@@ -7,6 +7,7 @@ mod access;
 mod cli;
 mod config;
 mod config_cmd;
+mod endpoint;
 mod error;
 mod proto;
 mod serve;
