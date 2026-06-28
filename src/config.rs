@@ -57,6 +57,12 @@ pub struct ServeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct AccessConfig {
+    /// Node-level settings shared by all access services. Today only
+    /// `relay_urls` is used — as the connectivity fallback for dialing peers
+    /// (Page 05 v3 §6). `secret_key` is ignored by the access role, which uses
+    /// an ephemeral key (see `endpoint::create_access_endpoint`).
+    #[serde(default)]
+    pub node: NodeConfig,
     #[serde(default)]
     pub services: Vec<AccessService>,
 }
@@ -233,8 +239,14 @@ impl ServeConfig {
 }
 
 impl AccessConfig {
-    /// Validate services (names, ports, node_id format, duplicates).
+    /// Validate node relay_urls + services (names, ports, node_id format,
+    /// duplicates).
     pub fn validate(&self) -> Result<()> {
+        for url in &self.node.relay_urls {
+            if !url.starts_with("https://") {
+                anyhow::bail!("invalid relay_url '{url}': must be https://");
+            }
+        }
         let mut seen: HashSet<&str> = HashSet::new();
         for svc in &self.services {
             validate_name(&svc.name)?;
@@ -426,6 +438,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 5432,
             }],
+            ..Default::default()
         };
         let err = cfg.validate().unwrap_err();
         assert!(format!("{err:#}").contains("invalid node_id"));
@@ -444,6 +457,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 5432,
             }],
+            ..Default::default()
         };
         cfg.validate().unwrap();
     }
