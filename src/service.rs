@@ -235,7 +235,9 @@ mod systemd {
             std::fs::remove_file(&path)
                 .with_context(|| format!("failed to remove {}", path.display()))?;
         }
-        let _ = run_systemctl(scope, &["daemon-reload"]);
+        // Refresh systemd's view of the now-removed unit. A failure here leaves
+        // stale state, so surface it rather than reporting success silently.
+        run_systemctl(scope, &["daemon-reload"])?;
         println!("Uninstalled {name}");
         Ok(())
     }
@@ -310,11 +312,21 @@ mod launchd {
         format!("{}.plist", label(role))
     }
 
+    /// Escape `&`, `<`, `>` for safe inclusion in a plist `<string>` element.
+    /// (Paths/labels won't normally contain these, but a user `--config` path
+    /// could, and an unescaped value would produce invalid XML.)
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
     /// Render the launchd plist for `iroh-tunnel {role} run`.
     fn format_plist(role: &str, binary: &Path, config: &Path) -> String {
-        let label = label(role);
-        let binary = binary.to_string_lossy();
-        let config = config.to_string_lossy();
+        let label = xml_escape(&label(role));
+        let binary = xml_escape(&binary.to_string_lossy());
+        let role = xml_escape(role);
+        let config = xml_escape(&config.to_string_lossy());
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyManifest-1.0.dtd\">\n\
@@ -440,6 +452,25 @@ mod launchd {
             // We can't assert the exact home in CI, but the suffix is stable.
             let p = plist_path("serve", ServiceScope::User).unwrap();
             assert!(p.ends_with("Library/LaunchAgents/dev.iroh-tunnel.serve.plist"));
+        }
+
+        #[test]
+        fn plist_escapes_xml_metacharacters_in_paths() {
+            // A config path containing XML metacharacters must be escaped so the
+            // plist stays valid XML (regression guard for the review fix).
+            let body = format_plist(
+                "serve",
+                Path::new("/opt/a&b"),
+                Path::new("/home/u<x>/serve.toml"),
+            );
+            assert!(
+                body.contains("/opt/a&amp;b") && !body.contains("/opt/a&b<"),
+                "binary path not escaped: {body}"
+            );
+            assert!(
+                body.contains("&lt;x&gt;") && !body.contains("u<x>"),
+                "config path not escaped: {body}"
+            );
         }
     }
 }
