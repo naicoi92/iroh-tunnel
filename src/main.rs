@@ -91,8 +91,15 @@ fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<Pa
 }
 
 fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
-    eprintln!("not implemented yet: {role} config {action:?}");
-    Ok(())
+    match action {
+        ConfigAction::Keygen { config } => config_cmd::keygen(role, config.as_deref()),
+        ConfigAction::Add(args) => config_cmd::add(role, &args),
+        ConfigAction::Remove { name } => config_cmd::remove(role, None, &name),
+        ConfigAction::List => config_cmd::list(role, None),
+        ConfigAction::Show => config_cmd::show(role, None),
+        ConfigAction::Edit => config_cmd::edit(role, None),
+        ConfigAction::Path => config_cmd::path(role, None),
+    }
 }
 
 fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
