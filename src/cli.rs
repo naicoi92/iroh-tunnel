@@ -8,9 +8,15 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+/// App version resolved at build time from the git tag (see `build.rs`).
+///
+/// Equals the tag (e.g. `1.2.3`) when HEAD sits exactly on a `vX.Y.Z` tag,
+/// otherwise `{cargo version}-dev` (e.g. `0.1.0-dev`) for local builds.
+const APP_VERSION: &str = env!("APP_VERSION");
+
 /// CLI entry point.
 #[derive(Parser, Debug)]
-#[command(name = "iroh-tunnel", version, about = "P2P port-forwarding tunnel via Iroh")]
+#[command(name = "iroh-tunnel", version = APP_VERSION, about = "P2P port-forwarding tunnel via Iroh")]
 pub struct Cli {
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
