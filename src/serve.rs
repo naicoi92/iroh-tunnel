@@ -88,7 +88,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
             .map(|s| crate::status::ServiceStatus {
                 name: s.name.clone(),
                 protocol: protocol_str(s.protocol).to_string(),
-                local_addr: format!("{}:{}", s.host, s.port),
+                local_addr: format_local_addr(&s.host, s.port),
                 active_connections: 0,
             })
             .collect(),
@@ -169,5 +169,16 @@ fn protocol_str(p: crate::config::Protocol) -> &'static str {
     match p {
         crate::config::Protocol::Tcp => "tcp",
         crate::config::Protocol::Udp => "udp",
+    }
+}
+
+/// Format a `host:port` pair for the machine-readable status file, bracketing
+/// IPv6 literals (`[::1]:8080`) so the result is unambiguous. Plain IPv4
+/// addresses and hostnames are left as `host:port`.
+fn format_local_addr(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }

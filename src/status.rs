@@ -50,6 +50,9 @@ pub struct ServiceStatus {
 impl StatusFile {
     /// Write the status file to the OS state directory, creating it if needed.
     /// Returns the path written.
+    ///
+    /// Atomic: the JSON is written to a sibling temp file and renamed into
+    /// place, so a concurrent reader never observes a half-written file.
     pub fn save(&self) -> Result<PathBuf> {
         let path = status_file_path()?;
         if let Some(parent) = path.parent() {
@@ -57,8 +60,14 @@ impl StatusFile {
                 .with_context(|| format!("failed to create state dir: {}", parent.display()))?;
         }
         let content = serde_json::to_string_pretty(self).context("failed to encode status JSON")?;
-        std::fs::write(&path, content)
-            .with_context(|| format!("failed to write status file: {}", path.display()))?;
+
+        // Write to a temp file in the same directory, then rename — atomic on
+        // POSIX, and on Windows for same-volume same-directory renames.
+        let temp = path.with_extension("json.tmp");
+        std::fs::write(&temp, &content)
+            .with_context(|| format!("failed to write status file: {}", temp.display()))?;
+        std::fs::rename(&temp, &path)
+            .with_context(|| format!("failed to finalize status file: {}", path.display()))?;
         Ok(path)
     }
 }
