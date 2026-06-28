@@ -28,28 +28,41 @@ use crate::config::{self, NodeConfig};
 /// The secret key is resolved from `node.secret_key`; if it was empty a fresh
 /// one is generated and the caller is expected to persist it (the config layer
 /// handles that via [`config::ServeConfig::resolve_and_save_key`]).
-pub async fn create_serve_endpoint(node: &NodeConfig) -> Result<Endpoint> {
+///
+/// `alpns` are the service ALPNs this endpoint will accept incoming streams on.
+/// In iroh 1.0 ALPNs are registered on the endpoint at build time (not filtered
+/// per-`accept`), so the serve handler collects every service's ALPN up front
+/// and passes the whole list here.
+pub async fn create_serve_endpoint(node: &NodeConfig, alpns: &[Vec<u8>]) -> Result<Endpoint> {
     // resolve_secret_key returns (key, needs_save); serve callers persist via
     // ServeConfig::resolve_and_save_key, so the boolean is ignored here.
     let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
-    create_endpoint_with_key(key, &node.relay_urls).await
+    create_endpoint_with_key(key, &node.relay_urls, alpns).await
 }
 
 /// Build an [`Endpoint`] for the **access** role.
 ///
-/// Uses an ephemeral [`SecretKey`] that is never persisted.
+/// Uses an ephemeral [`SecretKey`] that is never persisted. Access only dials
+/// out, so no ALPNs are registered.
 pub async fn create_access_endpoint(node: &NodeConfig) -> Result<Endpoint> {
     let key = iroh::SecretKey::generate();
-    create_endpoint_with_key(key, &node.relay_urls).await
+    create_endpoint_with_key(key, &node.relay_urls, &[]).await
 }
 
 async fn create_endpoint_with_key(
     key: iroh::SecretKey,
     relay_urls: &[String],
+    alpns: &[Vec<u8>],
 ) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(Minimal).secret_key(key);
 
     builder = builder.relay_mode(relay_mode_from_urls(relay_urls)?);
+
+    // Empty ALPN list is fine for access (outbound only); serve registers every
+    // service ALPN so it can accept on all of them.
+    if !alpns.is_empty() {
+        builder = builder.alpns(alpns.to_vec());
+    }
 
     builder
         .bind()
@@ -80,6 +93,16 @@ fn relay_mode_from_urls(relay_urls: &[String]) -> Result<RelayMode> {
 /// The node id (public key) of an [`Endpoint`], as its base32 string form.
 pub fn node_id_string(ep: &Endpoint) -> String {
     ep.secret_key().public().to_string()
+}
+
+/// The home relay URL of an [`Endpoint`], if one has been assigned yet.
+///
+/// iroh assigns the home relay asynchronously after the endpoint connects to a
+/// relay server, so this may return `None` right after bind. Serve prints it for
+/// operator convenience (Page 06 v5 §1.1); access uses the config's
+/// `relay_urls` to dial, so this is display-only.
+pub fn home_relay(ep: &Endpoint) -> Option<RelayUrl> {
+    ep.addr().relay_urls().next().cloned()
 }
 
 #[cfg(test)]
@@ -141,7 +164,7 @@ mod tests {
             secret_key: enc,
             relay_urls: vec![],
         };
-        let ep = create_serve_endpoint(&node).await.unwrap();
+        let ep = create_serve_endpoint(&node, &[b"iroh-tunnel/db".to_vec()]).await.unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());
     }
 }

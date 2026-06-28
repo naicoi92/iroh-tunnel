@@ -28,8 +28,16 @@ fn name_regex() -> &'static Regex {
 /// [`crate::proto`] prefix (see T-03). 63 keeps names dns-label friendly.
 const MAX_NAME_LEN: usize = 63;
 
-/// Base32 node_id length (Iroh PublicKey encoded is 52 chars).
-const NODE_ID_LEN: usize = 52;
+/// Valid node_id (PublicKey) string lengths.
+///
+/// iroh's [`PublicKey::Display`] emits lowercase hex (64 chars), and
+/// [`PublicKey::from_str`] accepts either hex (64) or base32 (52). We accept
+/// both so a node id copied from `serve`'s output (hex) round-trips into an
+/// access config.
+///
+/// [`PublicKey::Display`]: iroh::PublicKey
+/// [`PublicKey::from_str`]: iroh::PublicKey
+const NODE_ID_LENS: [usize; 2] = [52, 64];
 
 // ---------------------------------------------------------------------------
 // T-02.1: structs
@@ -233,9 +241,9 @@ impl AccessConfig {
             if !seen.insert(svc.name.as_str()) {
                 anyhow::bail!("duplicate service name: '{}'", svc.name);
             }
-            if svc.node_id.len() != NODE_ID_LEN {
+            if !NODE_ID_LENS.contains(&svc.node_id.len()) {
                 anyhow::bail!(
-                    "invalid node_id '{}': must be {NODE_ID_LEN} chars (base32)",
+                    "invalid node_id '{}': must be 52 (base32) or 64 (hex) chars",
                     svc.node_id
                 );
             }
@@ -421,5 +429,22 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(format!("{err:#}").contains("invalid node_id"));
+    }
+
+    #[test]
+    fn access_validation_accepts_hex_node_id() {
+        // iroh 1.0's PublicKey::Display emits lowercase hex (64 chars). A node
+        // id copied straight from `serve` output must validate.
+        let hex_id = "a".repeat(64);
+        let cfg = AccessConfig {
+            services: vec![AccessService {
+                name: "db".into(),
+                node_id: hex_id,
+                protocol: Protocol::Tcp,
+                host: "127.0.0.1".into(),
+                port: 5432,
+            }],
+        };
+        cfg.validate().unwrap();
     }
 }
