@@ -15,6 +15,7 @@ mod proto;
 mod serve;
 mod service;
 mod shutdown;
+mod status;
 
 use std::path::PathBuf;
 
