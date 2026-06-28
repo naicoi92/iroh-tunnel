@@ -1,0 +1,13 @@
+# Local Pi runtime state
+.atl/
+
+# Rust build artifacts
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
