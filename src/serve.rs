@@ -72,6 +72,32 @@ pub async fn run(config_path: &Path) -> Result<()> {
         accept_loop(&accept_ep, local_addrs).await;
     });
 
+    // Write the operator-facing status snapshot (T-13). Best-effort: a failure
+    // to write status is logged but does not stop the tunnel.
+    let status = crate::status::StatusFile {
+        node_id: node_id.clone(),
+        home_relay: endpoint::home_relay(&ep).map(|u| u.to_string()),
+        pid: std::process::id(),
+        started_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        services: cfg
+            .services
+            .iter()
+            .map(|s| crate::status::ServiceStatus {
+                name: s.name.clone(),
+                protocol: protocol_str(s.protocol).to_string(),
+                local_addr: format!("{}:{}", s.host, s.port),
+                active_connections: 0,
+            })
+            .collect(),
+    };
+    match status.save() {
+        Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
+        Err(e) => tracing::warn!("failed to write status file: {e}"),
+    }
+
     // Wait for SIGINT/SIGTERM, then drain in-flight streams before closing
     // the endpoint (T-08).
     crate::shutdown::wait_for_signal().await;
