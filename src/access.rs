@@ -140,7 +140,7 @@ async fn handle_local_connection(
         addr = addr.with_relay_url(relay);
     }
 
-    let conn = ep.connect(addr, alpn).await.context("dial peer failed")?;
+    let conn = connect_with_retry(ep, addr, alpn).await?;
 
     // open_bi returns (SendStream, RecvStream) — send first. Our pipe wants the
     // remote pair as (read, write) = (recv, send), so we swap.
@@ -151,6 +151,45 @@ async fn handle_local_connection(
 
     crate::pipe::pipe_bidirectional(local, (recv, send)).await?;
     Ok(())
+}
+
+/// Dial the peer with exponential backoff.
+///
+/// Retries the `Endpoint::connect` call on failure with backoff 1s → 2s → 4s →
+/// 8s → 16s → 30s (cap), looping. On the first success after one or more
+/// failures, logs `reconnected after N attempts`. Per-service independent: each
+/// local-client task runs its own retry, so one unreachable peer never affects
+/// another service (Page 04 v2 §1.3).
+///
+/// Note: the spec sample shows `ep.connect(node_id, alpn)` with a bare
+/// [`iroh::NodeId`], but iroh 1.0's connect takes an [`iroh::EndpointAddr`] —
+/// the same reality T-07's `handle_local_connection` already built the address
+/// for. We accept the prepared address and apply the retry/backoff contract on
+/// top of it unchanged.
+async fn connect_with_retry(
+    ep: &iroh::Endpoint,
+    addr: iroh::EndpointAddr,
+    alpn: &[u8],
+) -> Result<iroh::endpoint::Connection> {
+    let mut backoff_ms = 1000u64;
+    let max_backoff_ms = 30_000u64;
+    let mut attempt = 1u32;
+    loop {
+        match ep.connect(addr.clone(), alpn).await {
+            Ok(conn) => {
+                if attempt > 1 {
+                    tracing::info!("reconnected after {attempt} attempts");
+                }
+                return Ok(conn);
+            }
+            Err(e) => {
+                tracing::warn!("connect attempt {attempt} failed: {e}, retrying in {backoff_ms}ms");
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+                attempt += 1;
+            }
+        }
+    }
 }
 
 /// Lowercase protocol name for display (matches the serde form in `config`).
