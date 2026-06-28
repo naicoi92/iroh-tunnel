@@ -26,10 +26,22 @@
 //!
 //! [`Connection::accept_bi`]: iroh::endpoint::Connection::accept_bi
 //! [`Connection::open_bi`]: iroh::endpoint::Connection::open_bi
-#![allow(dead_code)] // consumed by T-06/T-07; flagged until then.
+//!
+//! ## UDP framing (T-10)
+//!
+//! UDP carries datagrams with boundaries, but an iroh bidirectional stream is a
+//! byte stream — so to tunnel UDP transparently we length-prefix each datagram
+//! with a big-endian `u32` and let the peer re-slice on the other side
+//! (`[len][payload]`). The payload bytes are untouched. See [`encode_frame`] /
+//! [`decode_frame`] for the codec and [`pipe_udp`] for the framed pipe.
+#![allow(dead_code)] // TCP pipe consumed by T-06/T-07; UDP codec/pipe by future UDP handlers.
 
 use anyhow::Result;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+/// Largest UDP datagram (header + payload) we will accept in a frame. Guards
+/// against a malicious/garbled length prefix causing a huge allocation.
+const MAX_DATAGRAM: usize = 65535;
 
 /// Copy bytes in both directions between a local stream and a remote read/write
 /// pair.
@@ -72,6 +84,85 @@ where
     let (a, b) = tokio::join!(c2r, r2c);
     a.map_err(anyhow::Error::from)?;
     b.map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// UDP framing codec (T-10)
+// ---------------------------------------------------------------------------
+
+/// Append one UDP datagram to `buf` as a length-prefixed frame: `[u32 BE len][payload]`.
+///
+/// The payload is copied verbatim — no transformation — so the tunnel stays
+/// transparent; the framing only preserves datagram boundaries across the byte
+/// stream. `buf` is appended to (not cleared) so callers can batch.
+pub fn encode_frame(buf: &mut Vec<u8>, payload: &[u8]) {
+    let len = payload.len() as u32;
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(payload);
+}
+
+/// Read one length-prefixed frame from `r` and return its payload.
+///
+/// Returns the original datagram bytes. Bails if the decoded length exceeds
+/// [`MAX_DATAGRAM`] (guards against a malicious/corrupt length prefix) or if the
+/// stream ends mid-frame.
+pub async fn decode_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_DATAGRAM {
+        anyhow::bail!("datagram too large: {len}");
+    }
+    let mut payload = vec![0u8; len];
+    r.read_exact(&mut payload).await?;
+    Ok(payload)
+}
+
+/// Pipe a local UDP socket against a remote framed byte-stream pair.
+///
+/// Each received datagram is [`encode_frame`]d before being written to the
+/// remote; each [`decode_frame`]d payload is sent as one datagram on the local
+/// socket. Returns when either direction ends (the other is dropped).
+///
+/// Note: the spec sample takes an `iroh::endpoint::BidiStream`, but iroh 1.0 has
+/// no `BidiStream` type — a bidirectional QUIC stream is a `(RecvStream,
+/// SendStream)` tuple (see the module-level note for the TCP pipe). We accept
+/// that pair directly, matching how `pipe_bidirectional` already works; the
+/// framing contract is unchanged.
+pub async fn pipe_udp<R, W>(
+    local: tokio::net::UdpSocket,
+    mut remote_read: R,
+    mut remote_write: W,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    // local -> remote: each datagram becomes a frame.
+    let c2r = async {
+        let mut buf = vec![0u8; MAX_DATAGRAM];
+        let mut frame = Vec::new();
+        while let Ok(n) = local.recv(&mut buf).await {
+            frame.clear();
+            encode_frame(&mut frame, &buf[..n]);
+            if remote_write.write_all(&frame).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    // remote -> local: each frame becomes a datagram.
+    let r2c = async {
+        while let Ok(payload) = decode_frame(&mut remote_read).await {
+            let _ = local.send(&payload).await;
+        }
+    };
+
+    tokio::select! {
+        _ = c2r => {},
+        _ = r2c => {},
+    }
     Ok(())
 }
 
@@ -198,5 +289,55 @@ mod tests {
         }
         let (r, w) = remote;
         assert_pipe(local, (r, w));
+    }
+
+    // ---- UDP framing codec (T-10) ----
+
+    /// encode_frame + decode_frame round-trip preserves the datagram payload
+    /// exactly and re-establishes its boundary. This is the primary T-10
+    /// verify gate (Page 05 v3 §5.3).
+    #[tokio::test]
+    async fn frame_codec_roundtrips_one_datagram() {
+        let payload = b"hello-udp-datagram";
+        let mut frame = Vec::new();
+        encode_frame(&mut frame, payload);
+        // Frame = 4-byte BE length + payload, nothing more.
+        assert_eq!(frame.len(), 4 + payload.len());
+
+        let mut cursor = std::io::Cursor::new(frame);
+        let decoded = decode_frame(&mut cursor).await.unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    /// Multiple datagrams framed back-to-back decode independently, proving the
+    /// length prefix preserves boundaries in the byte stream.
+    #[tokio::test]
+    async fn frame_codec_preserves_multiple_boundaries() {
+        let dgrams: &[&[u8]] = &[b"one", b"", b"two-two", b"three-three-three"];
+        let mut frame = Vec::new();
+        for d in dgrams {
+            encode_frame(&mut frame, d);
+        }
+
+        let mut cursor = std::io::Cursor::new(frame);
+        for expected in dgrams {
+            let decoded = decode_frame(&mut cursor).await.unwrap();
+            assert_eq!(decoded.as_slice(), *expected);
+        }
+        // No trailing bytes — boundaries line up exactly.
+        assert_eq!(cursor.position() as usize, cursor.get_ref().len());
+    }
+
+    /// A length prefix claiming more than MAX_DATAGRAM is rejected rather than
+    /// causing a huge allocation.
+    #[tokio::test]
+    async fn frame_codec_rejects_oversized_length() {
+        let mut frame = Vec::new();
+        // Spoof a length one byte over the cap.
+        let oversize = (MAX_DATAGRAM as u32 + 1).to_be_bytes();
+        frame.extend_from_slice(&oversize);
+        let mut cursor = std::io::Cursor::new(frame);
+        let err = decode_frame(&mut cursor).await.unwrap_err().to_string();
+        assert!(err.contains("too large"), "unexpected error: {err}");
     }
 }
