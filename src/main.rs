@@ -17,8 +17,9 @@ mod service;
 mod shutdown;
 mod status;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use clap::Parser;
 use cli::{Cli, ConfigAction, Role, RoleCmd, ServiceAction};
 use error::CliError;
@@ -91,6 +92,23 @@ fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<Pa
     Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")))
 }
 
+/// Make `path` absolute for embedding in a system service file.
+///
+/// Installed services run with a different working directory, so a relative
+/// `--config` path must be resolved against the current CWD before it is
+/// written into the unit/plist. Falls back to joining the CWD if the path
+/// can't be canonicalized (e.g. it doesn't exist yet).
+fn absolutize_config_path(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    if let Ok(abs) = std::fs::canonicalize(path) {
+        return Ok(abs);
+    }
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    Ok(cwd.join(path))
+}
+
 fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
     match action {
         ConfigAction::Keygen { config } => config_cmd::keygen(role, config.as_deref()),
@@ -104,6 +122,26 @@ fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
 }
 
 fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
-    eprintln!("not implemented yet: {role} service {action:?}");
-    Ok(())
+    use service::ServiceScope;
+    let scope_of = |user: bool| {
+        if user {
+            ServiceScope::User
+        } else {
+            ServiceScope::System
+        }
+    };
+    match action {
+        ServiceAction::Install { config, user } => {
+            let path = resolve_config_path(role, config)?;
+            // Persist an absolute path: the installed service runs with a
+            // different CWD, so a relative --config path would break it.
+            let path = absolutize_config_path(&path)?;
+            service::install(role, scope_of(user), &path)
+        }
+        ServiceAction::Uninstall { user } => service::uninstall(role, scope_of(user)),
+        ServiceAction::Start { user } => service::start(role, scope_of(user)),
+        ServiceAction::Stop { user } => service::stop(role, scope_of(user)),
+        ServiceAction::Restart { user } => service::restart(role, scope_of(user)),
+        ServiceAction::Status { user } => service::status(role, scope_of(user)),
+    }
 }
