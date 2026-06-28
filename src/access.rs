@@ -73,8 +73,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
     }
 
     tracing::info!("access endpoint ready, listening for local clients");
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutdown signal received");
+    crate::shutdown::wait_for_signal().await;
+    crate::shutdown::drain_connections(std::time::Duration::from_secs(5)).await;
     ep.close().await;
     Ok(())
 }

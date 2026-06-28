@@ -72,10 +72,11 @@ pub async fn run(config_path: &Path) -> Result<()> {
         accept_loop(&accept_ep, local_addrs).await;
     });
 
-    // Wait for Ctrl-C. Graceful shutdown (drain in-flight streams) lands in T-08.
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutdown signal received");
+    // Wait for SIGINT/SIGTERM, then drain in-flight streams before closing
+    // the endpoint (T-08).
+    crate::shutdown::wait_for_signal().await;
     accept.abort();
+    crate::shutdown::drain_connections(std::time::Duration::from_secs(5)).await;
     ep.close().await;
     Ok(())
 }
