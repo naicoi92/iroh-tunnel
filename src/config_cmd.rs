@@ -38,7 +38,7 @@ pub fn keygen(role: &str, config: Option<&Path>) -> Result<()> {
     let key_str = crate::config::encode_secret_key(&key);
 
     let mut doc = load_or_empty(&path)?;
-    ensure_node_table(&mut doc);
+    ensure_node_table(&mut doc, &path)?;
     doc["node"]["secret_key"] = toml_edit::value(key_str);
     write_doc(&path, &doc)?;
 
@@ -81,9 +81,12 @@ pub fn add(role: &str, args: &AddServiceArgs) -> Result<()> {
 
     // Append as an array-of-tables element: [[services]].
     doc["services"].or_insert(toml_edit::Item::ArrayOfTables(Default::default()));
-    let services = doc["services"]
-        .as_array_of_tables_mut()
-        .context("internal: [services] is not an array-of-tables")?;
+    let services = doc["services"].as_array_of_tables_mut().ok_or_else(|| {
+        CliError::Config(format!(
+            "invalid config at {}: [services] must be an array of tables",
+            path.display()
+        ))
+    })?;
     services.push(entry);
 
     // Validate the whole document via the schema before persisting.
@@ -212,15 +215,30 @@ fn load_or_empty(path: &Path) -> Result<DocumentMut> {
     };
     let doc: DocumentMut = content
         .parse()
-        .with_context(|| format!("failed to parse config: {}", path.display()))?;
+        .map_err(|e| CliError::Config(format!("failed to parse config {}: {e}", path.display())))?;
     Ok(doc)
 }
 
 /// Ensure a `[node]` table exists (used by `keygen` before setting `secret_key`).
-fn ensure_node_table(doc: &mut DocumentMut) {
-    if doc.get("node").is_none() {
-        doc["node"] = toml_edit::Item::Table(toml_edit::Table::new());
+///
+/// If `node` is present but not a table (e.g. someone wrote `node = "x"`), that
+/// is a malformed config → `CliError::Config` (exit 2) rather than a panic on
+/// the subsequent index.
+fn ensure_node_table(doc: &mut DocumentMut, path: &Path) -> Result<()> {
+    match doc.get("node") {
+        None => {
+            doc["node"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        Some(item) if item.is_table() => {}
+        Some(_) => {
+            return Err(CliError::Config(format!(
+                "invalid config at {}: [node] must be a table",
+                path.display()
+            ))
+            .into());
+        }
     }
+    Ok(())
 }
 
 /// Return the first `[[services]]` table whose `name` matches, if any.
@@ -259,5 +277,17 @@ fn write_doc(path: &Path, doc: &DocumentMut) -> Result<()> {
     }
     std::fs::write(path, doc.to_string())
         .with_context(|| format!("failed to write config: {}", path.display()))?;
+
+    // The serve config carries the node SecretKey, so tighten the file
+    // permissions to owner-only on Unix. Best-effort: a failure to chmod is
+    // logged but does not fail the write (NFR-05: never log the key itself).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("failed to set restrictive perms on {}: {e}", path.display());
+        }
+    }
+
     Ok(())
 }
