@@ -104,6 +104,23 @@ fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
 }
 
 fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
-    eprintln!("not implemented yet: {role} service {action:?}");
-    Ok(())
+    use service::ServiceScope;
+    let scope_of = |user: bool| {
+        if user {
+            ServiceScope::User
+        } else {
+            ServiceScope::System
+        }
+    };
+    match action {
+        ServiceAction::Install { config, user } => {
+            let path = resolve_config_path(role, config)?;
+            service::install(role, scope_of(user), &path)
+        }
+        ServiceAction::Uninstall { user } => service::uninstall(role, scope_of(user)),
+        ServiceAction::Start { user } => service::start(role, scope_of(user)),
+        ServiceAction::Stop { user } => service::stop(role, scope_of(user)),
+        ServiceAction::Restart { user } => service::restart(role, scope_of(user)),
+        ServiceAction::Status { user } => service::status(role, scope_of(user)),
+    }
 }
