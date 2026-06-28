@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod config_cmd;
 mod error;
+mod proto;
 mod serve;
 mod service;
 
