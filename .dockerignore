@@ -1,0 +1,8 @@
+# Keep the Docker build context small and reproducible.
+target
+.git
+.github
+.pi
+openspec
+**/*.log
+.DS_Store

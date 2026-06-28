@@ -1,0 +1,19 @@
+# Example access config for the docker-compose demo.
+#
+# This dials the serve node from examples/serve.toml (whose throwaway demo key
+# has NodeId e8bb34671b11ca03ca88f7f8b500b07ab3086be8cfd168b3d041d3f478837de9)
+# and exposes the tunneled `web` service on 0.0.0.0:8080 (the compose maps that
+# to 127.0.0.1:8080 on the host).
+#
+# To use your OWN serve node instead, paste its printed NodeId into `node_id`
+# below.
+
+[node]
+relay_urls = []
+
+[[services]]
+name = "web"
+node_id = "e8bb34671b11ca03ca88f7f8b500b07ab3086be8cfd168b3d041d3f478837de9"
+protocol = "tcp"
+host = "0.0.0.0"
+port = 8080
