@@ -5,6 +5,7 @@
 
 mod access;
 mod cli;
+mod config;
 mod config_cmd;
 mod error;
 mod serve;
