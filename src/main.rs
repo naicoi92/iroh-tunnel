@@ -14,6 +14,7 @@ mod pipe;
 mod proto;
 mod serve;
 mod service;
+mod shutdown;
 
 use std::path::PathBuf;
 
