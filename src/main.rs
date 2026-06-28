@@ -9,6 +9,7 @@ mod config;
 mod config_cmd;
 mod endpoint;
 mod error;
+mod pipe;
 mod proto;
 mod serve;
 mod service;
