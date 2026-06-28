@@ -19,9 +19,12 @@ services:
     build: .
     command: ["serve", "run", "--config", "/etc/iroh-tunnel/serve.toml"]
     volumes:
-      - ./examples/serve.toml:/etc/iroh-tunnel/serve.toml
+      # Read-only: the example ships with a demo key, so serve never needs to
+      # write back (and the tracked example file is never mutated).
+      - ./examples/serve.toml:/etc/iroh-tunnel/serve.toml:ro
     depends_on:
       - web
+    restart: unless-stopped
 
   # Access role: consume the remote `web` service to local port 8080.
   # Start separately after pasting serve's NodeId into examples/access.toml.
@@ -29,8 +32,10 @@ services:
     build: .
     command: ["access", "run", "--config", "/etc/iroh-tunnel/access.toml"]
     volumes:
-      - ./examples/access.toml:/etc/iroh-tunnel/access.toml
+      - ./examples/access.toml:/etc/iroh-tunnel/access.toml:ro
     ports:
-      - "8080:8080"
+      # Bind to loopback only — this demo exposes the tunnel on the host, not
+      # on external interfaces.
+      - "127.0.0.1:8080:8080"
     profiles:
       - demo

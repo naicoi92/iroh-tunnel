@@ -1,12 +1,16 @@
 # Example serve config for the docker-compose demo.
 #
 # The `serve` container exposes the `web` (nginx) container listening on port
-# 80 inside the compose network. iroh-tunnel generates a secret_key on first
-# run (persisted into this file) and prints its NodeId — copy that into
-# examples/access.toml's `node_id` so the access side can dial it.
+# 80 inside the compose network. This file ships with a throwaway demo
+# `secret_key` (NodeId: e8bb34671b11ca03ca88f7f8b500b07ab3086be8cfd168b3d041d3f478837de9),
+# so the compose demo mounts it read-only and serve has no need to write the
+# key back — examples/access.toml already references that NodeId.
+#
+# For a real deployment, generate your own key with `serve config keygen` and
+# use a writable, non-tracked config path.
 
 [node]
-secret_key = ""
+secret_key = "8dZvHJD3cHOj+H7dwW9trgiZkn1WQD3r4zaxAedtDxA="
 
 [[services]]
 name = "web"
