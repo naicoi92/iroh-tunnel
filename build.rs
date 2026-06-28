@@ -16,6 +16,7 @@
 use std::error::Error;
 use std::process::Command;
 
+use semver::Version;
 use vergen_gitcl::{Emitter, GitclBuilder};
 
 /// Return the version derived from the tag at HEAD, if any.
@@ -24,6 +25,10 @@ use vergen_gitcl::{Emitter, GitclBuilder};
 /// exactly at a tag (annotated or lightweight). For any other state (no tag,
 /// commits ahead, shallow clone without `.git`) it fails and we return `None`,
 /// which the caller maps to the `-dev` fallback.
+///
+/// Only tags that parse as valid Cargo semver are accepted (after stripping an
+/// optional `v` prefix); anything else (e.g. `v1bad`, `v1.2.3-hotfix/foo`) falls
+/// through to `-dev` so downstream packaging never sees an invalid version.
 fn tag_at_head() -> Option<String> {
     let output = Command::new("git")
         .args(["describe", "--tags", "--exact-match", "HEAD"])
@@ -33,19 +38,10 @@ fn tag_at_head() -> Option<String> {
         return None;
     }
     let tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // Accept tags shaped vX.Y.Z or X.Y.Z and strip an optional `v` prefix.
-    // Non-numeric tags (e.g. internal markers) fall through to `-dev`.
+    // Accept tags shaped vX.Y.Z or X.Y.Z and strip an optional `v` prefix,
+    // then require the remainder to be a fully valid Cargo semver.
     let stripped = tag.strip_prefix('v').unwrap_or(&tag);
-    let starts_with_digit = stripped
-        .chars()
-        .next()
-        .map(|c| c.is_ascii_digit())
-        .unwrap_or(false);
-    if starts_with_digit {
-        Some(stripped.to_string())
-    } else {
-        None
-    }
+    Version::parse(stripped).ok().map(|v| v.to_string())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

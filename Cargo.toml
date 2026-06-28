@@ -31,3 +31,6 @@ tempfile = "3"
 # vergen-gitcl 9.x — inject git tag into APP_VERSION at build time.
 # Pinned to 9.x: 10.x requires rustc 1.95, but this crate targets rust-version 1.91.
 vergen-gitcl = { version = "9.0", features = ["build"] }
+# Validate the git tag as Cargo semver before exporting it as APP_VERSION,
+# so downstream packaging never receives an invalid version string.
+semver = "1"

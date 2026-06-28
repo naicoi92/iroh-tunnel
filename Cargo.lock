@@ -1698,6 +1698,7 @@ dependencies = [
  "edit",
  "iroh",
  "regex",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
