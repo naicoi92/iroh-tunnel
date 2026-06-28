@@ -1,0 +1,15 @@
+# Example serve config for the docker-compose demo.
+#
+# The `serve` container exposes the `web` (nginx) container listening on port
+# 80 inside the compose network. iroh-tunnel generates a secret_key on first
+# run (persisted into this file) and prints its NodeId — copy that into
+# examples/access.toml's `node_id` so the access side can dial it.
+
+[node]
+secret_key = ""
+
+[[services]]
+name = "web"
+protocol = "tcp"
+host = "web"
+port = 80

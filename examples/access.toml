@@ -1,0 +1,21 @@
+# Example access config for the docker-compose demo.
+#
+# CHICKEN-AND-EGG: the access side needs the serve node's NodeId, which the
+# serve container generates on first run. Operator workflow:
+#   1. `docker compose up serve web` — serve prints `NodeId: <hex>`.
+#   2. Copy that hex into `node_id` below.
+#   3. `docker compose up access` — it dials the serve peer and exposes it on
+#      127.0.0.1:8080.
+#
+# The placeholder node_id below is intentionally invalid (wrong length) so the
+# access container fails loudly until you paste the real one in.
+
+[node]
+relay_urls = []
+
+[[services]]
+name = "web"
+node_id = "REPLACE_WITH_SERVE_NODEID_64_HEX_CHARS"
+protocol = "tcp"
+host = "0.0.0.0"
+port = 8080
