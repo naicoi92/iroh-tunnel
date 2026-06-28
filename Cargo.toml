@@ -26,3 +26,8 @@ regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+# vergen-gitcl 9.x — inject git tag into APP_VERSION at build time.
+# Pinned to 9.x: 10.x requires rustc 1.95, but this crate targets rust-version 1.91.
+vergen-gitcl = { version = "9.0", features = ["build"] }

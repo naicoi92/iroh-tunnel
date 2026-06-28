@@ -1707,6 +1707,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
+ "vergen-gitcl",
  "which 7.0.3",
 ]
 
@@ -3737,6 +3738,7 @@ dependencies = [
  "anyhow",
  "derive_builder",
  "rustversion",
+ "time",
  "vergen-lib",
 ]
 
