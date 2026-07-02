@@ -1,0 +1,91 @@
+# Snapshot pipeline — CI-only builds on push/PR, never publishes (ADR-0002).
+#
+# Runs `goreleaser release --snapshot --clean` for both Linux and macOS, which
+# builds all artifacts into dist/ WITHOUT publishing. This catches iroh crate
+# breakage and config regressions early (ADR-0002 §5 risk), before a real tag.
+#
+# Real releases on tag pushes live in release.yml.
+
+name: snapshot
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux snapshot: linux/amd64 + linux/arm64 binaries + Docker + deb/apk.
+  # ---------------------------------------------------------------------------
+  snapshot-linux:
+    name: snapshot (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (pinned to rust-version)
+        # `rustfmt` is needed because GoReleaser's `before.hooks` run
+        # `cargo fmt -- --check`.
+        run: |
+          rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
+          rustup default 1.91
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo +1.91 install cargo-zigbuild --locked
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: goreleaser snapshot (Linux)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --snapshot --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # macOS snapshot: darwin/arm64 binary + Homebrew cask config.
+  # ---------------------------------------------------------------------------
+  snapshot-macos:
+    name: snapshot (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (pinned to rust-version)
+        run: |
+          rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
+          rustup default 1.91
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo +1.91 install cargo-zigbuild --locked
+
+      - name: goreleaser snapshot (macOS)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --snapshot --clean --config .goreleaser.macos.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
