@@ -47,8 +47,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust toolchain (pinned to rust-version)
+        # `rustfmt` + `clippy` are needed because GoReleaser's `before.hooks`
+        # run `cargo fmt -- --check` (and clippy is cheap to include).
         run: |
-          rustup toolchain install 1.91 --profile minimal --no-self-update
+          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
           rustup default 1.91
 
       - name: Install Zig
@@ -95,8 +97,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust toolchain (pinned to rust-version)
+        # `rustfmt` is needed because GoReleaser's `before.hooks` run
+        # `cargo fmt -- --check`.
         run: |
-          rustup toolchain install 1.91 --profile minimal --no-self-update
+          rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
           rustup default 1.91
 
       - name: Install Zig
