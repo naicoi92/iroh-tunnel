@@ -1,0 +1,129 @@
+# GoReleaser config — LINUX pipeline (ADR-0002).
+#
+# Run on an ubuntu runner. Produces:
+#   - Release binaries for linux/amd64 + linux/arm64 (via cargo-zigbuild)
+#   - Checksums file
+#   - .deb + .apk Linux packages (via nFPM)
+#   - Multi-arch Docker image on ghcr.io (via dockers_v2 + buildx)
+#   - The GitHub Release itself (this job owns the release; the macOS job appends).
+#
+# The macOS (darwin/arm64) binary + Homebrew cask are built by a separate config
+# (`.goreleaser.macos.yaml`) on a macos runner, because iroh's dependency on
+# macOS frameworks (SystemConfiguration/CoreFoundation) cannot be cross-compiled
+# from Linux (see IROHTUN-42 review notes).
+#
+# The app version is resolved from the git tag at build time by build.rs
+# (ADR-0003 / IROHTUN-40); GoReleaser does not need to inject it.
+#
+# Out of scope (deferred): AUR, .rpm, macOS Intel, Trivy/SBOM, Cosign signing.
+
+version: 2
+
+project_name: iroh-tunnel
+
+before:
+  hooks:
+    # Fast local checks; fail fast on obvious mistakes before the long builds.
+    - cargo check --release
+    - cargo fmt -- --check
+
+builds:
+  - id: iroh-tunnel
+    builder: rust
+    binary: iroh-tunnel
+    env:
+      # Statically link PCRE2 for the `regex` crate so binaries are portable
+      # across distros without a libpcre2(-8) shared library at runtime.
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    flags:
+      - --release
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+# ---- Linux packages: .deb + .apk via nFPM ----
+# Architectures are inferred from the linux build targets above (amd64, arm64).
+nfpms:
+  - id: iroh-tunnel
+    package_name: iroh-tunnel
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: naicoi92
+    homepage: https://github.com/naicoi92/iroh-tunnel
+    maintainer: naicoi92 <naicoi@lttech.vn>
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
+    license: "MIT OR Apache-2.0"
+    formats:
+      - deb
+      - apk
+    contents:
+      # systemd unit for the `serve` role, installed by the package.
+      - src: packaging/iroh-tunnel.service
+        dst: /usr/lib/systemd/system/iroh-tunnel.service
+        type: config|noreplace
+      # Default config directory; the binary reads /etc/iroh-tunnel/serve.toml.
+      - dst: /etc/iroh-tunnel
+        type: dir
+    scripts:
+      postinstall: packaging/postinstall.sh
+
+# ---- Docker: multi-arch -> ghcr.io via buildx (no QEMU) ----
+# buildx is the default; no `use:` field. The Dockerfile copies the prebuilt
+# binaries GoReleaser stages at $TARGETPLATFORM/<binary>.
+dockers_v2:
+  - id: iroh-tunnel-ghcr
+    images:
+      - ghcr.io/naicoi92/iroh-tunnel
+    dockerfile: Dockerfile.goreleaser
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Tag }}"
+      - "v{{ .Major }}.{{ .Minor }}"
+      - "v{{ .Major }}"
+      - "{{ .Version }}"
+      - latest
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.licenses: "MIT OR Apache-2.0"
+    # Trivy/SBOM scanning is deferred beyond v0.1.0.
+    sbom: false
+
+release:
+  github:
+    owner: naicoi92
+    name: iroh-tunnel
+  draft: false
+  prerelease: auto
+  # `replace` so re-running the Linux job overwrites its own artifacts cleanly;
+  # the macOS job (`.goreleaser.macos.yaml`) uses `mode: append` to add its files.
+  mode: replace
+  name_template: "{{ .Tag }}"
+  # Auto release notes are produced by `changelog.use: github` above; GoReleaser
+  # 2.x dropped the separate `generate_release_notes` field.

@@ -1,0 +1,34 @@
+# systemd unit installed by the iroh-tunnel .deb/.apk packages (ADR-0002).
+#
+# This is the package-default unit for the `serve` role. It mirrors the unit
+# that `iroh-tunnel service install --scope system` (src/service.rs) generates,
+# so a machine provisioned via the OS package behaves identically to one set up
+# via the built-in installer.
+
+[Unit]
+Description=Iroh Tunnel (serve)
+Documentation=https://github.com/naicoi92/iroh-tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/iroh-tunnel serve run --config /etc/iroh-tunnel/serve.toml
+Restart=on-failure
+RestartSec=5
+# Hardening: run as an unprivileged dynamic user with its own namespacing.
+# `iroh-tunnel` only needs network access (relay dial) + read access to its
+# config; writes go to a runtime tmpfs. Keep these conservative so the package
+# works on Debian/Ubuntu/Alpine without extra setup.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+# Config lives under /etc/iroh-tunnel (shipped read-only by the package);
+# make it readable inside the sandbox.
+ReadWritePaths=/var/lib/iroh-tunnel
+StateDirectory=iroh-tunnel
+
+[Install]
+WantedBy=default.target

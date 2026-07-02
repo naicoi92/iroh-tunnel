@@ -118,8 +118,7 @@ impl ServeConfig {
 
     /// Serialize and write the config to disk.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("failed to serialize config")?;
+        let content = toml::to_string_pretty(self).context("failed to serialize config")?;
         std::fs::write(path, content)
             .with_context(|| format!("failed to write config: {}", path.display()))?;
         Ok(())
@@ -139,8 +138,7 @@ impl AccessConfig {
 
     /// Serialize and write the config to disk.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("failed to serialize config")?;
+        let content = toml::to_string_pretty(self).context("failed to serialize config")?;
         std::fs::write(path, content)
             .with_context(|| format!("failed to write config: {}", path.display()))?;
         Ok(())
@@ -199,14 +197,10 @@ impl ServeConfig {
 
 fn validate_name(name: &str) -> Result<()> {
     if !name_regex().is_match(name) {
-        anyhow::bail!(
-            "invalid service name '{name}': must match ^[a-z0-9-]+$"
-        );
+        anyhow::bail!("invalid service name '{name}': must match ^[a-z0-9-]+$");
     }
     if name.len() > MAX_NAME_LEN {
-        anyhow::bail!(
-            "invalid service name '{name}': max {MAX_NAME_LEN} bytes (ALPN limit)"
-        );
+        anyhow::bail!("invalid service name '{name}': max {MAX_NAME_LEN} bytes (ALPN limit)");
     }
     Ok(())
 }

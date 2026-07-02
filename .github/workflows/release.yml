@@ -1,92 +1,198 @@
-# Build release binaries and attach them to a GitHub Release on tag push.
+# Unified release pipeline for iroh-tunnel (ADR-0002).
 #
-# Targets (per T-14): Linux x86_64, Linux aarch64, macOS aarch64.
-# Linux aarch64 is cross-compiled from x86_64 via `cross`; the other two build
-# natively on a matching runner.
+# Two parallel pipelines, each with a release + snapshot job:
+#
+#   Linux (ubuntu-latest, .goreleaser.yaml):
+#     binaries for linux/amd64 + linux/arm64 (cargo-zigbuild), checksums,
+#     .deb/.apk (nFPM), Docker image on ghcr.io (buildx multi-arch), and the
+#     GitHub Release itself.
+#
+#   macOS (macos-14, .goreleaser.macos.yaml):
+#     binary for darwin/arm64 (native build) + Homebrew cask. Built natively
+#     because iroh depends on macOS frameworks (SystemConfiguration/
+#     CoreFoundation) that cannot be cross-compiled from Linux.
+#
+# The macOS release job appends to the GitHub Release the Linux job created, so
+# on tag pushes it `needs: release-linux`. The snapshot jobs are independent.
+#
+# This replaces the binary-only matrix workflow from T-14 (PR #14).
 
 name: release
 
 on:
   push:
+    # Tag pushes trigger the release jobs; branch pushes trigger snapshots.
     tags:
       - "v*"
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
 
-# Default permissions are read-only; the release job below escalates to
-# contents:write just for publishing.
 permissions:
-  contents: read
+  contents: write
+  packages: write
 
 jobs:
-  build:
-    name: build ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            use-cross: false
-            artifact: iroh-tunnel-x86_64-linux
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            use-cross: true
-            artifact: iroh-tunnel-aarch64-linux
-          - target: aarch64-apple-darwin
-            runner: macos-14
-            use-cross: false
-            artifact: iroh-tunnel-aarch64-macos
+  # ---------------------------------------------------------------------------
+  # Linux: binaries + Docker + deb/apk + owns the GitHub Release.
+  # ---------------------------------------------------------------------------
+  release-linux:
+    name: release (linux)
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install Rust toolchain (pinned to match rust-version)
+      - name: Install Rust toolchain (pinned to rust-version)
+        # `rustfmt` + `clippy` are needed because GoReleaser's `before.hooks`
+        # run `cargo fmt -- --check` (and clippy is cheap to include).
         run: |
-          rustup toolchain install 1.91 --profile minimal --no-self-update
+          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
           rustup default 1.91
-          rustup target add ${{ matrix.target }} --toolchain 1.91
 
-      - name: Install cross (pinned release)
-        if: ${{ matrix.use-cross }}
-        run: cargo +1.91 install cross --version 0.2.5 --locked
-
-      - name: Build release binary
-        run: |
-          if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cross +1.91 build --release --target ${{ matrix.target }}
-          else
-            cargo +1.91 build --release --target ${{ matrix.target }}
-          fi
-
-      - name: Package binary
-        run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/iroh-tunnel dist/${{ matrix.artifact }}
-          tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      # mlugg/setup-zig puts `zig` on PATH for subsequent steps, which
+      # GoReleaser's Rust builder (cargo-zigbuild) relies on. Pinned to 0.13.0
+      # to match the verified spike (ADR-0002 §2).
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}.tar.gz
+          version: 0.13.0
 
-  release:
-    name: publish release
-    needs: build
-    runs-on: ubuntu-latest
-    # Only create/publish a GitHub Release for real tag pushes (not manual runs).
-    if: startsWith(github.ref, 'refs/tags/v')
-    # This job uploads release assets, so it (and only it) needs write access.
-    permissions:
-      contents: write
+      - name: Install cargo-zigbuild
+        run: cargo +1.91 install cargo-zigbuild --locked
+
+      # QEMU lets buildx build the linux/arm64 image from the amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser (Linux)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # macOS: darwin binary + Homebrew cask. Appends to the Linux release.
+  # ---------------------------------------------------------------------------
+  release-macos:
+    name: release (macos)
+    runs-on: macos-14
+    needs: release-linux
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          path: dist
-          merge-multiple: true
+          fetch-depth: 0
 
-      - name: Create GitHub release with binaries
-        uses: softprops/action-gh-release@v2
+      - name: Install Rust toolchain (pinned to rust-version)
+        run: |
+          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
+          rustup default 1.91
+
+      # GoReleaser's Rust builder always invokes `cargo zigbuild` even for the
+      # native target, so zig + cargo-zigbuild must be present on macOS too.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
         with:
-          files: dist/*.tar.gz
-          generate_release_notes: true
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo +1.91 install cargo-zigbuild --locked
+
+      - name: Run GoReleaser (macOS)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean --config .goreleaser.macos.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Linux snapshot (no publish): runs on push/PR to catch breakage early.
+  # ---------------------------------------------------------------------------
+  snapshot-linux:
+    name: snapshot (linux)
+    runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (pinned to rust-version)
+        # `rustfmt` is needed because GoReleaser's `before.hooks` run
+        # `cargo fmt -- --check`.
+        run: |
+          rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
+          rustup default 1.91
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo +1.91 install cargo-zigbuild --locked
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: goreleaser snapshot (Linux)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --snapshot --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # macOS snapshot (no publish): runs on push/PR.
+  # ---------------------------------------------------------------------------
+  snapshot-macos:
+    name: snapshot (macos)
+    runs-on: macos-14
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (pinned to rust-version)
+        run: |
+          rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
+          rustup default 1.91
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo +1.91 install cargo-zigbuild --locked
+
+      - name: goreleaser snapshot (macOS)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --snapshot --clean --config .goreleaser.macos.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

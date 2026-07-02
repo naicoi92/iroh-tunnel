@@ -38,7 +38,11 @@ pub async fn run(config_path: &Path) -> Result<()> {
     // Collect every service's ALPN and build an ALPN -> local-addr lookup for
     // demultiplexing accepted streams. iroh 1.0 registers ALPNs on the endpoint
     // at build time, so we need them all up front.
-    let alpns: Vec<Vec<u8>> = cfg.services.iter().map(|s| proto::alpn_for(&s.name)).collect();
+    let alpns: Vec<Vec<u8>> = cfg
+        .services
+        .iter()
+        .map(|s| proto::alpn_for(&s.name))
+        .collect();
     let mut local_addrs: HashMap<Vec<u8>, String> = HashMap::new();
     for svc in &cfg.services {
         let alpn = proto::alpn_for(&svc.name);
