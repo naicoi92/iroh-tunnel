@@ -37,17 +37,32 @@ pub async fn run(config_path: &Path) -> Result<()> {
         tracing::warn!("no services configured; nothing to expose");
     }
 
-    // The global relay_urls serve as the connectivity fallback for dialing
-    // peers: we attach the first relay URL to each peer's EndpointAddr so the
-    // remote serve node is reachable through the shared relay. (n0 relays are
-    // stateless and will forward to any peer registered with them.) If no
-    // relay_urls are configured, dialing falls back to whatever address lookup
-    // the endpoint has — which for the Minimal preset may be none.
-    let relay_url = cfg
-        .node
-        .relay_urls
-        .first()
-        .and_then(|s: &String| s.parse::<iroh::RelayUrl>().ok());
+    // The relay URLs to attach to each dialed peer's EndpointAddr. An
+    // EndpointAddr containing only a node id cannot be routed by iroh (the
+    // Minimal preset registers no address-lookup service), so we MUST provide
+    // relay URLs to dial through.
+    //
+    // Relays are OPTIONAL in config (IROHTUN-44): if the user does not set
+    // `relay_urls`, we fall back to the n0 default relays — mirroring iroh's
+    // own `RelayMode::Default`. If the user configures `relay_urls`, those
+    // take precedence (custom/self-hosted relays for latency, privacy, etc.).
+    let relay_urls: Vec<iroh::RelayUrl> = if cfg.node.relay_urls.is_empty() {
+        let defaults = endpoint::n0_default_relay_urls();
+        tracing::info!(
+            count = defaults.len(),
+            "no relay_urls configured, falling back to n0 default relays"
+        );
+        defaults
+    } else {
+        cfg.node
+            .relay_urls
+            .iter()
+            .map(|s| {
+                s.parse::<iroh::RelayUrl>()
+                    .with_context(|| format!("invalid relay_url: {s}"))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
 
     for svc in &cfg.services {
         let node_id = svc
@@ -68,7 +83,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
             node_id,
             alpn,
             listen_addr,
-            relay_url.clone(),
+            relay_urls.clone(),
         ));
     }
 
@@ -88,7 +103,7 @@ async fn listen_loop(
     node_id: iroh::EndpointId,
     alpn: Vec<u8>,
     listen_addr: String,
-    relay_url: Option<iroh::RelayUrl>,
+    relay_urls: Vec<iroh::RelayUrl>,
 ) {
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => l,
@@ -104,9 +119,9 @@ async fn listen_loop(
             Ok((local_stream, peer_addr)) => {
                 let ep = ep.clone();
                 let alpn = alpn.clone();
-                let relay_url = relay_url.clone();
+                let relay_urls = relay_urls.clone();
                 tokio::spawn(async move {
-                    match handle_local_connection(&ep, node_id, &alpn, relay_url, local_stream)
+                    match handle_local_connection(&ep, node_id, &alpn, &relay_urls, local_stream)
                         .await
                     {
                         Ok(()) => tracing::debug!(%peer_addr, "tunnel closed"),
@@ -128,16 +143,22 @@ async fn handle_local_connection(
     ep: &iroh::Endpoint,
     node_id: iroh::EndpointId,
     alpn: &[u8],
-    relay_url: Option<iroh::RelayUrl>,
+    relay_urls: &[iroh::RelayUrl],
     local: TcpStream,
 ) -> Result<()> {
     // Build the peer address. Endpoint::connect() is idempotent — it reuses an
     // existing QUIC connection to the peer if one is already open, so a pool of
     // local clients multiplexes streams over a single QUIC connection (Page 04
     // v2 §5).
+    //
+    // Attach every available relay URL so iroh can try each in turn. With no
+    // relay URLs and no address-lookup service (Minimal preset), iroh returns
+    // "No addressing information available" — so an empty `relay_urls` is a
+    // programming error here. The caller (run()) guarantees a non-empty list
+    // by falling back to the n0 defaults when the config is empty (IROHTUN-44).
     let mut addr = EndpointAddr::new(node_id);
-    if let Some(relay) = relay_url {
-        addr = addr.with_relay_url(relay);
+    for url in relay_urls {
+        addr = addr.with_relay_url(url.clone());
     }
 
     let conn = connect_with_retry(ep, addr, alpn).await?;
