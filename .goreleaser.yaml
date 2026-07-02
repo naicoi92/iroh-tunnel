@@ -1,11 +1,16 @@
-# GoReleaser unified release pipeline for iroh-tunnel (ADR-0002).
+# GoReleaser config — LINUX pipeline (ADR-0002).
 #
-# From a single git tag `vX.Y.Z`, this config produces:
-#   - Release binaries for 3 targets (linux/amd64, linux/arm64, darwin/arm64)
+# Run on an ubuntu runner. Produces:
+#   - Release binaries for linux/amd64 + linux/arm64 (via cargo-zigbuild)
 #   - Checksums file
 #   - .deb + .apk Linux packages (via nFPM)
 #   - Multi-arch Docker image on ghcr.io (via dockers_v2 + buildx)
-#   - Homebrew cask on naicoi92/homebrew-tap (for macOS)
+#   - The GitHub Release itself (this job owns the release; the macOS job appends).
+#
+# The macOS (darwin/arm64) binary + Homebrew cask are built by a separate config
+# (`.goreleaser.macos.yaml`) on a macos runner, because iroh's dependency on
+# macOS frameworks (SystemConfiguration/CoreFoundation) cannot be cross-compiled
+# from Linux (see IROHTUN-42 review notes).
 #
 # The app version is resolved from the git tag at build time by build.rs
 # (ADR-0003 / IROHTUN-40); GoReleaser does not need to inject it.
@@ -33,7 +38,6 @@ builds:
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
-      - aarch64-apple-darwin
     flags:
       - --release
 
@@ -111,37 +115,14 @@ dockers_v2:
     # Trivy/SBOM scanning is deferred beyond v0.1.0.
     sbom: false
 
-# ---- Homebrew: cask -> naicoi92/homebrew-tap ----
-# `brews` is deprecated since GoReleaser v2.10; `homebrew_casks` is the
-# replacement and is also valid for CLI tools (installed into bin).
-homebrew_casks:
-  - name: iroh-tunnel
-    binaries:
-      - iroh-tunnel
-    repository:
-      owner: naicoi92
-      name: homebrew-tap
-      branch: main
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Casks
-    homepage: https://github.com/naicoi92/iroh-tunnel
-    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            # Remove the quarantine attribute so macOS Gatekeeper does not
-            # block the unsigned (cosign is deferred) command-line binary.
-            system_command "/usr/bin/xattr",
-              args: ["-dr", "com.apple.quarantine", "#{staged_path}/iroh-tunnel"]
-          end
-
 release:
   github:
     owner: naicoi92
     name: iroh-tunnel
   draft: false
   prerelease: auto
+  # `replace` so re-running the Linux job overwrites its own artifacts cleanly;
+  # the macOS job (`.goreleaser.macos.yaml`) uses `mode: append` to add its files.
   mode: replace
   name_template: "{{ .Tag }}"
   # Auto release notes are produced by `changelog.use: github` above; GoReleaser

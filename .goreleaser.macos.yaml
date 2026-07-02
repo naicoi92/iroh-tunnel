@@ -1,0 +1,90 @@
+# GoReleaser config — macOS pipeline (ADR-0002).
+#
+# Run on a macos-14 runner (Apple Silicon). Produces:
+#   - Release binary for darwin/arm64 (built natively — cross-compiling macOS
+#     from Linux is not possible because iroh depends on macOS frameworks
+#     SystemConfiguration/CoreFoundation via hickory-dns/system-configuration).
+#   - Homebrew cask published to naicoi92/homebrew-tap.
+#
+# This config APPENDS its artifacts to the GitHub Release created by the Linux
+# job (`.goreleaser.yaml`), so the Linux job must run first on tag pushes.
+#
+# Out of scope (deferred): macOS Intel (x86_64-apple-darwin), Cosign signing.
+
+version: 2
+
+project_name: iroh-tunnel
+
+before:
+  hooks:
+    - cargo check --release
+    - cargo fmt -- --check
+
+builds:
+  - id: iroh-tunnel-macos
+    builder: rust
+    binary: iroh-tunnel
+    # Native build on a macos-14 runner; no zigbuild cross-compile needed.
+    targets:
+      - aarch64-apple-darwin
+    flags:
+      - --release
+
+archives:
+  - id: macos
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+
+# Append this build's checksum to the one already created by the Linux job.
+checksum:
+  name_template: "checksums-darwin.txt"
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+# ---- Homebrew: cask -> naicoi92/homebrew-tap ----
+# `brews` is deprecated since GoReleaser v2.10; `homebrew_casks` is the
+# replacement and is also valid for CLI tools (installed into bin).
+homebrew_casks:
+  - name: iroh-tunnel
+    binaries:
+      - iroh-tunnel
+    repository:
+      owner: naicoi92
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/naicoi92/iroh-tunnel
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            # Remove the quarantine attribute so macOS Gatekeeper does not
+            # block the unsigned (cosign is deferred) command-line binary.
+            system_command "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "#{staged_path}/iroh-tunnel"]
+          end
+
+release:
+  github:
+    owner: naicoi92
+    name: iroh-tunnel
+  draft: false
+  prerelease: auto
+  # Append darwin artifacts to the release the Linux job already created.
+  mode: append
+  name_template: "{{ .Tag }}"
