@@ -64,10 +64,7 @@ async fn create_endpoint_with_key(
         builder = builder.alpns(alpns.to_vec());
     }
 
-    builder
-        .bind()
-        .await
-        .context("failed to bind iroh endpoint")
+    builder.bind().await.context("failed to bind iroh endpoint")
 }
 
 /// Translate the config `relay_urls` into a [`RelayMode`].
@@ -130,8 +127,12 @@ mod tests {
                     .into_iter()
                     .map(|u| u.to_string())
                     .collect();
-                assert!(collected.iter().any(|u| u == "https://use1-1.relay.n0.iroh.link./"));
-                assert!(collected.iter().any(|u| u == "https://euw-1.relay.n0.iroh.link./"));
+                assert!(collected
+                    .iter()
+                    .any(|u| u == "https://use1-1.relay.n0.iroh.link./"));
+                assert!(collected
+                    .iter()
+                    .any(|u| u == "https://euw-1.relay.n0.iroh.link./"));
             }
             other => panic!("expected Custom, got {other:?}"),
         }
@@ -164,7 +165,9 @@ mod tests {
             secret_key: enc,
             relay_urls: vec![],
         };
-        let ep = create_serve_endpoint(&node, &[b"iroh-tunnel/db".to_vec()]).await.unwrap();
+        let ep = create_serve_endpoint(&node, &[b"iroh-tunnel/db".to_vec()])
+            .await
+            .unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());
     }
 }

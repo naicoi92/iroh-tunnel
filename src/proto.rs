@@ -44,10 +44,7 @@ mod tests {
 
     #[test]
     fn name_from_alpn_strips_prefix() {
-        assert_eq!(
-            name_from_alpn(b"iroh-tunnel/postgres"),
-            Some("postgres")
-        );
+        assert_eq!(name_from_alpn(b"iroh-tunnel/postgres"), Some("postgres"));
         assert_eq!(name_from_alpn(b"iroh-tunnel/dns"), Some("dns"));
     }
 
