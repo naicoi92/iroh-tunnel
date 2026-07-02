@@ -1,0 +1,23 @@
+# Dockerfile used by GoReleaser's `dockers_v2` (ADR-0002).
+#
+# Unlike the top-level `Dockerfile` (multi-stage, rebuilds from source for the
+# `docker-compose` demo / local builds), this image does NOT compile anything.
+# GoReleaser already built the release binaries and stages them at
+# `${TARGETPLATFORM}/iroh-tunnel`. We simply copy the matching one into a
+# minimal runtime image.
+#
+# buildx sets TARGETPLATFORM to `linux/amd64` or `linux/arm64`, and the binary
+# built against glibc 2.31 (cargo-zigbuild default) is forward-compatible with
+# the glibc 2.36 in distroless cc-debian12 (ADR-0002 §5 risk mitigation).
+
+# syntax=docker/dockerfile:1
+FROM gcr.io/distroless/cc-debian12
+
+# TARGETPLATFORM is set by buildx (e.g. linux/amd64, linux/arm64).
+# The iroh-tunnel binary runs as PID 1; it does not need a root home dir,
+# but we set HOME so config discovery via the `dirs` crate resolves cleanly.
+ENV HOME=/tmp
+
+COPY iroh-tunnel /usr/local/bin/iroh-tunnel
+
+ENTRYPOINT ["iroh-tunnel"]
