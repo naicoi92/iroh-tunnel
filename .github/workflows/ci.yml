@@ -1,0 +1,62 @@
+# CI pipeline — fast checks on every pull request.
+#
+# Two lightweight jobs run IN PARALLEL (no dependency between them) to minimize
+# wall-clock time on PRs:
+#   - lint:  cargo fmt --check + cargo clippy (catches style + correctness issues)
+#   - test:  cargo test (unit/integration tests)
+#
+# Heavy artifact builds (GoReleaser snapshots, Docker, packages) live in
+# snapshot.yml and only run on push to main, not on PRs. Real releases on tag
+# pushes live in release.yml.
+
+name: ci
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # lint: format check + clippy. Cheap, fast, fail-fast on style issues.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned to rust-version)
+        run: |
+          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
+          rustup default 1.91
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # test: unit + integration tests. Runs in parallel with `lint`.
+  # ---------------------------------------------------------------------------
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned to rust-version)
+        run: |
+          rustup toolchain install 1.91 --profile minimal --no-self-update
+          rustup default 1.91
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --all-features
