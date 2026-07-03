@@ -77,6 +77,14 @@ homebrew_casks:
             # block the unsigned (cosign is deferred) command-line binary.
             system_command "/usr/bin/xattr",
               args: ["-dr", "com.apple.quarantine", "#{staged_path}/iroh-tunnel"]
+
+            # Install the `it` convenience alias as a sibling symlink to the
+            # iroh-tunnel binary. It sits inside staged_path, so when Homebrew
+            # links the cask into $(brew --prefix)/bin it picks up both the
+            # real binary and the alias — `it serve run` then works on PATH.
+            # `-sf` so `brew upgrade` recreates the symlink cleanly.
+            system_command "/bin/ln",
+              args: ["-sf", "iroh-tunnel", "#{staged_path}/it"]
           end
 
 release:
