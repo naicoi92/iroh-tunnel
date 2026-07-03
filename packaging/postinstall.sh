@@ -33,7 +33,10 @@ for BIN in /usr/local/bin/iroh-tunnel /usr/bin/iroh-tunnel; do
     [ -f "$BIN" ] || continue
     ALIAS="$(dirname "$BIN")/it"
     # Don't clobber an existing `it` the user may already have on PATH.
-    if [ ! -e "$ALIAS" ]; then
+    # `-e` alone misses dangling symlinks (e.g. left over from a botched
+    # uninstall); `-L` covers those too so we skip the `ln -s` and don't trip
+    # "File exists" under `set -e`.
+    if [ ! -e "$ALIAS" ] && [ ! -L "$ALIAS" ]; then
         ln -s iroh-tunnel "$ALIAS"
     fi
     break
