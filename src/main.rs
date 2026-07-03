@@ -123,25 +123,28 @@ fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
 
 fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
     use service::ServiceScope;
-    let scope_of = |user: bool| {
-        if user {
-            ServiceScope::User
-        } else {
+    // Default scope is per-user (LaunchAgent / `systemctl --user`): no
+    // privileges needed, and it matches how iroh-tunnel is normally used on a
+    // desktop. `--system` opts into a system-wide daemon (root, for servers).
+    let scope_of = |system: bool| {
+        if system {
             ServiceScope::System
+        } else {
+            ServiceScope::User
         }
     };
     match action {
-        ServiceAction::Install { config, user } => {
+        ServiceAction::Install { config, system } => {
             let path = resolve_config_path(role, config)?;
             // Persist an absolute path: the installed service runs with a
             // different CWD, so a relative --config path would break it.
             let path = absolutize_config_path(&path)?;
-            service::install(role, scope_of(user), &path)
+            service::install(role, scope_of(system), &path)
         }
-        ServiceAction::Uninstall { user } => service::uninstall(role, scope_of(user)),
-        ServiceAction::Start { user } => service::start(role, scope_of(user)),
-        ServiceAction::Stop { user } => service::stop(role, scope_of(user)),
-        ServiceAction::Restart { user } => service::restart(role, scope_of(user)),
-        ServiceAction::Status { user } => service::status(role, scope_of(user)),
+        ServiceAction::Uninstall { system } => service::uninstall(role, scope_of(system)),
+        ServiceAction::Start { system } => service::start(role, scope_of(system)),
+        ServiceAction::Stop { system } => service::stop(role, scope_of(system)),
+        ServiceAction::Restart { system } => service::restart(role, scope_of(system)),
+        ServiceAction::Status { system } => service::status(role, scope_of(system)),
     }
 }

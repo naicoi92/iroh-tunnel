@@ -151,23 +151,28 @@ Status file (written by `run`, for monitoring): `~/.local/state/iroh-tunnel/stat
 `iroh-tunnel service ...` manages a systemd unit (Linux) or launchd plist
 (macOS) generated from the config, so the tunnel comes back after reboot.
 
+By default the service installs at **user scope** — no privileges needed:
+`systemctl --user` on Linux, a per-user LaunchAgent on macOS. This matches how
+iroh-tunnel is normally used on a desktop (the service runs as the same user
+that owns the config under `$HOME`). Pass `--system` for a system-wide daemon
+(LaunchDaemon / `/etc/systemd/system`) on servers / headless hosts; that
+requires `sudo`.
+
 ```sh
-# Linux (systemd, system-wide)
-sudo iroh-tunnel serve service install             # /etc/systemd/system/iroh-tunnel-serve.service
-iroh-tunnel serve service start
-iroh-tunnel serve service status
+# Per-user (default, no sudo) — Linux systemd --user or macOS LaunchAgent
+iroh-tunnel access service install
+iroh-tunnel access service start
+iroh-tunnel access service status
 
-# Linux (systemd --user, no sudo)
-iroh-tunnel access service install --user
-iroh-tunnel access service start --user
-
-# macOS (launchd, user-level LaunchAgent)
-iroh-tunnel serve service install --user
-launchctl load ~/Library/LaunchAgents/iroh-tunnel-serve.plist
+# System-wide (--system, requires sudo) — for servers / headless hosts
+sudo iroh-tunnel serve service install --system    # /etc/systemd/system/iroh-tunnel-serve.service
+# or on macOS: /Library/LaunchDaemons/dev.iroh-tunnel-serve.plist
+sudo iroh-tunnel serve service start --system
 ```
 
 Subcommands: `install`, `uninstall`, `start`, `stop`, `restart`, `status`.
-The `--user` flag selects user-level scope (LaunchAgent / `systemctl --user`).
+Each accepts `--system` to target the system-wide daemon; the default is the
+per-user service.
 
 ---
 
