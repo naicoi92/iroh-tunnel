@@ -96,40 +96,46 @@ pub enum ConfigAction {
 }
 
 /// Service sub-actions.
+///
+/// Scope defaults to per-user (LaunchAgent / `systemctl --user`), which needs
+/// no privileges and matches how iroh-tunnel is typically used on a desktop.
+/// Pass `--system` to install as a system-wide daemon (LaunchDaemon /
+/// `/etc/systemd/system`), which requires root and is intended for
+/// server/headless hosts.
 #[derive(Subcommand, Debug)]
 pub enum ServiceAction {
     /// Install system service (systemd/launchd).
     Install {
         #[arg(short, long)]
         config: Option<PathBuf>,
-        /// User-level (systemd --user / LaunchAgents).
+        /// System-wide daemon (LaunchDaemon / /etc/systemd/system). Requires root.
         #[arg(long)]
-        user: bool,
+        system: bool,
     },
     /// Uninstall system service.
     Uninstall {
         #[arg(long)]
-        user: bool,
+        system: bool,
     },
     /// Start system service.
     Start {
         #[arg(long)]
-        user: bool,
+        system: bool,
     },
     /// Stop system service.
     Stop {
         #[arg(long)]
-        user: bool,
+        system: bool,
     },
     /// Restart system service.
     Restart {
         #[arg(long)]
-        user: bool,
+        system: bool,
     },
     /// Print system service status.
     Status {
         #[arg(long)]
-        user: bool,
+        system: bool,
     },
 }
 
