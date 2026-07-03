@@ -1,10 +1,12 @@
-# Snapshot pipeline — CI-only builds on push/PR, never publishes (ADR-0002).
+# Snapshot pipeline — CI-only builds on push to main, never publishes (ADR-0002).
 #
-# Runs `goreleaser release --snapshot --clean` for both Linux and macOS, which
-# builds all artifacts into dist/ WITHOUT publishing. This catches iroh crate
-# breakage and config regressions early (ADR-0002 §5 risk), before a real tag.
+# Runs `goreleaser release --snapshot --clean` for both Linux and macOS IN
+# PARALLEL (no dependency between the two jobs), which builds all artifacts into
+# dist/ WITHOUT publishing. This catches iroh crate breakage and config
+# regressions early (ADR-0002 §5 risk), before a real tag.
 #
-# Real releases on tag pushes live in release.yml.
+# Pull-request checks (fmt/clippy/test) live in ci.yml. Real releases on tag
+# pushes live in release.yml.
 
 name: snapshot
 
@@ -12,7 +14,6 @@ on:
   push:
     branches:
       - main
-  pull_request:
 
 permissions:
   contents: read
