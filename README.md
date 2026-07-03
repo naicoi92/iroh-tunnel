@@ -4,7 +4,7 @@ P2P port-forwarding tunnel (TCP/UDP) over [Iroh](https://iroh.computer).
 Expose a local service to the internet via an Iroh `node_id` — no public IP,
 port forwarding, or relay server required.
 
-> **Status:** `v0.1.0-rc.1` — prerelease. Core serve/access tunneling works;
+> **Status:** `v0.1.0` — first stable release. Core serve/access tunneling works;
 > the binary is **not yet Cosign-signed** (deferred). Cosign/SBOM/AUR/macOS-Intel
 > land in later releases.
 
@@ -38,7 +38,7 @@ handles NAT traversal.
 ```sh
 brew tap naicoi92/tap https://github.com/naicoi92/homebrew-tap
 brew install --cask iroh-tunnel
-iroh-tunnel --version          # → iroh-tunnel 0.1.0-rc.1
+iroh-tunnel --version          # → iroh-tunnel 0.1.0
 ```
 
 The cask removes the macOS quarantine attribute automatically, so Gatekeeper
@@ -51,23 +51,23 @@ and run under a hardened `DynamicUser`.
 
 ```sh
 # Debian / Ubuntu (.deb)
-curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0-rc.1/iroh-tunnel_0.1.0-rc.1_amd64.deb
-sudo dpkg -i iroh-tunnel_0.1.0-rc.1_amd64.deb   # or _arm64.deb on ARM
+curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0/iroh-tunnel_0.1.0_amd64.deb
+sudo dpkg -i iroh-tunnel_0.1.0_amd64.deb   # or _arm64.deb on ARM
 iroh-tunnel --version
 
 # Alpine (.apk)
-curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0-rc.1/iroh-tunnel_0.1.0-rc.1_amd64.apk
-sudo apk add --allow-untrusted iroh-tunnel_0.1.0-rc.1_amd64.apk
+curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0/iroh-tunnel_0.1.0_amd64.apk
+sudo apk add --allow-untrusted iroh-tunnel_0.1.0_amd64.apk
 ```
 
 ### Docker (prebuilt multi-arch image)
 
 ```sh
-docker run --rm ghcr.io/naicoi92/iroh-tunnel:v0.1.0-rc.1 --version
-# → iroh-tunnel 0.1.0-rc.1
+docker run --rm ghcr.io/naicoi92/iroh-tunnel:v0.1.0 --version
+# → iroh-tunnel 0.1.0
 ```
 
-Tags: `v0.1.0-rc.1`, `v0.1.0`, `v0.1`, `latest`. Platforms: `linux/amd64`,
+Tags: `v0.1.0`, `v0.1`, `latest`. Platforms: `linux/amd64`,
 `linux/arm64`.
 
 ### Build from source
@@ -103,6 +103,10 @@ dial.
 ### 2. On the **access** host (your laptop, anywhere)
 
 ```sh
+# Pin this access node's identity: generates a secret_key so the access NodeId
+# is stable across restarts (the serve side will see the same peer every time).
+iroh-tunnel access config keygen
+
 # Point at the serve NodeId you just copied, bind it to a local port.
 iroh-tunnel access config add \
   --name postgres \
@@ -112,8 +116,22 @@ iroh-tunnel access config add \
   --port 55432
 
 iroh-tunnel access run
+# prints: NodeId: <your access node's hex>
 # now:  psql -h 127.0.0.1 -p 55432   # hits the remote postgres via the tunnel
 ```
+
+Both sides log peer connect/disconnect at INFO (shown by default), each carrying
+the **remote** NodeId so you can correlate activity across the two hosts:
+
+```
+# serve side:                    # access side:
+INFO peer=<access id> … peer connected      INFO peer=<serve id> … connected to serve peer
+INFO peer=<access id> … peer disconnected   INFO peer=<serve id> … disconnected from serve peer
+```
+
+If you skip `access config keygen`, a key is generated automatically on the
+first `run` and persisted to the config — so the NodeId is still stable, just
+not chosen by you up front.
 
 ### Default config locations
 
@@ -160,7 +178,7 @@ The `--user` flag selects user-level scope (LaunchAgent / `systemctl --user`).
 ```sh
 docker run --rm \
   -v "$PWD/serve.toml:/etc/iroh-tunnel/serve.toml:ro" \
-  ghcr.io/naicoi92/iroh-tunnel:v0.1.0-rc.1 \
+  ghcr.io/naicoi92/iroh-tunnel:v0.1.0 \
   serve run --config /etc/iroh-tunnel/serve.toml
 ```
 
@@ -233,7 +251,7 @@ spec:
     spec:
       containers:
         - name: iroh-tunnel
-          image: ghcr.io/naicoi92/iroh-tunnel:v0.1.0-rc.1
+          image: ghcr.io/naicoi92/iroh-tunnel:v0.1.0
           args: ["serve", "run", "--config", "/etc/iroh-tunnel/serve.toml"]
           volumeMounts:
             - name: config
@@ -281,12 +299,15 @@ Commands:
   config    Manage config (keygen | add | remove | list | show | edit | path)
   service   Manage systemd/launchd service (install | start | stop | restart | status | uninstall)
 
-Flags:    -v / -vv / -vvv   increase logging  ·  -q quiet  ·  --color auto|always|never
+Flags:    -v / -vv   increase logging (debug/trace)  ·  -q quiet (errors only)  ·  --color auto|always|never
 ```
 
 Exit codes: `0` success · `1` general · `2` config · `3` permission · `4` iroh · `5` service.
 
-Logging respects `RUST_LOG` (e.g. `RUST_LOG=iroh_tunnel=debug iroh-tunnel serve run`).
+The default log level is **info**, so peer connect/disconnect and "endpoint
+ready" notices show without any flag. Use `-q` for errors-only, or
+`-v`/`-vv` for debug/trace. `RUST_LOG` overrides everything (e.g.
+`RUST_LOG=iroh_tunnel=debug iroh-tunnel serve run`).
 
 ---
 
