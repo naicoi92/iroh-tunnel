@@ -143,6 +143,27 @@ async fn accept_loop(ep: &iroh::Endpoint, local_addrs: HashMap<Vec<u8>, String>)
             continue;
         };
 
+        // The access peer's NodeId, from its TLS cert. Logged on connect and
+        // (via the watcher below) on disconnect, so operators can see who is
+        // tunneling in and correlate with access-side logs.
+        let remote_id = conn.remote_id();
+        let name = proto::name_from_alpn(&alpn)
+            .map(String::from)
+            .unwrap_or_else(|| format!("{alpn:02x?}"));
+        tracing::info!(peer = %remote_id, service = %name, "peer connected");
+
+        // Watcher: emit a disconnect line when the QUIC connection closes. The
+        // weak handle is registered while `conn` is still alive (before the
+        // stream-handling task takes it), so iroh guarantees the close event is
+        // delivered even if the connection drops before this resolves.
+        let weak = conn.weak_handle();
+        let rid = remote_id;
+        let sname = name.clone();
+        tokio::spawn(async move {
+            let _ = weak.closed().await;
+            tracing::info!(peer = %rid, service = %sname, "peer disconnected");
+        });
+
         tokio::spawn(async move {
             match handle_connection(&conn, &local_addr).await {
                 Ok(()) => tracing::debug!("connection closed normally"),

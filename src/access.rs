@@ -30,8 +30,11 @@ use crate::{config::AccessConfig, endpoint, proto};
 /// Loads `config_path`, builds an ephemeral-key endpoint, prints the per-service
 /// `Exposed:` lines, then spawns a listen loop per service.
 pub async fn run(config_path: &Path) -> Result<()> {
-    let cfg = AccessConfig::load(config_path)?;
+    let mut cfg = AccessConfig::load(config_path)?;
+    cfg.resolve_and_save_key(config_path)?;
     let ep = endpoint::create_access_endpoint(&cfg.node).await?;
+
+    println!("NodeId: {}", endpoint::node_id_string(&ep));
 
     if cfg.services.is_empty() {
         tracing::warn!("no services configured; nothing to expose");
@@ -78,12 +81,14 @@ pub async fn run(config_path: &Path) -> Result<()> {
         );
 
         let ep_clone = ep.clone();
+        let svc_name = svc.name.clone();
         tokio::spawn(listen_loop(
             ep_clone,
             node_id,
             alpn,
             listen_addr,
             relay_urls.clone(),
+            svc_name,
         ));
     }
 
@@ -104,6 +109,7 @@ async fn listen_loop(
     alpn: Vec<u8>,
     listen_addr: String,
     relay_urls: Vec<iroh::RelayUrl>,
+    svc_name: String,
 ) {
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => l,
@@ -120,12 +126,20 @@ async fn listen_loop(
                 let ep = ep.clone();
                 let alpn = alpn.clone();
                 let relay_urls = relay_urls.clone();
+                let svc_name = svc_name.clone();
                 tokio::spawn(async move {
-                    match handle_local_connection(&ep, node_id, &alpn, &relay_urls, local_stream)
-                        .await
+                    match handle_local_connection(
+                        &ep,
+                        node_id,
+                        &alpn,
+                        &relay_urls,
+                        &svc_name,
+                        local_stream,
+                    )
+                    .await
                     {
-                        Ok(()) => tracing::debug!(%peer_addr, "tunnel closed"),
-                        Err(e) => tracing::warn!(%peer_addr, "tunnel error: {e}"),
+                        Ok(()) => tracing::debug!(%peer_addr, %svc_name, "tunnel closed"),
+                        Err(e) => tracing::warn!(%peer_addr, %svc_name, "tunnel error: {e}"),
                     }
                 });
             }
@@ -144,6 +158,7 @@ async fn handle_local_connection(
     node_id: iroh::EndpointId,
     alpn: &[u8],
     relay_urls: &[iroh::RelayUrl],
+    svc_name: &str,
     local: TcpStream,
 ) -> Result<()> {
     // Build the peer address. Endpoint::connect() is idempotent — it reuses an
@@ -162,6 +177,22 @@ async fn handle_local_connection(
     }
 
     let conn = connect_with_retry(ep, addr, alpn).await?;
+
+    // The serve peer's NodeId, from its TLS cert. Logged on connect/disconnect
+    // so operators can correlate access activity with serve-side logs.
+    let remote_id = conn.remote_id();
+    tracing::info!(peer = %remote_id, %svc_name, "connected to serve peer");
+
+    // Watcher: emit a disconnect line when the QUIC connection closes. The weak
+    // handle is registered while `conn` is still alive, so iroh guarantees the
+    // close event is delivered even if `conn` drops before this resolves.
+    let weak = conn.weak_handle();
+    let rid = remote_id;
+    let sname = svc_name.to_string();
+    tokio::spawn(async move {
+        let _ = weak.closed().await;
+        tracing::info!(peer = %rid, %sname, "disconnected from serve peer");
+    });
 
     // open_bi returns (SendStream, RecvStream) — send first. Our pipe wants the
     // remote pair as (read, write) = (recv, send), so we swap.

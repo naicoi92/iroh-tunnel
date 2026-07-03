@@ -61,10 +61,15 @@ pub async fn create_serve_endpoint(node: &NodeConfig, alpns: &[Vec<u8>]) -> Resu
 
 /// Build an [`Endpoint`] for the **access** role.
 ///
-/// Uses an ephemeral [`SecretKey`] that is never persisted. Access only dials
-/// out, so no ALPNs are registered.
+/// Resolves the secret key from `node.secret_key`; if it was empty a fresh one
+/// is generated and the caller is expected to persist it (the config layer
+/// handles that via [`config::AccessConfig::resolve_and_save_key`]), so the
+/// access NodeId is stable across restarts. Access only dials out, so no ALPNs
+/// are registered.
 pub async fn create_access_endpoint(node: &NodeConfig) -> Result<Endpoint> {
-    let key = iroh::SecretKey::generate();
+    // resolve_secret_key returns (key, needs_save); access callers persist via
+    // AccessConfig::resolve_and_save_key, so the boolean is ignored here.
+    let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
     create_endpoint_with_key(key, &node.relay_urls, &[]).await
 }
 
@@ -203,6 +208,20 @@ mod tests {
         let ep = create_serve_endpoint(&node, &[b"iroh-tunnel/db".to_vec()])
             .await
             .unwrap();
+        assert_eq!(node_id_string(&ep), key.public().to_string());
+    }
+
+    #[tokio::test]
+    async fn access_endpoint_with_same_key_has_same_node_id() {
+        // A pinned access secret_key must yield a stable NodeId across endpoints
+        // (the whole point of pinning access identity).
+        let (key, _) = config::resolve_secret_key("").unwrap();
+        let enc = config::encode_secret_key(&key);
+        let node = NodeConfig {
+            secret_key: enc,
+            relay_urls: vec![],
+        };
+        let ep = create_access_endpoint(&node).await.unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());
     }
 }

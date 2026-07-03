@@ -27,12 +27,11 @@ use crate::error::CliError;
 
 /// `config keygen`: generate a new SecretKey, write it into `[node].secret_key`.
 ///
-/// No-op (with a warning) for the access role, which uses an ephemeral key.
+/// Works for both roles: serve pins the node identity that access peers dial,
+/// and access pins its own identity so the serve side sees a stable peer. Either
+/// way, downstream configs that reference this node's NodeId must be updated to
+/// match the newly generated key.
 pub fn keygen(role: &str, config: Option<&Path>) -> Result<()> {
-    if role == "access" {
-        println!("WARNING: access role uses an ephemeral key; keygen is not applicable.");
-        return Ok(());
-    }
     let path = resolve_config_path(role, config)?;
     let key = iroh::SecretKey::generate();
     let key_str = crate::config::encode_secret_key(&key);
@@ -44,7 +43,7 @@ pub fn keygen(role: &str, config: Option<&Path>) -> Result<()> {
 
     println!("Generated new secret_key.");
     println!("New NodeId: {}", key.public());
-    println!("WARNING: access-side configs must update their node_id to match.");
+    println!("WARNING: configs that reference this node's node_id must be updated to match.");
     Ok(())
 }
 
