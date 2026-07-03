@@ -25,7 +25,12 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false hardens PR-triggered jobs: this workflow only
+      # reads source (contents: read), so GITHUB_TOKEN should not be persisted
+      # into .git/config where later steps could leak or misuse it.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain (pinned to rust-version)
         run: |
@@ -49,6 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain (pinned to rust-version)
         run: |
