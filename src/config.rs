@@ -57,10 +57,12 @@ pub struct ServeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct AccessConfig {
-    /// Node-level settings shared by all access services. Today only
-    /// `relay_urls` is used — as the connectivity fallback for dialing peers
-    /// (Page 05 v3 §6). `secret_key` is ignored by the access role, which uses
-    /// an ephemeral key (see `endpoint::create_access_endpoint`).
+    /// Node-level settings shared by all access services.
+    ///
+    /// `relay_urls` is the connectivity fallback for dialing peers (Page 05 v3
+    /// §6). `secret_key` pins this access node's identity: if empty, a fresh
+    /// key is generated on the first `run` and persisted to the config, so the
+    /// access NodeId is stable across restarts (mirroring the serve role).
     #[serde(default)]
     pub node: NodeConfig,
     #[serde(default)]
@@ -180,6 +182,25 @@ impl ServeConfig {
     /// into the config file. Returns the resolved key.
     ///
     /// The key value itself is never logged (NFR-05).
+    pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
+        let (key, needs_save) = resolve_secret_key(&self.node.secret_key)?;
+        if needs_save {
+            tracing::warn!("secret_key empty, generated new key, saving to config");
+            self.node.secret_key = encode_secret_key(&key);
+            self.save(path)?;
+        }
+        Ok(key)
+    }
+}
+
+impl AccessConfig {
+    /// Resolve the node secret key; if it was just generated, persist it back
+    /// into the config file. Returns the resolved key.
+    ///
+    /// Pinned access identity: an empty `secret_key` is generated once and
+    /// persisted, so the access NodeId is stable across restarts (mirroring
+    /// [`ServeConfig::resolve_and_save_key`]). The key value itself is never
+    /// logged (NFR-05).
     pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
         let (key, needs_save) = resolve_secret_key(&self.node.secret_key)?;
         if needs_save {
@@ -336,6 +357,46 @@ mod tests {
         cfg.save(f.path()).unwrap();
         let reloaded = ServeConfig::load(f.path()).unwrap();
         assert_eq!(reloaded, cfg);
+    }
+
+    #[test]
+    fn access_resolve_and_save_key_generates_and_persists() {
+        // An empty access secret_key is generated once and written back, so the
+        // access NodeId is stable across restarts (mirrors serve behavior).
+        let f = tmpfile("access.toml", "");
+        let mut cfg = AccessConfig::default();
+        assert!(cfg.node.secret_key.is_empty());
+
+        let key = cfg.resolve_and_save_key(f.path()).unwrap();
+        assert!(!cfg.node.secret_key.is_empty(), "key should be persisted");
+
+        // The file on disk now carries the encoded key.
+        let reloaded = AccessConfig::load(f.path()).unwrap();
+        assert_eq!(reloaded.node.secret_key, cfg.node.secret_key);
+
+        // Re-resolving off the persisted value is a no-op (needs_save == false)
+        // and yields the same public key.
+        let (key2, needs_save) = resolve_secret_key(&reloaded.node.secret_key).unwrap();
+        assert!(!needs_save);
+        assert_eq!(key.public(), key2.public());
+    }
+
+    #[test]
+    fn access_resolve_and_save_key_no_save_when_present() {
+        // A pre-existing secret_key is reused verbatim; the file is not rewritten.
+        let (key, _) = resolve_secret_key("").unwrap();
+        let enc = encode_secret_key(&key);
+        let f = tmpfile("access.toml", "");
+        let mut cfg = AccessConfig {
+            node: NodeConfig {
+                secret_key: enc.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = cfg.resolve_and_save_key(f.path()).unwrap();
+        assert_eq!(resolved.public(), key.public());
+        assert_eq!(cfg.node.secret_key, enc, "value unchanged when already set");
     }
 
     #[test]

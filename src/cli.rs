@@ -18,7 +18,7 @@ const APP_VERSION: &str = env!("APP_VERSION");
 #[derive(Parser, Debug)]
 #[command(name = "iroh-tunnel", version = APP_VERSION, about = "P2P port-forwarding tunnel via Iroh")]
 pub struct Cli {
-    /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
+    /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -156,9 +156,10 @@ pub struct AddServiceArgs {
 /// Precedence (highest first):
 /// 1. `RUST_LOG` env var, if set — overrides everything.
 /// 2. `--quiet` (`-q`) — forces `error`.
-/// 3. `--verbose` (`-v`) count: 0=`warn`, 1=`info`, 2=`debug`, 3+=`trace`.
+/// 3. `--verbose` (`-v`) count: 0/1=`info`, 2=`debug`, 3+=`trace`.
 ///
-/// Default (no flags, no `RUST_LOG`) is `warn`.
+/// Default (no flags, no `RUST_LOG`) is `info`, so connection lifecycle
+/// notices (peer connect/disconnect, "endpoint ready", …) surface by default.
 pub fn init_tracing(verbose: u8, quiet: bool) {
     let filter = if let Ok(rust_log) = std::env::var("RUST_LOG") {
         EnvFilter::new(rust_log)
@@ -166,7 +167,7 @@ pub fn init_tracing(verbose: u8, quiet: bool) {
         EnvFilter::new("error")
     } else {
         let level = match verbose {
-            0 => "warn",
+            0 => "info",
             1 => "info",
             2 => "debug",
             _ => "trace",
