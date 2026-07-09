@@ -3,7 +3,9 @@
 # Run on an ubuntu runner. Produces:
 #   - Release binaries for linux/amd64 + linux/arm64 (via cargo-zigbuild)
 #   - Checksums file
-#   - .deb + .apk Linux packages (via nFPM)
+#   - .deb (glibc) + .apk (musl) Linux packages (via nFPM). The .apk targets
+#     Alpine/musl hosts (LXC, bare-metal), so it is built from a separate
+#     *-unknown-linux-musl target; the .deb + Docker image stay on glibc.
 #   - Multi-arch Docker image on ghcr.io (via dockers_v2 + buildx)
 #   - The GitHub Release itself (this job owns the release; the macOS job appends).
 #
@@ -28,6 +30,8 @@ before:
     - cargo fmt -- --check
 
 builds:
+  # glibc build — feeds the .deb package and the Docker image. Targets any
+  # standard glibc distro (Debian/Ubuntu/Fedora/...).
   - id: iroh-tunnel
     builder: rust
     binary: iroh-tunnel
@@ -41,10 +45,39 @@ builds:
     flags:
       - --release
 
+  # musl build — feeds the .apk package only. Required for Alpine hosts
+  # (LXC, bare-metal), which use musl libc and cannot run a glibc binary
+  # (missing /lib/ld-linux-*.so.* dynamic linker). cargo-zigbuild ships a
+  # musl sysroot via zig, so no extra musl-tools install is needed on the CI
+  # runner (ADR-0002 §2: zig 0.13.0 already set up by release.yml).
+  - id: iroh-tunnel-musl
+    builder: rust
+    binary: iroh-tunnel
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+    flags:
+      - --release
+
+# Two archive blocks because we now ship two linux libc flavours (glibc + musl);
+# without filtering by build `ids` both would emit `...-linux-<arch>.tar.gz` and
+# collide. The musl tarball is tagged `-musl` so Alpine users can pick it.
 archives:
-  - id: default
+  - id: glibc
+    ids:
+      - iroh-tunnel
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+  - id: musl
+    ids:
+      - iroh-tunnel-musl
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}-musl"
     files:
       - README.md
       - LICENSE*
@@ -64,9 +97,15 @@ changelog:
       - "Merge pull request"
       - "Merge branch"
 
-# ---- Linux packages: .deb + .apk via nFPM ----
-# Architectures are inferred from the linux build targets above (amd64, arm64).
+# ---- Linux packages via nFPM ----
+# Two blocks because the .deb and .apk need different libc flavours:
+#   - .deb from the glibc build (iroh-tunnel)  → Debian/Ubuntu/Fedora/...
+#   - .apk from the musl build (iroh-tunnel-musl) → Alpine (LXC, bare-metal)
+# Both share the same package_name, contents (systemd unit + config dir) and
+# postinstall script. Architectures are inferred from each build's targets
+# (amd64, arm64).
 nfpms:
+  # glibc → .deb
   - id: iroh-tunnel
     package_name: iroh-tunnel
     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
@@ -77,13 +116,36 @@ nfpms:
     license: "MIT OR Apache-2.0"
     formats:
       - deb
-      - apk
+    ids:
+      - iroh-tunnel
     contents:
       # systemd unit for the `serve` role, installed by the package.
       - src: packaging/iroh-tunnel.service
         dst: /usr/lib/systemd/system/iroh-tunnel.service
         type: config|noreplace
       # Default config directory; the binary reads /etc/iroh-tunnel/serve.toml.
+      - dst: /etc/iroh-tunnel
+        type: dir
+    scripts:
+      postinstall: packaging/postinstall.sh
+
+  # musl → .apk (Alpine)
+  - id: iroh-tunnel-musl
+    package_name: iroh-tunnel
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: naicoi92
+    homepage: https://github.com/naicoi92/iroh-tunnel
+    maintainer: naicoi92 <naicoi@lttech.vn>
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
+    license: "MIT OR Apache-2.0"
+    formats:
+      - apk
+    ids:
+      - iroh-tunnel-musl
+    contents:
+      - src: packaging/iroh-tunnel.service
+        dst: /usr/lib/systemd/system/iroh-tunnel.service
+        type: config|noreplace
       - dst: /etc/iroh-tunnel
         type: dir
     scripts:
@@ -97,6 +159,11 @@ dockers_v2:
     images:
       - ghcr.io/naicoi92/iroh-tunnel
     dockerfile: Dockerfile.goreleaser
+    # Pin to the glibc build only: the musl build (iroh-tunnel-musl) also
+    # produces a binary at linux/amd64/iroh-tunnel, so without this the staged
+    # build context would be ambiguous. The distroless base image is glibc.
+    ids:
+      - iroh-tunnel
     platforms:
       - linux/amd64
       - linux/arm64

@@ -47,17 +47,19 @@ will not block the unsigned binary.
 ### Linux (`.deb` / `.apk`)
 
 Packages ship a systemd unit at `/usr/lib/systemd/system/iroh-tunnel.service`
-and run under a hardened `DynamicUser`.
+and run under a hardened `DynamicUser`. The `.deb` is built against **glibc**
+(Debian/Ubuntu/Fedora/...); the `.apk` is built against **musl** for Alpine
+hosts (LXC, bare-metal) and will not run on a glibc system, and vice versa.
 
 ```sh
-# Debian / Ubuntu (.deb)
+# Debian / Ubuntu (.deb, glibc)
 curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0/iroh-tunnel_0.1.0_amd64.deb
 sudo dpkg -i iroh-tunnel_0.1.0_amd64.deb   # or _arm64.deb on ARM
 iroh-tunnel --version
 
-# Alpine (.apk)
+# Alpine (.apk, musl)
 curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0/iroh-tunnel_0.1.0_amd64.apk
-sudo apk add --allow-untrusted iroh-tunnel_0.1.0_amd64.apk
+sudo apk add --allow-untrusted iroh-tunnel_0.1.0_amd64.apk   # or _arm64.apk on ARM
 ```
 
 ### Docker (prebuilt multi-arch image)
@@ -336,8 +338,8 @@ ready" notices show without any flag. Use `-q` for errors-only, or
 
 One git tag `vX.Y.Z` produces, via [GoReleaser](https://goreleaser.com):
 
-- **Binaries:** `linux/amd64`, `linux/arm64`, `darwin/arm64` (+ checksums)
-- **Linux packages:** `.deb` + `.apk` (amd64 + arm64)
+- **Binaries:** `linux/amd64`, `linux/arm64` (glibc + musl), `darwin/arm64` (+ checksums)
+- **Linux packages:** `.deb` (glibc) + `.apk` (musl/Alpine) — amd64 + arm64
 - **Docker:** `ghcr.io/naicoi92/iroh-tunnel` multi-arch (amd64 + arm64)
 - **Homebrew cask:** published to [`naicoi92/homebrew-tap`](https://github.com/naicoi92/homebrew-tap)
 

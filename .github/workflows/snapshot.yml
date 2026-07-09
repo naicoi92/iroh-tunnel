@@ -20,7 +20,8 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Linux snapshot: linux/amd64 + linux/arm64 binaries + Docker + deb/apk.
+  # Linux snapshot: linux/amd64 + linux/arm64 binaries (glibc + musl) +
+  # Docker + deb (glibc) + apk (musl).
   # ---------------------------------------------------------------------------
   snapshot-linux:
     name: snapshot (linux)

@@ -6,8 +6,8 @@
 #
 # Linux (ubuntu-latest, .goreleaser.yaml):
 #   binaries for linux/amd64 + linux/arm64 (cargo-zigbuild), checksums,
-#   .deb/.apk (nFPM), Docker image on ghcr.io (buildx multi-arch), and the
-#   GitHub Release itself.
+#   .deb (glibc) + .apk (musl, for Alpine LXC/hosts) (nFPM), Docker image on
+#   ghcr.io (buildx multi-arch), and the GitHub Release itself.
 #
 # macOS (macos-14, .goreleaser.macos.yaml):
 #   binary for darwin/arm64 (native build) + Homebrew cask. Built natively
