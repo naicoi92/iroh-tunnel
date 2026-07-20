@@ -201,7 +201,7 @@ async fn handle_local_connection(
         .await
         .context("open bidirectional stream failed")?;
 
-    crate::pipe::pipe_bidirectional(local, (recv, send)).await?;
+    crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
     Ok(())
 }
 
