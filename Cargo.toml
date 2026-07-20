@@ -34,3 +34,9 @@ vergen-gitcl = { version = "9.0", features = ["build"] }
 # Validate the git tag as Cargo semver before exporting it as APP_VERSION,
 # so downstream packaging never receives an invalid version string.
 semver = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3
