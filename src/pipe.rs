@@ -227,6 +227,7 @@ where
 mod tests {
     use super::*;
     use tokio::io::{duplex, AsyncReadExt, DuplexStream};
+    use tokio::net::TcpListener;
 
     /// Wire two duplex streams together through `pipe_bidirectional` and
     /// confirm bytes flow in both directions without modification.
@@ -346,6 +347,132 @@ mod tests {
         }
         let (r, w) = remote;
         assert_pipe(local, (r, w));
+    }
+
+    // ---- pipe_tcp_bidirectional tests ----
+
+    /// Helper: create a connected TCP pair bound to 127.0.0.1.
+    /// Returns `(server, client)` — the caller picks which end is "local".
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let server = listener.accept().await.unwrap().0;
+        (server, client)
+    }
+
+    /// Wire a real TCP connection and a duplex stream together through
+    /// `pipe_tcp_bidirectional` and confirm bytes flow in both directions
+    /// without modification.
+    ///
+    /// Unlike the `pipe_bidirectional` tests which can use `duplex` for the
+    /// local side, `pipe_tcp_bidirectional` requires a concrete `TcpStream`
+    /// (for `into_split`), so we create a loopback TCP pair.
+    #[tokio::test]
+    async fn tcp_copies_bytes_in_both_directions() {
+        // Real TCP pair for the local side (pipe_tcp_bidirectional requires TcpStream).
+        let (local, mut peer) = tcp_pair().await;
+        // In-memory duplex for the remote side.
+        let (remote_a, mut remote_b) = duplex(8 * 1024);
+        let (remote_a_read, remote_a_write) = tokio::io::split(remote_a);
+        let pipe = tokio::spawn(pipe_tcp_bidirectional(
+            local,
+            (remote_a_read, remote_a_write),
+        ));
+
+        // peer -> remote (peer writes to its TCP end, pipe copies local->remote).
+        peer.write_all(b"hello-from-peer").await.unwrap();
+        let mut got = [0u8; 15];
+        remote_b.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hello-from-peer");
+
+        // remote -> peer (remote writes, pipe copies remote->local).
+        remote_b.write_all(b"hello-from-remote").await.unwrap();
+        let mut got = [0u8; 17];
+        peer.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hello-from-remote");
+
+        // Close peer write side -> EOF propagates to remote read side.
+        peer.shutdown().await.unwrap();
+        let mut eof = [0u8; 1];
+        let n = remote_b.read(&mut eof).await.unwrap();
+        assert_eq!(n, 0, "expected EOF on remote read after peer shutdown");
+
+        // Close remote write side -> EOF propagates to peer read side, which
+        // lets the pipe task finish.
+        let _ = remote_b.shutdown().await;
+
+        pipe.await.unwrap().unwrap();
+    }
+
+    /// Half-close on the TCP peer side propagates as EOF through the pipe to
+    /// the remote duplex read side, and data can still flow in the opposite
+    /// direction after the half-close.
+    #[tokio::test]
+    async fn tcp_half_close_propagates_eof() {
+        let (local, mut peer) = tcp_pair().await;
+        let (remote_a, mut remote_b) = duplex(8 * 1024);
+        let (remote_a_read, remote_a_write) = tokio::io::split(remote_a);
+        let pipe = tokio::spawn(pipe_tcp_bidirectional(
+            local,
+            (remote_a_read, remote_a_write),
+        ));
+
+        // Shut down peer's write half immediately — no data sent in this direction.
+        peer.shutdown().await.unwrap();
+
+        // remote_b should see EOF on its read side (the pipe's local->remote copy
+        // encounters EOF from the local TcpStream's read half, then shuts down
+        // remote_a_write, propagating FIN to remote_b).
+        let mut eof = [0u8; 1];
+        let n = remote_b.read(&mut eof).await.unwrap();
+        assert_eq!(
+            n, 0,
+            "expected EOF on remote after peer shutdown (half-close)"
+        );
+
+        // Data can still flow remote -> peer after the half-close.
+        remote_b.write_all(b"final-data").await.unwrap();
+        let mut got = [0u8; 10];
+        peer.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"final-data");
+
+        // Shut down remote write side so the pipe finishes.
+        let _ = remote_b.shutdown().await;
+
+        pipe.await.unwrap().unwrap();
+    }
+
+    /// A larger payload passes through byte-for-byte in both directions — a
+    /// regression guard against accidental truncation or buffer issues in the
+    /// 64 KiB `copy_buf` path used by `pipe_tcp_bidirectional`.
+    #[tokio::test]
+    async fn tcp_larger_payload_roundtrips_intact() {
+        let (local, mut peer) = tcp_pair().await;
+        let (remote_a, mut remote_b) = duplex(64 * 1024);
+        let (remote_a_read, remote_a_write) = tokio::io::split(remote_a);
+        let pipe = tokio::spawn(pipe_tcp_bidirectional(
+            local,
+            (remote_a_read, remote_a_write),
+        ));
+
+        // peer -> remote: 50 KiB payload.
+        let payload_out: Vec<u8> = (0..50_000).map(|i| (i % 251) as u8).collect();
+        peer.write_all(&payload_out).await.unwrap();
+        peer.shutdown().await.unwrap();
+        let mut got_remote = vec![0u8; payload_out.len()];
+        remote_b.read_exact(&mut got_remote).await.unwrap();
+        assert_eq!(got_remote, payload_out);
+
+        // remote -> peer: 50 KiB payload (different pattern).
+        let payload_back: Vec<u8> = (0..50_000).map(|i| ((i + 7) % 251) as u8).collect();
+        remote_b.write_all(&payload_back).await.unwrap();
+        let _ = remote_b.shutdown().await;
+        let mut got_peer = vec![0u8; payload_back.len()];
+        peer.read_exact(&mut got_peer).await.unwrap();
+        assert_eq!(got_peer, payload_back);
+
+        pipe.await.unwrap().unwrap();
     }
 
     // ---- UDP framing codec (T-10) ----
