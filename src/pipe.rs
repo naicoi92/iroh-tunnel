@@ -37,7 +37,8 @@
 #![allow(dead_code)] // TCP pipe consumed by T-06/T-07; UDP codec/pipe by future UDP handlers.
 
 use anyhow::Result;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 
 /// Largest UDP datagram (header + payload) we will accept in a frame. Guards
 /// against a malicious/garbled length prefix causing a huge allocation.
@@ -77,6 +78,62 @@ where
     let r2c = async {
         let res = tokio::io::copy(&mut ri, &mut lo).await;
         let _ = lo.shutdown().await;
+        let _ = res?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    let (a, b) = tokio::join!(c2r, r2c);
+    a.map_err(anyhow::Error::from)?;
+    b.map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
+/// Copy bytes in both directions between a local [`TcpStream`] and a remote
+/// read/write pair, using lock-free [`TcpStream::into_split`] and 64 KiB
+/// copy buffers.
+///
+/// Unlike the generic [`pipe_bidirectional`] which splits the local side with
+/// [`tokio::io::split`] (a `BiLock`-based split), this function consumes a
+/// concrete `TcpStream` and calls [`TcpStream::into_split`] to obtain
+/// `OwnedReadHalf` / `OwnedWriteHalf`. These are backed by `Arc<Mutex<…>>`
+/// rather than `BiLock`, so concurrent reads and writes on the two halves
+/// never contend — a real TCP socket is read/write-safe at the OS level.
+///
+/// Both copy directions use [`BufReader::with_capacity`]`(`[`64 * 1024`]`, …)`
+/// together with [`tokio::io::copy_buf`] so that each direction enjoys a 64 KiB
+/// internal buffer instead of the default 8 KiB, reducing syscall overhead on
+/// large transfers.
+///
+/// Half-close semantics are identical to [`pipe_bidirectional`]: when one
+/// direction finishes (EOF) the matching write side is shut down, and the
+/// function returns once *both* directions have completed.
+pub async fn pipe_tcp_bidirectional<R, W>(local: TcpStream, remote: (R, W)) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let (ri, mut wi) = remote;
+    let (read_half, mut write_half) = local.into_split();
+
+    // Wrap both read sides in a 64 KiB BufReader so copy_buf uses a
+    // 64 KiB buffer instead of the default 8 KiB.
+    let mut local_reader = BufReader::with_capacity(64 * 1024, read_half);
+    let mut remote_reader = BufReader::with_capacity(64 * 1024, ri);
+
+    // local -> remote
+    let c2r = async {
+        let res = tokio::io::copy_buf(&mut local_reader, &mut wi).await;
+        // Always attempt a clean half-close so the peer sees FIN, even when the
+        // copy errored. The original error (if any) is what we return.
+        let _ = wi.shutdown().await;
+        let _ = res?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    // remote -> local
+    let r2c = async {
+        let res = tokio::io::copy_buf(&mut remote_reader, &mut write_half).await;
+        let _ = write_half.shutdown().await;
         let _ = res?;
         Ok::<_, std::io::Error>(())
     };
