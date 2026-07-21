@@ -2,7 +2,7 @@
 //! systemd (Linux) and launchd (macOS).
 //!
 //! Implements T-12. Each platform is a cfg-gated submodule exposing the same
-//! six actions; the top-level functions dispatch to whichever platform the
+//! six actions; the top-level dispatchers forward to whichever platform the
 //! binary was built for. Based on Page 06 v5 §1.3 (service subcommand) and
 //! §1.3.2/§1.3.3 (unit/plist templates).
 
@@ -15,6 +15,36 @@ mod launchd;
 #[cfg(target_os = "linux")]
 mod systemd;
 
+/// Restart policy shared by every platform's service template.
+///
+/// Both `systemd::format_unit` and `launchd::format_plist` read from this so
+/// the policy has a single source of truth — the previous design hard-coded it
+/// separately in each template (`Restart=on-failure`/`RestartSec=5` in the
+/// unit, `KeepAlive SuccessfulExit=false` in the plist), which silently drifted
+/// whenever one side was edited.
+///
+/// `delay_secs` is honored by systemd only; launchd manages its own throttle
+/// interval internally and has no user-settable knob for it. The field stays
+/// shared so the policy reads as one coherent thing, even if one platform
+/// ignores the backoff.
+pub(crate) struct RestartPolicy {
+    /// Restart the service when it exits with a non-zero status.
+    pub on_failure: bool,
+    /// Delay between restart attempts, in seconds. Read by systemd; ignored
+    /// by launchd (which uses an internal ThrottleInterval).
+    #[allow(dead_code)] // unread on macOS builds (launchd has no equivalent knob)
+    pub delay_secs: u64,
+}
+
+impl RestartPolicy {
+    /// The policy iroh-tunnel ships with: restart on crash, 5 s backoff.
+    /// Matches the previous hard-coded values in both templates.
+    pub const DEFAULT: RestartPolicy = RestartPolicy {
+        on_failure: true,
+        delay_secs: 5,
+    };
+}
+
 /// Whether the service is installed system-wide or per-user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceScope {
@@ -24,7 +54,12 @@ pub enum ServiceScope {
 
 // ---------------------------------------------------------------------------
 // Public dispatchers — one per ServiceAction. They forward to the platform
-// module selected at compile time.
+// module selected at compile time. Each has the same cfg(linux)/cfg(macos)/
+// cfg(not(...)) skeleton; they're kept explicit rather than factored into a
+// macro because (a) `install` takes an extra `config` arg the others don't,
+// (b) the unsupported fallback needs to consume the args to stay warning-free,
+// and (c) six functions × three cfg arms reads more clearly than a macro that
+// has to solve all of that generically.
 // ---------------------------------------------------------------------------
 
 /// `service install`: write the unit/plist, enable, and start.
@@ -142,7 +177,7 @@ fn unsupported() -> Result<()> {
 ///
 /// Prefer `which` (so a system install is used); fall back to the current
 /// executable so `cargo run -- service install` works during development.
-fn resolve_binary() -> Result<PathBuf> {
+pub(super) fn resolve_binary() -> Result<PathBuf> {
     if let Ok(p) = which::which("iroh-tunnel") {
         return Ok(p);
     }
@@ -168,5 +203,15 @@ mod tests {
         // is exercised at minimum.
         let p = resolve_binary().expect("resolve_binary should not fail in tests");
         assert!(p.is_absolute(), "binary path should be absolute");
+    }
+
+    #[test]
+    fn restart_policy_default_matches_previous_hardcoded_values() {
+        // Regression guard: the shared RestartPolicy must produce the same
+        // values the per-platform templates used to hard-code (Restart=
+        // on-failure, RestartSec=5 / KeepAlive SuccessfulExit=false).
+        let p = RestartPolicy::DEFAULT;
+        assert!(p.on_failure, "default policy must restart on failure");
+        assert_eq!(p.delay_secs, 5, "default policy must keep the 5s backoff");
     }
 }

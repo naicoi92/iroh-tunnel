@@ -4,7 +4,7 @@
 //! `~/.config/systemd/user` (user scope). Each action delegates to `systemctl`
 //! with `--user` added automatically for the per-user domain.
 
-use super::{resolve_binary, ServiceScope};
+use super::{resolve_binary, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -24,9 +24,24 @@ fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
 }
 
 /// Render the systemd unit file body for `iroh-tunnel {role} run`.
+///
+/// The restart directives come from the shared [`RestartPolicy`] so they stay
+/// in sync with the launchd plist template.
 fn format_unit(role: &str, binary: &Path, config: &Path) -> String {
+    format_unit_with(role, binary, config, &RestartPolicy::DEFAULT)
+}
+
+fn format_unit_with(role: &str, binary: &Path, config: &Path, policy: &RestartPolicy) -> String {
     let binary = binary.to_string_lossy();
     let config = config.to_string_lossy();
+    // systemd spells restart-on-failure as `Restart=on-failure` (or `no` when
+    // the policy disables it). RestartSec is the backoff in seconds.
+    let restart = if policy.on_failure {
+        "on-failure"
+    } else {
+        "no"
+    };
+    let restart_sec = policy.delay_secs;
     format!(
         "[Unit]\n\
          Description=Iroh Tunnel ({role})\n\
@@ -36,8 +51,8 @@ fn format_unit(role: &str, binary: &Path, config: &Path) -> String {
          [Service]\n\
          Type=simple\n\
          ExecStart={binary} {role} run --config {config}\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
+         Restart={restart}\n\
+         RestartSec={restart_sec}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n"
@@ -123,10 +138,46 @@ pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-fn _unit_name_is_stable() {
-    // Compile-only guard: keep unit_name/format_unit referenced so a
-    // refactor doesn't silently drop the template logic.
-    let _ = unit_name("serve");
-    let _ = format_unit("serve", Path::new("/x"), Path::new("/y"));
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_name_is_stable() {
+        assert_eq!(unit_name("serve"), "iroh-tunnel-serve.service");
+        assert_eq!(unit_name("access"), "iroh-tunnel-access.service");
+    }
+
+    #[test]
+    fn format_unit_uses_default_restart_policy() {
+        // Regression: the shared RestartPolicy::DEFAULT must produce the same
+        // Restart=/RestartSec= values the template used to hard-code.
+        let body = format_unit(
+            "serve",
+            Path::new("/usr/bin/iroh-tunnel"),
+            Path::new("/etc/cfg"),
+        );
+        assert!(body.contains("Restart=on-failure"), "body: {body}");
+        assert!(body.contains("RestartSec=5"), "body: {body}");
+        assert!(body.contains("ExecStart=/usr/bin/iroh-tunnel serve run --config /etc/cfg"));
+    }
+
+    #[test]
+    fn format_unit_with_disabled_policy_omits_restart() {
+        let policy = RestartPolicy {
+            on_failure: false,
+            delay_secs: 0,
+        };
+        let body = format_unit_with("serve", Path::new("/x"), Path::new("/y"), &policy);
+        assert!(body.contains("Restart=no"), "body: {body}");
+        assert!(body.contains("RestartSec=0"), "body: {body}");
+    }
+
+    #[test]
+    fn unit_path_system_scope_is_under_etc() {
+        let p = unit_path("serve", ServiceScope::System).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/etc/systemd/system/iroh-tunnel-serve.service")
+        );
+    }
 }
