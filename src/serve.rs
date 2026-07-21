@@ -18,6 +18,7 @@
 //! earlier draft the spec was written against — see the API notes inline.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -32,6 +33,18 @@ use crate::{config::ServeConfig, endpoint, proto};
 /// endpoint with all service ALPNs registered, prints the operator-facing
 /// status lines, then enters the accept loop.
 pub async fn run(config_path: &Path) -> Result<()> {
+    run_with_shutdown(config_path, crate::shutdown::wait_for_signal()).await
+}
+
+/// Run the serve role until the caller-provided `shutdown` future resolves.
+///
+/// Same as [`run`], but the shutdown signal is injected. Production wires
+/// `shutdown::wait_for_signal()` here; tests inject a `oneshot::Receiver` or
+/// similar so the role can be driven end-to-end without sending real signals.
+pub async fn run_with_shutdown(
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
     let mut cfg = ServeConfig::load(config_path)?;
     cfg.resolve_and_save_key(config_path)?;
 
@@ -102,9 +115,10 @@ pub async fn run(config_path: &Path) -> Result<()> {
         Err(e) => tracing::warn!("failed to write status file: {e}"),
     }
 
-    // Wait for SIGINT/SIGTERM, then drain in-flight streams before closing
-    // the endpoint (T-08).
-    crate::shutdown::wait_for_signal().await;
+    // Wait for the injected shutdown signal (production: SIGINT/SIGTERM via
+    // shutdown::wait_for_signal; tests: a oneshot receiver), then drain
+    // in-flight streams before closing the endpoint (T-08).
+    shutdown.await;
     accept.abort();
     crate::shutdown::drain_connections(std::time::Duration::from_secs(5)).await;
     ep.close().await;
