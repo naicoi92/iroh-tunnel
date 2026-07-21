@@ -21,7 +21,6 @@ use std::future::Future;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use iroh::EndpointAddr;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::{config::AccessConfig, endpoint, proto};
@@ -59,26 +58,17 @@ pub async fn run_with_shutdown(
     // relay URLs to dial through.
     //
     // Relays are OPTIONAL in config (IROHTUN-44): if the user does not set
-    // `relay_urls`, we fall back to the n0 default relays — mirroring iroh's
-    // own `RelayMode::Default`. If the user configures `relay_urls`, those
-    // take precedence (custom/self-hosted relays for latency, privacy, etc.).
-    let relay_urls: Vec<iroh::RelayUrl> = if cfg.node.relay_urls.is_empty() {
-        let defaults = endpoint::n0_default_relay_urls();
+    // `relay_urls`, resolve_relay_urls falls back to the n0 defaults —
+    // mirroring iroh's own `RelayMode::Default`. If the user configures
+    // `relay_urls`, those take precedence (custom/self-hosted relays for
+    // latency, privacy, etc.).
+    let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)?;
+    if cfg.node.relay_urls.is_empty() {
         tracing::info!(
-            count = defaults.len(),
+            count = relay_urls.len(),
             "no relay_urls configured, falling back to n0 default relays"
         );
-        defaults
-    } else {
-        cfg.node
-            .relay_urls
-            .iter()
-            .map(|s| {
-                s.parse::<iroh::RelayUrl>()
-                    .with_context(|| format!("invalid relay_url: {s}"))
-            })
-            .collect::<Result<Vec<_>>>()?
-    };
+    }
 
     for svc in &cfg.services {
         let node_id = svc
@@ -179,15 +169,12 @@ async fn handle_local_connection(
     // local clients multiplexes streams over a single QUIC connection (Page 04
     // v2 §5).
     //
-    // Attach every available relay URL so iroh can try each in turn. With no
-    // relay URLs and no address-lookup service (Minimal preset), iroh returns
-    // "No addressing information available" — so an empty `relay_urls` is a
-    // programming error here. The caller (run()) guarantees a non-empty list
-    // by falling back to the n0 defaults when the config is empty (IROHTUN-44).
-    let mut addr = EndpointAddr::new(node_id);
-    for url in relay_urls {
-        addr = addr.with_relay_url(url.clone());
-    }
+    // The address construction itself lives in endpoint::build_dial_addr so
+    // iroh's EndpointAddr type stays behind the endpoint seam. The caller
+    // (run()) guarantees a non-empty `relay_urls` by routing through
+    // endpoint::resolve_relay_urls, which falls back to the n0 defaults when
+    // the config is empty (IROHTUN-44).
+    let addr = endpoint::build_dial_addr(node_id, relay_urls);
 
     let conn = connect_with_retry(ep, addr, alpn).await?;
 

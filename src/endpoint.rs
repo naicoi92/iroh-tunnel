@@ -126,6 +126,53 @@ pub fn home_relay(ep: &Endpoint) -> Option<RelayUrl> {
     ep.addr().relay_urls().next().cloned()
 }
 
+/// Resolve the relay URLs to dial peers through, from the config form.
+///
+/// This is the access-side counterpart to [`relay_mode_from_urls`]: where the
+/// latter decides how *this* endpoint uses relays for itself, this one
+/// decides which relay URLs to attach to a *dialed peer's* `EndpointAddr`.
+///
+/// - Empty input → fall back to [`n0_default_relay_urls`] (mirrors
+///   `RelayMode::Default`). The access role cannot dial a peer with an empty
+///   relay list under the `Minimal` preset — see IROHTUN-44.
+/// - Non-empty input → parse each entry as a [`RelayUrl`], surfacing the
+///   invalid entry in the error.
+///
+/// Lifted out of `access::run` so the parsing logic has a single home
+/// (previously it was duplicated with `relay_mode_from_urls` and inlined in
+/// the access handler).
+pub fn resolve_relay_urls(config_urls: &[String]) -> Result<Vec<RelayUrl>> {
+    if config_urls.is_empty() {
+        return Ok(n0_default_relay_urls());
+    }
+    config_urls
+        .iter()
+        .map(|s| {
+            s.parse::<RelayUrl>()
+                .with_context(|| format!("invalid relay_url: {s}"))
+        })
+        .collect()
+}
+
+/// Build the [`EndpointAddr`] to dial `node_id` through `relay_urls`.
+///
+/// Each URL in `relay_urls` is attached via [`EndpointAddr::with_relay_url`]
+/// so iroh can try each in turn. With no relay URLs and no address-lookup
+/// service (the `Minimal` preset registers none), iroh returns "No
+/// addressing information available" — so callers must pass a non-empty
+/// list (the access role does this by routing through [`resolve_relay_urls`]
+/// which falls back to the n0 defaults).
+///
+/// Lifted out of `access::handle_local_connection` so `iroh::EndpointAddr`
+/// construction stops leaking across the seam.
+pub fn build_dial_addr(node_id: iroh::EndpointId, relay_urls: &[RelayUrl]) -> iroh::EndpointAddr {
+    let mut addr = iroh::EndpointAddr::new(node_id);
+    for url in relay_urls {
+        addr = addr.with_relay_url(url.clone());
+    }
+    addr
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +270,74 @@ mod tests {
         };
         let ep = create_access_endpoint(&node).await.unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());
+    }
+
+    // ---- resolve_relay_urls + build_dial_addr tests ----
+
+    #[test]
+    fn resolve_relay_urls_falls_back_to_n0_defaults_when_empty() {
+        // Empty config must return the n0-operated public relays (IROHTUN-44).
+        let urls = resolve_relay_urls(&[]).unwrap();
+        assert!(!urls.is_empty(), "expected fallback to n0 defaults");
+        let hostnames: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+        assert!(
+            hostnames.iter().any(|h| h.contains("relay.n0.iroh.link")),
+            "no n0 relay hostname in fallback: {hostnames:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_relay_urls_parses_configured_urls() {
+        let cfg = vec![
+            "https://use1-1.relay.n0.iroh.link.".to_string(),
+            "https://euw-1.relay.n0.iroh.link.".to_string(),
+        ];
+        let urls = resolve_relay_urls(&cfg).unwrap();
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0].to_string(), "https://use1-1.relay.n0.iroh.link./");
+    }
+
+    #[test]
+    fn resolve_relay_urls_errors_on_invalid_url() {
+        let cfg = vec!["not a url".to_string()];
+        let err = resolve_relay_urls(&cfg).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid relay_url"));
+    }
+
+    #[test]
+    fn build_dial_addr_attaches_every_relay_url() {
+        // A node_id we can parse from a known-public hex string. Use a freshly
+        // generated key's public so we don't hard-code a magic value.
+        let key = iroh::SecretKey::generate();
+        let node_id: iroh::EndpointId = key.public();
+        let urls: Vec<RelayUrl> = vec![
+            "https://use1-1.relay.n0.iroh.link./".parse().unwrap(),
+            "https://euw-1.relay.n0.iroh.link./".parse().unwrap(),
+            "https://aps1-1.relay.n0.iroh.link./".parse().unwrap(),
+        ];
+
+        let addr = build_dial_addr(node_id, &urls);
+
+        // Every URL must be attached so iroh can try each in turn.
+        let attached: Vec<String> = addr.relay_urls().map(|u| u.to_string()).collect();
+        for u in &urls {
+            let s = u.to_string();
+            assert!(
+                attached.contains(&s),
+                "missing relay URL {s} in addr: {attached:?}"
+            );
+        }
+        assert_eq!(attached.len(), urls.len(), "relay URL count mismatch");
+    }
+
+    #[test]
+    fn build_dial_addr_with_empty_urls_is_just_the_node_id() {
+        // The caller is required to pass a non-empty list (resolve_relay_urls
+        // guarantees this), but build_dial_addr itself should not panic on
+        // empty — it should produce a minimal address carrying only the node id.
+        let key = iroh::SecretKey::generate();
+        let node_id: iroh::EndpointId = key.public();
+        let addr = build_dial_addr(node_id, &[]);
+        assert_eq!(addr.relay_urls().count(), 0);
     }
 }
