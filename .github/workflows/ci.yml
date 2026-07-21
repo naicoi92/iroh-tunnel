@@ -28,7 +28,7 @@ jobs:
       # persist-credentials: false hardens PR-triggered jobs: this workflow only
       # reads source (contents: read), so GITHUB_TOKEN should not be persisted
       # into .git/config where later steps could leak or misuse it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -53,7 +53,7 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
