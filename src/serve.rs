@@ -75,7 +75,7 @@ pub async fn run_with_shutdown(
         println!(
             "Serving: {} {}://{local_addr}",
             svc.name,
-            protocol_str(svc.protocol)
+            crate::role_run::protocol_str(svc.protocol)
         );
     }
 
@@ -104,7 +104,7 @@ pub async fn run_with_shutdown(
             .iter()
             .map(|s| crate::status::ServiceStatus {
                 name: s.name.clone(),
-                protocol: protocol_str(s.protocol).to_string(),
+                protocol: crate::role_run::protocol_str(s.protocol).to_string(),
                 local_addr: format_local_addr(&s.host, s.port),
                 active_connections: 0,
             })
@@ -170,13 +170,11 @@ async fn accept_loop(ep: &iroh::Endpoint, local_addrs: HashMap<Vec<u8>, String>)
         // weak handle is registered while `conn` is still alive (before the
         // stream-handling task takes it), so iroh guarantees the close event is
         // delivered even if the connection drops before this resolves.
-        let weak = conn.weak_handle();
-        let rid = remote_id;
-        let sname = name.clone();
-        tokio::spawn(async move {
-            let _ = weak.closed().await;
-            tracing::info!(peer = %rid, service = %sname, "peer disconnected");
-        });
+        crate::role_run::spawn_disconnect_watcher(
+            &conn,
+            remote_id.to_string(),
+            format!("peer disconnected (service {name})"),
+        );
 
         tokio::spawn(async move {
             match handle_connection(&conn, &local_addr).await {
@@ -201,14 +199,6 @@ async fn handle_connection(conn: &Connection, local_addr: &str) -> Result<()> {
     // Pipe the local TCP stream against the QUIC stream halves.
     crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
     Ok(())
-}
-
-/// Lowercase protocol name for display (matches the serde form in `config`).
-fn protocol_str(p: crate::config::Protocol) -> &'static str {
-    match p {
-        crate::config::Protocol::Tcp => "tcp",
-        crate::config::Protocol::Udp => "udp",
-    }
 }
 
 /// Format a `host:port` pair for the machine-readable status file, bracketing

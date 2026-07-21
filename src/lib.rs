@@ -18,6 +18,7 @@ pub mod endpoint;
 pub mod error;
 pub mod pipe;
 pub mod proto;
+pub mod role_run;
 pub mod serve;
 pub mod service;
 pub mod shutdown;
