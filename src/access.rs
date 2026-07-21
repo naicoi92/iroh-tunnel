@@ -80,7 +80,7 @@ pub async fn run_with_shutdown(
         println!(
             "Exposed: {} {listen_addr} -> peer {node_id} ({}://{listen_addr})",
             svc.name,
-            protocol_str(svc.protocol)
+            crate::role_run::protocol_str(svc.protocol)
         );
 
         let ep_clone = ep.clone();
@@ -186,13 +186,11 @@ async fn handle_local_connection(
     // Watcher: emit a disconnect line when the QUIC connection closes. The weak
     // handle is registered while `conn` is still alive, so iroh guarantees the
     // close event is delivered even if `conn` drops before this resolves.
-    let weak = conn.weak_handle();
-    let rid = remote_id;
-    let sname = svc_name.to_string();
-    tokio::spawn(async move {
-        let _ = weak.closed().await;
-        tracing::info!(peer = %rid, %sname, "disconnected from serve peer");
-    });
+    crate::role_run::spawn_disconnect_watcher(
+        &conn,
+        remote_id.to_string(),
+        format!("disconnected from serve peer (service {svc_name})"),
+    );
 
     // open_bi returns (SendStream, RecvStream) — send first. Our pipe wants the
     // remote pair as (read, write) = (recv, send), so we swap.
@@ -241,13 +239,5 @@ async fn connect_with_retry(
                 attempt += 1;
             }
         }
-    }
-}
-
-/// Lowercase protocol name for display (matches the serde form in `config`).
-fn protocol_str(p: crate::config::Protocol) -> &'static str {
-    match p {
-        crate::config::Protocol::Tcp => "tcp",
-        crate::config::Protocol::Udp => "udp",
     }
 }
