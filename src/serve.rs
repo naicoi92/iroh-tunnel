@@ -105,7 +105,7 @@ pub async fn run_with_shutdown(
             .map(|s| crate::status::ServiceStatus {
                 name: s.name.clone(),
                 protocol: crate::role_run::protocol_str(s.protocol).to_string(),
-                local_addr: format_local_addr(&s.host, s.port),
+                local_addr: crate::status::format_local_addr(&s.host, s.port),
                 active_connections: 0,
             })
             .collect(),
@@ -199,15 +199,4 @@ async fn handle_connection(conn: &Connection, local_addr: &str) -> Result<()> {
     // Pipe the local TCP stream against the QUIC stream halves.
     crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
     Ok(())
-}
-
-/// Format a `host:port` pair for the machine-readable status file, bracketing
-/// IPv6 literals (`[::1]:8080`) so the result is unambiguous. Plain IPv4
-/// addresses and hostnames are left as `host:port`.
-fn format_local_addr(host: &str, port: u16) -> String {
-    if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
 }
