@@ -104,12 +104,35 @@ pub enum Protocol {
 }
 
 // ---------------------------------------------------------------------------
-// T-02.2: load / save
+// T-02.2 / T-02.3: shared load / save / resolve_and_save_key via RoleDoc
 // ---------------------------------------------------------------------------
 
-impl ServeConfig {
-    /// Load and validate a serve config from a TOML file.
-    pub fn load(path: &Path) -> Result<Self> {
+/// A role's TOML config document: schema + validation + the bits every role
+/// shares (load, save, secret-key resolution).
+///
+/// [`ServeConfig`] and [`AccessConfig`] both `impl RoleDoc`. The default
+/// methods below collapse what used to be three byte-identical method pairs
+/// (`load`, `save`, `resolve_and_save_key`) into a single definition — only
+/// [`RoleDoc::validate`] differs per role, so that stays the one required
+/// method.
+///
+/// The trait is sealed to this crate (`pub(crate)` boundary) because it's an
+/// internal abstraction over two known implementers, not a public extension
+/// point.
+pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
+    /// Validate the parsed document; called automatically at the end of
+    /// [`RoleDoc::load`]. Each role implements its own checks.
+    fn validate(&self) -> Result<()>;
+
+    /// The node-level section that carries `secret_key` + `relay_urls`. Used
+    /// by [`RoleDoc::resolve_and_save_key`] to read and persist the key.
+    fn node_mut(&mut self) -> &mut NodeConfig;
+
+    /// Load and validate a role config from a TOML file.
+    fn load(path: &Path) -> Result<Self>
+    where
+        Self: Sized,
+    {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {}", path.display()))?;
         let cfg: Self = toml::from_str(&content)
@@ -119,31 +142,69 @@ impl ServeConfig {
     }
 
     /// Serialize and write the config to disk.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    fn save(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self).context("failed to serialize config")?;
         std::fs::write(path, content)
             .with_context(|| format!("failed to write config: {}", path.display()))?;
         Ok(())
+    }
+
+    /// Resolve the node secret key; if it was just generated, persist it back
+    /// into the config file. Returns the resolved key.
+    ///
+    /// The key value itself is never logged (NFR-05).
+    fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
+        let (key, needs_save) = resolve_secret_key(&self.node_mut().secret_key)?;
+        if needs_save {
+            tracing::warn!("secret_key empty, generated new key, saving to config");
+            self.node_mut().secret_key = encode_secret_key(&key);
+            self.save(path)?;
+        }
+        Ok(key)
+    }
+}
+
+impl ServeConfig {
+    /// Load and validate a serve config from a TOML file.
+    ///
+    /// Thin delegate to the [`RoleDoc`] default — kept as an inherent method
+    /// so existing call sites (`ServeConfig::load(path)`) read naturally.
+    pub fn load(path: &Path) -> Result<Self> {
+        RoleDoc::load(path)
+    }
+
+    /// Serialize and write the config to disk.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        RoleDoc::save(self, path)
+    }
+
+    /// Resolve the node secret key; if it was just generated, persist it back
+    /// into the config file. Returns the resolved key.
+    pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
+        RoleDoc::resolve_and_save_key(self, path)
     }
 }
 
 impl AccessConfig {
     /// Load and validate an access config from a TOML file.
+    ///
+    /// Thin delegate to the [`RoleDoc`] default.
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read config: {}", path.display()))?;
-        let cfg: Self = toml::from_str(&content)
-            .with_context(|| format!("failed to parse config: {}", path.display()))?;
-        cfg.validate()?;
-        Ok(cfg)
+        RoleDoc::load(path)
     }
 
     /// Serialize and write the config to disk.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self).context("failed to serialize config")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("failed to write config: {}", path.display()))?;
-        Ok(())
+        RoleDoc::save(self, path)
+    }
+
+    /// Resolve the node secret key; if it was just generated, persist it back
+    /// into the config file. Returns the resolved key.
+    ///
+    /// Pinned access identity: an empty `secret_key` is generated once and
+    /// persisted, so the access NodeId is stable across restarts.
+    pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
+        RoleDoc::resolve_and_save_key(self, path)
     }
 }
 
@@ -175,41 +236,6 @@ pub fn resolve_secret_key(s: &str) -> Result<(SecretKey, bool)> {
 /// Encode a [`SecretKey`] to a base64 string for config storage.
 pub fn encode_secret_key(key: &SecretKey) -> String {
     BASE64.encode(&key.to_bytes())
-}
-
-impl ServeConfig {
-    /// Resolve the node secret key; if it was just generated, persist it back
-    /// into the config file. Returns the resolved key.
-    ///
-    /// The key value itself is never logged (NFR-05).
-    pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
-        let (key, needs_save) = resolve_secret_key(&self.node.secret_key)?;
-        if needs_save {
-            tracing::warn!("secret_key empty, generated new key, saving to config");
-            self.node.secret_key = encode_secret_key(&key);
-            self.save(path)?;
-        }
-        Ok(key)
-    }
-}
-
-impl AccessConfig {
-    /// Resolve the node secret key; if it was just generated, persist it back
-    /// into the config file. Returns the resolved key.
-    ///
-    /// Pinned access identity: an empty `secret_key` is generated once and
-    /// persisted, so the access NodeId is stable across restarts (mirroring
-    /// [`ServeConfig::resolve_and_save_key`]). The key value itself is never
-    /// logged (NFR-05).
-    pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
-        let (key, needs_save) = resolve_secret_key(&self.node.secret_key)?;
-        if needs_save {
-            tracing::warn!("secret_key empty, generated new key, saving to config");
-            self.node.secret_key = encode_secret_key(&key);
-            self.save(path)?;
-        }
-        Ok(key)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +279,18 @@ impl ServeConfig {
     }
 }
 
+impl RoleDoc for ServeConfig {
+    fn validate(&self) -> Result<()> {
+        // Delegate to the inherent method so callers using either
+        // ServeConfig::validate or RoleDoc::validate get the same behavior.
+        ServeConfig::validate(self)
+    }
+
+    fn node_mut(&mut self) -> &mut NodeConfig {
+        &mut self.node
+    }
+}
+
 impl AccessConfig {
     /// Validate node relay_urls + services (names, ports, node_id format,
     /// duplicates).
@@ -277,6 +315,16 @@ impl AccessConfig {
             validate_port(svc.port)?;
         }
         Ok(())
+    }
+}
+
+impl RoleDoc for AccessConfig {
+    fn validate(&self) -> Result<()> {
+        AccessConfig::validate(self)
+    }
+
+    fn node_mut(&mut self) -> &mut NodeConfig {
+        &mut self.node
     }
 }
 
