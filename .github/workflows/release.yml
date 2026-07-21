@@ -41,6 +41,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain (pinned to rust-version)
         # `rustfmt` + `clippy` are needed because GoReleaser's `before.hooks`
@@ -93,6 +94,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain (pinned to rust-version)
         run: |
