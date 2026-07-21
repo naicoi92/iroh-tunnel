@@ -1,0 +1,39 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true
+  },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read(./**)",
+      "Write(./**)",
+      "Edit(./**)",
+      "Glob(./**)",
+      "Grep(./**)",
+      "Read(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Write(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Edit(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Glob(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Grep(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Read(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/.auto-claude/specs/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Write(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/.auto-claude/specs/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Edit(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/worktrees/tasks/001-replace-locking-tokio-io-split-with-lock-free-tcps/.auto-claude/specs/001-replace-locking-tokio-io-split-with-lock-free-tcps/**)",
+      "Read(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/**)",
+      "Write(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/**)",
+      "Edit(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/**)",
+      "Glob(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/**)",
+      "Grep(/Users/naicoi/Projects/iroh/iroh-tunnel/.auto-claude/**)",
+      "Bash(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "mcp__context7__resolve-library-id(*)",
+      "mcp__context7__query-docs(*)",
+      "mcp__graphiti-memory__search_nodes(*)",
+      "mcp__graphiti-memory__search_facts(*)",
+      "mcp__graphiti-memory__add_episode(*)",
+      "mcp__graphiti-memory__get_episodes(*)",
+      "mcp__graphiti-memory__get_entity_edge(*)"
+    ]
+  }
+}

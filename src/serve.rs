@@ -185,7 +185,7 @@ async fn handle_connection(conn: &Connection, local_addr: &str) -> Result<()> {
         .with_context(|| format!("failed to connect local service: {local_addr}"))?;
 
     // Pipe the local TCP stream against the QUIC stream halves.
-    crate::pipe::pipe_bidirectional(local, (recv, send)).await?;
+    crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
     Ok(())
 }
 
