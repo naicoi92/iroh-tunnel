@@ -6,6 +6,14 @@ rust-version = "1.91"
 description = "P2P port-forwarding tunnel (TCP/UDP) via Iroh"
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "iroh_tunnel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iroh-tunnel"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.52", features = ["full"] }

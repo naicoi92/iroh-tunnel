@@ -3,30 +3,22 @@
 //! Dispatch wires up the role run handlers (T-06 serve, T-07 access); config
 //! (T-11) and service (T-12) management are still placeholders.
 //! Exit-code mapping follows Page 06 v5 §6 (see [`error::CliError`]).
-
-mod access;
-mod cli;
-mod config;
-mod config_cmd;
-mod endpoint;
-mod error;
-mod pipe;
-mod proto;
-mod serve;
-mod service;
-mod shutdown;
-mod status;
+//!
+//! This is a thin binary wrapper over the [`iroh_tunnel`] library crate; all
+//! real logic lives there so integration tests can exercise it in-process.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::Parser;
-use cli::{Cli, ConfigAction, Role, RoleCmd, ServiceAction};
-use error::CliError;
+use iroh_tunnel::cli::{self, Cli, ConfigAction, Role, RoleCmd, ServiceAction};
+use iroh_tunnel::config_cmd;
+use iroh_tunnel::error::CliError;
+use iroh_tunnel::{access, serve, service};
 
 fn main() {
-    let cli = Cli::parse();
-    cli::init_tracing(cli.verbose, cli.quiet);
+    let parsed = Cli::parse();
+    cli::init_tracing(parsed.verbose, parsed.quiet);
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -39,7 +31,7 @@ fn main() {
         }
     };
 
-    match rt.block_on(run(cli)) {
+    match rt.block_on(run(parsed)) {
         Ok(()) => std::process::exit(0),
         Err(e) => {
             eprintln!("error: {e:#}");

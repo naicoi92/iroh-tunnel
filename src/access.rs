@@ -17,6 +17,7 @@
 //! run CLI behavior). Note: iroh 1.0's connect/ALPN API differs from the
 //! earlier draft the spec was written against — see the API notes inline.
 
+use std::future::Future;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -30,6 +31,18 @@ use crate::{config::AccessConfig, endpoint, proto};
 /// Loads `config_path`, builds an ephemeral-key endpoint, prints the per-service
 /// `Exposed:` lines, then spawns a listen loop per service.
 pub async fn run(config_path: &Path) -> Result<()> {
+    run_with_shutdown(config_path, crate::shutdown::wait_for_signal()).await
+}
+
+/// Run the access role until the caller-provided `shutdown` future resolves.
+///
+/// Same as [`run`], but the shutdown signal is injected. Production wires
+/// `shutdown::wait_for_signal()` here; tests inject a `oneshot::Receiver` or
+/// similar so the role can be driven end-to-end without sending real signals.
+pub async fn run_with_shutdown(
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
     let mut cfg = AccessConfig::load(config_path)?;
     cfg.resolve_and_save_key(config_path)?;
     let ep = endpoint::create_access_endpoint(&cfg.node).await?;
@@ -93,7 +106,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
     }
 
     tracing::info!("access endpoint ready, listening for local clients");
-    crate::shutdown::wait_for_signal().await;
+    shutdown.await;
     crate::shutdown::drain_connections(std::time::Duration::from_secs(5)).await;
     ep.close().await;
     Ok(())
