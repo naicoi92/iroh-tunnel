@@ -186,7 +186,7 @@ release:
   github:
     owner: naicoi92
     name: iroh-tunnel
-  draft: false
+  draft: true
   prerelease: auto
   # `replace` so re-running the Linux job overwrites its own artifacts cleanly;
   # the macOS job (`.goreleaser.macos.yaml`) uses `mode: append` to add its files.
