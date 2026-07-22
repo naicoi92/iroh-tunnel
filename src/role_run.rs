@@ -29,8 +29,8 @@ pub(crate) fn protocol_str(p: Protocol) -> &'static str {
 /// Spawn a task that logs a disconnect line when the peer's QUIC connection
 /// closes.
 ///
-/// The weak handle is registered while \`conn\` is still alive, so iroh
-/// guarantees the close event is delivered even if \`conn\` drops before this
+/// The weak handle is registered while `conn` is still alive, so iroh
+/// guarantees the close event is delivered even if `conn` drops before this
 /// resolves. Previously duplicated (with cosmetic differences) in both roles:
 /// serve logged `peer disconnected` with a `service` field, access logged
 /// `disconnected from serve peer` with an `sname` field. Both call sites
@@ -68,11 +68,11 @@ pub(crate) fn next_backoff_ms(prev_ms: u64) -> u64 {
 /// Retries [`iroh::Endpoint::connect`] on failure with the schedule
 /// [`INITIAL_BACKOFF_MS`] → [`next_backoff_ms`] → … → [`MAX_BACKOFF_MS`]:
 /// `1s → 2s → 4s → 8s → 16s → 30s (cap)`. On the first success after one or
-/// more failures, logs \`reconnected after N attempts\`. Per-service
+/// more failures, logs `reconnected after N attempts`. Per-service
 /// independent: each local-client task runs its own retry, so one unreachable
 /// peer never affects another service (Page 04 v2 §1.3).
 ///
-/// Lifted from \`access::handle_local_connection\` so the backoff contract has
+/// Lifted from `access::handle_local_connection` so the backoff contract has
 /// one definition site and the schedule is testable.
 pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
