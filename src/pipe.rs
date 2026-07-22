@@ -173,8 +173,8 @@ pub async fn decode_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>> {
 /// Note: the spec sample takes an `iroh::endpoint::BidiStream`, but iroh 1.0 has
 /// no `BidiStream` type — a bidirectional QUIC stream is a `(RecvStream,
 /// SendStream)` tuple (see the module-level note for the TCP pipe). We accept
-/// that pair directly, matching how `pipe_bidirectional` already works; the
-/// framing contract is unchanged.
+/// that pair directly, matching how [`pipe_tcp_bidirectional`] accepts its
+/// remote halves; the framing contract is unchanged.
 pub async fn pipe_udp<R, W>(
     local: tokio::net::UdpSocket,
     mut remote_read: R,
@@ -233,9 +233,9 @@ mod tests {
     /// `pipe_tcp_bidirectional` and confirm bytes flow in both directions
     /// without modification.
     ///
-    /// Unlike the `pipe_bidirectional` tests which can use `duplex` for the
-    /// local side, `pipe_tcp_bidirectional` requires a concrete `TcpStream`
-    /// (for `into_split`), so we create a loopback TCP pair.
+    /// Because `pipe_tcp_bidirectional` requires a concrete `TcpStream`
+    /// (for `into_split`), the local side can't be an in-memory `duplex`;
+    /// we create a loopback TCP pair bound to 127.0.0.1 instead.
     #[tokio::test]
     async fn tcp_copies_bytes_in_both_directions() {
         // Real TCP pair for the local side (pipe_tcp_bidirectional requires TcpStream).
