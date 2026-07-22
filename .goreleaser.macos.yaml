@@ -94,7 +94,7 @@ release:
   github:
     owner: naicoi92
     name: iroh-tunnel
-  draft: false
+  draft: true
   prerelease: auto
   # Append darwin artifacts to the release the Linux job already created.
   mode: append
