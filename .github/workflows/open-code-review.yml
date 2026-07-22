@@ -114,6 +114,13 @@ jobs:
           # OpenAI-compatible protocol (NOT Anthropic). The action maps this to
           # OCR_USE_ANTHROPIC=false.
           llm_use_anthropic: 'false'
+          # --- Rate limit mitigation (CRITICAL) ---
+          # Z.AI GLM Coding Plan has a very low concurrency cap (1-3 in-flight
+          # requests depending on tier; the platform adjusts dynamically). The
+          # default OCR concurrency spams the API and gets 429s on every file.
+          # Force concurrency=1 so reviews go one file at a time. Slower, but
+          # reliable. See https://docs.z.ai/devpack/usage-policy.
+          review_concurrency: '1'
           # --- Review behavior ---
           # Sticky summary: update one summary comment in place rather than
           # posting a new one each run. Keeps the PR thread readable.
