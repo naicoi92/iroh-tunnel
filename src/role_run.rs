@@ -1,20 +1,27 @@
 //! Shared scaffolding for the serve and access role `run` paths.
 //!
-//! The two roles share ~70% of their skeleton (load config → resolve key →
-//! build endpoint → print status → loop → shutdown footer), but the shared
-//! pieces were duplicated in `src/serve.rs` and `src/access.rs`. This module
-//! hosts the helpers that are genuinely identical across roles so each role
-//! file only carries its own divergence.
+//! The two roles share the skeleton: load config → resolve key → build
+//! endpoint → print NodeId → loop until shutdown → drain + close. The
+//! genuinely different pieces (serve's ALPN demux + status-file write;
+//! access's N-listeners + retry-on-dial) live behind the [`RoleStrategy`]
+//! trait so the shared skeleton has one definition site.
 //!
 //! Everything here is `pub(crate)` — these are internal seams between two
 //! modules of this crate, not a public extension point.
 
+use std::future::Future;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
 use iroh::endpoint::Connection;
 
-use crate::config::Protocol;
+use crate::config::{Protocol, RoleDoc};
+use crate::shutdown;
+
+// ---------------------------------------------------------------------------
+// Small display helpers (shared, no polymorphism)
+// ---------------------------------------------------------------------------
 
 /// Lowercase protocol name for display (matches the serde form in `config`).
 ///
@@ -97,6 +104,93 @@ pub(crate) async fn connect_with_retry(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// RoleStrategy trait + shared run skeleton
+// ---------------------------------------------------------------------------
+
+/// The role's half of the `run` skeleton.
+///
+/// Each implementer carries the genuinely-different pieces (build the
+/// endpoint with role-specific args, print the per-service status lines,
+/// run the role-specific loop). The shared skeleton — load config, resolve
+/// key, print NodeId, wait for shutdown, drain + close — lives in
+/// [`run_with_shutdown`] so it has exactly one definition site.
+///
+/// The associated type [`RoleStrategy::Config`] is the role's TOML document
+/// (`ServeConfig` / `AccessConfig`); it must load+validate+persist its own
+/// key via the [`crate::config::RoleDoc`] trait.
+pub(crate) trait RoleStrategy {
+    /// The TOML config document this role loads.
+    type Config: crate::config::RoleDoc;
+
+    /// Build the iroh endpoint for this role (serve registers ALPNs, access
+    /// dials out only).
+    fn build_endpoint(
+        cfg: &Self::Config,
+    ) -> impl std::future::Future<Output = Result<iroh::Endpoint>>;
+
+    /// Print the per-service status lines after the endpoint is up (serve:
+    /// "Serving: ..."; access: "Exposed: ... -> peer ...").
+    fn print_services(cfg: &Self::Config);
+
+    /// Run the role's accept/listen loop until `shutdown` resolves.
+    ///
+    /// The loop owns the endpoint (cloned if needed) and is responsible for
+    /// spawning per-connection tasks. It MUST return when `shutdown` resolves
+    /// so the shared skeleton can proceed to drain + close.
+    fn run_loop(
+        ep: iroh::Endpoint,
+        cfg: Self::Config,
+        shutdown: impl Future<Output = ()>,
+    ) -> impl std::future::Future<Output = Result<()>>;
+}
+
+/// Drive a role end-to-end: load → resolve key → endpoint → print → loop →
+/// shutdown footer.
+///
+/// Production callers wrap this with [`shutdown::wait_for_signal`]; tests
+/// inject a `oneshot::Receiver` so the role can be driven without sending
+/// real signals.
+///
+/// The status-file write (serve-only) and any other post-build hooks live
+/// inside the strategy's `run_loop` — that's where the role has access to
+/// both the loaded config and the live endpoint, and where the timing fits
+/// between "endpoint ready" and "shutdown received".
+pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    // Load and validate the config, then resolve+persist the secret key. Both
+    // steps are shared across roles via the RoleDoc trait.
+    let mut cfg = S::Config::load(config_path)?;
+    cfg.resolve_and_save_key(config_path)?;
+
+    // Build the role-specific endpoint (serve registers ALPNs, access is
+    // outbound-only).
+    let ep = S::build_endpoint(&cfg).await?;
+
+    // Print the operator-facing NodeId line (identical across roles).
+    println!("NodeId: {}", crate::endpoint::node_id_string(&ep));
+    if let Some(relay) = crate::endpoint::home_relay(&ep) {
+        println!("Home relay: {relay}");
+    }
+
+    // Per-service status lines diverge (Serving vs Exposed), so they sit
+    // behind the strategy. The strategy is also responsible for warning
+    // when there are no services configured.
+    S::print_services(&cfg);
+
+    tracing::info!("endpoint ready");
+    // Drive the role-specific loop. The strategy MUST honor `shutdown`.
+    S::run_loop(ep, cfg, shutdown).await?;
+
+    // Shared shutdown footer: drain in-flight streams. The endpoint close
+    // itself happens inside `run_loop` because each role needs to abort its
+    // accept task(s) before closing.
+    shutdown::drain_connections(Duration::from_secs(5)).await;
+    Ok(())
 }
 
 #[cfg(test)]

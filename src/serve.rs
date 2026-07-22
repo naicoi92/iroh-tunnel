@@ -25,15 +25,21 @@ use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 use tokio::net::TcpStream;
 
-use crate::{config::ServeConfig, endpoint, proto};
+use crate::config::ServeConfig;
+use crate::endpoint;
+use crate::proto;
+use crate::role_run::RoleStrategy;
 
 /// Run the serve role until interrupted (Ctrl-C).
 ///
-/// Loads `config_path`, resolves/persists the node secret key, builds the
-/// endpoint with all service ALPNs registered, prints the operator-facing
-/// status lines, then enters the accept loop.
+/// Thin wrapper over [`crate::role_run::run_with_shutdown`] that wires the
+/// real signal handler and the [`ServeStrategy`] implementer.
 pub async fn run(config_path: &Path) -> Result<()> {
-    run_with_shutdown(config_path, crate::shutdown::wait_for_signal()).await
+    crate::role_run::run_with_shutdown::<ServeStrategy>(
+        config_path,
+        crate::shutdown::wait_for_signal(),
+    )
+    .await
 }
 
 /// Run the serve role until the caller-provided `shutdown` future resolves.
@@ -45,84 +51,98 @@ pub async fn run_with_shutdown(
     config_path: &Path,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    let mut cfg = ServeConfig::load(config_path)?;
-    cfg.resolve_and_save_key(config_path)?;
+    crate::role_run::run_with_shutdown::<ServeStrategy>(config_path, shutdown).await
+}
 
-    // Collect every service's ALPN and build an ALPN -> local-addr lookup for
-    // demultiplexing accepted streams. iroh 1.0 registers ALPNs on the endpoint
-    // at build time, so we need them all up front.
-    let alpns: Vec<Vec<u8>> = cfg
-        .services
-        .iter()
-        .map(|s| proto::alpn_for(&s.name))
-        .collect();
-    let mut local_addrs: HashMap<Vec<u8>, String> = HashMap::new();
-    for svc in &cfg.services {
-        let alpn = proto::alpn_for(&svc.name);
-        local_addrs.insert(alpn, format!("{}:{}", svc.host, svc.port));
-    }
+/// Serve-role implementation of [`RoleStrategy`].
+///
+/// Owns the genuinely-serve-specific pieces: registers every service's ALPN
+/// on the endpoint, writes the status snapshot, runs the accept loop that
+/// demultiplexes incoming streams by ALPN.
+pub(crate) struct ServeStrategy;
 
-    let ep = endpoint::create_serve_endpoint(&cfg.node, &alpns).await?;
+impl RoleStrategy for ServeStrategy {
+    type Config = ServeConfig;
 
-    let node_id = endpoint::node_id_string(&ep);
-    println!("NodeId: {node_id}");
-    if let Some(relay) = endpoint::home_relay(&ep) {
-        println!("Home relay: {relay}");
-    }
-
-    for svc in &cfg.services {
-        let local_addr = format!("{}:{}", svc.host, svc.port);
-        println!(
-            "Serving: {} {}://{local_addr}",
-            svc.name,
-            crate::role_run::protocol_str(svc.protocol)
-        );
-    }
-
-    if cfg.services.is_empty() {
-        tracing::warn!("no services configured; nothing to serve");
-    }
-
-    tracing::info!("serve endpoint ready, accepting connections");
-    let accept_ep = ep.clone();
-    let accept = tokio::spawn(async move {
-        accept_loop(&accept_ep, local_addrs).await;
-    });
-
-    // Write the operator-facing status snapshot (T-13). Best-effort: a failure
-    // to write status is logged but does not stop the tunnel.
-    let status = crate::status::StatusFile {
-        node_id: node_id.clone(),
-        home_relay: endpoint::home_relay(&ep).map(|u| u.to_string()),
-        pid: std::process::id(),
-        started_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        services: cfg
+    async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
+        // Collect every service's ALPN up front — iroh 1.0 registers ALPNs on
+        // the endpoint at build time (not filtered per-accept).
+        let alpns: Vec<Vec<u8>> = cfg
             .services
             .iter()
-            .map(|s| crate::status::ServiceStatus {
-                name: s.name.clone(),
-                protocol: crate::role_run::protocol_str(s.protocol).to_string(),
-                local_addr: crate::status::format_local_addr(&s.host, s.port),
-                active_connections: 0,
-            })
-            .collect(),
-    };
-    match status.save() {
-        Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
-        Err(e) => tracing::warn!("failed to write status file: {e}"),
+            .map(|s| proto::alpn_for(&s.name))
+            .collect();
+        endpoint::create_serve_endpoint(&cfg.node, &alpns).await
     }
 
-    // Wait for the injected shutdown signal (production: SIGINT/SIGTERM via
-    // shutdown::wait_for_signal; tests: a oneshot receiver), then drain
-    // in-flight streams before closing the endpoint (T-08).
-    shutdown.await;
-    accept.abort();
-    crate::shutdown::drain_connections(std::time::Duration::from_secs(5)).await;
-    ep.close().await;
-    Ok(())
+    fn print_services(cfg: &Self::Config) {
+        if cfg.services.is_empty() {
+            tracing::warn!("no services configured; nothing to serve");
+            return;
+        }
+        for svc in &cfg.services {
+            let local_addr = format!("{}:{}", svc.host, svc.port);
+            println!(
+                "Serving: {} {}://{local_addr}",
+                svc.name,
+                crate::role_run::protocol_str(svc.protocol)
+            );
+        }
+    }
+
+    async fn run_loop(
+        ep: iroh::Endpoint,
+        cfg: Self::Config,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
+        // Build the ALPN -> local-addr lookup for demultiplexing accepted
+        // streams.
+        let mut local_addrs: HashMap<Vec<u8>, String> = HashMap::new();
+        for svc in &cfg.services {
+            let alpn = proto::alpn_for(&svc.name);
+            local_addrs.insert(alpn, format!("{}:{}", svc.host, svc.port));
+        }
+
+        tracing::info!("serve endpoint ready, accepting connections");
+        let accept_ep = ep.clone();
+        let accept = tokio::spawn(async move {
+            accept_loop(&accept_ep, local_addrs).await;
+        });
+
+        // Write the operator-facing status snapshot (T-13). Best-effort: a
+        // failure to write status is logged but does not stop the tunnel.
+        let status = crate::status::StatusFile {
+            node_id: crate::endpoint::node_id_string(&ep),
+            home_relay: endpoint::home_relay(&ep).map(|u| u.to_string()),
+            pid: std::process::id(),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            services: cfg
+                .services
+                .iter()
+                .map(|s| crate::status::ServiceStatus {
+                    name: s.name.clone(),
+                    protocol: crate::role_run::protocol_str(s.protocol).to_string(),
+                    local_addr: crate::status::format_local_addr(&s.host, s.port),
+                    active_connections: 0,
+                })
+                .collect(),
+        };
+        match status.save() {
+            Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
+            Err(e) => tracing::warn!("failed to write status file: {e}"),
+        }
+
+        // Wait for the injected shutdown signal, then drain in-flight streams
+        // before closing the endpoint (T-08). The accept task is aborted
+        // first so it stops handing new connections to the pipe.
+        shutdown.await;
+        accept.abort();
+        ep.close().await;
+        Ok(())
+    }
 }
 
 /// Accept connections forever, demultiplexing each to its service by ALPN.

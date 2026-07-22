@@ -23,14 +23,21 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::{config::AccessConfig, endpoint, proto};
+use crate::config::AccessConfig;
+use crate::endpoint;
+use crate::proto;
+use crate::role_run::RoleStrategy;
 
 /// Run the access role until interrupted (Ctrl-C).
 ///
-/// Loads `config_path`, builds an ephemeral-key endpoint, prints the per-service
-/// `Exposed:` lines, then spawns a listen loop per service.
+/// Thin wrapper over [`crate::role_run::run_with_shutdown`] that wires the
+/// real signal handler and the [`AccessStrategy`] implementer.
 pub async fn run(config_path: &Path) -> Result<()> {
-    run_with_shutdown(config_path, crate::shutdown::wait_for_signal()).await
+    crate::role_run::run_with_shutdown::<AccessStrategy>(
+        config_path,
+        crate::shutdown::wait_for_signal(),
+    )
+    .await
 }
 
 /// Run the access role until the caller-provided `shutdown` future resolves.
@@ -42,64 +49,107 @@ pub async fn run_with_shutdown(
     config_path: &Path,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    let mut cfg = AccessConfig::load(config_path)?;
-    cfg.resolve_and_save_key(config_path)?;
-    let ep = endpoint::create_access_endpoint(&cfg.node).await?;
+    crate::role_run::run_with_shutdown::<AccessStrategy>(config_path, shutdown).await
+}
 
-    println!("NodeId: {}", endpoint::node_id_string(&ep));
+/// Access-role implementation of [`RoleStrategy`].
+///
+/// Owns the genuinely-access-specific pieces: resolves relay URLs (falling
+/// back to the n0 defaults), parses each service's `node_id`, spawns one
+/// TCP listener per service.
+pub(crate) struct AccessStrategy;
 
-    if cfg.services.is_empty() {
-        tracing::warn!("no services configured; nothing to expose");
+impl RoleStrategy for AccessStrategy {
+    type Config = AccessConfig;
+
+    async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
+        // Access only dials out, so no ALPNs are registered. The endpoint
+        // resolves the node's secret key (generating+persisting on first run)
+        // via the shared RoleDoc::resolve_and_save_key path in the skeleton.
+        endpoint::create_access_endpoint(&cfg.node).await
     }
 
-    // The relay URLs to attach to each dialed peer's EndpointAddr. An
-    // EndpointAddr containing only a node id cannot be routed by iroh (the
-    // Minimal preset registers no address-lookup service), so we MUST provide
-    // relay URLs to dial through.
-    //
-    // Relays are OPTIONAL in config (IROHTUN-44): if the user does not set
-    // `relay_urls`, resolve_relay_urls falls back to the n0 defaults —
-    // mirroring iroh's own `RelayMode::Default`. If the user configures
-    // `relay_urls`, those take precedence (custom/self-hosted relays for
-    // latency, privacy, etc.).
-    let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)?;
-    if cfg.node.relay_urls.is_empty() {
-        tracing::info!(
-            count = relay_urls.len(),
-            "no relay_urls configured, falling back to n0 default relays"
-        );
+    fn print_services(cfg: &Self::Config) {
+        if cfg.services.is_empty() {
+            tracing::warn!("no services configured; nothing to expose");
+            return;
+        }
+        // Resolve and parse everything up front so a bad config fails loudly
+        // before we bind any ports. The results feed both the printout and the
+        // spawned listeners.
+        let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)
+            .unwrap_or_else(|e| {
+                tracing::warn!("failed to resolve relay_urls, will fail at dial time: {e}");
+                Vec::new()
+            });
+        if cfg.node.relay_urls.is_empty() {
+            tracing::info!(
+                count = relay_urls.len(),
+                "no relay_urls configured, falling back to n0 default relays"
+            );
+        }
+        for svc in &cfg.services {
+            // We don't fail here — print_services is infallible in the trait
+            // signature. parse errors surface later when listen_loop tries
+            // to dial; printing the raw node_id preserves the operator's
+            // intent so they can see what was configured.
+            let node_id_display = match svc.node_id.parse::<iroh::EndpointId>() {
+                Ok(id) => id.to_string(),
+                Err(_) => svc.node_id.clone(),
+            };
+            let listen_addr = format!("{}:{}", svc.host, svc.port);
+            println!(
+                "Exposed: {} {listen_addr} -> peer {node_id_display} ({}://{listen_addr})",
+                svc.name,
+                crate::role_run::protocol_str(svc.protocol)
+            );
+        }
     }
 
-    for svc in &cfg.services {
-        let node_id = svc
-            .node_id
-            .parse::<iroh::EndpointId>()
-            .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
-        let alpn = proto::alpn_for(&svc.name);
-        let listen_addr = format!("{}:{}", svc.host, svc.port);
-        println!(
-            "Exposed: {} {listen_addr} -> peer {node_id} ({}://{listen_addr})",
-            svc.name,
-            crate::role_run::protocol_str(svc.protocol)
-        );
+    async fn run_loop(
+        ep: iroh::Endpoint,
+        cfg: Self::Config,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
+        // Resolve the relay URLs and parse every service's node_id before
+        // spawning listeners, so a bad config fails fast.
+        let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)?;
+        if cfg.node.relay_urls.is_empty() {
+            tracing::info!(
+                count = relay_urls.len(),
+                "no relay_urls configured, falling back to n0 default relays"
+            );
+        }
 
-        let ep_clone = ep.clone();
-        let svc_name = svc.name.clone();
-        tokio::spawn(listen_loop(
-            ep_clone,
-            node_id,
-            alpn,
-            listen_addr,
-            relay_urls.clone(),
-            svc_name,
-        ));
+        let mut handles = Vec::new();
+        for svc in cfg.services {
+            let node_id = svc
+                .node_id
+                .parse::<iroh::EndpointId>()
+                .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
+            let alpn = proto::alpn_for(&svc.name);
+            let listen_addr = format!("{}:{}", svc.host, svc.port);
+            let svc_name = svc.name.clone();
+            handles.push(tokio::spawn(listen_loop(
+                ep.clone(),
+                node_id,
+                alpn,
+                listen_addr,
+                relay_urls.clone(),
+                svc_name,
+            )));
+        }
+
+        tracing::info!("access endpoint ready, listening for local clients");
+        shutdown.await;
+        // Abort each per-service listener so they stop accepting new local
+        // clients before the endpoint close tears down the in-flight dials.
+        for h in handles {
+            h.abort();
+        }
+        ep.close().await;
+        Ok(())
     }
-
-    tracing::info!("access endpoint ready, listening for local clients");
-    shutdown.await;
-    crate::shutdown::drain_connections(std::time::Duration::from_secs(5)).await;
-    ep.close().await;
-    Ok(())
 }
 
 /// Bind `listen_addr` and, for each local client, dial the peer and pipe bytes.
@@ -171,7 +221,7 @@ async fn handle_local_connection(
     //
     // The address construction itself lives in endpoint::build_dial_addr so
     // iroh's EndpointAddr type stays behind the endpoint seam. The caller
-    // (run()) guarantees a non-empty `relay_urls` by routing through
+    // (run_loop()) guarantees a non-empty `relay_urls` by routing through
     // endpoint::resolve_relay_urls, which falls back to the n0 defaults when
     // the config is empty (IROHTUN-44).
     let addr = endpoint::build_dial_addr(node_id, relay_urls);
