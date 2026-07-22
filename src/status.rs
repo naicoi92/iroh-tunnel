@@ -95,7 +95,8 @@ impl StatusFile {
         // rename error is still what we return; a cleanup failure is best-effort.
         if let Err(e) = std::fs::rename(&temp, &path) {
             let _ = std::fs::remove_file(&temp);
-            return Err(e).with_context(|| format!("failed to finalize status file: {}", path.display()));
+            return Err(e)
+                .with_context(|| format!("failed to finalize status file: {}", path.display()));
         }
         Ok(path)
     }
