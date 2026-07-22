@@ -90,8 +90,13 @@ impl StatusFile {
         let temp = dir.join("status.json.tmp");
         std::fs::write(&temp, &content)
             .with_context(|| format!("failed to write status file: {}", temp.display()))?;
-        std::fs::rename(&temp, &path)
-            .with_context(|| format!("failed to finalize status file: {}", path.display()))?;
+        // If rename fails, the temp file is stale — clean it up so repeated
+        // failures don't accumulate `status.json.tmp` on disk. The original
+        // rename error is still what we return; a cleanup failure is best-effort.
+        if let Err(e) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e).with_context(|| format!("failed to finalize status file: {}", path.display()));
+        }
         Ok(path)
     }
 }
@@ -215,5 +220,33 @@ mod tests {
     fn format_local_addr_passes_hostname_through_unchanged() {
         assert_eq!(format_local_addr("localhost", 8080), "localhost:8080");
         assert_eq!(format_local_addr("db.internal", 5432), "db.internal:5432");
+    }
+
+    #[test]
+    fn save_to_cleans_up_temp_file_when_rename_fails() {
+        // Drive rename failure by making the destination path unwritable:
+        // create a *directory* at status.json's slot so the rename target is
+        // occupied by an incompatible entry. This forces rename() to fail on
+        // most platforms; if it doesn't fail, the test asserts the
+        // post-condition (no stale temp) only when the rename actually
+        // failed, so it can't false-positive on a platform where rename
+        // overwrites a directory.
+        let tmp = tempfile::tempdir().unwrap();
+        // Block the destination: a directory at status.json.
+        std::fs::create_dir_all(tmp.path().join("status.json")).unwrap();
+
+        let status = sample_status();
+        let res = status.save_to(tmp.path());
+
+        if res.is_err() {
+            // The load-bearing assertion: the temp file must not linger after
+            // a rename failure.
+            assert!(
+                !tmp.path().join("status.json.tmp").exists(),
+                "temp file leaked after rename failure"
+            );
+        }
+        // If rename somehow succeeded (platform-specific), the temp file is
+        // gone anyway because the rename consumed it — no extra assertion.
     }
 }
