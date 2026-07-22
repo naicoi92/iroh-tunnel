@@ -18,6 +18,9 @@ pub mod endpoint;
 pub mod error;
 pub mod pipe;
 pub mod proto;
+/// `pub(crate)` — internal seam between serve/access, not a public extension
+/// point. See `src/role_run.rs` module docs.
+pub(crate) mod role_run;
 pub mod serve;
 pub mod service;
 pub mod shutdown;
