@@ -6,6 +6,9 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Zig cache (cargo-zigbuild writes here during cross-compilation in CI)
+.zig-cache/
+
 # Editor / OS
 .DS_Store
 .idea/
