@@ -14,6 +14,15 @@ Reviews use **Z.AI GLM-5.2** via the [GLM Coding Plan](https://docs.z.ai/guides/
 
 GLM Coding Plan is a flat-rate subscription; reviews do not consume pay-as-you-go token quota.
 
+### Quota & rate limits (important)
+
+The Coding Plan has two limits you need to know about:
+
+1. **5-hour prompt quota** — each tier (Lite / Pro / Max) gives a fixed number of prompts per rolling 5-hour window. When exhausted, reviews fail until the next cycle. See [Z.AI FAQ](https://docs.z.ai/devpack/faq) for current numbers.
+2. **Concurrency cap** — only 1-3 in-flight requests at a time (the platform adjusts dynamically, see [Usage Policy](https://docs.z.ai/devpack/usage-policy)). The workflow pins `review_concurrency: '1'` to stay under this. Triggering many PRs at once (e.g. force-re-reviewing 8 PRs in parallel) will still hit the cap because each PR runs as its own workflow.
+
+**Practical implication:** if you force a re-review on many PRs at once, expect some to fail with `429 Too Many Requests`. Retry those individually after a few minutes.
+
 ## Triggers
 
 | Event | Behavior |
