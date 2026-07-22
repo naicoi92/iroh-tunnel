@@ -16,7 +16,7 @@
 //! `launchctl start <label>` searched the *caller's* domain, found nothing, and
 //! returned 3 — even though the job was loaded in the system domain.
 
-use super::{resolve_binary, ServiceScope};
+use super::{resolve_binary, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -97,11 +97,32 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Render the launchd plist for `iroh-tunnel {role} run`.
+///
+/// The KeepAlive block comes from the shared [`RestartPolicy`] so the
+/// "restart on crash" behavior stays in sync with the systemd unit template.
 fn format_plist(role: &str, binary: &Path, config: &Path) -> String {
+    format_plist_with(role, binary, config, &RestartPolicy::DEFAULT)
+}
+
+fn format_plist_with(role: &str, binary: &Path, config: &Path, policy: &RestartPolicy) -> String {
     let label = xml_escape(&label(role));
     let binary = xml_escape(&binary.to_string_lossy());
     let role = xml_escape(role);
     let config = xml_escape(&config.to_string_lossy());
+    // launchd spells restart-on-failure as KeepAlive{SuccessfulExit=false}:
+    // "respawn unless the last exit was clean". When on_failure is disabled,
+    // drop the KeepAlive block entirely (no respawn). delay_secs is not
+    // expressible in launchd's KeepAlive dict — it's a systemd-specific knob
+    // that launchd manages internally (ThrottleInterval, not user-set here).
+    let keep_alive = if policy.on_failure {
+        "\t<key>KeepAlive</key>\n\
+         \t<dict>\n\
+         \t\t<key>SuccessfulExit</key>\n\
+         \t\t<false/>\n\
+         \t</dict>\n"
+    } else {
+        ""
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyManifest-1.0.dtd\">\n\
@@ -119,11 +140,7 @@ fn format_plist(role: &str, binary: &Path, config: &Path) -> String {
          \t</array>\n\
          \t<key>RunAtLoad</key>\n\
          \t<true/>\n\
-         \t<key>KeepAlive</key>\n\
-         \t<dict>\n\
-         \t\t<key>SuccessfulExit</key>\n\
-         \t\t<false/>\n\
-         \t</dict>\n\
+         {keep_alive}\
          </dict>\n\
          </plist>\n"
     )
@@ -369,5 +386,39 @@ mod tests {
     #[test]
     fn domain_target_system_is_plain_system() {
         assert_eq!(domain_target(ServiceScope::System), "system");
+    }
+
+    #[test]
+    fn plist_default_policy_emits_keepalive_successful_exit_false() {
+        // Regression: the shared RestartPolicy::DEFAULT must keep the previous
+        // "respawn unless clean exit" behavior the plist used to hard-code.
+        let body = format_plist(
+            "serve",
+            Path::new("/usr/local/bin/iroh-tunnel"),
+            Path::new("/etc/cfg"),
+        );
+        assert!(
+            body.contains("<key>KeepAlive</key>"),
+            "KeepAlive missing with default policy: {body}"
+        );
+        assert!(
+            body.contains("<key>SuccessfulExit</key>\n\t\t<false/>"),
+            "KeepAlive SuccessfulExit=false missing: {body}"
+        );
+    }
+
+    #[test]
+    fn plist_disabled_policy_omits_keepalive_block() {
+        let policy = RestartPolicy {
+            on_failure: false,
+            delay_secs: 0,
+        };
+        let body = format_plist_with("serve", Path::new("/x"), Path::new("/y"), &policy);
+        assert!(
+            !body.contains("<key>KeepAlive</key>"),
+            "KeepAlive should be absent when policy disables restart: {body}"
+        );
+        // RunAtLoad is orthogonal and should still be present.
+        assert!(body.contains("<key>RunAtLoad</key>"));
     }
 }
