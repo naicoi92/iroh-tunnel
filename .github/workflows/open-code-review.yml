@@ -1,0 +1,135 @@
+# OpenCodeReview — AI PR review with Alibaba's open-source OCR CLI + Zai GLM-5.2.
+#
+# Replaces CodeRabbit for this repo. Uses the composite action published by
+# alibaba/open-code-review, configured against the Z.AI GLM Coding Plan endpoint
+# (https://api.z.ai/api/coding/paas/v4) running the glm-5.2 model.
+#
+# Triggers:
+#   - pull_request_target (opened/synchronize/reopened) — automatic review on PR
+#     activity. pull_request_target (not pull_request) is required so secrets
+#     are available even for forked PRs; this is safe because OCR only reads
+#     the diff and does not execute any code from the PR.
+#   - issue_comment created — re-review on demand when a MEMBER/OWNER/COLLABORATOR
+#     posts a comment starting with `/open-code-review` or `@open-code-review`.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   OCR_LLM_AUTH_TOKEN   Z.AI API key (GLM Coding Plan)
+#
+# Required repo variables (Settings → Secrets and variables → Actions → Variables):
+#   (none — model + endpoint are pinned in this workflow file)
+#
+# Rate-limit / cost note: GLM Coding Plan has its own quota; reviews run on every
+# PR push, so tight `paths` filtering is intentionally NOT applied (every change
+# is reviewable). If quota becomes a concern, gate the synchronize trigger or
+# raise the file-count threshold in OCR's config.
+
+name: open-code-review
+
+# Concurrency group: a new review on the same PR cancels any in-progress one.
+# Non-matching issue_comment events (regular conversation replies) land in a
+# unique noop-<run_id> group so they skip instantly without disrupting a run.
+concurrency:
+  group: >-
+    ${{
+      (
+        github.event_name == 'pull_request_target'
+        || (
+          github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && github.event.comment.user.type != 'Bot'
+          && (
+            github.event.comment.author_association == 'MEMBER'
+            || github.event.comment.author_association == 'OWNER'
+            || github.event.comment.author_association == 'COLLABORATOR'
+          )
+          && (
+            startsWith(github.event.comment.body, '/open-code-review')
+            || startsWith(github.event.comment.body, '@open-code-review')
+          )
+        )
+      )
+      && format('ocr-{0}', github.event.pull_request.number || github.event.issue.number)
+      || format('noop-{0}', github.run_id)
+    }}
+  cancel-in-progress: true
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: |
+      github.event_name == 'pull_request_target'
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && (
+          github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR'
+        )
+        && (
+          startsWith(github.event.comment.body, '/open-code-review')
+          || startsWith(github.event.comment.body, '@open-code-review')
+        )
+      )
+    steps:
+      # For issue_comment events, resolve the PR's base/head because that event
+      # payload has no top-level pull_request fields. The OCR action accepts
+      # base_ref + head_sha inputs to handle this exact case.
+      - name: Get PR context
+        id: pr-context
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput('base_ref', pullRequest.base.ref);
+            core.setOutput('head_sha', pullRequest.head.sha);
+
+      - name: Run OpenCodeReview
+        uses: alibaba/open-code-review@main
+        with:
+          # --- Z.AI GLM Coding Plan endpoint + model (pinned) ---
+          # The action auto-appends /chat/completions if not already present,
+          # so this works for OpenAI-compatible providers like Z.AI.
+          llm_url: https://api.z.ai/api/coding/paas/v4
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: glm-5.2
+          # OpenAI-compatible protocol (NOT Anthropic). The action maps this to
+          # OCR_USE_ANTHROPIC=false.
+          llm_use_anthropic: 'false'
+          # --- Review behavior ---
+          # Sticky summary: update one summary comment in place rather than
+          # posting a new one each run. Keeps the PR thread readable.
+          sticky_summary: 'true'
+          # Incremental inline comments: skip a new inline comment if its
+          # (path, line range) overlaps an existing one. Non-destructive.
+          incremental: 'true'
+          # Review language — match the rest of the repo's docs.
+          language: English
+          # Disable reasoning/thinking mode on the model — code review is a
+          # bounded task and we want fast responses, not chain-of-thought.
+          llm_extra_body: '{"thinking": {"type": "disabled"}}'
+          # Upload raw JSON + stderr as artifacts for debugging when a review
+          # looks wrong or the model returned an unexpected shape.
+          upload_artifacts: 'true'
+          # For issue_comment triggers, pass the resolved refs. For
+          # pull_request_target the action resolves them from the event itself.
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}
