@@ -4,7 +4,8 @@ P2P port-forwarding tunnel (TCP/UDP) over [Iroh](https://iroh.computer).
 Expose a local service to the internet via an Iroh `node_id` — no public IP,
 port forwarding, or relay server required.
 
-> **Status:** `v0.1.0` — first stable release. Core serve/access tunneling works;
+> **Status:** `v0.2.0` — multiplexing release (one connection per service,
+> one stream per channel). Core serve/access tunneling works;
 > the binary is **not yet Cosign-signed** (deferred). Cosign/SBOM/AUR/macOS-Intel
 > land in later releases.
 
@@ -38,7 +39,7 @@ handles NAT traversal.
 ```sh
 brew tap naicoi92/tap https://github.com/naicoi92/homebrew-tap
 brew install --cask iroh-tunnel
-iroh-tunnel --version          # → iroh-tunnel 0.1.0
+iroh-tunnel --version          # → iroh-tunnel 0.2.0
 ```
 
 The cask removes the macOS quarantine attribute automatically, so Gatekeeper
@@ -53,23 +54,23 @@ hosts (LXC, bare-metal) and will not run on a glibc system, and vice versa.
 
 ```sh
 # Debian / Ubuntu (.deb, glibc)
-curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0/iroh-tunnel_0.1.0_amd64.deb
-sudo dpkg -i iroh-tunnel_0.1.0_amd64.deb   # or _arm64.deb on ARM
+curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.2.0/iroh-tunnel_0.2.0_amd64.deb
+sudo dpkg -i iroh-tunnel_0.2.0_amd64.deb   # or _arm64.deb on ARM
 iroh-tunnel --version
 
 # Alpine (.apk, musl)
-curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.1.0/iroh-tunnel_0.1.0_amd64.apk
-sudo apk add --allow-untrusted iroh-tunnel_0.1.0_amd64.apk   # or _arm64.apk on ARM
+curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.2.0/iroh-tunnel_0.2.0_amd64.apk
+sudo apk add --allow-untrusted iroh-tunnel_0.2.0_amd64.apk   # or _arm64.apk on ARM
 ```
 
 ### Docker (prebuilt multi-arch image)
 
 ```sh
-docker run --rm ghcr.io/naicoi92/iroh-tunnel:v0.1.0 --version
-# → iroh-tunnel 0.1.0
+docker run --rm ghcr.io/naicoi92/iroh-tunnel:v0.2.0 --version
+# → iroh-tunnel 0.2.0
 ```
 
-Tags: `v0.1.0`, `v0.1`, `latest`. Platforms: `linux/amd64`,
+Tags: `v0.2.0`, `v0.1`, `latest`. Platforms: `linux/amd64`,
 `linux/arm64`.
 
 ### Build from source
@@ -247,7 +248,7 @@ installing requires root.
 ```sh
 docker run --rm \
   -v "$PWD/serve.toml:/etc/iroh-tunnel/serve.toml:ro" \
-  ghcr.io/naicoi92/iroh-tunnel:v0.1.0 \
+  ghcr.io/naicoi92/iroh-tunnel:v0.2.0 \
   serve run --config /etc/iroh-tunnel/serve.toml
 ```
 
@@ -320,7 +321,7 @@ spec:
     spec:
       containers:
         - name: iroh-tunnel
-          image: ghcr.io/naicoi92/iroh-tunnel:v0.1.0
+          image: ghcr.io/naicoi92/iroh-tunnel:v0.2.0
           args: ["serve", "run", "--config", "/etc/iroh-tunnel/serve.toml"]
           volumeMounts:
             - name: config

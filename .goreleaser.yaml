@@ -58,6 +58,11 @@ builds:
     targets:
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl
+      # NanoKVM / embedded riscv64 (buildroot, musl). Build path verified by
+      # the v0.1.4 spike (ring 0.17.14 compiles for riscv64 with zig 0.13 +
+      # cargo-zigbuild); the CI snapshot run rehearses the target before any
+      # tag goes out.
+      - riscv64gc-unknown-linux-musl
     flags:
       - --release
 
