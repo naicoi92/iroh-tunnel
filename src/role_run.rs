@@ -85,7 +85,8 @@ pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
     addr: &iroh::EndpointAddr,
     alpn: &[u8],
-) -> Result<Connection> {
+    retry_if: impl Fn(&iroh::endpoint::ConnectError) -> bool,
+) -> std::result::Result<Connection, iroh::endpoint::ConnectError> {
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut attempt = 1u32;
     loop {
@@ -95,6 +96,15 @@ pub(crate) async fn connect_with_retry(
                     tracing::info!("reconnected after {attempt} attempts");
                 }
                 return Ok(conn);
+            }
+            Err(e) if !retry_if(&e) => {
+                // Non-transient failure the caller refuses to retry (e.g. the
+                // peer rejected this ALPN at the handshake) — return the
+                // typed error so the caller can classify it.
+                if attempt > 1 {
+                    tracing::warn!("connect failed after {attempt} attempts: {e}");
+                }
+                return Err(e);
             }
             Err(e) => {
                 tracing::warn!("connect attempt {attempt} failed: {e}, retrying in {backoff_ms}ms");
