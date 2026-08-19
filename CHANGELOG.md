@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Docs**: README rewritten as a full OSS landing page — badges, table of
+  contents, comparison table (ngrok/cloudflared/Tailscale/frp/bore), use
+  cases, FAQ/troubleshooting, security notes, acknowledgments. Claims
+  corrected to TCP-only while UDP framing is not yet wired into the run
+  path. Added CONTRIBUTING.md and SECURITY.md.
 - **BusyBox / SysV init service backend** (non-systemd Linux): `service`
   subcommands now detect at runtime whether the host runs systemd
   (`/run/systemd/system`, fallback `/proc/1/exe`) and, when it does not,
