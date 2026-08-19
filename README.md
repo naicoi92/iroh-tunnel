@@ -1,40 +1,97 @@
+<div align="center">
+
 # iroh-tunnel
 
-P2P port-forwarding tunnel (TCP/UDP) over [Iroh](https://iroh.computer).
-Expose a local service to the internet via an Iroh `node_id` — no public IP,
-port forwarding, or relay server required.
+**P2P port-forwarding tunnels over [Iroh](https://iroh.computer) — no public IP,
+no port forwarding, no relay to rent.**
 
-> **Status:** `v0.2.0` — multiplexing release (one connection per service,
-> one stream per channel). Core serve/access tunneling works;
-> the binary is **not yet Cosign-signed** (deferred). Cosign/SBOM/AUR/macOS-Intel
-> land in later releases.
+[![snapshot](https://github.com/naicoi92/iroh-tunnel/actions/workflows/snapshot.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/snapshot.yml)
+[![release](https://img.shields.io/github/v/release/naicoi92/iroh-tunnel)](https://github.com/naicoi92/iroh-tunnel/releases)
+[![rust](https://img.shields.io/badge/rust-1.91%2B-dea584?logo=rust)](Cargo.toml)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE-MIT)
+[![homebrew](https://img.shields.io/badge/homebrew-naicoi92%2Ftap-FF7A59?logo=homebrew&logoColor=white)](https://github.com/naicoi92/homebrew-tap)
+
+Run **`serve`** next to any local service — a database, an SSH daemon, a dev
+server — and it becomes reachable through Iroh under a `node_id`. Run
+**`access`** anywhere else and that service shows up on `localhost`, as if it
+ran on your own machine.
+
+</div>
+
+> **Status:** `v0.2.0` — the multiplexing release. TCP tunneling is
+> production-shaped; UDP framing exists in the codebase but is **not yet wired
+> into the run path**. Binaries are not Cosign-signed yet — Cosign/SBOM/AUR/
+> macOS-Intel land in later releases.
 
 ---
+
+## Table of contents
+
+- [Why iroh-tunnel?](#why-iroh-tunnel)
+- [How it works](#how-it-works)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [How it compares](#how-it-compares)
+- [Use cases](#use-cases)
+- [Configuration](#configuration)
+- [Multiplexing (0.2.0)](#multiplexing-020)
+- [Run as a system service](#run-as-a-system-service)
+- [Docker & Kubernetes](#docker--kubernetes)
+- [Operations](#operations)
+- [FAQ / Troubleshooting](#faq--troubleshooting)
+- [Security notes](#security-notes)
+- [Project layout](#project-layout)
+- [Releases](#releases)
+- [Contributing](#contributing)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
+
+---
+
+## Why iroh-tunnel?
+
+- **Zero network setup.** No public IP, no port forwarding, no DNS, no rented
+  relay. Iroh's relay network handles NAT traversal; the data path is direct
+  P2P QUIC whenever the networks allow it.
+- **True peer-to-peer.** Traffic is end-to-end encrypted between the two
+  nodes; relays only help punch holes and carry encrypted bytes.
+- **One connection, many channels.** Since 0.2.0 each service keeps a single
+  long-lived Iroh connection and opens one QUIC stream per local connection —
+  the handshake is paid once, not per channel.
+- **Identity, not accounts.** A `node_id` is a self-certifying TLS identity.
+  No sign-up, no tokens, no vendor lock-in.
+- **One static binary.** No daemon, no runtime deps. Linux `amd64`/`arm64`
+  (glibc **and** musl), macOS `arm64`, and `riscv64` for embedded boards.
+- **Fits any init.** First-class service management for systemd, launchd,
+  and BusyBox/SysV init (buildroot-class devices).
+- **Observable by default.** Peer connect/disconnect logs at INFO, an
+  atomic `status.json` for monitoring, and meaningful exit codes.
 
 ## How it works
 
 ```
-┌─────────┐                                  ┌──────────┐
-│  serve  │ ──── Iroh P2P (node_id) ───────► │  access  │
-│ (behind │   exposes local service          │ exposes  │
-│  NAT)   │                                  │ on local │
-└─────────┘                                  │  port    │
-                                             └──────────┘
+   access host (your laptop)                 serve host (behind NAT)
+  ┌───────────────────────┐                ┌───────────────────────┐
+  │                       │  one Iroh P2P  │                       │
+  │  psql ──▶ :55432 ─────┼─(node_id,QUIC)─┼────▶ :5432 ── postgres│
+  │        access         │   connection   │         serve         │
+  │                       │  one stream per│                       │
+  │                       │  channel (0.2) │                       │
+  └───────────────────────┘                └───────────────────────┘
+     any local client connects to          the local service stays
+     localhost, as usual                   bound to localhost, too
 ```
 
-- **`serve`** runs next to a local service (e.g. a DB, dev server) and publishes
-  it into Iroh under a `node_id`.
+- **`serve`** runs next to a local service (e.g. a DB, dev server, SSH) and
+  publishes it into Iroh under a `node_id`.
 - **`access`** dials that `node_id` from anywhere and binds the remote service
   to a local port — as if it ran on your machine.
-
-No public IP, no port forwarding, no relay to rent. Iroh's relay network
-handles NAT traversal.
 
 ---
 
 ## Install
 
-### macOS (Homebrew) — recommended
+### macOS (Homebrew)
 
 ```sh
 brew tap naicoi92/tap https://github.com/naicoi92/homebrew-tap
@@ -63,17 +120,17 @@ curl -LO https://github.com/naicoi92/iroh-tunnel/releases/download/v0.2.0/iroh-t
 sudo apk add --allow-untrusted iroh-tunnel_0.2.0_amd64.apk   # or _arm64.apk on ARM
 ```
 
-### Docker (prebuilt multi-arch image)
+### Docker
 
 ```sh
 docker run --rm ghcr.io/naicoi92/iroh-tunnel:v0.2.0 --version
 # → iroh-tunnel 0.2.0
 ```
 
-Tags: `v0.2.0`, `v0.1`, `latest`. Platforms: `linux/amd64`,
-`linux/arm64`.
+Tags: `v0.2.0`, `v0.1`, `latest`. Platforms: `linux/amd64`, `linux/arm64`.
 
-### Build from source
+<details>
+<summary><strong>Build from source</strong></summary>
 
 Requires Rust 1.91+ (matches `rust-version` in `Cargo.toml`).
 
@@ -82,28 +139,30 @@ git clone https://github.com/naicoi92/iroh-tunnel && cd iroh-tunnel
 cargo run --release -- --help
 ```
 
+</details>
+
 ---
 
-## Quick start (macOS / Linux)
+## Quick start
 
-### 1. On the **serve** host (the machine with the local service)
+Two terminals, two machines — or two windows on one machine to try it out.
+
+**1. On the serve host** (the machine with the local service, e.g. postgres
+on `:5432`):
 
 ```sh
 # Generate a config + a fresh secret key (this prints/uses a NEW node_id).
 iroh-tunnel serve config keygen
 
-# Add the service you want to expose (e.g. a local postgres on :5432).
+# Add the service you want to expose.
 iroh-tunnel serve config add --name postgres --protocol tcp --port 5432
 
-# Show the config + note the NodeId printed when you run it.
+# Run it — note the NodeId it prints. That's the address clients dial.
 iroh-tunnel serve config show
 iroh-tunnel serve run        # prints:  NodeId: <hex>
 ```
 
-`serve run` prints the **NodeId** (hex) — copy it. That's the address clients
-dial.
-
-### 2. On the **access** host (your laptop, anywhere)
+**2. On the access host** (your laptop, anywhere):
 
 ```sh
 # Pin this access node's identity: generates a secret_key so the access NodeId
@@ -120,11 +179,17 @@ iroh-tunnel access config add \
 
 iroh-tunnel access run
 # prints: NodeId: <your access node's hex>
-# now:  psql -h 127.0.0.1 -p 55432   # hits the remote postgres via the tunnel
 ```
 
-Both sides log peer connect/disconnect at INFO (shown by default), each carrying
-the **remote** NodeId so you can correlate activity across the two hosts:
+**3. Use it like a local service:**
+
+```sh
+psql -h 127.0.0.1 -p 55432    # hits the remote postgres via the tunnel
+```
+
+Both sides log peer connect/disconnect at INFO (shown by default), each
+carrying the **remote** NodeId so you can correlate activity across the two
+hosts:
 
 ```
 # serve side:                    # access side:
@@ -136,18 +201,60 @@ If you skip `access config keygen`, a key is generated automatically on the
 first `run` and persisted to the config — so the NodeId is still stable, just
 not chosen by you up front.
 
-### Default config locations
+---
+
+## How it compares
+
+A quick orientation, not a benchmark — check each project's current docs
+before deciding.
+
+|                              | **iroh-tunnel**      | ngrok                | cloudflared tunnel    | Tailscale            | frp                  | bore                 |
+|------------------------------|----------------------|----------------------|-----------------------|----------------------|----------------------|----------------------|
+| Transport model              | P2P QUIC, relay fallback | hosted TCP/HTTP tunnels | Cloudflare edge       | WireGuard mesh       | proxy via `frps`     | TCP relay            |
+| Needs your own public-IP server | no               | no                   | no                    | no                   | **yes**              | yes (or their cloud) |
+| Forwards arbitrary TCP       | yes                  | yes                  | via WARP client       | L3 routes (any IP)   | yes                  | yes                  |
+| UDP                          | groundwork only, not wired yet | limited, paid tiers | no                    | L3 routes (any IP)   | yes                  | no                   |
+| Identity / auth              | `node_id`, no accounts | account + token    | Cloudflare account + domain | SSO / MagicDNS  | shared token         | shared key           |
+| Client side needs            | the same static binary | a URL (or their CLI for raw TCP) | `cloudflared` / WARP | join the tailnet | `frpc` config        | the `bore` client    |
+
+Where iroh-tunnel is **not** the right tool: you need HTTP-edge features
+(TLS certs, WAF, custom domains) — use cloudflared/ngrok; you need a full
+L3 network between many machines — use Tailscale; you already run a public
+server and want classic port-mapping — frp fits.
+
+## Use cases
+
+- **Reach a dev database from anywhere.** Postgres/Redis/MySQL on your work
+  machine or CI box, consumed from your laptop — the walkthrough above.
+- **SSH into a homelab behind CGNAT.**
+  `serve config add --name ssh --protocol tcp --port 22` on the box,
+  then `access ... --port 2222` on the laptop, and
+  `ssh -p 2222 user@127.0.0.1`.
+- **Expose an in-cluster Kubernetes service** to your workstation without
+  Ingress or `port-forward` sessions that die — see
+  [Docker & Kubernetes](#docker--kubernetes).
+- **Embedded boards.** Static `riscv64` musl binaries and a BusyBox/SysV init
+  backend mean a buildroot device (e.g. Sipeed NanoKVM) can publish its web
+  UI or SSH to you, wherever it boots.
+- **Chatty clients.** DB pools, HTTP/2 sessions, parallel SSH channels — the
+  multiplexed transport keeps them all on one connection; see below.
+
+---
+
+## Configuration
 
 If you omit `--config`, the file is read from the OS config dir:
 
-| OS      | Path                                      |
-|---------|-------------------------------------------|
+| OS      | Path                                        |
+|---------|---------------------------------------------|
 | Linux   | `~/.config/iroh-tunnel/{serve,access}.toml` |
 | macOS   | `~/Library/Application Support/iroh-tunnel/{serve,access}.toml` |
 
-Status file (written by `run`, for monitoring): `~/.local/state/iroh-tunnel/status.json` (Linux) or `~/Library/Application Support/iroh-tunnel/status.json` (macOS).
+Status file (written by `run`, for monitoring): `~/.local/state/iroh-tunnel/status.json`
+(Linux) or `~/Library/Application Support/iroh-tunnel/status.json` (macOS).
 
----
+Sample files ship in [`examples/`](examples/) — `serve.toml` and `access.toml`
+with a throwaway demo key so the compose demo runs as-is.
 
 ## Multiplexing (0.2.0)
 
@@ -210,11 +317,11 @@ own connection), or while a serve peer is not yet upgraded.
 (macOS) generated from the config, so the tunnel comes back after reboot.
 
 By default the service installs at **user scope** — no privileges needed:
-`systemctl --user` on Linux, a per-user LaunchAgent on macOS. This matches how
-iroh-tunnel is normally used on a desktop (the service runs as the same user
-that owns the config under `$HOME`). Pass `--system` for a system-wide daemon
-(LaunchDaemon / `/etc/systemd/system`) on servers / headless hosts; that
-requires `sudo`.
+`systemctl --user` on Linux, a per-user LaunchAgent on macOS. This matches
+how iroh-tunnel is normally used on a desktop (the service runs as the same
+user that owns the config under `$HOME`). Pass `--system` for a system-wide
+daemon (LaunchDaemon / `/etc/systemd/system`) on servers / headless hosts;
+that requires `sudo`.
 
 ```sh
 # Per-user (default, no sudo) — Linux systemd --user or macOS LaunchAgent
@@ -241,7 +348,7 @@ installing requires root.
 
 ---
 
-## Docker
+## Docker & Kubernetes
 
 ### Prebuilt image (multi-arch, from ghcr.io)
 
@@ -252,7 +359,7 @@ docker run --rm \
   serve run --config /etc/iroh-tunnel/serve.toml
 ```
 
-### Compose demo (tunnel an nginx through Iroh)
+### Compose demo — tunnel an nginx through Iroh
 
 The repo ships a working demo in `docker-compose.yml`:
 
@@ -269,19 +376,13 @@ docker compose up access
 curl http://127.0.0.1:8080        # nginx default page, tunneled via Iroh
 ```
 
-`examples/serve.toml` and `examples/access.toml` ship with a throwaway demo
-key so the compose demo runs as-is; for a real deployment generate your own
-with `serve config keygen`.
-
----
-
-## Kubernetes
+### Kubernetes — expose an in-cluster `postgres` Service
 
 iroh-tunnel is a single static binary with a config file — run it as either a
 **Deployment** (the `serve` side, exposing an in-cluster Service) or a sidecar.
-Below is a minimal `serve` Deployment that publishes a ClusterIP Service.
 
-### Example: expose an in-cluster `postgres` Service
+<details>
+<summary><strong>Minimal serve Deployment (ConfigMap + Deployment)</strong></summary>
 
 ```yaml
 ---
@@ -342,13 +443,15 @@ kubectl apply -f iroh-tunnel-serve.yaml
 kubectl logs deploy/iroh-tunnel-serve | grep NodeId
 ```
 
-### Notes for K8s
+</details>
 
-- **Stable `node_id`:** the example regenerates a key on each pod start, so the
-  `node_id` changes on rollout. For a stable id, generate a key once
-  (`iroh-tunnel serve config keygen`), put it in a `Secret`, and mount it into
-  the config — or use a `StatefulSet` + a `volumeClaimTemplate` for a writable
-  config the pod persists.
+**Notes for K8s:**
+
+- **Stable `node_id`:** the example regenerates a key on each pod start, so
+  the `node_id` changes on rollout. For a stable id, generate a key once
+  (`iroh-tunnel serve config keygen`), put it in a `Secret`, and mount it
+  into the config — or use a `StatefulSet` + a `volumeClaimTemplate` for a
+  writable config the pod persists.
 - **No host networking needed:** Iroh dials out to its relay network, so the
   pod only needs normal egress. You do **not** need a `Service` or `Ingress`
   in front of the iroh-tunnel pod.
@@ -358,7 +461,9 @@ kubectl logs deploy/iroh-tunnel-serve | grep NodeId
 
 ---
 
-## CLI reference
+## Operations
+
+### CLI reference
 
 ```
 iroh-tunnel <ROLE> <COMMAND>
@@ -372,12 +477,81 @@ Commands:
 Flags:    -v / -vv   increase logging (debug/trace)  ·  -q quiet (errors only)  ·  --color auto|always|never
 ```
 
-Exit codes: `0` success · `1` general · `2` config · `3` permission · `4` iroh · `5` service.
+### Exit codes
+
+| Code | Meaning    |
+|------|------------|
+| `0`  | success    |
+| `1`  | general    |
+| `2`  | config     |
+| `3`  | permission |
+| `4`  | iroh       |
+| `5`  | service    |
+
+### Logging
 
 The default log level is **info**, so peer connect/disconnect and "endpoint
 ready" notices show without any flag. Use `-q` for errors-only, or
 `-v`/`-vv` for debug/trace. `RUST_LOG` overrides everything (e.g.
 `RUST_LOG=iroh_tunnel=debug iroh-tunnel serve run`).
+
+### Monitoring
+
+`run` writes `status.json` (see [Configuration](#configuration) for the
+path) atomically — `node_id`, `home_relay`, uptime, and
+`active_connections` (which counts in-flight **streams**, the
+operator-meaningful number under multiplexing).
+
+---
+
+## FAQ / Troubleshooting
+
+**The serve `NodeId` changes after every restart.**
+The config has no persisted `secret_key`. Run `serve config keygen` once —
+it generates and stores a key so the `node_id` is stable for the life of the
+config. The same applies to `access config keygen`.
+
+**The `.apk` package won't run on Debian/Ubuntu (or the `.deb` fails on Alpine).**
+The `.apk` is musl, the `.deb` is glibc — they are not interchangeable.
+Pick the one matching the host libc.
+
+**A second connection just hangs against an old serve node.**
+You are running a 0.2.0+ access with `multiplex = true` against a pre-0.2.0
+serve. Upgrade the serve node first, or set `multiplex = false` on that
+service. See [Multiplexing](#multiplexing-020).
+
+**Is UDP supported?**
+Not yet. The framing codec (`[len][payload]`) and UDP pipe are in the
+codebase, but they are not wired into the run path. TCP is the supported
+protocol today.
+
+**How do I see what the tunnel is doing?**
+`-v`/`-vv` for debug/trace, `RUST_LOG=iroh_tunnel=debug` for full control,
+`status.json` for a monitoring-friendly snapshot, and the
+[exit codes](#exit-codes) for scripting. Both roles log the *remote* NodeId
+on connect/disconnect so the two sides can be correlated.
+
+**Can I run serve and access on the same machine?**
+Yes — every quick-start command works in two terminals on one host. The
+configs are separate (`serve.toml` / `access.toml`) and the NodeIds are
+distinct.
+
+---
+
+## Security notes
+
+- Traffic between the two nodes is end-to-end encrypted QUIC/TLS; Iroh relays
+  only see encrypted bytes and are used for NAT traversal, not as a trusted
+  middleman.
+- The `access` side pins the serve `node_id` (a self-certifying TLS identity),
+  so it always reaches the intended serve node.
+- The `serve` side has **no peer allowlist**: any peer that learns the
+  `node_id` and the service name can connect and reach the exposed local
+  service. Treat the `node_id` as a bearer capability and keep secret keys
+  out of shared configs and logs.
+
+For reporting vulnerabilities and the full policy, see
+[SECURITY.md](SECURITY.md).
 
 ---
 
@@ -388,26 +562,46 @@ ready" notices show without any flag. Use `-q` for errors-only, or
 | `src/cli.rs`               | clap CLI surface (`<role> <command>`)                  |
 | `src/serve.rs`             | serve role: publish local services into Iroh           |
 | `src/access.rs`            | access role: dial a remote node_id to a local port     |
-| `src/service.rs`           | systemd/launchd unit generation + `systemctl` wrappers |
+| `src/role_run.rs`          | shared run skeleton: dial with retry/backoff, watchers |
+| `src/pipe.rs`              | byte-copy pipes between Iroh streams and local sockets |
+| `src/endpoint.rs`          | Iroh endpoint construction + transport tuning          |
+| `src/proto.rs`             | ALPN protocol constants (`iroh-tunnel/{name}`)         |
+| `src/config.rs`, `src/config_cmd.rs` | config model + `config` subcommands           |
+| `src/service/`             | service backends: `systemd`, `launchd`, BusyBox init   |
 | `src/status.rs`            | atomic `status.json` writer                            |
+| `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
-| `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)   |
+| `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)  |
 | `packaging/`               | systemd unit + deb postinstall used by nFPM            |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
-
----
 
 ## Releases
 
 One git tag `vX.Y.Z` produces, via [GoReleaser](https://goreleaser.com):
 
-- **Binaries:** `linux/amd64`, `linux/arm64` (glibc + musl), `darwin/arm64` (+ checksums)
+- **Binaries:** `linux/amd64`, `linux/arm64` (glibc + musl), `darwin/arm64`
+  (+ checksums), `riscv64gc` musl
 - **Linux packages:** `.deb` (glibc) + `.apk` (musl/Alpine) — amd64 + arm64
 - **Docker:** `ghcr.io/naicoi92/iroh-tunnel` multi-arch (amd64 + arm64)
 - **Homebrew cask:** published to [`naicoi92/homebrew-tap`](https://github.com/naicoi92/homebrew-tap)
 
 See the [Releases page](https://github.com/naicoi92/iroh-tunnel/releases).
 
+## Contributing
+
+Bug reports and pull requests are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks CI
+runs, and the compatibility rules. For security issues, follow
+[SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+## Acknowledgments
+
+- [iroh](https://github.com/n0-computer/iroh) and the n0 team — the P2P
+  transport, relay network, and QUIC stack (noq) this project builds on.
+- [GoReleaser](https://goreleaser.com) and its maintainers — the cross-platform
+  release pipeline.
+
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option.
