@@ -58,7 +58,7 @@ pub async fn create_serve_endpoint(node: &NodeConfig, alpns: &[Vec<u8>]) -> Resu
     // resolve_secret_key returns (key, needs_save); serve callers persist via
     // ServeConfig::resolve_and_save_key, so the boolean is ignored here.
     let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
-    create_endpoint_with_key(key, &node.relay_urls, alpns).await
+    create_endpoint_with_key(key, node, alpns).await
 }
 
 /// Build an [`Endpoint`] for the **access** role.
@@ -72,19 +72,19 @@ pub async fn create_access_endpoint(node: &NodeConfig) -> Result<Endpoint> {
     // resolve_secret_key returns (key, needs_save); access callers persist via
     // AccessConfig::resolve_and_save_key, so the boolean is ignored here.
     let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
-    create_endpoint_with_key(key, &node.relay_urls, &[]).await
+    create_endpoint_with_key(key, node, &[]).await
 }
 
 async fn create_endpoint_with_key(
     key: iroh::SecretKey,
-    relay_urls: &[String],
+    node: &NodeConfig,
     alpns: &[Vec<u8>],
 ) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(Minimal)
         .secret_key(key)
-        .transport_config(multiplex_transport_config());
+        .transport_config(transport_config(node.max_concurrent_streams));
 
-    builder = builder.relay_mode(relay_mode_from_urls(relay_urls)?);
+    builder = builder.relay_mode(relay_mode_from_urls(&node.relay_urls)?);
 
     // Empty ALPN list is fine for access (outbound only); serve registers every
     // service ALPN so it can accept on all of them.
@@ -95,16 +95,6 @@ async fn create_endpoint_with_key(
     builder.bind().await.context("failed to bind iroh endpoint")
 }
 
-/// Concurrent bidirectional-stream budget per QUIC connection (both roles).
-///
-/// This is headroom tuning, not a correctness requirement: it must only cover
-/// the realistic number of simultaneously-open tunneled channels per service.
-/// When the budget is exhausted, further `open_bi` calls are flow-control
-/// blocked until another stream closes. Worst-case buffer memory scales with
-/// `MAX_CONCURRENT_BIDI_STREAMS × stream_receive_window`, so raising it has a
-/// memory cost.
-const MAX_CONCURRENT_BIDI_STREAMS: u32 = 256;
-
 /// Keep-alive interval for long-lived multiplexed connections.
 ///
 /// iroh's default transport config already sends QUIC keep-alives every 5s
@@ -113,16 +103,26 @@ const MAX_CONCURRENT_BIDI_STREAMS: u32 = 256;
 /// upstream changes.
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Transport config for stream multiplexing: explicit concurrent-bidi-stream
-/// budget + keep-alive.
+/// Transport config for stream multiplexing: pinned keep-alive plus an
+/// optional concurrent-bidi-stream budget override.
+///
+/// `max_streams = None` (config absent) keeps noq's own default (100
+/// concurrent bidirectional streams) — the budget is headroom tuning, not a
+/// requirement, so it should only be raised after measuring the real
+/// concurrent-channel count of the target workload. When the budget is
+/// exhausted, further `open_bi` calls are flow-control blocked until another
+/// stream closes. Worst-case buffer memory scales with
+/// `max_concurrent_bidi_streams × stream_receive_window`, so raising it has a
+/// memory cost.
 ///
 /// Built from [`QuicTransportConfig::builder`] so every other iroh default
 /// (path idle timeouts, multipath limits, …) is preserved unchanged.
-fn multiplex_transport_config() -> QuicTransportConfig {
-    QuicTransportConfig::builder()
-        .max_concurrent_bidi_streams(VarInt::from_u32(MAX_CONCURRENT_BIDI_STREAMS))
-        .keep_alive_interval(KEEP_ALIVE_INTERVAL)
-        .build()
+fn transport_config(max_streams: Option<u32>) -> QuicTransportConfig {
+    let mut builder = QuicTransportConfig::builder().keep_alive_interval(KEEP_ALIVE_INTERVAL);
+    if let Some(max_streams) = max_streams {
+        builder = builder.max_concurrent_bidi_streams(VarInt::from_u32(max_streams));
+    }
+    builder.build()
 }
 
 /// Translate the config `relay_urls` into a [`RelayMode`].
@@ -285,6 +285,7 @@ mod tests {
         let node = NodeConfig {
             secret_key: enc,
             relay_urls: vec![],
+            max_concurrent_streams: None,
         };
         let ep = create_serve_endpoint(&node, &[b"iroh-tunnel/db".to_vec()])
             .await
@@ -301,6 +302,7 @@ mod tests {
         let node = NodeConfig {
             secret_key: enc,
             relay_urls: vec![],
+            max_concurrent_streams: None,
         };
         let ep = create_access_endpoint(&node).await.unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());

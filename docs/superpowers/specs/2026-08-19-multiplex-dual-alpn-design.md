@@ -75,10 +75,12 @@ mỗi local TCP connection = 1 QUIC bidi stream**.
 
 ### 4. Transport config
 
-- Serve + access: `max_concurrent_bidi_streams = 256` tường minh (headroom
-  tuning, không phải requirement). Docs: worst-case memory ∝
-  `max_concurrent_bidi_streams × stream_receive_window`; hết slot → `open_bi`
-  bị flow-control block chờ stream khác đóng.
+- (Chỉnh theo feedback owner sau review PR #48:) KHÔNG hardcode limit —
+  mặc định giữ noq default `max_concurrent_bidi_streams = 100`; override qua
+  config `[node] max_concurrent_streams` (Option<u32>, validate ≥ 1, cả hai
+  role). Docs: worst-case memory ∝ `max_concurrent_streams ×
+  stream_receive_window`; hết slot → `open_bi` bị flow-control block chờ
+  stream khác đóng.
 
 ### 5. Status file
 

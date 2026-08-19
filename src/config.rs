@@ -75,6 +75,29 @@ pub struct NodeConfig {
     pub secret_key: String,
     #[serde(default)]
     pub relay_urls: Vec<String>,
+    /// Concurrent bidirectional-stream budget per QUIC connection (both
+    /// roles, since 0.2.0). `None`/absent keeps noq's default (100).
+    ///
+    /// Headroom tuning, not a requirement: set it only after measuring the
+    /// real concurrent-channel count of the workload. Worst-case buffer
+    /// memory scales with `max_concurrent_streams × stream_receive_window`;
+    /// when the budget is exhausted a new channel's `open_bi` is
+    /// flow-control blocked until another stream closes.
+    #[serde(default)]
+    pub max_concurrent_streams: Option<u32>,
+}
+
+impl NodeConfig {
+    /// Shared node-level validation. Both roles call this from their
+    /// `RoleDoc::validate`.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(max) = self.max_concurrent_streams {
+            if max == 0 {
+                anyhow::bail!("invalid max_concurrent_streams {max}: must be >= 1");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -297,6 +320,7 @@ impl ServeConfig {
                 anyhow::bail!("invalid relay_url '{url}': must be https://");
             }
         }
+        self.node.validate()?;
         Ok(())
     }
 }
@@ -322,6 +346,7 @@ impl AccessConfig {
                 anyhow::bail!("invalid relay_url '{url}': must be https://");
             }
         }
+        self.node.validate()?;
         let mut seen: HashSet<&str> = HashSet::new();
         for svc in &self.services {
             validate_name(&svc.name)?;
@@ -641,5 +666,51 @@ multiplex = "auto"
         );
         let err = toml::from_str::<AccessConfig>(&toml).unwrap_err();
         assert!(format!("{err}").contains("auto"));
+    }
+    #[test]
+    fn node_max_concurrent_streams_defaults_to_none() {
+        // Absent field: None — the endpoint keeps noq's own default (100).
+        let cfg: ServeConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.node.max_concurrent_streams, None);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn node_max_concurrent_streams_parses() {
+        let cfg: ServeConfig = toml::from_str(
+            r#"
+[node]
+max_concurrent_streams = 512
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.node.max_concurrent_streams, Some(512));
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn node_max_concurrent_streams_rejects_zero() {
+        // 0 would forbid the peer from opening ANY bidi stream — nonsense
+        // for a tunnel, so fail loudly at load time (both roles).
+        for role in ["serve", "access"] {
+            let toml = r#"
+[node]
+max_concurrent_streams = 0
+"#;
+            let err = match role {
+                "serve" => toml::from_str::<ServeConfig>(toml)
+                    .unwrap()
+                    .validate()
+                    .unwrap_err(),
+                _ => toml::from_str::<AccessConfig>(toml)
+                    .unwrap()
+                    .validate()
+                    .unwrap_err(),
+            };
+            assert!(
+                format!("{err:#}").contains("max_concurrent_streams"),
+                "{role}: {err:#}"
+            );
+        }
     }
 }

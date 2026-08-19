@@ -182,10 +182,17 @@ own connection), or while a serve peer is not yet upgraded.
 
 **Operational notes:**
 
-- Both roles set `max_concurrent_bidi_streams = 256` and a 5 s QUIC
-  keep-alive. 256 is headroom, not a requirement — tune it to your real
-  concurrent-channel count. Worst-case buffer memory scales with
-  `max_concurrent_bidi_streams × stream_receive_window`, so raising it has a
+- Both roles pin a 5 s QUIC keep-alive, and keep noq's own concurrent
+  bidirectional-stream budget by default (100 per connection). Override per
+  node only when a measured workload needs more —
+
+  ```toml
+  [node]
+  max_concurrent_streams = 512
+  ```
+
+  The budget is headroom, not a requirement. Worst-case buffer memory scales
+  with `max_concurrent_streams × stream_receive_window`, so raising it has a
   memory cost; when all slots are busy, a new channel's `open_bi` is
   flow-control blocked until another stream closes.
 - A dead multiplexed connection surfaces as EOF on its channels (correct
