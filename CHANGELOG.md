@@ -63,14 +63,15 @@ access node must talk to a serve peer that is not yet upgraded, set
   A dead connection surfaces as EOF on its channels; the next channel dials
   a fresh one. `multiplex = false` is the pre-0.2.0 behavior verbatim.
 
-- **Transport tuning, explicit**: both roles set
-  `max_concurrent_bidi_streams = 256` and a 5 s QUIC keep-alive (iroh's
-  own default, now pinned — long-lived connections do not depend on it
-  silently). 256 is headroom, not a requirement — tune to your real
-  concurrent-channel count. Worst-case buffer memory scales with
-  `max_concurrent_bidi_streams × stream_receive_window`, and when all
-  slots are busy a new channel's `open_bi` is flow-control blocked until
-  another stream closes.
+- **Transport tuning**: both roles pin a 5 s QUIC keep-alive (iroh's own
+  default, now explicit — long-lived connections do not depend on it
+  silently) and otherwise keep noq's own defaults, including the
+  concurrent-bidi-stream budget (100 per connection). Nodes that need more
+  can override it after measuring their real concurrent-channel count:
+  `[node] max_concurrent_streams = N` (both roles; validated ≥ 1). Worst-case
+  buffer memory scales with `max_concurrent_streams ×
+  stream_receive_window`, and when all slots are busy a new channel's
+  `open_bi` is flow-control blocked until another stream closes.
 
 - **Status file**: `active_connections` in `status.json` now counts active
   **streams** (in-flight pipes), refreshed by a 5 s flush task that only
