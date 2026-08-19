@@ -102,8 +102,11 @@ jobs:
     runs-on: macos-14
     needs: release-linux
     env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+      # NOTE: no sccache here on purpose — cargo-zigbuild's zigcc wrapper on
+      # macOS is not a compiler sccache can drive (cc-rs prepends sccache
+      # from RUSTC_WRAPPER and rejects the wrapper script with "Compiler not
+      # supported"), which broke the ring build. Linux keeps sccache.
+      SCCACHE_GHA_ENABLED: "false"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -118,8 +121,6 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
 
       # GoReleaser's Rust builder always invokes `cargo zigbuild` even for the
       # native target, so zig + cargo-zigbuild must be present on macOS too.

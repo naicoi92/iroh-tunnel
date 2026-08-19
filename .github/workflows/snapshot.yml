@@ -80,8 +80,12 @@ jobs:
     name: snapshot (macos)
     runs-on: macos-14
     env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+      # NOTE: no sccache here on purpose. cargo-zigbuild's zigcc wrapper on
+      # macOS is not a compiler sccache can drive (cc-rs prepends sccache
+      # because RUSTC_WRAPPER is inherited, and it rejects the wrapper script
+      # with "Compiler not supported"), which broke the ring build. The Linux
+      # jobs keep sccache — verified green there.
+      SCCACHE_GHA_ENABLED: "false"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -96,8 +100,6 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
