@@ -1,9 +1,29 @@
 //! Access role: consume remote services to local.
 //!
-//! Implements T-07. Loads the access config (ephemeral key), builds an
-//! [`Endpoint`], and for each service opens a local TCP listener. When a local
-//! client connects, access dials the remote serve peer, opens a bidirectional
-//! QUIC stream, and pipes the client stream through it.
+//! Implements T-07. Loads the access config, builds an [`Endpoint`], and for
+//! each service opens a local TCP listener. When a local client connects,
+//! access opens a bidirectional QUIC stream to the remote serve peer and
+//! pipes the client stream through it.
+//!
+//! ## Multiplexing (0.2.0)
+//!
+//! Each service has a `multiplex` config flag (default `true`):
+//!
+//! - **`true`**: the service keeps ONE long-lived iroh connection to the
+//!   serve peer (dialed via the usual retry/backoff loop) and opens one
+//!   bidirectional stream per local TCP connection. Handshakes are paid
+//!   once. A dead connection surfaces as EOF on its channels (correct
+//!   port-forward semantics) and the next channel dials a fresh one.
+//! - **`false`**: one iroh connection per local TCP connection — the
+//!   pre-0.2.0 behavior verbatim.
+//!
+//! There is deliberately NO protocol negotiation: the ALPN is unchanged
+//! (`iroh-tunnel/{name}`, see [`crate::proto`]). The rollout contract is
+//! serve-first — multiplexing requires a 0.2.0+ serve peer, because a
+//! pre-0.2.0 serve accepts exactly one stream per connection (a second
+//! stream would hang until the connection closes). Upgrade serve nodes
+//! before enabling multiplexing; if an access node must talk to an older
+//! serve, set `multiplex = false` on that service.
 //!
 //! ## Concurrency model
 //!
@@ -19,11 +39,13 @@
 
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 
-use crate::config::AccessConfig;
+use crate::config::{AccessConfig, AccessService};
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
@@ -127,17 +149,15 @@ impl RoleStrategy for AccessStrategy {
                 .node_id
                 .parse::<iroh::EndpointId>()
                 .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
-            let alpn = proto::alpn_for(&svc.name);
             let listen_addr = format!("{}:{}", svc.host, svc.port);
-            let svc_name = svc.name.clone();
-            handles.push(tokio::spawn(listen_loop(
-                ep.clone(),
+            let dialer = Arc::new(ServiceDialer::new(
+                &ep,
                 node_id,
-                alpn,
+                &svc,
+                &relay_urls,
                 listen_addr,
-                relay_urls.clone(),
-                svc_name,
-            )));
+            ));
+            handles.push(tokio::spawn(listen_loop(dialer)));
         }
 
         tracing::info!("access endpoint ready, listening for local clients");
@@ -152,18 +172,89 @@ impl RoleStrategy for AccessStrategy {
     }
 }
 
-/// Bind `listen_addr` and, for each local client, dial the peer and pipe bytes.
+/// Per-service dialing state shared by all local-client tasks.
+///
+/// Owns the multiplexed-connection cache. The `multiplex = false` path is
+/// stateless here — every channel dials its own connection.
+struct ServiceDialer {
+    ep: iroh::Endpoint,
+    addr: iroh::EndpointAddr,
+    /// The service ALPN — unchanged between modes (no negotiation).
+    alpn: Vec<u8>,
+    svc_name: String,
+    listen_addr: String,
+    multiplex: bool,
+    /// The shared multiplexed connection, if any. Guarded by a tokio Mutex so
+    /// concurrent channels serialize the (re)dial instead of racing N dials.
+    conn: Mutex<Option<iroh::endpoint::Connection>>,
+}
+
+impl ServiceDialer {
+    fn new(
+        ep: &iroh::Endpoint,
+        node_id: iroh::EndpointId,
+        svc: &AccessService,
+        relay_urls: &[iroh::RelayUrl],
+        listen_addr: String,
+    ) -> Self {
+        // build_dial_addr attaches every relay URL so iroh can try each in
+        // turn; resolve_relay_urls guarantees a non-empty list (n0 defaults
+        // fallback, IROHTUN-44).
+        Self {
+            ep: ep.clone(),
+            addr: endpoint::build_dial_addr(node_id, relay_urls),
+            alpn: proto::alpn_for(&svc.name),
+            svc_name: svc.name.clone(),
+            listen_addr,
+            multiplex: svc.multiplex,
+            conn: Mutex::new(None),
+        }
+    }
+
+    /// Get the shared multiplexed connection, dialing it if there is none.
+    ///
+    /// The lock is held across the retry loop on purpose: N concurrent
+    /// channels produce exactly one connection, not N.
+    async fn get_or_dial(&self) -> Result<iroh::endpoint::Connection> {
+        let mut guard = self.conn.lock().await;
+        if let Some(conn) = guard.as_ref() {
+            return Ok(conn.clone());
+        }
+        let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn)
+            .await
+            .inspect(|conn| {
+                let remote_id = conn.remote_id();
+                tracing::info!(
+                    peer = %remote_id,
+                    %self.svc_name,
+                    "connected to serve peer (multiplexed)"
+                );
+                crate::role_run::spawn_disconnect_watcher(
+                    conn,
+                    remote_id.to_string(),
+                    format!(
+                        "disconnected from serve peer (service {}, multiplexed)",
+                        self.svc_name
+                    ),
+                );
+            })?;
+        *guard = Some(conn.clone());
+        Ok(conn)
+    }
+
+    /// Drop the cached multiplexed connection (it died); the next channel
+    /// dials a fresh one.
+    async fn invalidate(&self) {
+        *self.conn.lock().await = None;
+    }
+}
+
+/// Bind the service's `listen_addr` and, for each local client, tunnel it.
 ///
 /// Returns only if the listener errors fatally (e.g. the bound socket closes).
 /// Per-client errors are logged, not propagated.
-async fn listen_loop(
-    ep: iroh::Endpoint,
-    node_id: iroh::EndpointId,
-    alpn: Vec<u8>,
-    listen_addr: String,
-    relay_urls: Vec<iroh::RelayUrl>,
-    svc_name: String,
-) {
+async fn listen_loop(dialer: Arc<ServiceDialer>) {
+    let listen_addr = dialer.listen_addr.clone();
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -176,23 +267,15 @@ async fn listen_loop(
     loop {
         match listener.accept().await {
             Ok((local_stream, peer_addr)) => {
-                let ep = ep.clone();
-                let alpn = alpn.clone();
-                let relay_urls = relay_urls.clone();
-                let svc_name = svc_name.clone();
+                let dialer = dialer.clone();
                 tokio::spawn(async move {
-                    match handle_local_connection(
-                        &ep,
-                        node_id,
-                        &alpn,
-                        &relay_urls,
-                        &svc_name,
-                        local_stream,
-                    )
-                    .await
-                    {
-                        Ok(()) => tracing::debug!(%peer_addr, %svc_name, "tunnel closed"),
-                        Err(e) => tracing::warn!(%peer_addr, %svc_name, "tunnel error: {e}"),
+                    match handle_local_connection(&dialer, local_stream).await {
+                        Ok(()) => {
+                            tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed")
+                        }
+                        Err(e) => {
+                            tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {e}")
+                        }
                     }
                 });
             }
@@ -204,51 +287,63 @@ async fn listen_loop(
     }
 }
 
-/// Dial the peer, open a bidirectional stream, and pipe the local client
-/// through it until either side closes.
-async fn handle_local_connection(
-    ep: &iroh::Endpoint,
-    node_id: iroh::EndpointId,
-    alpn: &[u8],
-    relay_urls: &[iroh::RelayUrl],
-    svc_name: &str,
-    local: TcpStream,
-) -> Result<()> {
-    // Build the peer address. Endpoint::connect() is idempotent — it reuses an
-    // existing QUIC connection to the peer if one is already open, so a pool of
-    // local clients multiplexes streams over a single QUIC connection (Page 04
-    // v2 §5).
-    //
-    // The address construction itself lives in endpoint::build_dial_addr so
-    // iroh's EndpointAddr type stays behind the endpoint seam. The caller
-    // (run_loop()) guarantees a non-empty `relay_urls` by routing through
-    // endpoint::resolve_relay_urls, which falls back to the n0 defaults when
-    // the config is empty (IROHTUN-44).
-    let addr = endpoint::build_dial_addr(node_id, relay_urls);
+/// Tunnel one local client according to the service's `multiplex` flag.
+///
+/// See the module docs for the rollout contract. Errors close only this
+/// local client's channel.
+async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Result<()> {
+    if !dialer.multiplex {
+        return dialer.pipe_per_channel(local).await;
+    }
+    // Multiplexed: one stream on the shared connection per channel. If
+    // `open_bi` fails with a connection-level error, the cache is dropped and
+    // exactly one redial + retry is attempted before giving up — a dead
+    // connection surfaces as EOF-style errors on the active channels and the
+    // next channel gets a fresh one.
+    let conn = dialer.get_or_dial().await?;
+    match conn.open_bi().await {
+        // open_bi returns (SendStream, RecvStream) — send first. Our pipe
+        // wants the remote pair as (read, write) = (recv, send), so swap.
+        Ok((send, recv)) => crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await,
+        Err(e) => {
+            tracing::warn!(
+                svc = %dialer.svc_name,
+                "multiplexed open_bi failed: {e}, redialing once"
+            );
+            dialer.invalidate().await;
+            let conn = dialer.get_or_dial().await?;
+            let (send, recv) = conn
+                .open_bi()
+                .await
+                .context("open bidirectional stream failed after redial")?;
+            crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await
+        }
+    }
+}
 
-    let conn = crate::role_run::connect_with_retry(ep, &addr, alpn).await?;
+impl ServiceDialer {
+    /// `multiplex = false`: exactly the pre-0.2.0 behavior — one iroh
+    /// connection per local client, retried with backoff until it connects.
+    async fn pipe_per_channel(&self, local: TcpStream) -> Result<()> {
+        // iroh 1.0's Endpoint::connect does NOT reuse an existing connection
+        // — every call is a fresh QUIC connection (relay session + TLS
+        // handshake). That is precisely the cost multiplexing removes; this
+        // path keeps the pre-0.2.0 one-connection-per-channel semantics.
+        let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
 
-    // The serve peer's NodeId, from its TLS cert. Logged on connect/disconnect
-    // so operators can correlate access activity with serve-side logs.
-    let remote_id = conn.remote_id();
-    tracing::info!(peer = %remote_id, %svc_name, "connected to serve peer");
+        let remote_id = conn.remote_id();
+        tracing::info!(peer = %remote_id, %self.svc_name, "connected to serve peer");
+        crate::role_run::spawn_disconnect_watcher(
+            &conn,
+            remote_id.to_string(),
+            format!("disconnected from serve peer (service {})", self.svc_name),
+        );
 
-    // Watcher: emit a disconnect line when the QUIC connection closes. The weak
-    // handle is registered while `conn` is still alive, so iroh guarantees the
-    // close event is delivered even if `conn` drops before this resolves.
-    crate::role_run::spawn_disconnect_watcher(
-        &conn,
-        remote_id.to_string(),
-        format!("disconnected from serve peer (service {svc_name})"),
-    );
-
-    // open_bi returns (SendStream, RecvStream) — send first. Our pipe wants the
-    // remote pair as (read, write) = (recv, send), so we swap.
-    let (send, recv) = conn
-        .open_bi()
-        .await
-        .context("open bidirectional stream failed")?;
-
-    crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
-    Ok(())
+        let (send, recv) = conn
+            .open_bi()
+            .await
+            .context("open bidirectional stream failed")?;
+        crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
+        Ok(())
+    }
 }

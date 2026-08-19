@@ -18,8 +18,10 @@
 
 use anyhow::{Context, Result};
 use iroh::endpoint::presets::Minimal;
-use iroh::endpoint::{Endpoint, RelayMode};
+use iroh::endpoint::{Endpoint, QuicTransportConfig, RelayMode, VarInt};
 use iroh::RelayUrl;
+
+use std::time::Duration;
 
 /// The n0 default relay URLs (use1-1, usw1-1, euc1-1, aps1-1).
 ///
@@ -78,7 +80,9 @@ async fn create_endpoint_with_key(
     relay_urls: &[String],
     alpns: &[Vec<u8>],
 ) -> Result<Endpoint> {
-    let mut builder = Endpoint::builder(Minimal).secret_key(key);
+    let mut builder = Endpoint::builder(Minimal)
+        .secret_key(key)
+        .transport_config(multiplex_transport_config());
 
     builder = builder.relay_mode(relay_mode_from_urls(relay_urls)?);
 
@@ -89,6 +93,36 @@ async fn create_endpoint_with_key(
     }
 
     builder.bind().await.context("failed to bind iroh endpoint")
+}
+
+/// Concurrent bidirectional-stream budget per QUIC connection (both roles).
+///
+/// This is headroom tuning, not a correctness requirement: it must only cover
+/// the realistic number of simultaneously-open tunneled channels per service.
+/// When the budget is exhausted, further `open_bi` calls are flow-control
+/// blocked until another stream closes. Worst-case buffer memory scales with
+/// `MAX_CONCURRENT_BIDI_STREAMS × stream_receive_window`, so raising it has a
+/// memory cost.
+const MAX_CONCURRENT_BIDI_STREAMS: u32 = 256;
+
+/// Keep-alive interval for long-lived multiplexed connections.
+///
+/// iroh's default transport config already sends QUIC keep-alives every 5s
+/// (iroh 1.0 `HEARTBEAT_INTERVAL`); we set it explicitly so long-lived
+/// multiplexed connections do not silently depend on that default surviving
+/// upstream changes.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Transport config for stream multiplexing: explicit concurrent-bidi-stream
+/// budget + keep-alive.
+///
+/// Built from [`QuicTransportConfig::builder`] so every other iroh default
+/// (path idle timeouts, multipath limits, …) is preserved unchanged.
+fn multiplex_transport_config() -> QuicTransportConfig {
+    QuicTransportConfig::builder()
+        .max_concurrent_bidi_streams(VarInt::from_u32(MAX_CONCURRENT_BIDI_STREAMS))
+        .keep_alive_interval(KEEP_ALIVE_INTERVAL)
+        .build()
 }
 
 /// Translate the config `relay_urls` into a [`RelayMode`].

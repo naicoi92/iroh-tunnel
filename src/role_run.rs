@@ -76,11 +76,8 @@ pub(crate) fn next_backoff_ms(prev_ms: u64) -> u64 {
 /// [`INITIAL_BACKOFF_MS`] → [`next_backoff_ms`] → … → [`MAX_BACKOFF_MS`]:
 /// `1s → 2s → 4s → 8s → 16s → 30s (cap)`. On the first success after one or
 /// more failures, logs `reconnected after N attempts`. Per-service
-/// independent: each local-client task runs its own retry, so one unreachable
+/// independent: each connection task runs its own retry, so one unreachable
 /// peer never affects another service (Page 04 v2 §1.3).
-///
-/// Lifted from `access::handle_local_connection` so the backoff contract has
-/// one definition site and the schedule is testable.
 pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
     addr: &iroh::EndpointAddr,

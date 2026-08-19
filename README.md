@@ -148,6 +148,54 @@ Status file (written by `run`, for monitoring): `~/.local/state/iroh-tunnel/stat
 
 ---
 
+## Multiplexing (0.2.0)
+
+With `multiplex = true` (default, per service on the access side), each
+service keeps **one long-lived Iroh connection** between access and serve,
+and every local TCP connection rides its own QUIC bidirectional stream on
+that connection. The relay session and QUIC/TLS handshake are paid once, not
+once per channel.
+
+```toml
+# access.toml
+[[services]]
+name = "postgres"
+node_id = "…"
+protocol = "tcp"
+host = "127.0.0.1"
+port = 5433
+multiplex = true   # default; false = one connection per channel (pre-0.2.0)
+```
+
+**Rollout: upgrade serve before access.** There is deliberately no protocol
+negotiation — the ALPN is unchanged. A 0.2.0+ serve is fully
+backward-compatible with every access version, so upgrading serve nodes
+first has no caveat. The reverse is not supported: a multiplexing access
+against a pre-0.2.0 serve would hang its second stream (the old serve
+accepts exactly one stream per connection) — if you must run a new access
+against an old serve, set `multiplex = false` on that service.
+
+**When it helps:** many parallel channels to one serve node (a DB pool, many
+HTTP clients, SSH sessions). **When to turn it off:** if you want hard
+isolation between channels (with `false`, a channel's failure domain is its
+own connection), or while a serve peer is not yet upgraded.
+
+**Operational notes:**
+
+- Both roles set `max_concurrent_bidi_streams = 256` and a 5 s QUIC
+  keep-alive. 256 is headroom, not a requirement — tune it to your real
+  concurrent-channel count. Worst-case buffer memory scales with
+  `max_concurrent_bidi_streams × stream_receive_window`, so raising it has a
+  memory cost; when all slots are busy, a new channel's `open_bi` is
+  flow-control blocked until another stream closes.
+- A dead multiplexed connection surfaces as EOF on its channels (correct
+  port-forward semantics); the next channel dials a fresh connection.
+- In the serve's `status.json`, `active_connections` counts **active
+  streams** (in-flight pipes), which is the operator-meaningful number once
+  one connection can carry many channels.
+
+---
+
 ## Run as a system service
 
 `iroh-tunnel service ...` manages a systemd unit (Linux) or launchd plist
