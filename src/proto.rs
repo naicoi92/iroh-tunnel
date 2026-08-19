@@ -65,7 +65,10 @@ pub fn name_from_alpn(alpn: &[u8]) -> Option<&str> {
 /// multiplex variant. Since service names cannot contain `/`, any slash
 /// after the prefix can only come from the multiplex suffix.
 pub fn is_multiplex_alpn(alpn: &[u8]) -> bool {
-    match std::str::from_utf8(alpn).ok().and_then(|s| s.strip_prefix(ALPN_PREFIX)) {
+    match std::str::from_utf8(alpn)
+        .ok()
+        .and_then(|s| s.strip_prefix(ALPN_PREFIX))
+    {
         Some(name) => name.contains('/'),
         None => false,
     }
@@ -153,5 +156,4 @@ mod tests {
         let alpn = multiplex_alpn_for(&max_name);
         assert!(alpn.len() <= 255);
     }
-
 }

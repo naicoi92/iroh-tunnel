@@ -1,15 +1,18 @@
 //! Serve role: publish local services into Iroh.
 //!
 //! Implements T-06. Loads the serve config, builds an [`Endpoint`] that
-//! registers every service's ALPN, then accepts incoming streams and pipes each
-//! one to the matching local TCP service.
+//! registers every service's ALPN (legacy + multiplex variants — see
+//! [`crate::proto`]), then accepts incoming connections and pipes every
+//! bidirectional stream on each to the matching local TCP service.
 //!
 //! ## Concurrency model
 //!
 //! - One accept loop task serves the whole endpoint (iroh 1.0 registers all
 //!   ALPNs on a single endpoint, so we demultiplex by ALPN per connection).
-//! - Each accepted stream becomes its own task, so a failure in one connection
-//!   never affects another (NFR-08).
+//! - Each *connection* is supervised by its own task running an
+//!   `accept_bi` loop; every accepted *stream* becomes its own pipe task,
+//!   so a failure in one stream never affects another (NFR-08). One
+//!   connection can therefore carry any number of concurrent channels.
 //! - Connection errors are logged at WARN and the connection is dropped; the
 //!   process never crashes on a per-connection error.
 //!
@@ -20,8 +23,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use iroh::endpoint::Connection;
 use tokio::net::TcpStream;
 
@@ -65,12 +71,15 @@ impl RoleStrategy for ServeStrategy {
     type Config = ServeConfig;
 
     async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
-        // Collect every service's ALPN up front — iroh 1.0 registers ALPNs on
-        // the endpoint at build time (not filtered per-accept).
+        // Collect every service's ALPNs up front — iroh 1.0 registers ALPNs
+        // on the endpoint at build time (not filtered per-accept). Both the
+        // legacy and the multiplex variant map to the same service, so
+        // pre-0.2.0 access peers keep working unchanged while 0.2.0 access
+        // peers can negotiate multiplexing.
         let alpns: Vec<Vec<u8>> = cfg
             .services
             .iter()
-            .map(|s| proto::alpn_for(&s.name))
+            .flat_map(|s| [proto::alpn_for(&s.name), proto::multiplex_alpn_for(&s.name)])
             .collect();
         endpoint::create_serve_endpoint(&cfg.node, &alpns).await
     }
@@ -95,23 +104,21 @@ impl RoleStrategy for ServeStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
-        // Build the ALPN -> local-addr lookup for demultiplexing accepted
-        // streams.
-        let mut local_addrs: HashMap<Vec<u8>, String> = HashMap::new();
+        // Build the ALPN -> target lookup for demultiplexing accepted
+        // streams. Both ALPN variants of a service share one target (same
+        // local addr, same active-stream counter).
+        let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
         for svc in &cfg.services {
-            let alpn = proto::alpn_for(&svc.name);
-            local_addrs.insert(alpn, format!("{}:{}", svc.host, svc.port));
+            let target = ServiceTarget::new(format!("{}:{}", svc.host, svc.port));
+            targets.insert(proto::alpn_for(&svc.name), target.clone());
+            targets.insert(proto::multiplex_alpn_for(&svc.name), target.clone());
         }
 
-        tracing::info!("serve endpoint ready, accepting connections");
-        let accept_ep = ep.clone();
-        let accept = tokio::spawn(async move {
-            accept_loop(&accept_ep, local_addrs).await;
-        });
-
-        // Write the operator-facing status snapshot (T-13). Best-effort: a
-        // failure to write status is logged but does not stop the tunnel.
-        let status = crate::status::StatusFile {
+        // Operator-facing status snapshot (T-13), refreshed by the flush task
+        // below as stream counts change. Best-effort: a failure to write
+        // status is logged but does not stop the tunnel. Built before the
+        // accept task takes ownership of `targets`.
+        let status = StatusSnapshot {
             node_id: crate::endpoint::node_id_string(&ep),
             home_relay: endpoint::home_relay(&ep).map(|u| u.to_string()),
             pid: std::process::id(),
@@ -122,26 +129,130 @@ impl RoleStrategy for ServeStrategy {
             services: cfg
                 .services
                 .iter()
-                .map(|s| crate::status::ServiceStatus {
+                .map(|s| StatusServiceRow {
                     name: s.name.clone(),
                     protocol: crate::role_run::protocol_str(s.protocol).to_string(),
                     local_addr: crate::status::format_local_addr(&s.host, s.port),
-                    active_connections: 0,
+                    active_streams: targets
+                        .get(&proto::alpn_for(&s.name))
+                        .map(|t| t.active_streams())
+                        .unwrap_or_default(),
                 })
                 .collect(),
         };
-        match status.save() {
+        match status.render().save() {
             Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
 
+        tracing::info!("serve endpoint ready, accepting connections");
+        let accept_ep = ep.clone();
+        let accept = tokio::spawn(async move {
+            accept_loop(&accept_ep, targets).await;
+        });
+
+        // Refresh status.json when any service's active-stream count changes,
+        // at most once per STATUS_FLUSH_INTERVAL — avoids disk churn under
+        // busy stream churn while keeping the file near-live for operators.
+        let flush = tokio::spawn(status_flush_loop(status));
+
         // Wait for the injected shutdown signal, then drain in-flight streams
-        // before closing the endpoint (T-08). The accept task is aborted
-        // first so it stops handing new connections to the pipe.
+        // before closing the endpoint (T-08). The accept and status tasks are
+        // aborted first so they stop handing new connections to the pipe.
         shutdown.await;
         accept.abort();
+        flush.abort();
         ep.close().await;
         Ok(())
+    }
+}
+
+/// How often the status flush task re-checks stream counters.
+const STATUS_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// One served service: where to dial locally + the live stream counter.
+#[derive(Clone)]
+struct ServiceTarget {
+    local_addr: String,
+    active_streams: Arc<AtomicU64>,
+}
+
+impl ServiceTarget {
+    fn new(local_addr: String) -> Self {
+        Self {
+            local_addr,
+            active_streams: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn active_streams(&self) -> Arc<AtomicU64> {
+        self.active_streams.clone()
+    }
+}
+
+/// Status-file template: everything immutable for the life of the process,
+/// plus the live per-service counters rendered into `active_connections`.
+///
+/// Since 0.2.0 `active_connections` counts *active streams* (in-flight pipes),
+/// not iroh connections — with multiplexing one connection carries many
+/// channels, so streams are what an operator cares about.
+struct StatusSnapshot {
+    node_id: String,
+    home_relay: Option<String>,
+    pid: u32,
+    started_at: u64,
+    services: Vec<StatusServiceRow>,
+}
+
+struct StatusServiceRow {
+    name: String,
+    protocol: String,
+    local_addr: String,
+    active_streams: Arc<AtomicU64>,
+}
+
+impl StatusSnapshot {
+    fn render(&self) -> crate::status::StatusFile {
+        crate::status::StatusFile {
+            node_id: self.node_id.clone(),
+            home_relay: self.home_relay.clone(),
+            pid: self.pid,
+            started_at: self.started_at,
+            services: self
+                .services
+                .iter()
+                .map(|s| crate::status::ServiceStatus {
+                    name: s.name.clone(),
+                    protocol: s.protocol.clone(),
+                    local_addr: s.local_addr.clone(),
+                    active_connections: s.active_streams.load(Ordering::Relaxed),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Periodically rewrite status.json, but only when a counter changed.
+async fn status_flush_loop(status: StatusSnapshot) {
+    let mut last: Vec<u64> = status
+        .services
+        .iter()
+        .map(|s| s.active_streams.load(Ordering::Relaxed))
+        .collect();
+    loop {
+        tokio::time::sleep(STATUS_FLUSH_INTERVAL).await;
+        let now: Vec<u64> = status
+            .services
+            .iter()
+            .map(|s| s.active_streams.load(Ordering::Relaxed))
+            .collect();
+        if now == last {
+            continue;
+        }
+        last = now;
+        if let Err(e) = status.render().save() {
+            tracing::warn!("failed to write status file: {e}");
+        }
     }
 }
 
@@ -149,7 +260,7 @@ impl RoleStrategy for ServeStrategy {
 ///
 /// Returns only if the endpoint is closed (e.g. after Ctrl-C). Per-connection
 /// errors are logged, not propagated.
-async fn accept_loop(ep: &iroh::Endpoint, local_addrs: HashMap<Vec<u8>, String>) {
+async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarget>) {
     loop {
         // ep.accept() is a Future yielding Option<Incoming>; None means the
         // endpoint was closed.
@@ -167,9 +278,9 @@ async fn accept_loop(ep: &iroh::Endpoint, local_addrs: HashMap<Vec<u8>, String>)
             }
         };
 
-        // Demultiplex by the negotiated ALPN to find the local service address.
+        // Demultiplex by the negotiated ALPN to find the service target.
         let alpn = conn.alpn().to_vec();
-        let Some(local_addr) = local_addrs.get(&alpn).cloned() else {
+        let Some(target) = targets.get(&alpn).cloned() else {
             let name = proto::name_from_alpn(&alpn)
                 .map(String::from)
                 .unwrap_or_else(|| format!("{alpn:02x?}"));
@@ -179,12 +290,18 @@ async fn accept_loop(ep: &iroh::Endpoint, local_addrs: HashMap<Vec<u8>, String>)
 
         // The access peer's NodeId, from its TLS cert. Logged on connect and
         // (via the watcher below) on disconnect, so operators can see who is
-        // tunneling in and correlate with access-side logs.
+        // tunneling in and correlate with access-side logs. `mode` records
+        // which ALPN variant negotiated this connection.
         let remote_id = conn.remote_id();
         let name = proto::name_from_alpn(&alpn)
             .map(String::from)
             .unwrap_or_else(|| format!("{alpn:02x?}"));
-        tracing::info!(peer = %remote_id, service = %name, "peer connected");
+        let mode = if proto::is_multiplex_alpn(&alpn) {
+            "multi"
+        } else {
+            "legacy"
+        };
+        tracing::info!(peer = %remote_id, service = %name, %mode, "peer connected");
 
         // Watcher: emit a disconnect line when the QUIC connection closes. The
         // weak handle is registered while `conn` is still alive (before the
@@ -193,30 +310,56 @@ async fn accept_loop(ep: &iroh::Endpoint, local_addrs: HashMap<Vec<u8>, String>)
         crate::role_run::spawn_disconnect_watcher(
             &conn,
             remote_id.to_string(),
-            format!("peer disconnected (service {name})"),
+            format!("peer disconnected (service {name}, {mode})"),
         );
 
         tokio::spawn(async move {
-            match handle_connection(&conn, &local_addr).await {
-                Ok(()) => tracing::debug!("connection closed normally"),
-                Err(e) => tracing::warn!("connection error: {e}"),
-            }
+            handle_connection(&conn, target).await;
         });
     }
 }
 
-/// Accept a bidirectional stream on `conn`, connect the local service, and pipe
-/// bytes both ways until either side closes.
-async fn handle_connection(conn: &Connection, local_addr: &str) -> Result<()> {
-    // accept_bi/open_bi return (SendStream, RecvStream) — send first. Our pipe
-    // wants the remote pair as (read, write) = (recv, send), so swap.
-    let (send, recv) = conn.accept_bi().await.context("accept_bidi failed")?;
+/// Supervise one connection: accept bidirectional streams in a loop, connect
+/// the local service for each, and pipe bytes both ways until either side
+/// closes.
+///
+/// Returns when the connection closes (`accept_bi` errors). Per-stream
+/// failures — including a refused local dial — reset only that stream; the
+/// connection and its other streams are unaffected.
+async fn handle_connection(conn: &Connection, target: ServiceTarget) {
+    loop {
+        // accept_bi returns (SendStream, RecvStream) — send first. Our pipe
+        // wants the remote pair as (read, write) = (recv, send), so swap.
+        let (send, recv) = match conn.accept_bi().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::debug!("connection closed: {e}");
+                return;
+            }
+        };
 
-    let local = TcpStream::connect(local_addr)
-        .await
-        .with_context(|| format!("failed to connect local service: {local_addr}"))?;
+        let local = match TcpStream::connect(&target.local_addr).await {
+            Ok(local) => local,
+            Err(e) => {
+                // Dropping the halves resets this one stream (RESET_STREAM /
+                // STOP_SENDING); the access side surfaces it as a failed
+                // channel while the connection stays usable.
+                tracing::warn!(
+                    local_addr = %target.local_addr,
+                    "failed to connect local service, resetting stream: {e}"
+                );
+                continue;
+            }
+        };
 
-    // Pipe the local TCP stream against the QUIC stream halves.
-    crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
-    Ok(())
+        let counter = target.active_streams();
+        counter.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(async move {
+            match crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await {
+                Ok(()) => tracing::debug!("stream closed normally"),
+                Err(e) => tracing::warn!("stream error: {e}"),
+            }
+            counter.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
 }
