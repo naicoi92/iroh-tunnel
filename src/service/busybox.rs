@@ -258,9 +258,10 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("LOG=\"/var/log/iroh-tunnel-serve.log\""), "{s}");
-        // The actual daemon invocation must pass the role + config through.
+        // The daemon invocation passes the role through the ROLE variable
+        // (interpolated once into ROLE="…" above) — not a per-role literal.
         assert!(
-            s.contains("\"$DAEMON\" \"serve\" run --config \"$CONFIG\""),
+            s.contains("\"$DAEMON\" \"$ROLE\" run --config \"$CONFIG\""),
             "daemon invocation wrong: {s}"
         );
         // All four init verbs must be wired in the case block.
