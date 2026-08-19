@@ -186,7 +186,9 @@ release:
   github:
     owner: naicoi92
     name: iroh-tunnel
-  draft: true
+  # Publish immediately on tag push — no draft step. (Previously `draft: true`;
+  # flipped to `false` so tagged releases go live without a manual publish.)
+  draft: false
   prerelease: auto
   # `replace` so re-running the Linux job overwrites its own artifacts cleanly;
   # the macOS job (`.goreleaser.macos.yaml`) uses `mode: append` to add its files.

@@ -94,7 +94,9 @@ release:
   github:
     owner: naicoi92
     name: iroh-tunnel
-  draft: true
+  # Publish immediately on tag push — no draft step. (Previously `draft: true`;
+  # flipped to `false` so tagged releases go live without a manual publish.)
+  draft: false
   prerelease: auto
   # Append darwin artifacts to the release the Linux job already created.
   mode: append

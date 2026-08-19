@@ -1,8 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **BusyBox / SysV init service backend** (non-systemd Linux): `service`
+  subcommands now detect at runtime whether the host runs systemd
+  (`/run/systemd/system`, fallback `/proc/1/exe`) and, when it does not,
+  install an `/etc/init.d/S96iroh-tunnel-<role>` script instead of a systemd
+  unit — covering buildroot/BusyBox embedded devices such as the Sipeed
+  NanoKVM. The script is dependency-lean (plain `sh`, PID file, no
+  `start-stop-daemon`), starts after networking (boot order S96), stops with
+  SIGTERM + a 5 s grace window before SIGKILL, and both scopes map to the
+  system-wide `/etc/init.d` (BusyBox has no per-user services). Requires
+  root.
+
+### Changed
+
+- **CI**: sccache (`RUSTC_WRAPPER`) enabled on lint/test/build jobs to cache
+  rustc output across runs on top of `Swatinem/rust-cache`.
+- **Releases**: GoReleaser `draft: false` on both configs — a pushed tag now
+  publishes immediately instead of waiting for a manual publish step.
+- Dependency bumps: clap 4.6, tokio 1.53, toml 1.1, toml_edit 0.25, dirs 6,
+  which 8, data-encoding 2.11, regex 1.13.
+
 ## [0.2.0] — 2026-08-19
 
 **Multiplexing: one connection per service, one stream per channel.**
+
 Minor — non-breaking **with the correct rollout order (serve first, then
 access)**.
 

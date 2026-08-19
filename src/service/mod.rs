@@ -1,15 +1,18 @@
-//! System-service management: install/uninstall/start/stop/restart/status for
-//! systemd (Linux) and launchd (macOS).
+//! System-service management: install/uninstall/start/stop/restart/status.
 //!
-//! Implements T-12. Each platform is a cfg-gated submodule exposing the same
-//! six actions; the top-level dispatchers forward to whichever platform the
-//! binary was built for. Based on Page 06 v5 §1.3 (service subcommand) and
-//! §1.3.2/§1.3.3 (unit/plist templates).
+//! Implements T-12. The macOS backend is launchd. On Linux the backend is
+//! chosen at RUNTIME (not compile time): systemd when the host boots with it
+//! (detected via `/run/systemd/system`), otherwise a BusyBox/SysV init backend
+//! that installs an `/etc/init.d/S??iroh-tunnel-<role>` script. The latter
+//! covers embedded buildroot devices such as the Sipeed NanoKVM, whose busybox
+//! init runs every executable `/etc/init.d/S*` script on boot.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+#[cfg(target_os = "linux")]
+mod busybox;
 #[cfg(target_os = "macos")]
 mod launchd;
 #[cfg(target_os = "linux")]
@@ -54,7 +57,9 @@ pub enum ServiceScope {
 
 // ---------------------------------------------------------------------------
 // Public dispatchers — one per ServiceAction. They forward to the platform
-// module selected at compile time. Each has the same cfg(linux)/cfg(macos)/
+// module selected at compile time. On Linux the choice between systemd and the
+// BusyBox/SysV backend is made at runtime (see [`linux_is_systemd`]); on macOS
+// it is always launchd. Each has the same cfg(linux)/cfg(macos)/
 // cfg(not(...)) skeleton; they're kept explicit rather than factored into a
 // macro because (a) `install` takes an extra `config` arg the others don't,
 // (b) the unsupported fallback needs to consume the args to stay warning-free,
@@ -62,11 +67,15 @@ pub enum ServiceScope {
 // has to solve all of that generically.
 // ---------------------------------------------------------------------------
 
-/// `service install`: write the unit/plist, enable, and start.
+/// `service install`: write the unit/plist/init-script, enable, and start.
 pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        systemd::install(role, scope, config)
+        if linux_is_systemd() {
+            systemd::install(role, scope, config)
+        } else {
+            busybox::install(role, scope, config)
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -79,11 +88,15 @@ pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
     }
 }
 
-/// `service uninstall`: stop, disable, and remove the unit/plist.
+/// `service uninstall`: stop, disable, and remove the unit/plist/init-script.
 pub fn uninstall(role: &str, scope: ServiceScope) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        systemd::uninstall(role, scope)
+        if linux_is_systemd() {
+            systemd::uninstall(role, scope)
+        } else {
+            busybox::uninstall(role, scope)
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -100,7 +113,11 @@ pub fn uninstall(role: &str, scope: ServiceScope) -> Result<()> {
 pub fn start(role: &str, scope: ServiceScope) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        systemd::start(role, scope)
+        if linux_is_systemd() {
+            systemd::start(role, scope)
+        } else {
+            busybox::start(role, scope)
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -117,7 +134,11 @@ pub fn start(role: &str, scope: ServiceScope) -> Result<()> {
 pub fn stop(role: &str, scope: ServiceScope) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        systemd::stop(role, scope)
+        if linux_is_systemd() {
+            systemd::stop(role, scope)
+        } else {
+            busybox::stop(role, scope)
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -134,7 +155,11 @@ pub fn stop(role: &str, scope: ServiceScope) -> Result<()> {
 pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        systemd::restart(role, scope)
+        if linux_is_systemd() {
+            systemd::restart(role, scope)
+        } else {
+            busybox::restart(role, scope)
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -151,7 +176,11 @@ pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
 pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        systemd::status(role, scope)
+        if linux_is_systemd() {
+            systemd::status(role, scope)
+        } else {
+            busybox::status(role, scope)
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -164,9 +193,32 @@ pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Linux init-system detection.
+// ---------------------------------------------------------------------------
+
+/// True when systemd is the running init (PID 1). Used to pick the systemd vs
+/// BusyBox/SysV backend at runtime.
+///
+/// Primary signal: systemd creates `/run/systemd/system` when it manages the
+/// boot. Fallback: read the target of `/proc/1/exe` (the kernel exposes PID 1's
+/// executable there) and check it ends in `systemd`. Both are no-ops (return
+/// false) on a non-systemd host and on non-Linux builds.
+#[cfg(target_os = "linux")]
+fn linux_is_systemd() -> bool {
+    if std::path::Path::new("/run/systemd/system").exists() {
+        return true;
+    }
+    std::fs::read_link("/proc/1/exe")
+        .map(|p| p.ends_with("systemd"))
+        .unwrap_or(false)
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn unsupported() -> Result<()> {
-    anyhow::bail!("service management is only supported on Linux (systemd) and macOS (launchd)")
+    anyhow::bail!(
+        "service management is only supported on Linux (systemd/BusyBox init) and macOS (launchd)"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -213,5 +265,12 @@ mod tests {
         let p = RestartPolicy::DEFAULT;
         assert!(p.on_failure, "default policy must restart on failure");
         assert_eq!(p.delay_secs, 5, "default policy must keep the 5s backoff");
+    }
+
+    // Compile-only guard: on Linux the runtime probe must exist and be bool.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_is_systemd_is_bool() {
+        let _ = linux_is_systemd();
     }
 }

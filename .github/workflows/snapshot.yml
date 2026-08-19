@@ -26,6 +26,12 @@ jobs:
   snapshot-linux:
     name: snapshot (linux)
     runs-on: ubuntu-latest
+    env:
+      # sccache caches compilation output across snapshot runs (cargo-zigbuild
+      # invokes rustc, which honors RUSTC_WRAPPER). Job-level so the GoReleaser
+      # `before.hooks` + zigbuild builds are both covered.
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,6 +44,12 @@ jobs:
         run: |
           rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
           rustup default 1.91
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -67,6 +79,9 @@ jobs:
   snapshot-macos:
     name: snapshot (macos)
     runs-on: macos-14
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -77,6 +92,12 @@ jobs:
         run: |
           rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
           rustup default 1.91
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2

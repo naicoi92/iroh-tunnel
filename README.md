@@ -224,6 +224,13 @@ Subcommands: `install`, `uninstall`, `start`, `stop`, `restart`, `status`.
 Each accepts `--system` to target the system-wide daemon; the default is the
 per-user service.
 
+**Non-systemd Linux (BusyBox/SysV init, e.g. Sipeed NanoKVM / buildroot
+devices):** `service install` detects at runtime that the host does not run
+systemd and installs an `/etc/init.d/S96iroh-tunnel-<role>` script instead
+(boot-order 96: after networking). The same six subcommands work; scope is
+always system-wide there (BusyBox init has no per-user services), and
+installing requires root.
+
 ---
 
 ## Docker
