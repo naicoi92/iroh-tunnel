@@ -71,21 +71,14 @@ impl RoleStrategy for ServeStrategy {
     type Config = ServeConfig;
 
     async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
-        // Collect every service's ALPNs up front — iroh 1.0 registers ALPNs
-        // on the endpoint at build time (not filtered per-accept). Both the
-        // multiplex and the legacy variant map to the same service, so
-        // pre-0.2.0 access peers keep working unchanged while 0.2.0 access
-        // peers can negotiate multiplexing.
-        //
-        // ORDER MATTERS: rustls's server-side ALPN selection follows the
-        // server's registration order (first registered wins among the
-        // client's offers), so the multiplex variant must come FIRST — an
-        // access peer offering [multi, legacy] then negotiates multi, while
-        // a pre-0.2.0 peer offering only [legacy] still gets legacy.
+        // Collect every service's ALPN up front — iroh 1.0 registers ALPNs on
+        // the endpoint at build time (not filtered per-accept). The ALPN is
+        // deliberately UNCHANGED by multiplexing (no negotiation): a 0.2.0
+        // serve is fully backward-compatible with any access peer.
         let alpns: Vec<Vec<u8>> = cfg
             .services
             .iter()
-            .flat_map(|s| [proto::multiplex_alpn_for(&s.name), proto::alpn_for(&s.name)])
+            .map(|s| proto::alpn_for(&s.name))
             .collect();
         endpoint::create_serve_endpoint(&cfg.node, &alpns).await
     }
@@ -111,13 +104,11 @@ impl RoleStrategy for ServeStrategy {
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
         // Build the ALPN -> target lookup for demultiplexing accepted
-        // streams. Both ALPN variants of a service share one target (same
-        // local addr, same active-stream counter).
+        // streams.
         let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
         for svc in &cfg.services {
             let target = ServiceTarget::new(format!("{}:{}", svc.host, svc.port));
-            targets.insert(proto::alpn_for(&svc.name), target.clone());
-            targets.insert(proto::multiplex_alpn_for(&svc.name), target.clone());
+            targets.insert(proto::alpn_for(&svc.name), target);
         }
 
         // Operator-facing status snapshot (T-13), refreshed by the flush task
@@ -294,20 +285,14 @@ async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarge
             continue;
         };
 
-        // The access peer's NodeId, from its TLS cert. Logged on connect and
+        // The access peer's NodeId, from its cert. Logged on connect and
         // (via the watcher below) on disconnect, so operators can see who is
-        // tunneling in and correlate with access-side logs. `mode` records
-        // which ALPN variant negotiated this connection.
+        // tunneling in and correlate with access-side logs.
         let remote_id = conn.remote_id();
         let name = proto::name_from_alpn(&alpn)
             .map(String::from)
             .unwrap_or_else(|| format!("{alpn:02x?}"));
-        let mode = if proto::is_multiplex_alpn(&alpn) {
-            "multi"
-        } else {
-            "legacy"
-        };
-        tracing::info!(peer = %remote_id, service = %name, %mode, "peer connected");
+        tracing::info!(peer = %remote_id, service = %name, "peer connected");
 
         // Watcher: emit a disconnect line when the QUIC connection closes. The
         // weak handle is registered while `conn` is still alive (before the
@@ -316,7 +301,7 @@ async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarge
         crate::role_run::spawn_disconnect_watcher(
             &conn,
             remote_id.to_string(),
-            format!("peer disconnected (service {name}, {mode})"),
+            format!("peer disconnected (service {name})"),
         );
 
         tokio::spawn(async move {
@@ -333,6 +318,7 @@ async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarge
 /// failures — including a refused local dial — reset only that stream; the
 /// connection and its other streams are unaffected.
 async fn handle_connection(conn: &Connection, target: ServiceTarget) {
+    let mut stream_no: u64 = 0;
     loop {
         // accept_bi returns (SendStream, RecvStream) — send first. Our pipe
         // wants the remote pair as (read, write) = (recv, send), so swap.
@@ -343,6 +329,8 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget) {
                 return;
             }
         };
+        stream_no += 1;
+        tracing::debug!(stream = stream_no, "accepted stream on connection");
 
         let local = match TcpStream::connect(&target.local_addr).await {
             Ok(local) => local,
@@ -352,6 +340,7 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget) {
                 // channel while the connection stays usable.
                 tracing::warn!(
                     local_addr = %target.local_addr,
+                    stream = stream_no,
                     "failed to connect local service, resetting stream: {e}"
                 );
                 continue;

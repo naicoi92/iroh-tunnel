@@ -6,22 +6,28 @@
 //!
 //! ## Suites
 //!
-//! 1. `serve_access_tunnel_roundtrips_bytes` — the pre-0.2.0 behavior,
-//!    pinned: one local client, one connection, bytes intact. Also covers
-//!    access configured `multiplex = "off"` against a 0.2.0 serve (compat).
+//! 1. `serve_access_tunnel_roundtrips_bytes` — the pre-0.2.0 single-channel
+//!    behavior, pinned against the 0.2.0 serve (access- cũ ↔ serve-mới
+//!    compatibility: the ALPN is unchanged and the serve still serves
+//!    single-stream connections exactly as before).
 //! 2. `multiplex_two_streams_share_one_connection` — 0.2.0 multiplexing:
 //!    two concurrent local clients are carried as two bidirectional streams
 //!    on ONE iroh connection (asserted via a counting mini-serve); closing
 //!    one stream does not affect the other.
-//! 3. `fallback_to_legacy_on_old_serve` — negotiation: against a serve that
-//!    registers only the legacy ALPN (a pre-0.2.0 stand-in), access
-//!    `multiplex = "auto"` falls back to one-connection-per-channel without
-//!    hanging (the refusal fails fast at the TLS handshake).
-//! 4. `multiplex_off_matches_legacy_behavior` — access `multiplex = "off"`
-//!    against a full 0.2.0 serve: two sequential channels work, unchanged.
-//! 5. `multiplex_survives_idle_beyond_timeout` — keep-alive: after 35 s with
+//! 3. `multiplex_false_matches_legacy_behavior` — access `multiplex = false`:
+//!    two sequential channels, two separate connections — the pre-0.2.0
+//!    behavior verbatim.
+//! 4. `multiplex_survives_idle_beyond_timeout` — keep-alive: after 60 s with
 //!    no traffic (noq's default idle timeout is 30 s), a new channel still
 //!    rides the SAME connection and both channels keep echoing.
+//!
+//! ## Rollout contract (no negotiation)
+//!
+//! Multiplexing requires a 0.2.0+ serve peer; the ALPN carries no version
+//! information. The unsupported combination (new access with multiplex
+//! enabled vs an old one-stream-per-connection serve) is therefore not
+//! tested here — it is avoided by upgrading serve first, or by setting
+//! `multiplex = false`.
 //!
 //! ## Why `#[ignore]`
 //!
@@ -55,7 +61,7 @@ use tokio::sync::oneshot;
 const PAYLOAD_OUT: &[u8] = b"hello-through-the-tunnel";
 
 // ---------------------------------------------------------------------------
-// Suite 1 — pre-0.2.0 behavior pinned
+// Suite 1 — pre-0.2.0 single-channel behavior pinned
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -109,6 +115,9 @@ port = {port}
     let access_addr = access_listener.local_addr()?;
     drop(access_listener);
 
+    // 4. A pre-0.2.0-style access config: no `multiplex` field would also
+    //    default to true, so pin `false` explicitly — this suite pins the
+    //    single-channel (legacy) behavior of the whole stack.
     let access_cfg_path = tmp.path().join("access.toml");
     std::fs::write(
         &access_cfg_path,
@@ -120,13 +129,14 @@ node_id = "{node_id}"
 protocol = "tcp"
 host = "127.0.0.1"
 port = {port}
+multiplex = false
 "#,
             node_id = serve_node_id,
             port = access_addr.port(),
         ),
     )?;
 
-    // 4. Launch serve and access with injected shutdown signals.
+    // 5. Launch serve and access with injected shutdown signals.
     let (serve_tx, serve_rx) = oneshot::channel::<()>();
     let (access_tx, access_rx) = oneshot::channel::<()>();
 
@@ -149,7 +159,7 @@ port = {port}
         })
     };
 
-    // 5. Wait for the access listener to come up, then pipe bytes through it.
+    // 6. Wait for the access listener to come up, then pipe bytes through it.
     //    The relay handshake + first dial can take a few seconds; retry TCP
     //    connect with backoff.
     let mut client = retry_connect(access_addr, Duration::from_secs(30)).await?;
@@ -164,7 +174,7 @@ port = {port}
         "tunnel did not deliver bytes intact"
     );
 
-    // 6. Shutdown both roles gracefully and assert they exited cleanly.
+    // 7. Shutdown both roles gracefully and assert they exited cleanly.
     let _ = serve_tx.send(());
     let _ = access_tx.send(());
 
@@ -188,7 +198,7 @@ port = {port}
 }
 
 // ---------------------------------------------------------------------------
-// Suites 2/3/5 — counting mini-serve
+// Suites 2–4 — counting mini-serve
 // ---------------------------------------------------------------------------
 
 /// An in-test serve endpoint that echoes every bidirectional stream and
@@ -204,23 +214,16 @@ struct MiniServe {
 }
 
 impl MiniServe {
-    async fn start(svc_name: &str, legacy_only: bool) -> Result<Self> {
-        // Registration order mirrors the real serve: multiplex FIRST (rustls
-        // server-side selection follows the server's order), legacy second —
-        // or legacy only, standing in for a pre-0.2.0 serve.
-        let mut alpns = Vec::new();
-        if !legacy_only {
-            alpns.push(proto::multiplex_alpn_for(svc_name));
-        }
-        alpns.push(proto::alpn_for(svc_name));
-        let key = SecretKey::generate();
+    /// Start a mini-serve under the service's (single, unchanged) ALPN.
+    async fn start(svc_name: &str) -> Result<Self> {
         let ep = iroh::Endpoint::builder(Minimal)
-            .secret_key(key)
-            .alpns(alpns)
+            .secret_key(SecretKey::generate())
+            .alpns(vec![proto::alpn_for(svc_name)])
             .relay_mode(RelayMode::Default)
             .bind()
             .await
             .context("mini-serve bind")?;
+
         let conns = Arc::new(AtomicUsize::new(0));
         let streams = Arc::new(AtomicUsize::new(0));
         let total_conns = Arc::new(AtomicUsize::new(0));
@@ -243,16 +246,8 @@ impl MiniServe {
                 conns.fetch_add(1, Ordering::SeqCst);
                 total.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
-                    if legacy_only {
-                        // Pre-0.2.0 semantics: one stream per connection.
-                        if let Ok((send, recv)) = conn.accept_bi().await {
-                            streams.fetch_add(1, Ordering::SeqCst);
-                            echo_stream(recv, send, streams).await;
-                        }
-                        conns.fetch_sub(1, Ordering::SeqCst);
-                        return;
-                    }
-                    // 0.2.0 semantics: every stream until the connection dies.
+                    // 0.2.0 serve semantics: accept every stream until the
+                    // connection dies.
                     loop {
                         match conn.accept_bi().await {
                             Ok((send, recv)) => {
@@ -298,7 +293,7 @@ async fn echo_stream(mut recv: RecvStream, mut send: SendStream, streams: Arc<At
 async fn boot_access(
     tmp: &tempfile::TempDir,
     serve_node_id: &str,
-    multiplex: &str,
+    multiplex: bool,
 ) -> Result<(
     std::net::SocketAddr,
     oneshot::Sender<()>,
@@ -319,7 +314,7 @@ node_id = "{node_id}"
 protocol = "tcp"
 host = "127.0.0.1"
 port = {port}
-multiplex = "{multiplex}"
+multiplex = {multiplex}
 "#,
             node_id = serve_node_id,
             port = access_addr.port(),
@@ -349,7 +344,7 @@ async fn echo_once(client: &mut TcpStream) -> Result<()> {
     Ok(())
 }
 
-/// Poll `f` until it returns true or `deadline` elapses.
+/// Poll `f` until it returns true or 30 s elapse.
 async fn wait_until<F: Fn() -> bool>(f: F, what: &str) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
         while !f() {
@@ -369,9 +364,9 @@ async fn multiplex_two_streams_share_one_connection() -> Result<()> {
     init_tracing();
     let tmp = tempfile::tempdir().context("tempdir")?;
 
-    let serve = MiniServe::start("echo", false).await?;
+    let serve = MiniServe::start("echo").await?;
     let serve_node_id = serve.ep.secret_key().public().to_string();
-    let (access_addr, _tx, _access) = boot_access(&tmp, &serve_node_id, "auto").await?;
+    let (access_addr, _tx, _access) = boot_access(&tmp, &serve_node_id, true).await?;
 
     // Two concurrent local clients.
     let mut c1 = retry_connect(access_addr, Duration::from_secs(30)).await?;
@@ -404,44 +399,17 @@ async fn multiplex_two_streams_share_one_connection() -> Result<()> {
     Ok(())
 }
 
-/// Suite 3 — negotiation fallback: a pre-0.2.0 serve (legacy ALPN only, one
-/// stream per connection) must be detected and fallen back from — the local
-/// client still works, and nothing hangs.
+/// Suite 3 — access `multiplex = false`: the pre-0.2.0 behavior, unchanged
+/// (two sequential channels each get their own connection).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Internet + n0 relay network; run with --ignored"]
-async fn fallback_to_legacy_on_old_serve() -> Result<()> {
+async fn multiplex_false_matches_legacy_behavior() -> Result<()> {
     init_tracing();
     let tmp = tempfile::tempdir().context("tempdir")?;
 
-    let serve = MiniServe::start("echo", true).await?;
+    let serve = MiniServe::start("echo").await?;
     let serve_node_id = serve.ep.secret_key().public().to_string();
-    let (access_addr, _tx, _access) = boot_access(&tmp, &serve_node_id, "auto").await?;
-
-    // The multi-ALPN dial must fail FAST (TLS refusal, no retry hang) and the
-    // channel must fall back to the legacy one-connection-per-channel path.
-    // If anything hung instead, retry_connect's deadline would fail the test.
-    let mut c1 = retry_connect(access_addr, Duration::from_secs(30)).await?;
-    echo_once(&mut c1).await?;
-    assert_eq!(serve.conns.load(Ordering::SeqCst), 1);
-
-    // A second channel while the first is open: legacy path, own connection.
-    let mut c2 = retry_connect(access_addr, Duration::from_secs(30)).await?;
-    echo_once(&mut c2).await?;
-    assert_eq!(serve.conns.load(Ordering::SeqCst), 2);
-    Ok(())
-}
-
-/// Suite 4 — access `multiplex = "off"` against a full 0.2.0 serve: the
-/// pre-0.2.0 behavior, unchanged (two sequential channels each work).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires Internet + n0 relay network; run with --ignored"]
-async fn multiplex_off_matches_legacy_behavior() -> Result<()> {
-    init_tracing();
-    let tmp = tempfile::tempdir().context("tempdir")?;
-
-    let serve = MiniServe::start("echo", false).await?;
-    let serve_node_id = serve.ep.secret_key().public().to_string();
-    let (access_addr, _tx, _access) = boot_access(&tmp, &serve_node_id, "off").await?;
+    let (access_addr, _tx, _access) = boot_access(&tmp, &serve_node_id, false).await?;
 
     let mut c1 = retry_connect(access_addr, Duration::from_secs(30)).await?;
     echo_once(&mut c1).await?;
@@ -449,28 +417,28 @@ async fn multiplex_off_matches_legacy_behavior() -> Result<()> {
 
     let mut c2 = retry_connect(access_addr, Duration::from_secs(30)).await?;
     echo_once(&mut c2).await?;
-    // One connection per channel: two sequential channels, two connections
-    // in total (the live count never peaks at 2 — c1 closes before c2).
+    // One connection per channel: two sequential channels, two connections in
+    // total (the live count never peaks at 2 — c1 closes before c2).
     wait_until(
         || serve.total_conns.load(Ordering::SeqCst) == 2,
-        "two legacy connections in total",
+        "two per-channel connections in total",
     )
     .await?;
     Ok(())
 }
 
-/// Suite 5 — keep-alive: a multiplexed connection with no traffic for longer
-/// than noq's default 30 s idle timeout must stay alive (5 s keep-alives);
-/// a channel opened afterwards rides the SAME connection.
+/// Suite 4 — keep-alive: a multiplexed connection with no traffic for 60 s
+/// (twice noq's default 30 s idle timeout) must stay alive via the 5 s
+/// keep-alive; a channel opened afterwards rides the SAME connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires Internet + n0 relay network; run with --ignored; slow ~40s"]
+#[ignore = "requires Internet + n0 relay network; run with --ignored; slow ~70s"]
 async fn multiplex_survives_idle_beyond_timeout() -> Result<()> {
     init_tracing();
     let tmp = tempfile::tempdir().context("tempdir")?;
 
-    let serve = MiniServe::start("echo", false).await?;
+    let serve = MiniServe::start("echo").await?;
     let serve_node_id = serve.ep.secret_key().public().to_string();
-    let (access_addr, _tx, _access) = boot_access(&tmp, &serve_node_id, "auto").await?;
+    let (access_addr, _tx, _access) = boot_access(&tmp, &serve_node_id, true).await?;
 
     let mut c1 = retry_connect(access_addr, Duration::from_secs(30)).await?;
     echo_once(&mut c1).await?;
@@ -480,9 +448,9 @@ async fn multiplex_survives_idle_beyond_timeout() -> Result<()> {
     )
     .await?;
 
-    // Idle window beyond the 30 s QUIC idle timeout. The connection must be
+    // Idle window twice the 30 s QUIC idle timeout. The connection must be
     // kept alive by the 5 s keep-alive pings.
-    tokio::time::sleep(Duration::from_secs(35)).await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
 
     // New channel: must ride the SAME connection (no new handshake).
     let mut c2 = retry_connect(access_addr, Duration::from_secs(30)).await?;

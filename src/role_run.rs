@@ -72,82 +72,29 @@ pub(crate) fn next_backoff_ms(prev_ms: u64) -> u64 {
 
 /// Dial a peer with exponential backoff, retrying forever until success.
 ///
-/// Plain [`iroh::Endpoint::connect`] with the primary `alpn` only. See
-/// [`connect_with_retry_opts`] for the backoff contract and the option-aware
-/// variant (used by the multiplex negotiation to offer additional ALPNs).
+/// Retries [`iroh::Endpoint::connect`] on failure with the schedule
+/// [`INITIAL_BACKOFF_MS`] → [`next_backoff_ms`] → … → [`MAX_BACKOFF_MS`]:
+/// `1s → 2s → 4s → 8s → 16s → 30s (cap)`. On the first success after one or
+/// more failures, logs `reconnected after N attempts`. Per-service
+/// independent: each connection task runs its own retry, so one unreachable
+/// peer never affects another service (Page 04 v2 §1.3).
 pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
     addr: &iroh::EndpointAddr,
     alpn: &[u8],
-    retry_if: impl Fn(&iroh::endpoint::ConnectError) -> bool,
-) -> std::result::Result<Connection, iroh::endpoint::ConnectError> {
-    connect_with_retry_opts(
-        ep,
-        addr,
-        alpn,
-        iroh::endpoint::ConnectOptions::new(),
-        retry_if,
-    )
-    .await
-}
-
-/// Dial a peer with exponential backoff, retrying until success or until a
-/// failure the caller refuses to retry.
-///
-/// Retries [`iroh::Endpoint::connect_with_opts`] on failure with the schedule
-/// [`INITIAL_BACKOFF_MS`] → [`next_backoff_ms`] → … → [`MAX_BACKOFF_MS`]:
-/// `1s → 2s → 4s → 8s → 16s → 30s (cap)`. On the first success after one or
-/// more failures, logs `reconnected after N attempts`. When `retry_if`
-/// returns false for an error, that typed error is returned immediately
-/// (fail-fast — e.g. the peer refused this ALPN at the handshake) so the
-/// caller can act on the specific error class. Per-service independent: each
-/// local-client task runs its own retry, so one unreachable peer never
-/// affects another service (Page 04 v2 §1.3).
-pub(crate) async fn connect_with_retry_opts(
-    ep: &iroh::Endpoint,
-    addr: &iroh::EndpointAddr,
-    alpn: &[u8],
-    opts: iroh::endpoint::ConnectOptions,
-    retry_if: impl Fn(&iroh::endpoint::ConnectError) -> bool,
-) -> std::result::Result<Connection, iroh::endpoint::ConnectError> {
+) -> Result<Connection> {
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut attempt = 1u32;
     loop {
-        match ep.connect_with_opts(addr.clone(), alpn, opts.clone()).await {
-            Ok(connecting) => match connecting.await {
-                Ok(conn) => {
-                    if attempt > 1 {
-                        tracing::info!("reconnected after {attempt} attempts");
-                    }
-                    return Ok(conn);
+        match ep.connect(addr.clone(), alpn).await {
+            Ok(conn) => {
+                if attempt > 1 {
+                    tracing::info!("reconnected after {attempt} attempts");
                 }
-                Err(e) => {
-                    let err = iroh::endpoint::ConnectError::from(e);
-                    if !retry_if(&err) {
-                        if attempt > 1 {
-                            tracing::warn!("connect failed after {attempt} attempts: {err}");
-                        }
-                        return Err(err);
-                    }
-                    tracing::warn!(
-                        "connect attempt {attempt} failed: {err}, retrying in {backoff_ms}ms"
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = next_backoff_ms(backoff_ms);
-                    attempt += 1;
-                }
-            },
+                return Ok(conn);
+            }
             Err(e) => {
-                let err = iroh::endpoint::ConnectError::from(e);
-                if !retry_if(&err) {
-                    if attempt > 1 {
-                        tracing::warn!("connect failed after {attempt} attempts: {err}");
-                    }
-                    return Err(err);
-                }
-                tracing::warn!(
-                    "connect attempt {attempt} failed: {err}, retrying in {backoff_ms}ms"
-                );
+                tracing::warn!("connect attempt {attempt} failed: {e}, retrying in {backoff_ms}ms");
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = next_backoff_ms(backoff_ms);
                 attempt += 1;

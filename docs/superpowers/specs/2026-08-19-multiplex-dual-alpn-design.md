@@ -1,8 +1,16 @@
-# Multiplexing per connection + dual-ALPN negotiation — Design
+# Multiplexing per connection — Design (single ALPN, serve-first rollout)
 
 Ngày: 2026-08-19
-Trạng thái: Đã duyệt (user)
-PR target: `feat/multiplex-dual-alpn` → `main`
+Trạng thái: Đã duyệt (user) — **quyết định owner chốt: KHÔNG đổi ALPN, KHÔNG
+đàm phán phiên bản. Rollout: upgrade serve trước, access sau.**
+PR: #48 (`feat/multiplex-dual-alpn` → `main`)
+
+> **Lịch sử thiết kế:** brief đầu tiên đề xuất dual-ALPN negotiation
+> (`/multi` variant + fail-fast fallback). Một bản implement dual-ALPN đầy
+> đủ (offer-both RFC 7301) đã được làm và test 5/5 xanh trên cùng PR, nhưng
+> owner chốt đơn giản hóa: bỏ ALPN variant, bỏ negotiation, quản lý
+> compatibility bằng thứ tự rollout. Các facts probe (giữ lại bên dưới làm
+> tham khảo) vẫn đúng cho iroh 1.0.0.
 
 ## Động lực
 
@@ -19,10 +27,11 @@ mỗi local TCP connection = 1 QUIC bidi stream**.
 
 - `Endpoint::connect()` **không reuse** connection — mỗi call tạo QUIC connection
   mới (comment "idempotent" cũ trong `access.rs` sai, được sửa kèm PR này).
-- ALPN không khớp → handshake fail nhanh, lỗi surface là
-  `ConnectError::Connection { ConnectionError::ConnectionClosed(..) }`.
-  Lỗi network (TimedOut, unreachable…) là class khác → không dùng làm tín hiệu
-  fallback.
+- **Facts probe (tham khảo, không còn dùng):** ALPN-không-hợp bị iroh 1.0
+  drop im lặng → client chờ 30s timeout (không alert); client offer danh
+  sách không khớp hoàn toàn mới nhận `NoApplicationProtocol` 0x178 ~125ms.
+  Với single-ALPN điều này không còn liên quan: mọi connection dùng
+  `alpn_for(name)`.
 - `QuicTransportConfig::builder()` khởi tạo từ iroh defaults (keepalive 5s,
   path idle 15s, multipath…) — append thêm `max_concurrent_bidi_streams(VarInt)`
   và gán qua `Endpoint::builder().transport_config(cfg)` không mất defaults.
@@ -31,33 +40,17 @@ mỗi local TCP connection = 1 QUIC bidi stream**.
 
 ## Quyết định thiết kế
 
-### 1. Dual-ALPN (protocol negotiation có chủ đích)
+### 1. Single ALPN + rollout contract
 
-> **Cập nhật sau probe thực nghiệm (2026-08-19):** thiết kế ban đầu là "dial
-> multi trước, gặp serve cũ thì fallback" với giả định ALPN mismatch fail-fast
-> `ConnectionClosed`. Probe với n0 relay thật đã bác bỏ: iroh 1.0 drop im lặng
-> incoming ALPN-không-hợp → client chờ **30s timeout**, không có alert ở lớp
-> đó (alert chỉ xuất hiện khi client offer danh sách KHÔNG có gì khớp —
-> `NoApplicationProtocol` 0x178, ~125ms). Thiết kế cuối dùng offer-both:
-
-- Serve đăng ký **cả hai** ALPN cho mỗi service, **multi TRƯỚC legacy**
-  (rustls server-side selection theo registration order của server):
-  - multi: `iroh-tunnel/{name}/multi` (suffix `/multi` — tự diễn giải, grep
-    được trong packet capture; service name `[a-z0-9-]` không chứa `/` nên
-    parse không nhập nhằng)
-  - legacy: `iroh-tunnel/{name}` (giữ nguyên, tương thích hoàn toàn)
-- Access mode `auto` gọi `connect_with_opts(primary=multi,
-  additional_alpns=[legacy])` — **một dial duy nhất** offer cả hai trong một
-  TLS handshake (RFC 7301). Serve mới chọn multi; serve cũ chọn legacy.
-  `conn.alpn()` quyết định mode: multi → cache connection dài hạn; legacy →
-  connection đó chỉ phục vụ kênh hiện tại (semantics cũ). KHÔNG có fallback
-  state/re-probe bookkeeping — serve upgrade thì kênh kế tự negotiate multi.
-- Mode `on`: offer chỉ multi. Serve cũ → QUIC strict-ALPN từ chối nhanh
-  (~125ms, `ConnectionClosed`) → lỗi rõ ràng gợi ý `auto`/`off`
-  (classifikasi qua `is_peer_refusal`).
-- Mode `off`: dial legacy thuần như cũ.
-- Ma trận tương thích: access cũ ↔ serve mới = như cũ (serve mới phục vụ mọi
-  stream trên legacy ALPN; access cũ chỉ cần stream đầu).
+- ALPN giữ nguyên `iroh-tunnel/{name}` cho cả hai mode — KHÔNG negotiation.
+- Ma trận tương thích quản bằng **thứ tự rollout serve-trước**:
+  - access cũ ↔ serve mới: như cũ (serve mới vẫn phục vụ stream đầu y như
+    cũ; thực tế phục vụ mọi stream).
+  - access mới `multiplex = true` ↔ serve cũ: **không được hỗ trợ** (stream
+    #2 không ai accept, treo tới khi conn đóng/idle timeout) — tránh bằng
+    rollout đúng thứ tự; nếu buộc phải chạy thì `multiplex = false`.
+  - access mới `multiplex = false`: behavior pre-0.2.0 nguyên vẹn với mọi
+    serve.
 
 ### 2. Serve — accept loop per connection
 
@@ -70,14 +63,15 @@ mỗi local TCP connection = 1 QUIC bidi stream**.
 
 ### 3. Access — connection dài hạn + open_bi per kênh
 
-- `AccessService` thêm field `multiplex: MultiplexMode` (`auto|on|off`,
-  default `auto`, serde lowercase). Chỉ có ý nghĩa với TCP; UDP path không đổi.
-- Multi path (negotiated): mỗi service giữ shared `Mutex<Option<Connection>>`;
-  mỗi local TCP conn accepted → `get_or_dial_multi(offer_legacy)` → `open_bi`
-  → pipe (lock giữ xuyên suốt dial để N kênh đồng thời chỉ tạo 1 connection;
-  chỉ connection negotiated-multi mới được cache). Local TCP đóng → stream
-  đóng, connection GIỮ. `open_bi` lỗi conn-level → drop cache + redial 1 lần
-  + retry 1 lần; vẫn lỗi → kênh nhận lỗi (semantics port-forward).
+- `AccessService` thêm field `multiplex: bool` (default `true`, serde
+  default function). Chỉ có ý nghĩa với TCP; UDP path không đổi.
+- Multiplex path: mỗi service giữ shared `Mutex<Option<Connection>>`; mỗi
+  local TCP conn accepted → `get_or_dial` (tái dùng `connect_with_retry`,
+  lock giữ xuyên suốt dial để N kênh đồng thời chỉ tạo 1 connection) →
+  `open_bi` → pipe. Local TCP đóng → stream đóng, connection GIỮ. `open_bi`
+  lỗi conn-level → drop cache + redial 1 lần + retry 1 lần; vẫn lỗi → kênh
+  nhận lỗi (semantics port-forward).
+- `multiplex = false`: per-channel `connect_with_retry` như cũ.
 
 ### 4. Transport config
 
@@ -98,21 +92,24 @@ mỗi local TCP connection = 1 QUIC bidi stream**.
 - UDP path: không đụng.
 - Không thêm framing/mux tự chế — chỉ QUIC stream native.
 
+
 ## Testing
 
-- Unit: proto roundtrip 2 ALPN forms; config parse 3 mode + default; backoff.
+- Unit: config parse bool `multiplex` + default; backoff; proto như cũ.
 - Integration (`tests/serve_access_tunnel.rs`, giữ convention `#[ignore]` +
   n0 relay):
-  1. N stream song song trên 1 connection; đóng 1 stream, stream khác sống.
-  2. Compat: access cấu hình `multiplex = "off"` ↔ serve mới — behavior như cũ.
-  3. Fallback: serve chỉ register legacy ALPN (giả serve cũ) → access `auto`
-     tự fallback, kênh hoạt động, không treo.
-  4. N local TCP đồng thời đi trên 1 iroh connection (verify qua counter).
-  5. Keepalive: idle > 30s rồi mở stream mới vẫn hoạt động.
+  1. `serve_access_tunnel_roundtrips_bytes` — single-channel legacy pin
+     (access cũ ↔ serve mới compat, đường legacy tự nhiên).
+  2. N stream song song trên 1 connection; đóng 1 stream, stream khác sống.
+  3. `multiplex = false`: 2 kênh tuần tự = 2 connection riêng.
+  4. Keepalive: idle 60s (2× idle timeout 30s) rồi mở stream mới vẫn cùng
+     connection, kênh cũ còn sống.
 
 ## Release
 
-- Version 0.2.0 (minor, non-breaking, tự tương thích ngược).
-- CHANGELOG.md (mới): 2 mode, negotiation semantics, default, trade-off.
-- README mục "Multiplexing": khi nào lợi (nhiều kênh song song到一个 serve
-  node), khi nào tắt (muốn isolation giữa kênh), memory/blocking trade-off.
+- Version 0.2.0 (minor — non-breaking với thứ tự rollout đúng).
+- CHANGELOG.md: ma trận tương thích + yêu cầu rollout serve-trước, default,
+  trade-off.
+- README mục "Multiplexing": khi nào lợi (nhiều kênh song song đến một serve
+  node), khi nào tắt (isolation giữa kênh, hoặc serve chưa upgrade),
+  memory/blocking trade-off.

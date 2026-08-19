@@ -150,20 +150,11 @@ Status file (written by `run`, for monitoring): `~/.local/state/iroh-tunnel/stat
 
 ## Multiplexing (0.2.0)
 
-By default (`multiplex = "auto"` per service on the access side), each service
-keeps **one long-lived Iroh connection** between access and serve, and every
-local TCP connection rides its own QUIC bidirectional stream on that
-connection. The relay session and QUIC/TLS handshake are paid once, not once
-per channel.
-
-The mode is negotiated with the serve peer in a single handshake via
-standard ALPN offer negotiation (RFC 7301): access offers both
-`iroh-tunnel/<name>/multi` and the legacy `iroh-tunnel/<name>`; a 0.2.0+
-serve picks the multiplex variant, an older serve picks legacy and the
-service transparently behaves like before (one connection per channel).
-There is no hang and no double dial — mixed versions interoperate on the
-first connect. A serve peer that later upgrades starts multiplexing on the
-next dial automatically.
+With `multiplex = true` (default, per service on the access side), each
+service keeps **one long-lived Iroh connection** between access and serve,
+and every local TCP connection rides its own QUIC bidirectional stream on
+that connection. The relay session and QUIC/TLS handshake are paid once, not
+once per channel.
 
 ```toml
 # access.toml
@@ -173,19 +164,21 @@ node_id = "…"
 protocol = "tcp"
 host = "127.0.0.1"
 port = 5433
-multiplex = "auto"   # auto (default) | on | off
+multiplex = true   # default; false = one connection per channel (pre-0.2.0)
 ```
 
-- **`auto`** — offer both ALPNs; the serve peer decides. Best for mixed
-  version fleets.
-- **`on`** — multiplex only. A pre-0.2.0 serve refuses the handshake
-  immediately (~100 ms, `NoApplicationProtocol`), which surfaces as a loud
-  error telling you to use `auto`/`off`.
+**Rollout: upgrade serve before access.** There is deliberately no protocol
+negotiation — the ALPN is unchanged. A 0.2.0+ serve is fully
+backward-compatible with every access version, so upgrading serve nodes
+first has no caveat. The reverse is not supported: a multiplexing access
+against a pre-0.2.0 serve would hang its second stream (the old serve
+accepts exactly one stream per connection) — if you must run a new access
+against an old serve, set `multiplex = false` on that service.
 
 **When it helps:** many parallel channels to one serve node (a DB pool, many
 HTTP clients, SSH sessions). **When to turn it off:** if you want hard
-isolation between channels — with `off`, a channel's failure domain is its
-own connection.
+isolation between channels (with `false`, a channel's failure domain is its
+own connection), or while a serve peer is not yet upgraded.
 
 **Operational notes:**
 
