@@ -7,21 +7,27 @@
 //!
 //! ## Multiplexing (0.2.0)
 //!
-//! Each service has a [`MultiplexMode`] (config `multiplex`, default `auto`):
+//! Each service has a [`MultiplexMode`] (config `multiplex`, default `auto`).
+//! The mode is negotiated with the serve peer via standard ALPN offer
+//! negotiation (RFC 7301) on the dual-ALPN convention of [`crate::proto`]:
 //!
-//! - **Multiplexed** (`auto` with a 0.2.0+ serve peer, or `on`): the service
-//!   keeps ONE long-lived iroh connection to the serve peer and opens one
-//!   bidirectional stream per local client. Handshakes are paid once. When
-//!   the connection dies every tunneled channel sees EOF (correct
-//!   port-forward semantics) and the next channel dials a fresh connection.
-//! - **Legacy** (`off`, or `auto` after a pre-0.2.0 serve peer refused the
-//!   multiplex ALPN): one iroh connection per local client, exactly the
-//!   pre-0.2.0 behavior.
-//!
-//! The mode is negotiated via the dual-ALPN convention (see [`crate::proto`]):
-//! access dials `iroh-tunnel/{name}/multi`; a serve peer that does not know
-//! that ALPN refuses the connection at the TLS handshake (fail-fast, no
-//! hang), which access detects and falls back from.
+//! - **`auto`** (default): every dial offers `[iroh-tunnel/{name}/multi,
+//!   iroh-tunnel/{name}]` in one TLS handshake. The *serve* side picks (rustls
+//!   follows the server's registration order): a 0.2.0+ serve that registers
+//!   the multiplex ALPN first picks `…/multi`, a pre-0.2.0 serve picks the
+//!   legacy ALPN. The negotiated [`Connection::alpn`] then decides the mode:
+//!   - `…/multi` — the service keeps ONE long-lived iroh connection and opens
+//!     one bidirectional stream per local client. Handshakes are paid once.
+//!     A dead connection surfaces as EOF on its channels (correct
+//!     port-forward semantics) and the next channel dials a fresh one.
+//!   - legacy — this connection carries this channel only, exactly the
+//!     pre-0.2.0 behavior. No fallback state is kept: the next channel
+//!     re-offers both ALPNs, so a serve peer that upgrades starts
+//!     multiplexing immediately.
+//! - **`on`**: offer the multiplex ALPN only. A pre-0.2.0 serve peer refuses
+//!   the handshake outright (QUIC strict-ALPN, `NoApplicationProtocol`) —
+//!   this fails fast (~100 ms, not a timeout) and surfaces as a loud error.
+//! - **`off`**: offer the legacy ALPN only — the pre-0.2.0 behavior verbatim.
 //!
 //! ## Concurrency model
 //!
@@ -37,7 +43,6 @@
 
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -173,8 +178,10 @@ impl RoleStrategy for AccessStrategy {
 
 /// Per-service dialing state shared by all local-client tasks.
 ///
-/// Owns the multiplexed-connection cache and the fallback bookkeeping. The
-/// legacy per-channel path keeps no state here beyond the fallback counters.
+/// Owns the multiplexed-connection cache. The legacy per-channel path is
+/// stateless here: there is no fallback bookkeeping, because with the
+/// offer-both negotiation every dial discovers the serve peer's capability
+/// anew.
 struct ServiceDialer {
     ep: iroh::Endpoint,
     addr: iroh::EndpointAddr,
@@ -188,13 +195,6 @@ struct ServiceDialer {
     /// The shared multiplexed connection, if any. Guarded by a tokio Mutex so
     /// concurrent channels serialize the (re)dial instead of racing N dials.
     conn: Mutex<Option<iroh::endpoint::Connection>>,
-    /// Set once the serve peer refuses the multiplex ALPN (pre-0.2.0 peer).
-    /// Only consulted in `auto` mode; cleared again once the last legacy
-    /// channel closes so multi is re-probed (a serve peer may upgrade).
-    refused: AtomicBool,
-    /// Number of in-flight legacy channels created *because* of the refusal.
-    /// When it drops to zero, [`ServiceDialer::refused`] is cleared.
-    legacy_active: AtomicUsize,
 }
 
 impl ServiceDialer {
@@ -217,46 +217,69 @@ impl ServiceDialer {
             listen_addr,
             mode: svc.multiplex,
             conn: Mutex::new(None),
-            refused: AtomicBool::new(false),
-            legacy_active: AtomicUsize::new(0),
         }
     }
 
     /// Get the shared multiplexed connection, dialing it if there is none.
     ///
-    /// Retries transient failures with the usual backoff schedule, but fails
-    /// fast (no retry) when the peer refused the multiplex ALPN — that is a
-    /// version mismatch, not a network problem. The lock is held across the
-    /// dial on purpose: N concurrent channels produce exactly one connection.
-    async fn get_or_dial_multi(
-        &self,
-    ) -> std::result::Result<iroh::endpoint::Connection, iroh::endpoint::ConnectError> {
+    /// With `offer_legacy` (mode `auto`) the dial offers `[multi, legacy]` in
+    /// one handshake (see module docs); with any serve peer that knows this
+    /// service the connect itself always succeeds, so the usual retry-forever
+    /// backoff is correct. Without it (mode `on`) the offer is multi-only and
+    /// a refusing peer fails fast (~100 ms, no retry) with a loud hint.
+    ///
+    /// The lock is held across the dial on purpose: N concurrent channels
+    /// produce exactly one connection. Only a *negotiated-multi* connection
+    /// is cached — a negotiated-legacy one belongs to its single channel.
+    async fn get_or_dial_multi(&self, offer_legacy: bool) -> Result<iroh::endpoint::Connection> {
         let mut guard = self.conn.lock().await;
         if let Some(conn) = guard.as_ref() {
             return Ok(conn.clone());
         }
-        let conn =
-            crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.multi_alpn, |e| {
-                !is_peer_refusal(e)
-            })
-            .await
-            .inspect(|conn| {
-                let remote_id = conn.remote_id();
-                tracing::info!(
-                    peer = %remote_id,
-                    %self.svc_name,
-                    "connected to serve peer (multiplexed)"
-                );
-                crate::role_run::spawn_disconnect_watcher(
-                    conn,
-                    remote_id.to_string(),
-                    format!(
-                        "disconnected from serve peer (service {}, multiplexed)",
-                        self.svc_name
-                    ),
-                );
-            })?;
-        *guard = Some(conn.clone());
+        let opts = if offer_legacy {
+            iroh::endpoint::ConnectOptions::new().with_additional_alpns(vec![self.alpn.clone()])
+        } else {
+            iroh::endpoint::ConnectOptions::new()
+        };
+        let retry_if = move |e: &iroh::endpoint::ConnectError| offer_legacy || !is_peer_refusal(e);
+        let conn = crate::role_run::connect_with_retry_opts(
+            &self.ep,
+            &self.addr,
+            &self.multi_alpn,
+            opts,
+            retry_if,
+        )
+        .await
+        .map_err(|e| {
+            if !offer_legacy && is_peer_refusal(&e) {
+                anyhow::Error::new(e).context(
+                    "multiplex = \"on\" but the serve peer refused the multiplex ALPN \
+                     (it is pre-0.2.0?); use multiplex = \"auto\" or \"off\"",
+                )
+            } else {
+                anyhow::Error::new(e)
+            }
+        })
+        .inspect(|conn| {
+            let mode = if conn.alpn() == self.multi_alpn.as_slice() {
+                "multiplexed"
+            } else {
+                "legacy"
+            };
+            let remote_id = conn.remote_id();
+            tracing::info!(peer = %remote_id, %self.svc_name, mode, "connected to serve peer");
+            crate::role_run::spawn_disconnect_watcher(
+                conn,
+                remote_id.to_string(),
+                format!(
+                    "disconnected from serve peer (service {}, {mode})",
+                    self.svc_name
+                ),
+            );
+        })?;
+        if conn.alpn() == self.multi_alpn.as_slice() {
+            *guard = Some(conn.clone());
+        }
         Ok(conn)
     }
 
@@ -265,35 +288,17 @@ impl ServiceDialer {
     async fn invalidate_multi(&self) {
         *self.conn.lock().await = None;
     }
-
-    /// Record that the peer refused multiplexing. While fallback channels
-    /// exist the service stays legacy; the last one out clears the flag so
-    /// multi is re-probed (see [`ServiceDialer::legacy_channel_finished`]).
-    fn note_refusal(&self) {
-        self.refused.store(true, Ordering::Release);
-    }
-
-    fn legacy_channel_started(&self) {
-        self.legacy_active.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn legacy_channel_finished(&self) {
-        if self.legacy_active.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Last fallback channel gone: re-probe multiplexing on the next
-            // dial cycle (the serve peer may have upgraded to 0.2.0+).
-            self.refused.store(false, Ordering::Release);
-        }
-    }
 }
 
 /// Whether a connect error means the *peer refused* the connection (as
 /// opposed to a transient/network failure).
 ///
 /// An ALPN the serve peer does not register is refused during the TLS
-/// handshake: the peer aborts the connection, surfaced as
-/// `ConnectError::Connection { ConnectionError::ConnectionClosed }`. Network
-/// problems surface as other variants (`TimedOut`, …) and must NOT be treated
-/// as a version mismatch — retrying those is correct.
+/// handshake via QUIC strict-ALPN (`NoApplicationProtocol`, crypto error
+/// 0x178): the peer aborts, surfaced as `ConnectError::Connection {
+/// ConnectionError::ConnectionClosed }` within ~100 ms. Network problems
+/// surface as other variants (`TimedOut`, …) and must NOT be treated as a
+/// version mismatch — retrying those is correct.
 pub(crate) fn is_peer_refusal(err: &iroh::endpoint::ConnectError) -> bool {
     matches!(
         err,
@@ -342,114 +347,70 @@ async fn listen_loop(dialer: Arc<ServiceDialer>) {
     }
 }
 
-/// Distinguishes "peer refused the multiplex ALPN" (a version mismatch the
-/// caller may fall back from) from every other dial failure.
-#[derive(Debug)]
-enum MultiplexError {
-    Refused(anyhow::Error),
-    Other(anyhow::Error),
-}
-
 /// Tunnel one local client according to the service's multiplex mode.
 ///
-/// See the module docs for the mode semantics. Errors close only this local
-/// client's channel.
+/// See the module docs for the negotiation semantics. Errors close only this
+/// local client's channel.
 async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Result<()> {
     match dialer.mode {
         MultiplexMode::Off => dialer.pipe_legacy(local).await,
-        MultiplexMode::On => match dialer.open_multiplexed().await {
-            Ok((send, recv)) => crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await,
-            Err(MultiplexError::Refused(inner)) => Err(inner.context(
-                "multiplex = \"on\" but the serve peer refused the multiplex ALPN \
-                 (it is pre-0.2.0?); use multiplex = \"auto\" or \"off\"",
-            )),
-            Err(MultiplexError::Other(inner)) => Err(inner),
-        },
-        MultiplexMode::Auto => {
-            if dialer.refused.load(Ordering::Acquire) {
-                // Known pre-0.2.0 peer (refused earlier): legacy path for
-                // this channel; the last channel out re-probes multi.
-                return dialer.pipe_legacy_fallback(local).await;
-            }
-            match dialer.open_multiplexed().await {
-                Ok((send, recv)) => crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await,
-                Err(MultiplexError::Refused(e)) => {
-                    tracing::info!(
-                        svc = %dialer.svc_name,
-                        "serve peer refused multiplex ALPN ({e:#}), \
-                         falling back to one-connection-per-channel"
-                    );
-                    dialer.note_refusal();
-                    dialer.pipe_legacy_fallback(local).await
-                }
-                Err(MultiplexError::Other(e)) => Err(e),
-            }
-        }
+        MultiplexMode::On => dialer.pipe_multiplex_only(local).await,
+        MultiplexMode::Auto => dialer.pipe_negotiated(local).await,
     }
 }
 
 impl ServiceDialer {
-    /// Multiplexed path, dial phase: get (or redial) the shared connection
-    /// and open one bidirectional stream on it for this channel.
-    ///
-    /// If `open_bi` fails with a connection-level error, the cache is dropped
-    /// and exactly one redial + retry is attempted before giving up — a dead
-    /// connection surfaces as EOF-style errors on the active channels and the
-    /// next channel gets a fresh one.
-    async fn open_multiplexed(
-        &self,
-    ) -> std::result::Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), MultiplexError>
-    {
-        let conn = self.get_or_dial_multi().await.map_err(classify)?;
-        // open_bi returns (SendStream, RecvStream) — send first. Our pipe
-        // wants the remote pair as (read, write) = (recv, send), so the
-        // caller swaps.
-        match conn.open_bi().await {
-            Ok(pair) => Ok(pair),
-            Err(e) => {
-                tracing::warn!(
-                    svc = %self.svc_name,
-                    "multiplexed open_bi failed: {e}, redialing once"
-                );
-                self.invalidate_multi().await;
-                let conn = self.get_or_dial_multi().await.map_err(classify)?;
-                conn.open_bi()
-                    .await
-                    .context("open bidirectional stream failed after redial")
-                    .map_err(MultiplexError::Other)
-            }
+    /// `auto`: one dial offering both ALPNs; the negotiated ALPN picks the
+    /// mode (multiplexed stream on the shared connection, or this channel
+    /// rides the negotiated legacy connection alone).
+    async fn pipe_negotiated(&self, local: TcpStream) -> Result<()> {
+        let conn = self.get_or_dial_multi(true).await?;
+        if conn.alpn() == self.multi_alpn.as_slice() {
+            let (send, recv) = self.open_bi_with_redial(&conn).await?;
+            crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await
+        } else {
+            // The serve peer chose the legacy ALPN (pre-0.2.0 peer): this
+            // connection carries this channel only — the pre-0.2.0 behavior.
+            // The next channel re-offers both ALPNs, so an upgraded serve
+            // peer starts multiplexing without any state here.
+            self.pipe_channel_on(&conn, local).await
         }
     }
 
-    /// Legacy path (mode `off`): exactly the pre-0.2.0 behavior — one iroh
-    /// connection per local client, retried with backoff until it connects.
+    /// `on`: multiplex or a loud, fast error — never fall back.
+    async fn pipe_multiplex_only(&self, local: TcpStream) -> Result<()> {
+        // Multi-only offer: a pre-0.2.0 peer refuses at the handshake
+        // (fail-fast, see is_peer_refusal) instead of negotiating legacy.
+        let conn = self.get_or_dial_multi(false).await?;
+        debug_assert_eq!(conn.alpn(), self.multi_alpn.as_slice());
+        let (send, recv) = self.open_bi_with_redial(&conn).await?;
+        crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await
+    }
+
+    /// `off`: exactly the pre-0.2.0 behavior — one iroh connection per local
+    /// client, retried with backoff until it connects.
     async fn pipe_legacy(&self, local: TcpStream) -> Result<()> {
-        self.legacy_connect_and_pipe(local).await
-    }
-
-    /// Legacy path taken because the peer refused multiplexing (`auto`
-    /// fallback): same as [`ServiceDialer::pipe_legacy`] plus fallback
-    /// bookkeeping — while fallback channels exist the service stays legacy;
-    /// the last one out clears the refusal so multi is re-probed.
-    async fn pipe_legacy_fallback(&self, local: TcpStream) -> Result<()> {
-        self.legacy_channel_started();
-        let res = self.legacy_connect_and_pipe(local).await;
-        self.legacy_channel_finished();
-        res
-    }
-
-    async fn legacy_connect_and_pipe(&self, local: TcpStream) -> Result<()> {
-        // iroh 1.0's Endpoint::connect does NOT reuse an existing connection
-        // — every call is a fresh QUIC connection (relay session + TLS
-        // handshake). That is precisely the cost multiplexing removes; this
-        // path keeps the pre-0.2.0 one-connection-per-channel semantics.
         let conn =
             crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn, |_| true).await?;
+        self.pipe_channel_on(&conn, local).await
+    }
 
+    /// Pipe one channel over an already-established connection that this
+    /// channel owns exclusively (both legacy paths).
+    async fn pipe_channel_on(
+        &self,
+        conn: &iroh::endpoint::Connection,
+        local: TcpStream,
+    ) -> Result<()> {
+        // iroh 1.0's Endpoint::connect does NOT reuse an existing connection
+        // — every call is a fresh QUIC connection (relay session + TLS
+        // handshake). That is precisely the cost multiplexing removes; the
+        // legacy paths keep the pre-0.2.0 one-connection-per-channel
+        // semantics.
         let remote_id = conn.remote_id();
         tracing::info!(peer = %remote_id, %self.svc_name, "connected to serve peer");
         crate::role_run::spawn_disconnect_watcher(
-            &conn,
+            conn,
             remote_id.to_string(),
             format!("disconnected from serve peer (service {})", self.svc_name),
         );
@@ -461,14 +422,41 @@ impl ServiceDialer {
         crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
         Ok(())
     }
-}
 
-/// Map a dial failure to its [`MultiplexError`] class by refusal-ness.
-fn classify(e: iroh::endpoint::ConnectError) -> MultiplexError {
-    if is_peer_refusal(&e) {
-        MultiplexError::Refused(anyhow::Error::new(e))
-    } else {
-        MultiplexError::Other(anyhow::Error::new(e))
+    /// Open one bidirectional stream on the shared multiplexed connection.
+    ///
+    /// If `open_bi` fails with a connection-level error, the cache is dropped
+    /// and exactly one redial + retry is attempted before giving up — a dead
+    /// connection surfaces as EOF-style errors on the active channels and the
+    /// next channel gets a fresh one.
+    async fn open_bi_with_redial(
+        &self,
+        conn: &iroh::endpoint::Connection,
+    ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+        // open_bi returns (SendStream, RecvStream) — send first. Our pipe
+        // wants the remote pair as (read, write) = (recv, send), so the
+        // caller swaps.
+        match conn.open_bi().await {
+            Ok(pair) => Ok(pair),
+            Err(e) => {
+                tracing::warn!(
+                    svc = %self.svc_name,
+                    "multiplexed open_bi failed: {e}, redialing once"
+                );
+                self.invalidate_multi().await;
+                let offer_legacy = self.mode != MultiplexMode::On;
+                let conn = self.get_or_dial_multi(offer_legacy).await?;
+                if conn.alpn() != self.multi_alpn.as_slice() {
+                    anyhow::bail!(
+                        "service '{}': peer negotiated the legacy ALPN while reopening a stream",
+                        self.svc_name
+                    );
+                }
+                conn.open_bi()
+                    .await
+                    .context("open bidirectional stream failed after redial")
+            }
+        }
     }
 }
 
@@ -476,5 +464,5 @@ fn classify(e: iroh::endpoint::ConnectError) -> MultiplexError {
 // `#[non_exhaustive]` with a stack-error `meta` field, so a refusal cannot
 // be constructed outside the iroh crate. The classification is verified
 // end-to-end by the fallback integration test (a serve endpoint that
-// registers only the legacy ALPN must be detected and fallen back from —
+// registers only the legacy ALPN refuses a multi-only offer fast —
 // see tests/serve_access_tunnel.rs).

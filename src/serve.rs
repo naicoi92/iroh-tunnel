@@ -73,13 +73,19 @@ impl RoleStrategy for ServeStrategy {
     async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
         // Collect every service's ALPNs up front — iroh 1.0 registers ALPNs
         // on the endpoint at build time (not filtered per-accept). Both the
-        // legacy and the multiplex variant map to the same service, so
+        // multiplex and the legacy variant map to the same service, so
         // pre-0.2.0 access peers keep working unchanged while 0.2.0 access
         // peers can negotiate multiplexing.
+        //
+        // ORDER MATTERS: rustls's server-side ALPN selection follows the
+        // server's registration order (first registered wins among the
+        // client's offers), so the multiplex variant must come FIRST — an
+        // access peer offering [multi, legacy] then negotiates multi, while
+        // a pre-0.2.0 peer offering only [legacy] still gets legacy.
         let alpns: Vec<Vec<u8>> = cfg
             .services
             .iter()
-            .flat_map(|s| [proto::alpn_for(&s.name), proto::multiplex_alpn_for(&s.name)])
+            .flat_map(|s| [proto::multiplex_alpn_for(&s.name), proto::alpn_for(&s.name)])
             .collect();
         endpoint::create_serve_endpoint(&cfg.node, &alpns).await
     }
