@@ -24,6 +24,11 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    env:
+      # sccache wraps rustc to cache compilation output across runs. Set at job
+      # level so every `cargo` invocation (fmt/clippy/build) is covered.
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       # persist-credentials: false hardens PR-triggered jobs: this workflow only
       # reads source (contents: read), so GITHUB_TOKEN should not be persisted
@@ -40,6 +45,9 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
@@ -52,6 +60,9 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -64,6 +75,9 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: cargo test
         run: cargo test --all-features

@@ -37,6 +37,11 @@ jobs:
   release-linux:
     name: release (linux)
     runs-on: ubuntu-latest
+    env:
+      # sccache caches compilation output across release runs. Job-level so the
+      # GoReleaser `before.hooks` + cargo-zigbuild cross builds are both covered.
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -49,6 +54,12 @@ jobs:
         run: |
           rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
           rustup default 1.91
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # mlugg/setup-zig puts `zig` on PATH for subsequent steps, which
       # GoReleaser's Rust builder (cargo-zigbuild) relies on. Pinned to 0.13.0
@@ -90,6 +101,9 @@ jobs:
     name: release (macos)
     runs-on: macos-14
     needs: release-linux
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -100,6 +114,12 @@ jobs:
         run: |
           rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
           rustup default 1.91
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # GoReleaser's Rust builder always invokes `cargo zigbuild` even for the
       # native target, so zig + cargo-zigbuild must be present on macOS too.
