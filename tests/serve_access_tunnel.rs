@@ -282,14 +282,9 @@ impl MiniServe {
 /// counter when done.
 async fn echo_stream(mut recv: RecvStream, mut send: SendStream, streams: Arc<AtomicUsize>) {
     let mut buf = [0u8; 4096];
-    loop {
-        match recv.read(&mut buf).await {
-            Ok(Some(n)) => {
-                if send.write_all(&buf[..n]).await.is_err() {
-                    break;
-                }
-            }
-            _ => break,
+    while let Ok(Some(n)) = recv.read(&mut buf).await {
+        if send.write_all(&buf[..n]).await.is_err() {
+            break;
         }
     }
     let _ = send.finish();

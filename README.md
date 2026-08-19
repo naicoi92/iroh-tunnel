@@ -148,6 +148,61 @@ Status file (written by `run`, for monitoring): `~/.local/state/iroh-tunnel/stat
 
 ---
 
+## Multiplexing (0.2.0)
+
+By default (`multiplex = "auto"` per service on the access side), each service
+keeps **one long-lived Iroh connection** between access and serve, and every
+local TCP connection rides its own QUIC bidirectional stream on that
+connection. The relay session and QUIC/TLS handshake are paid once, not once
+per channel.
+
+The mode is negotiated with the serve peer in a single handshake via
+standard ALPN offer negotiation (RFC 7301): access offers both
+`iroh-tunnel/<name>/multi` and the legacy `iroh-tunnel/<name>`; a 0.2.0+
+serve picks the multiplex variant, an older serve picks legacy and the
+service transparently behaves like before (one connection per channel).
+There is no hang and no double dial — mixed versions interoperate on the
+first connect. A serve peer that later upgrades starts multiplexing on the
+next dial automatically.
+
+```toml
+# access.toml
+[[services]]
+name = "postgres"
+node_id = "…"
+protocol = "tcp"
+host = "127.0.0.1"
+port = 5433
+multiplex = "auto"   # auto (default) | on | off
+```
+
+- **`auto`** — offer both ALPNs; the serve peer decides. Best for mixed
+  version fleets.
+- **`on`** — multiplex only. A pre-0.2.0 serve refuses the handshake
+  immediately (~100 ms, `NoApplicationProtocol`), which surfaces as a loud
+  error telling you to use `auto`/`off`.
+
+**When it helps:** many parallel channels to one serve node (a DB pool, many
+HTTP clients, SSH sessions). **When to turn it off:** if you want hard
+isolation between channels — with `off`, a channel's failure domain is its
+own connection.
+
+**Operational notes:**
+
+- Both roles set `max_concurrent_bidi_streams = 256` and a 5 s QUIC
+  keep-alive. 256 is headroom, not a requirement — tune it to your real
+  concurrent-channel count. Worst-case buffer memory scales with
+  `max_concurrent_bidi_streams × stream_receive_window`, so raising it has a
+  memory cost; when all slots are busy, a new channel's `open_bi` is
+  flow-control blocked until another stream closes.
+- A dead multiplexed connection surfaces as EOF on its channels (correct
+  port-forward semantics); the next channel dials a fresh connection.
+- In the serve's `status.json`, `active_connections` counts **active
+  streams** (in-flight pipes), which is the operator-meaningful number once
+  one connection can carry many channels.
+
+---
+
 ## Run as a system service
 
 `iroh-tunnel service ...` manages a systemd unit (Linux) or launchd plist
