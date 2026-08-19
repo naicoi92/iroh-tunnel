@@ -94,6 +94,32 @@ pub struct AccessService {
     #[serde(default = "default_host")]
     pub host: String,
     pub port: u16,
+    /// Stream multiplexing mode for this service (since 0.2.0).
+    ///
+    /// - `auto` (default): dial the multiplex ALPN first; if the serve peer
+    ///   refuses it (pre-0.2.0 serve), fall back to the legacy
+    ///   one-connection-per-channel behavior automatically.
+    /// - `on`: always dial the multiplex ALPN; a pre-0.2.0 serve peer is an
+    ///   error, never fall back.
+    /// - `off`: always use the legacy one-connection-per-channel behavior.
+    ///
+    /// Only meaningful for TCP services (the UDP path is unchanged); the
+    /// field is accepted regardless so configs stay forward-compatible.
+    #[serde(default)]
+    pub multiplex: MultiplexMode,
+}
+
+/// Per-service stream multiplexing mode. See [`AccessService::multiplex`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MultiplexMode {
+    /// Dial multiplex ALPN first, fall back to legacy on refusal.
+    #[default]
+    Auto,
+    /// Multiplex only; refusal is an error.
+    On,
+    /// Legacy one-connection-per-channel.
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -540,6 +566,7 @@ mod tests {
                 protocol: Protocol::Tcp,
                 host: "127.0.0.1".into(),
                 port: 5432,
+                multiplex: MultiplexMode::default(),
             }],
             ..Default::default()
         };
@@ -559,9 +586,66 @@ mod tests {
                 protocol: Protocol::Tcp,
                 host: "127.0.0.1".into(),
                 port: 5432,
+                multiplex: MultiplexMode::default(),
             }],
             ..Default::default()
         };
         cfg.validate().unwrap();
+    }
+    #[test]
+    fn access_multiplex_defaults_to_auto() {
+        // TOML without the field parses with mode = auto (forward/backward
+        // compatible: pre-0.2.0 configs keep working).
+        let toml = r#"
+[[services]]
+name = "db"
+node_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+protocol = "tcp"
+port = 5432
+"#;
+        let cfg: AccessConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.services[0].multiplex, MultiplexMode::Auto);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn access_multiplex_parses_all_modes() {
+        let id = "a".repeat(64);
+        for (raw, want) in [
+            ("auto", MultiplexMode::Auto),
+            ("on", MultiplexMode::On),
+            ("off", MultiplexMode::Off),
+        ] {
+            let toml = format!(
+                r#"
+[[services]]
+name = "db"
+node_id = "{id}"
+protocol = "tcp"
+port = 5432
+multiplex = "{raw}"
+"#
+            );
+            let cfg: AccessConfig = toml::from_str(&toml).unwrap();
+            assert_eq!(cfg.services[0].multiplex, want, "mode {raw}");
+            cfg.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn access_multiplex_rejects_unknown_mode() {
+        let id = "a".repeat(64);
+        let toml = format!(
+            r#"
+[[services]]
+name = "db"
+node_id = "{id}"
+protocol = "tcp"
+port = 5432
+multiplex = "sometimes"
+"#
+        );
+        let err = toml::from_str::<AccessConfig>(&toml).unwrap_err();
+        assert!(format!("{err}").contains("sometimes"));
     }
 }
