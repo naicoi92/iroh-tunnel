@@ -14,13 +14,13 @@
 //! the general error (exit 1) with an actionable message naming the exact
 //! path (see README §Exit codes).
 
+use std::io::Write;
 use std::path::Path;
-
-use anyhow::{anyhow, Context, Result};
-use serde::de::DeserializeOwned;
 
 use crate::conn_path::TransportStatus;
 use crate::status::{AccessStatusFile, StatusFile, StatusRole, StatusWriter};
+use anyhow::{anyhow, Context, Result};
+use serde::de::DeserializeOwned;
 
 /// Entry point for `iroh-tunnel <role> status [--json]`.
 ///
@@ -47,29 +47,74 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
                 .context(format!("failed to read status file: {}", path.display())));
         }
     };
+    // (pid, started_at) — both schemas carry them; the liveness warning
+    // below needs them before the output shape diverges.
+    let (pid, started_at) = match role {
+        StatusRole::Serve => {
+            let file: StatusFile = parse_status_file(&body, &path)?;
+            (file.pid, file.started_at)
+        }
+        StatusRole::Access => {
+            let file: AccessStatusFile = parse_status_file(&body, &path)?;
+            (file.pid, file.started_at)
+        }
+    };
+    // Cross-check the writer's pid: a graceful shutdown removes the file,
+    // but a crash or `kill -9` leaves it behind — stale, yet often still
+    // useful (last-known state). Warn on stderr, keep printing on stdout.
+    warn_if_writer_dead(role, pid, started_at);
     if json {
         // Verbatim file contents, not a re-serialization: anything piping
         // this command must get byte-identical JSON to reading the file.
-        // Validated through the SAME typed parse as the table path first —
-        // full parity, so a corrupt file fails identically either way.
-        match role {
-            StatusRole::Serve => {
-                let _: StatusFile = parse_status_file(&body, &path)?;
-            }
-            StatusRole::Access => {
-                let _: AccessStatusFile = parse_status_file(&body, &path)?;
-            }
-        }
-        println!("{body}");
-        return Ok(());
+        // Already validated through the typed parse above.
+        return print_line(&body);
     }
     let table = match role {
-        StatusRole::Serve => render_serve_status(&parse_status_file(&body, &path)?),
-        StatusRole::Access => render_access_status(&parse_status_file(&body, &path)?),
+        StatusRole::Serve => render_serve_status(&parse_status_file::<StatusFile>(&body, &path)?),
+        StatusRole::Access => {
+            render_access_status(&parse_status_file::<AccessStatusFile>(&body, &path)?)
+        }
     };
-    println!("{table}");
-    Ok(())
+    print_line(&table)
 }
+
+/// Write one line to stdout, tolerating a closed pipe.
+///
+/// `println!` panics on a broken pipe (exit 101) — but a consumer closing
+/// early (`iroh-tunnel serve status | head`) is a normal exit for this
+/// command, not an error. Any other write failure propagates.
+fn print_line(line: &str) -> Result<()> {
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{line}") {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e).context("failed to write status output")),
+    }
+}
+
+/// Warn when the process that wrote the snapshot is gone (unix only).
+///
+/// Probes `kill(pid, 0)`: success or `EPERM` (exists, owned by another
+/// user) means alive; `ESRCH` means dead. Non-unix builds skip the check —
+/// there is no portable probe, so no warning is better than a wrong one.
+#[cfg(unix)]
+fn warn_if_writer_dead(role: StatusRole, pid: u32, started_at: u64) {
+    // SAFETY: kill(2) with signal 0 performs existence and permission
+    // checks only — no signal is ever delivered.
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied;
+    if !alive {
+        eprintln!(
+            "warning: {} appears stopped (pid {pid} not running); showing last snapshot from epoch {started_at}",
+            role.name()
+        );
+    }
+}
+
+/// Non-unix twin of [`warn_if_writer_dead`]: no portable pid-liveness
+/// probe, so the check is skipped silently.
+#[cfg(not(unix))]
+fn warn_if_writer_dead(_role: StatusRole, _pid: u32, _started_at: u64) {}
 
 /// Parse a status file body as `T`, with the path in the error context.
 fn parse_status_file<T: DeserializeOwned>(body: &str, path: &Path) -> Result<T> {

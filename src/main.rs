@@ -67,10 +67,11 @@ async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Res
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
-            match role {
-                "serve" => serve::run(&path).await,
-                "access" => access::run(&path).await,
-                _ => unreachable!("unknown role {role}"),
+            // The typed role tag exhaustively selects the run handler —
+            // the compiler enforces both arms, no string fallthrough.
+            match status_role {
+                StatusRole::Serve => serve::run(&path).await,
+                StatusRole::Access => access::run(&path).await,
             }
         }
         RoleCmd::Config { action } => dispatch_config(role, action),

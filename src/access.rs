@@ -285,6 +285,13 @@ impl AccessStrategy {
             }
         };
 
+        // Resolve the status path BEFORE `status` moves into the flush
+        // task: on graceful shutdown the run loop removes the file, so a
+        // `<role> status` reader never mistakes a stale snapshot for a live
+        // role. A crash skips this cleanup — the reader-side pid-liveness
+        // warning covers exactly that case.
+        let status_path = StatusWriter::access().path_for_state_dir(status.state_dir.as_deref());
+
         tracing::info!("access endpoint ready, listening for local clients");
         let flush = tokio::spawn(access_status_flush_loop(status, dialers.clone(), seeded));
         for dialer in dialers {
@@ -299,6 +306,17 @@ impl AccessStrategy {
         }
         flush.abort();
         ep.close().await;
+        // Best-effort status-file removal on graceful exit (the flush task
+        // is already aborted, so nothing can rewrite it afterwards). A
+        // missing file was never written — not an error; any other failure
+        // is logged at debug, the exit path must stay clean.
+        if let Ok(path) = &status_path {
+            if let Err(e) = tokio::fs::remove_file(path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("failed to remove status file: {e}");
+                }
+            }
+        }
         Ok(())
     }
 }

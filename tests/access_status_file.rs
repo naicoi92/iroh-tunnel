@@ -272,8 +272,18 @@ multiplex = true
 
     let _ = access_tx.send(());
     finish_role(&access_role, "access").await?;
+    // Graceful shutdown removes the role's status file — a fresh
+    // `<role> status` must see "not running", not a stale snapshot.
+    assert!(
+        !access_status_path.exists(),
+        "access-status.json must be removed on graceful shutdown"
+    );
     let _ = serve_tx.send(());
     finish_role(&serve_role, "serve").await?;
+    assert!(
+        !serve_status_path.exists(),
+        "serve-status.json must be removed on graceful shutdown"
+    );
     echo.abort();
     Ok(())
 }
@@ -376,8 +386,13 @@ async fn echo_server(listener: TcpListener) {
 }
 
 /// Retry TCP connect until `deadline`, polling both role tasks so an early
-/// exit (config error, bind race) fails fast with the role's real error
-/// instead of a misleading connect timeout.
+/// exit fails fast with the role's real error instead of a misleading
+/// connect timeout.
+///
+/// Only a CONFIG error exits the role task outright — a bind failure is
+/// merely logged inside the role's per-service listen task and the role
+/// keeps running, so it surfaces as the deadline expiry below; the hint in
+/// the bail message points at the logs to check.
 async fn retry_connect(
     addr: std::net::SocketAddr,
     deadline: Duration,
@@ -396,7 +411,10 @@ async fn retry_connect(
             Ok(s) => return Ok(s),
             Err(e) => {
                 if start.elapsed() > deadline {
-                    anyhow::bail!("could not connect to {addr} within {deadline:?}: {e}");
+                    anyhow::bail!(
+                        "could not connect to {addr} within {deadline:?}: {e} \
+                         (the access listener may have failed to bind — check its logs)"
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

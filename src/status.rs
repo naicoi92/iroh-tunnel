@@ -158,10 +158,10 @@ pub struct AccessServiceStatus {
 /// The typed snapshot a role saves — re-tying each schema to its role at
 /// the save boundary.
 ///
-/// [`StatusWriter`] is role-tagged and its save methods take this enum,
-/// so a serve writer serializing an access schema (or vice versa) is
-/// caught by the writer's role debug-assert instead of silently writing
-/// the wrong schema under the right file name.
+/// [`StatusWriter`] is role-tagged and its save methods take this enum;
+/// [`StatusWriter::save_to`] rejects a mismatched writer/payload pair with
+/// a runtime role check that errors in every build profile, instead of
+/// silently writing the wrong schema under the right file name.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatusPayload {
     Serve(StatusFile),
@@ -314,6 +314,21 @@ impl StatusWriter {
         match state_dir {
             Some(dir) => self.save_to(dir, value),
             None => self.save(value),
+        }
+    }
+
+    /// The path [`Self::save_with_state_dir`] writes to for this state-dir
+    /// choice: `Some(dir)` → `<dir>/<file_name>`, `None` → the env-aware
+    /// default.
+    ///
+    /// The read/remove counterpart of the save side, for callers that clean
+    /// the file up on graceful shutdown — the flush task owns the writer,
+    /// so the run loop resolves the same path up front instead of keeping a
+    /// second handle to it.
+    pub fn path_for_state_dir(&self, state_dir: Option<&Path>) -> Result<PathBuf> {
+        match state_dir {
+            Some(dir) => Ok(dir.join(self.file_name())),
+            None => self.path(),
         }
     }
 

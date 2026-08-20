@@ -197,6 +197,14 @@ impl ServeStrategy {
             accept_loop(&accept_ep, targets, accept_peers).await;
         });
 
+        // Resolve the status path BEFORE `status` moves into the flush
+        // task: on graceful shutdown the run loop removes the file, so a
+        // `<role> status` reader never mistakes a stale snapshot for a live
+        // role. A crash skips this cleanup — the reader-side pid-liveness
+        // warning covers exactly that case.
+        let status_path =
+            crate::status::StatusWriter::serve().path_for_state_dir(status.state_dir.as_deref());
+
         // Refresh serve-status.json when the rendered snapshot changes —
         // stream counters, connected peers, or their transport states — at
         // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
@@ -210,6 +218,17 @@ impl ServeStrategy {
         accept.abort();
         flush.abort();
         ep.close().await;
+        // Best-effort status-file removal on graceful exit (the flush task
+        // is already aborted, so nothing can rewrite it afterwards). A
+        // missing file was never written — not an error; any other failure
+        // is logged at debug, the exit path must stay clean.
+        if let Ok(path) = &status_path {
+            if let Err(e) = tokio::fs::remove_file(path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("failed to remove status file: {e}");
+                }
+            }
+        }
         Ok(())
     }
 }
