@@ -3,11 +3,11 @@
 #
 # Implements docs/self-hosted-relay.md §5: installs the iroh-relay binary from
 # GitHub Releases (queries the API for the asset and verifies its sha256 digest),
-# writes the TOML config (loopback binds, metrics, access.shared_token), installs
+# writes the TOML config (loopback binds, metrics, optional access token), installs
 # a systemd service + hang-guard timer, and sets up Caddy (official apt repo,
 # ACME TLS) reverse-proxying to 127.0.0.1:3340.
 #
-# Idempotent: safe to re-run — the access token is reused from the existing config.
+# Idempotent: safe to re-run — the persisted token survives open/token toggling.
 #
 # Usage:
 #   ./install-relay-debian.sh [--domain relay.example.com] [--token <token>]
@@ -23,8 +23,11 @@
 # Options:
 #   --domain <d>       Public hostname of the relay (A record -> LXC public IP).
 #                      If omitted the script prompts (requires a TTY).
-#   --token <t>        Access token (shared_token). If omitted and no existing
-#                      config: prompt (Enter = generate via openssl rand -hex 32).
+#   --enable-token     Require a shared access token (recommended on a public
+#                      IP, decision D2). Default: open relay. Re-run without
+#                      it to open the relay again.
+#   --token <t>        Access token (only used with --enable-token). If
+#                      omitted: reuse the persisted token or generate one.
 #   --version <v>      Pin a release version (default: v1.0.3).
 #   --latest           Use the latest release instead of the pin.
 #   --acme-email <e>   Email for the ACME account (optional).
@@ -48,6 +51,7 @@ DOMAIN=""
 TOKEN=""
 ACME_EMAIL=""
 APPLY_FIREWALL=0
+ENABLE_TOKEN=0
 ENABLE_QUIC=0
 QUIC_CERT=""
 QUIC_KEY=""
@@ -61,7 +65,7 @@ RELAY_PORT=3340
 METRICS_PORT=9090
 CADDY_CERTS=/var/lib/caddy/.local/share/caddy/certificates
 
-usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "==> $*"; }
@@ -74,6 +78,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --token) TOKEN="${2:-}"; shift 2 ;;
+    --enable-token) ENABLE_TOKEN=1; shift ;;
     --version) IROH_VERSION="${2:-}"; shift 2 ;;
     --latest) LATEST=1; shift ;;
     --acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
@@ -120,29 +125,48 @@ if [ -z "$DOMAIN" ]; then
   done
 fi
 
-# Token: flag > existing config > prompt / generate
-if [ -z "$TOKEN" ] && [ -f "$CONFIG_FILE" ]; then
-  TOKEN=$(sed -n 's/^access\.shared_token = \["\([^"]*\)"\]$/\1/p' "$CONFIG_FILE" || true)
-  [ -n "$TOKEN" ] && log "reusing token from existing config"
+# Access token — only active with --enable-token (default: open relay).
+# TOKEN_FILE persists the token so toggling --enable-token on/off never loses it.
+TOKEN_FILE=$CONFIG_DIR/token
+# Migrate a token embedded in an older config.toml (pre---enable-token script)
+if [ ! -f "$TOKEN_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+  MIGRATED_TOKEN=$(sed -n 's/^access\.shared_token = \["\([^"]*\)"\]$/\1/p' "$CONFIG_FILE" || true)
+  if [ -n "$MIGRATED_TOKEN" ]; then
+    mkdir -p "$CONFIG_DIR"
+    printf '%s' "$MIGRATED_TOKEN" > "$TOKEN_FILE"
+    chmod 0600 "$TOKEN_FILE"
+    log "migrated existing token from config.toml to $TOKEN_FILE"
+  fi
 fi
-if [ -z "$TOKEN" ]; then
-  if [ -t 0 ]; then
-    read -r -p "Access token (Enter = generate): " TOKEN
+
+if [ "$ENABLE_TOKEN" -eq 1 ]; then
+  # --token flag > persisted token file > prompt / generate
+  if [ -z "$TOKEN" ] && [ -f "$TOKEN_FILE" ]; then
+    TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+    [ -n "$TOKEN" ] && log "reusing persisted token from $TOKEN_FILE"
   fi
   if [ -z "$TOKEN" ]; then
-    if command -v openssl >/dev/null 2>&1; then
-      TOKEN=$(openssl rand -hex 32)
-    else
-      TOKEN=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+    if [ -t 0 ]; then
+      read -r -p "Access token (Enter = generate): " TOKEN
     fi
-    log "generated a new token (openssl rand -hex 32)"
+    if [ -z "$TOKEN" ]; then
+      if command -v openssl >/dev/null 2>&1; then
+        TOKEN=$(openssl rand -hex 32)
+      else
+        TOKEN=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+      fi
+      log "generated a new token (openssl rand -hex 32)"
+    fi
   fi
+  # TOML string safety: the token lands inside double quotes in the config
+  case "$TOKEN" in
+    *'"'*) die "token contains \" — cannot be written to TOML safely" ;;
+  esac
+  [ -n "$TOKEN" ] || die "empty token (the server refuses to start)"
+else
+  [ -n "$TOKEN" ] && echo "WARN: --token ignored (only used with --enable-token)" >&2
+  echo "WARN: relay will be OPEN (access = everyone) on a public IP — anyone can use it (D2). Re-run with --enable-token to lock it." >&2
 fi
-# TOML string safety: the token lands inside double quotes in the config
-case "$TOKEN" in
-  *'"'*) die "token contains \" — cannot be written to TOML safely" ;;
-esac
-[ -n "$TOKEN" ] || die "empty token (the server refuses to start)"
 
 # ---------------------------------------------------------------------------
 # Deps
@@ -219,8 +243,12 @@ http_bind_addr = "127.0.0.1:${RELAY_PORT}"      # default is [::] — must set l
 enable_metrics = true
 metrics_bind_addr = "127.0.0.1:${METRICS_PORT}" # default is [::]:9090 — loopback, separate tunnel
 
-access.shared_token = ["${TOKEN}"]
 EOF
+if [ "$ENABLE_TOKEN" -eq 1 ]; then
+  printf 'access.shared_token = ["%s"]\n' "$TOKEN" >> "$CONFIG_FILE"
+  printf '%s' "$TOKEN" > "$TOKEN_FILE"
+  chmod 0600 "$TOKEN_FILE"
+fi
 if [ "$ENABLE_QUIC" -eq 1 ]; then
   cat >> "$CONFIG_FILE" <<EOF
 
@@ -358,12 +386,11 @@ cat <<SUMMARY
 
  URL          : https://${DOMAIN}   (DNS A record -> the LXC's public IP)
  Health local : curl http://127.0.0.1:${RELAY_PORT}/healthz
- Health public: curl -sI https://${DOMAIN}/healthz   (once DNS + ACME are done)
+ Health public: curl -s -o /dev/null -w '%{http_code}\n' https://${DOMAIN}/healthz  (expect 200; HEAD gives 404 by design)
  Metrics      : curl http://127.0.0.1:${METRICS_PORT}/metrics
  QAD          : $( [ "$ENABLE_QUIC" -eq 1 ] && echo "enabled — udp/${QUIC_PORT} (cert ${QUIC_CERT})" || echo 'disabled (enable with --enable-quic)')
 
- Access token (keep secret — both client sides need it):
-   ${TOKEN}
+ Access       : $( [ "$ENABLE_TOKEN" -eq 1 ] && printf 'token required (keep secret):\n   %s' "$TOKEN" || echo 'OPEN (everyone) — lock with --enable-token (recommended, D2)')
 
  Client wiring (docs/self-hosted-relay.md §"Wiring the clients"):
    - Rust    : RelayMode::Custom(url) + RelayMap::with_auth_token(token)

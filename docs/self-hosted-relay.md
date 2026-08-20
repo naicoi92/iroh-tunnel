@@ -54,7 +54,7 @@ Internet ──► LXC public IP (e.g. 203.0.113.10) — Debian 12, systemd
 | # | Decision | Choice | Why |
 |---|---|---|---|
 | D1 | Traffic gateway | **Caddy** (default) | zero-config ACME, streaming without buffering; swap later *with measurements*, not before |
-| D2 | Access control | **`shared_token` mandatory** (public IP = internet-facing) | an open relay on the internet will be abused |
+| D2 | Access control | **Open by default; `--enable-token` to require a token** | token strongly recommended on a public IP (an open relay will be abused) — but deployment/testing may want it off first |
 | D3 | QUIC addr discovery | Off by default; `--enable-quic` available | parity item for native↔native peers (n0's farm runs it); browser peers can't use it — see §5.4 |
 | D4 | LXC OS | **Debian 12** | glibc binary compat + official Caddy apt repo |
 | D5 | Metrics | On (9090, loopback) | measure real throughput instead of assuming |
@@ -82,8 +82,8 @@ curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/docs/inst
 # Or from a checkout of this repo — copy the script into the LXC and run as root:
 scp docs/install-relay-debian.sh root@<LXC-IP>:/tmp/
 ssh root@<LXC-IP> 'bash /tmp/install-relay-debian.sh --domain relay.<domain>'
-# Extra flags: --acme-email <email> · --apply-firewall (ufw) · --enable-quic (§5.4) · --version v1.0.3 | --latest · --token <t>
-# Re-runs are idempotent — the token is reused from the existing config.
+# Extra flags: --acme-email <email> · --apply-firewall (ufw) · --enable-quic (§5.4) · --enable-token (D2) · --version v1.0.3 | --latest · --token <t>
+# Re-runs are idempotent — the persisted token survives open/token toggling.
 ```
 
 ### 5.1 Create the LXC + install the binary
@@ -189,7 +189,8 @@ http_bind_addr = "127.0.0.1:3340"    # IMPORTANT: default is [::] (all interface
 enable_metrics = true
 metrics_bind_addr = "127.0.0.1:9090" # default is [::]:9090 — set loopback; scrape via a separate tunnel
 
-access.shared_token = ["<long-random-token>"]   # public IP → never "everyone"
+access.shared_token = ["<long-random-token>"]   # only written with --enable-token (default: open relay)
+# the token persists in /etc/iroh-relay/token — toggling --enable-token off/on keeps it
 # or via env: IROH_RELAY_ACCESS_TOKEN=<token> (overrides the config)
 ```
 
@@ -282,7 +283,7 @@ If pve-firewall is enabled on the container, mirror the same rules at the PVE la
 ### 5.8 Deployment checklist
 
 1. Create the LXC (5.1) + run the script (quick start above) → the script itself verifies `127.0.0.1:3340/healthz` = 200.
-2. DNS A record `relay.<domain>` → LXC IP → `curl -sI https://relay.<domain>/healthz` = 200 (ACME issues the cert on the first hit after DNS resolves).
+2. DNS A record `relay.<domain>` → LXC IP → `curl -s -o /dev/null -w '%{http_code}' https://relay.<domain>/healthz` = 200 (GET — HEAD returns 404 by design; ACME issues the cert on the first hit after DNS resolves).
 3. Firewall (5.7 — `--apply-firewall` or manual) + SSH hardening.
 4. `systemctl reboot` the LXC once to verify everything comes up by itself (relay + hang-guard timer + Caddy).
 5. Wire up the clients (next section) + run the verification checklist.
@@ -310,7 +311,7 @@ configured. The relay accepts the shared token either as
 
 ## Verification checklist (after deploy)
 
-- [ ] `curl -sI https://relay.<domain>/healthz` = 200 (Caddy TLS + relay alive)
+- [ ] `curl -s -o /dev/null -w '%{http_code}' https://relay.<domain>/healthz` = 200 (GET — HEAD returns 404 by design)
 - [ ] Client logs: endpoints register through the new relay (no more n0 hostnames)
 - [ ] Connections succeed through the new relay; throughput measurable via metrics 9090
 - [ ] QAD (if `--enable-quic`): `ss -ulnp | grep 7824` on the LXC shows the relay
@@ -318,7 +319,7 @@ configured. The relay accepts the shared token either as
       after a Caddy upgrade (storage layout is not a public API — §5.4)
 - [ ] `systemctl restart iroh-relay` + LXC `reboot` → clients reconnect, all services come back
 - [ ] From the internet: only 80/443 (and 7824/udp if enabled) open; 3340/9090 unreachable
-- [ ] Without a token → the relay refuses access (shared_token works)
+- [ ] With `--enable-token`: without a token → the relay refuses access; with a valid token → connects
 
 ## Risks / open items
 
