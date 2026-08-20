@@ -2,32 +2,45 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-20
+
+Self-hosted relay support: deploy guide + installer, relay authentication,
+per-service relay overrides.
+
 ### Added
+
+- **`relay_token` (both roles)**: `[node] relay_token` authenticates to
+  relays that enforce `access.shared_token` — sent as
+  `Authorization: Bearer` on the relay connection, applied to every relay
+  in `relay_urls` (home + failover). Single-token semantics: mixing relays
+  with different tokens is not supported; relays without access control
+  ignore the extra header. Validated non-empty/no-whitespace; never logged
+  or shown in status output.
+
+- **Per-service relay override (access)**: `[[services]] relay_urls` dials
+  that service's serve peer through its own relay set instead of
+  `[node] relay_urls` (absent/empty keeps the node fallback, then the n0
+  defaults). The access endpoint joins the union of node + service relays
+  so every dial has a live relay transport; each service's dialer attaches
+  only its own URLs. The serve peer must itself be registered on those
+  relays. Serve deliberately has no per-service relays — one endpoint, one
+  relay mode.
+
+- **Self-hosted relay deployment guide + installer**
+  (`docs/self-hosted-relay.md`, `docs/install-relay-debian.sh`): run your
+  own iroh-relay on a Debian 12/13 LXC with a public IP — Caddy ACME TLS
+  terminator, loopback binds, systemd + hang-guard timer, optional
+  `--enable-token` / `--enable-quic` (QUIC address discovery reusing
+  Caddy's cert with automatic reload), sha256-verified release download.
+  Facts verified against iroh-relay v1.0.3 source.
+
+### Changed
 
 - **Docs**: README rewritten as a full OSS landing page — badges, table of
   contents, comparison table (ngrok/cloudflared/Tailscale/frp/bore), use
   cases, FAQ/troubleshooting, security notes, acknowledgments. Claims
   corrected to TCP-only while UDP framing is not yet wired into the run
   path. Added CONTRIBUTING.md and SECURITY.md.
-- **BusyBox / SysV init service backend** (non-systemd Linux): `service`
-  subcommands now detect at runtime whether the host runs systemd
-  (`/run/systemd/system`, fallback `/proc/1/exe`) and, when it does not,
-  install an `/etc/init.d/S96iroh-tunnel-<role>` script instead of a systemd
-  unit — covering buildroot/BusyBox embedded devices such as the Sipeed
-  NanoKVM. The script is dependency-lean (plain `sh`, PID file, no
-  `start-stop-daemon`), starts after networking (boot order S96), stops with
-  SIGTERM + a 5 s grace window before SIGKILL, and both scopes map to the
-  system-wide `/etc/init.d` (BusyBox has no per-user services). Requires
-  root.
-
-### Changed
-
-- **CI**: sccache (`RUSTC_WRAPPER`) enabled on lint/test/build jobs to cache
-  rustc output across runs on top of `Swatinem/rust-cache`.
-- **Releases**: GoReleaser `draft: false` on both configs — a pushed tag now
-  publishes immediately instead of waiting for a manual publish step.
-- Dependency bumps: clap 4.6, tokio 1.53, toml 1.1, toml_edit 0.25, dirs 6,
-  which 8, data-encoding 2.11, regex 1.13.
 
 ## [0.2.0] — 2026-08-19
 
@@ -82,6 +95,26 @@ access node must talk to a serve peer that is not yet upgraded, set
   **streams** (in-flight pipes), refreshed by a 5 s flush task that only
   rewrites on change. With multiplexing one connection carries many
   channels, so streams are the operator-meaningful number.
+
+- **BusyBox / SysV init service backend** (non-systemd Linux): `service`
+  subcommands now detect at runtime whether the host runs systemd
+  (`/run/systemd/system`, fallback `/proc/1/exe`) and, when it does not,
+  install an `/etc/init.d/S96iroh-tunnel-<role>` script instead of a systemd
+  unit — covering buildroot/BusyBox embedded devices such as the Sipeed
+  NanoKVM. The script is dependency-lean (plain `sh`, PID file, no
+  `start-stop-daemon`), starts after networking (boot order S96), stops with
+  SIGTERM + a 5 s grace window before SIGKILL, and both scopes map to the
+  system-wide `/etc/init.d` (BusyBox has no per-user services). Requires
+  root.
+
+### Changed
+
+- **CI**: sccache (`RUSTC_WRAPPER`) enabled on lint/test/build jobs to cache
+  rustc output across runs on top of `Swatinem/rust-cache`.
+- **Releases**: GoReleaser `draft: false` on both configs — a pushed tag now
+  publishes immediately instead of waiting for a manual publish step.
+- Dependency bumps: clap 4.6, tokio 1.53, toml 1.1, toml_edit 0.25, dirs 6,
+  which 8, data-encoding 2.11, regex 1.13.
 
 ### Fixed
 
