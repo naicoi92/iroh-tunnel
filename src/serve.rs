@@ -20,21 +20,21 @@
 //! (serve run CLI behavior). Note: iroh 1.0's accept/ALPN API differs from the
 //! earlier draft the spec was written against — see the API notes inline.
 
+use anyhow::{Context, Result};
+use iroh::endpoint::Connection;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-
-use anyhow::Result;
-use iroh::endpoint::Connection;
 use tokio::net::TcpStream;
 
 use crate::config::ServeConfig;
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
+use crate::status::STATUS_FLUSH_INTERVAL;
 
 /// Run the serve role until interrupted (Ctrl-C).
 ///
@@ -176,7 +176,7 @@ impl ServeStrategy {
         // it succeeded — otherwise the first tick would rewrite an identical
         // idle snapshot. A failed initial write seeds `None`, so the first
         // tick retries it.
-        let seeded = match save_status_file(&initial, status.state_dir.as_deref()) {
+        let seeded = match save_status_file(initial.clone(), status.state_dir.clone()).await {
             Ok(p) => {
                 tracing::info!(path = %p.display(), "wrote status file");
                 Some(initial)
@@ -197,25 +197,72 @@ impl ServeStrategy {
             accept_loop(&accept_ep, targets, accept_peers).await;
         });
 
+        // Graceful-cleanup inputs captured BEFORE `status` moves into the
+        // flush task: the state-dir choice (the ownership-checked removal
+        // resolves its own path from it) and the cooperative stop channel.
+        let cleanup_state_dir = status.state_dir.clone();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
         // Refresh serve-status.json when the rendered snapshot changes —
         // stream counters, connected peers, or their transport states — at
         // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
         // stream churn, still near-live for operators.
-        let flush = tokio::spawn(status_flush_loop(status, ep.clone(), peers, seeded));
+        let mut flush = tokio::spawn(status_flush_loop(
+            status,
+            ep.clone(),
+            peers,
+            seeded,
+            stop_rx,
+            STATUS_FLUSH_INTERVAL,
+            save_status_file,
+        ));
 
         // Wait for the injected shutdown signal, then drain in-flight streams
-        // before closing the endpoint (T-08). The accept and status tasks are
-        // aborted first so they stop handing new connections to the pipe.
+        // before closing the endpoint (T-08). The accept task is aborted
+        // first so it stops handing new connections to the pipe.
         shutdown.await;
         accept.abort();
-        flush.abort();
+        // Signal the flush task to stop (dropping the sender alone would
+        // also close the channel, but only at scope end — far too late).
+        let _ = stop_tx.send(());
+        // Stop the flush task COOPERATIVELY and JOIN it: aborting would not
+        // cancel an in-flight spawn_blocking save (write+fsync+rename runs
+        // to completion on the blocking pool and could recreate the file
+        // AFTER the cleanup removal). The task exits only at an await
+        // point and every save is awaited inside its loop — a successful
+        // join therefore proves none of its saves is still running. On a
+        // pathological stall (>5 s for one fsync) the join is abandoned
+        // and the removal is SKIPPED: a possibly-stale file (surfaced by
+        // the reader-side pid warning) beats a resurrection race that
+        // cannot be won once the save is in-flight.
+        let flush_abort = flush.abort_handle();
+        let flush_stopped = tokio::time::timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .is_ok();
+        if !flush_stopped {
+            tracing::warn!(
+                "status flush task did not stop within 5s; aborting it and KEEPING \
+                 the status file (removal could race its in-flight save)"
+            );
+            flush_abort.abort();
+        }
         ep.close().await;
+        // Remove the status file only after a clean join AND only if it
+        // still belongs to THIS process (its `pid` field decides — two
+        // instances can share a state dir, and an idle peer would not
+        // recreate its own file after a blind removal). A crash never runs
+        // this path; the reader-side pid-liveness warning covers the stale
+        // file it leaves behind.
+        if flush_stopped {
+            crate::status::remove_own_status_file(
+                crate::status::StatusWriter::serve(),
+                cleanup_state_dir.as_deref(),
+            )
+            .await;
+        }
         Ok(())
     }
 }
-
-/// How often the status flush task re-checks stream counters.
-const STATUS_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// One served service: where to dial locally + the live stream counter.
 #[derive(Clone)]
@@ -397,29 +444,55 @@ async fn render_connections(
     out
 }
 
-/// Persist the rendered status file: into `state_dir` when the testing seam
-/// injected one, otherwise via [`crate::status::StatusFile::save`]
-/// (env-aware default path).
-fn save_status_file(
-    file: &crate::status::StatusFile,
-    state_dir: Option<&Path>,
+/// Persist the rendered status file via the shared writer: into `state_dir`
+/// when the testing seam injected one, otherwise the env-aware default
+/// path (see [`crate::status::StatusWriter`]).
+///
+/// Runs on the blocking pool: the atomic save fsyncs, and a stalled disk
+/// must never stall an async worker (the accept loop shares this runtime).
+async fn save_status_file(
+    file: crate::status::StatusFile,
+    state_dir: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf> {
-    match state_dir {
-        Some(dir) => file.save_to(dir),
-        None => file.save(),
-    }
+    let writer = crate::status::StatusWriter::serve();
+    let payload = crate::status::StatusPayload::Serve(file);
+    tokio::task::spawn_blocking(move || writer.save_with_state_dir(state_dir.as_deref(), &payload))
+        .await
+        .context("status save task failed")?
 }
 
 /// Periodically rewrite serve-status.json, but only when the rendered
 /// snapshot changed (stream counters, peer set, or transport states).
-async fn status_flush_loop(
+///
+/// Stops COOPERATIVELY on `stop`: aborting this task would not cancel an
+/// in-flight `spawn_blocking` save (write+fsync+rename runs to completion
+/// on the blocking pool and could recreate the file after the shutdown
+/// cleanup removed it). The run loop therefore signals, then JOINS this
+/// task before removing the file — the loop here must exit on the signal
+/// while letting the current save finish.
+///
+/// `interval` and `save` are seams for unit-testing the stop handshake;
+/// production passes [`STATUS_FLUSH_INTERVAL`] and [`save_status_file`].
+async fn status_flush_loop<S, F>(
     status: StatusSnapshot,
     ep: iroh::Endpoint,
     peers: PeerTracker,
     mut last: Option<crate::status::StatusFile>,
-) {
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+    interval: Duration,
+    mut save: S,
+) where
+    S: FnMut(crate::status::StatusFile, Option<std::path::PathBuf>) -> F,
+    F: Future<Output = Result<std::path::PathBuf>>,
+{
     loop {
-        tokio::time::sleep(STATUS_FLUSH_INTERVAL).await;
+        // `biased` so a stop that arrives during a save is observed before
+        // the next sleep even starts — no extra tick, no extra save.
+        tokio::select! {
+            biased;
+            _ = &mut stop => break,
+            _ = tokio::time::sleep(interval) => {}
+        }
         let connections = render_connections(&ep, &peers).await;
         let file = status.render(connections);
         if last.as_ref() == Some(&file) {
@@ -428,7 +501,7 @@ async fn status_flush_loop(
         // Only record the file as written on success, so a failed write is
         // retried on the next tick rather than silently dropped until the
         // next change.
-        match save_status_file(&file, status.state_dir.as_deref()) {
+        match save(file.clone(), status.state_dir.clone()).await {
             Ok(_) => last = Some(file),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }

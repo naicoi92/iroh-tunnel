@@ -14,6 +14,8 @@ use clap::Parser;
 use iroh_tunnel::cli::{self, Cli, ConfigAction, Role, RoleCmd, ServiceAction};
 use iroh_tunnel::config_cmd;
 use iroh_tunnel::error::CliError;
+use iroh_tunnel::status::StatusRole;
+use iroh_tunnel::status_cmd;
 use iroh_tunnel::{access, serve, service};
 
 fn main() {
@@ -48,26 +50,32 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let role_str = match &cli.role {
-        Role::Serve { .. } => "serve",
-        Role::Access { .. } => "access",
+    // The typed role tag comes from ONE match on the CLI enum; the dispatch
+    // string is derived from it — an invalid role is unrepresentable, and
+    // the two can never disagree.
+    let status_role = match &cli.role {
+        Role::Serve { .. } => StatusRole::Serve,
+        Role::Access { .. } => StatusRole::Access,
     };
     match cli.role {
-        Role::Serve { cmd } | Role::Access { cmd } => dispatch_role_cmd(role_str, cmd).await,
+        Role::Serve { cmd } | Role::Access { cmd } => dispatch_role_cmd(status_role, cmd).await,
     }
 }
 
-async fn dispatch_role_cmd(role: &str, cmd: RoleCmd) -> anyhow::Result<()> {
+async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Result<()> {
+    let role = status_role.name();
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
-            match role {
-                "serve" => serve::run(&path).await,
-                "access" => access::run(&path).await,
-                _ => unreachable!("unknown role {role}"),
+            // The typed role tag exhaustively selects the run handler —
+            // the compiler enforces both arms, no string fallthrough.
+            match status_role {
+                StatusRole::Serve => serve::run(&path).await,
+                StatusRole::Access => access::run(&path).await,
             }
         }
         RoleCmd::Config { action } => dispatch_config(role, action),
+        RoleCmd::Status { json } => status_cmd::run(status_role, json),
         RoleCmd::Service { action } => dispatch_service(role, action),
     }
 }

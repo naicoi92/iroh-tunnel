@@ -30,15 +30,28 @@
 //! - One listen-loop task per service (so each service has its own bound port).
 //! - Each accepted local client becomes its own task, so a failure in one
 //!   tunnel never affects another (NFR-08).
-//! - `host = 0.0.0.0` binds all interfaces (share within the LAN); the default
-//!   `127.0.0.1` keeps it local-only.
+//! - `host = 0.0.0.0` binds all interfaces (share within the LAN); the
+//!   default `127.0.0.1` keeps it local-only.
+//!
+//! ## Status file (issue #59)
+//!
+//! `access run` writes `access-status.json` beside the serve file (same
+//! atomic write, same 5 s change-detect flush): `node_id`, `pid`,
+//! `started_at`, and one row per configured service — `name`,
+//! `listen_addr`, the configured serve `peer`, the live `transports` of the
+//! service's multiplexed connection, and the endpoint's local UDP
+//! candidates. Transports are queried fresh from the cached connection at
+//! each flush (never snapshotted in the cache), and are empty while the
+//! service has no live connection — `multiplex = false` services therefore
+//! always show an empty list (their connections are per-channel and
+//! short-lived).
 //!
 //! Based on Page 04 v2 §1.2 (access dial sequence) and Page 06 v5 §1.2 (access
 //! run CLI behavior). Note: iroh 1.0's connect/ALPN API differs from the
 //! earlier draft the spec was written against — see the API notes inline.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +63,7 @@ use crate::config::{AccessConfig, AccessService};
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
+use crate::status::{AccessServiceStatus, AccessStatusFile, StatusPayload, StatusWriter};
 
 /// Run the access role until interrupted (Ctrl-C).
 ///
@@ -73,6 +87,29 @@ pub async fn run_with_shutdown(
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
     crate::role_run::run_with_shutdown::<AccessStrategy>(config_path, shutdown).await
+}
+
+/// Run the access role like [`run_with_shutdown`], but write its status
+/// file into the explicitly given `state_dir` instead of the env-resolved
+/// default.
+///
+/// Advanced/testing seam mirroring
+/// [`crate::serve::run_with_shutdown_with_state_dir`]: integration tests
+/// point an access instance at an isolated tempdir without touching the
+/// process-global `IROH_TUNNEL_STATE_DIR` variable (which cannot be
+/// mutated safely while other test threads exist). Production callers use
+/// [`run_with_shutdown`]; operators relocate the file via the env variable
+/// instead.
+pub async fn run_with_shutdown_with_state_dir(
+    state_dir: &Path,
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let state_dir = Some(state_dir.to_path_buf());
+    crate::role_run::run_skeleton::<AccessStrategy, _, _>(config_path, |ep, cfg| {
+        AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir)
+    })
+    .await
 }
 
 /// Access-role implementation of [`RoleStrategy`].
@@ -157,6 +194,19 @@ impl RoleStrategy for AccessStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
+        Self::run_loop_with_state_dir(ep, cfg, shutdown, None).await
+    }
+}
+
+impl AccessStrategy {
+    /// [`RoleStrategy::run_loop`] with an optional injected state dir for
+    /// the status file (see [`run_with_shutdown_with_state_dir`]).
+    async fn run_loop_with_state_dir(
+        ep: iroh::Endpoint,
+        cfg: AccessConfig,
+        shutdown: impl Future<Output = ()>,
+        state_dir: Option<PathBuf>,
+    ) -> Result<()> {
         // Resolve the node-level relays once (the per-service fallback) and
         // parse every service's node_id before spawning listeners, so a bad
         // config fails fast. Each service resolves its own effective relay
@@ -171,38 +221,257 @@ impl RoleStrategy for AccessStrategy {
         }
 
         let mut handles = Vec::new();
-        for svc in cfg.services {
+        // One dialer per service, kept alive alongside the listener tasks:
+        // the status flush task reads each service's live connection path
+        // from its dialer (issue #59).
+        let mut dialers: Vec<Arc<ServiceDialer>> = Vec::new();
+        let mut status_services: Vec<AccessStatusServiceRow> = Vec::new();
+        for svc in &cfg.services {
             let node_id = svc
                 .node_id
                 .parse::<iroh::EndpointId>()
                 .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
-            let listen_addr = format!("{}:{}", svc.host, svc.port);
+            // Raw `host:port` is what TcpListener::bind consumes; the
+            // status row renders the bracketed-IPv6 form via
+            // format_local_addr — the same normalization as the serve
+            // schema's `local_addr`.
+            let bind_addr = format!("{}:{}", svc.host, svc.port);
             let effective: Vec<iroh::RelayUrl> = if svc.relay_urls.is_empty() {
                 node_relay_urls.clone()
             } else {
                 endpoint::resolve_relay_urls(&svc.relay_urls)
                     .with_context(|| format!("service '{}': invalid relay_urls", svc.name))?
             };
-            let dialer = Arc::new(ServiceDialer::new(
-                &ep,
-                node_id,
-                &svc,
-                &effective,
-                listen_addr,
-            ));
-            handles.push(tokio::spawn(listen_loop(dialer)));
+            let dialer = Arc::new(ServiceDialer::new(&ep, node_id, svc, &effective, bind_addr));
+            status_services.push(AccessStatusServiceRow {
+                name: svc.name.clone(),
+                listen_addr: crate::status::format_local_addr(&svc.host, svc.port),
+                // The parsed id, not the raw config string — the status row
+                // is normalized exactly like every other rendered id.
+                peer: node_id.to_string(),
+            });
+            dialers.push(dialer);
         }
+        // The initial status write happens BEFORE any listener spawns (the
+        // same ordering as serve): no local client can have connected yet,
+        // so the first snapshot deterministically carries every service's
+        // configured peer with empty transports.
+
+        // Operator-facing status snapshot (issue #59), refreshed by the
+        // flush task below as connections come and go. Best-effort: a
+        // failure to write status is logged but does not stop the tunnel.
+        // Same seeding contract as serve's: the initial write seeds the
+        // change detection when it succeeds; a failure seeds `None` so the
+        // first tick retries it.
+        let status = AccessStatusTemplate {
+            node_id: crate::endpoint::node_id_string(&ep),
+            pid: std::process::id(),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            services: status_services,
+            state_dir,
+        };
+        let initial = render_access_status(&status, &dialers).await;
+        let seeded = match save_access_status(initial.clone(), status.state_dir.clone()).await {
+            Ok(p) => {
+                tracing::info!(path = %p.display(), "wrote status file");
+                Some(initial)
+            }
+            Err(e) => {
+                tracing::warn!("failed to write status file: {e}");
+                None
+            }
+        };
+
+        // Graceful-cleanup inputs captured BEFORE `status` moves into the
+        // flush task: the state-dir choice (the ownership-checked removal
+        // resolves its own path from it) and the cooperative stop channel.
+        let cleanup_state_dir = status.state_dir.clone();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 
         tracing::info!("access endpoint ready, listening for local clients");
+        let mut flush = tokio::spawn(access_status_flush_loop(
+            status,
+            dialers.clone(),
+            seeded,
+            stop_rx,
+            crate::status::STATUS_FLUSH_INTERVAL,
+            save_access_status,
+        ));
+        for dialer in dialers {
+            handles.push(tokio::spawn(listen_loop(dialer)));
+        }
         shutdown.await;
         // Abort each per-service listener so they stop accepting new local
         // clients before the endpoint close tears down the in-flight dials.
         for h in handles {
             h.abort();
         }
+        // Signal the flush task to stop (dropping the sender alone would
+        // also close the channel, but only at scope end — far too late).
+        let _ = stop_tx.send(());
+        // Stop the flush task COOPERATIVELY and JOIN it: aborting would not
+        // cancel an in-flight spawn_blocking save (write+fsync+rename runs
+        // to completion on the blocking pool and could recreate the file
+        // AFTER the cleanup removal). The task exits only at an await
+        // point and every save is awaited inside its loop — a successful
+        // join therefore proves none of its saves is still running. On a
+        // pathological stall (>5 s for one fsync) the join is abandoned
+        // and the removal is SKIPPED: a possibly-stale file (surfaced by
+        // the reader-side pid warning) beats a resurrection race that
+        // cannot be won once the save is in-flight.
+        let flush_abort = flush.abort_handle();
+        let flush_stopped = tokio::time::timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .is_ok();
+        if !flush_stopped {
+            tracing::warn!(
+                "status flush task did not stop within 5s; aborting it and KEEPING \
+                 the status file (removal could race its in-flight save)"
+            );
+            flush_abort.abort();
+        }
         ep.close().await;
+        // Remove the status file only after a clean join AND only if it
+        // still belongs to THIS process (its `pid` field decides — two
+        // instances can share a state dir, and an idle peer would not
+        // recreate its own file after a blind removal). A crash never runs
+        // this path; the reader-side pid-liveness warning covers the stale
+        // file it leaves behind.
+        if flush_stopped {
+            crate::status::remove_own_status_file(
+                StatusWriter::access(),
+                cleanup_state_dir.as_deref(),
+            )
+            .await;
+        }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Status file (issue #59)
+// ---------------------------------------------------------------------------
+
+/// Access-status template: everything immutable for the life of the
+/// process. The live per-service transports are rendered into each snapshot
+/// at flush time from the dialers' cached connections.
+struct AccessStatusTemplate {
+    node_id: String,
+    pid: u32,
+    started_at: u64,
+    services: Vec<AccessStatusServiceRow>,
+    /// Injected state dir (testing seam); `None` → env-resolved default.
+    state_dir: Option<PathBuf>,
+}
+
+/// One immutable per-service row of [`AccessStatusTemplate`].
+struct AccessStatusServiceRow {
+    name: String,
+    listen_addr: String,
+    /// Configured serve peer (full node id) — shown even before the first
+    /// connection, so operators can tell "misconfigured peer" apart from
+    /// "not connected yet".
+    peer: String,
+}
+
+/// Render the template into the status file: per service, a fresh
+/// connection-path report of its multiplexed connection (queried NOW, never
+/// a cached snapshot — path migrations can't go stale between flushes), or
+/// the configured peer with empty transports while disconnected.
+async fn render_access_status(
+    status: &AccessStatusTemplate,
+    dialers: &[Arc<ServiceDialer>],
+) -> AccessStatusFile {
+    debug_assert_eq!(
+        status.services.len(),
+        dialers.len(),
+        "one dialer per status row"
+    );
+    let mut services = Vec::with_capacity(status.services.len());
+    for (row, dialer) in status.services.iter().zip(dialers) {
+        let (transports, local_bound_addrs) = match dialer.path_report().await {
+            Some(report) => (report.transports, report.local_bound_addrs),
+            None => (Vec::new(), Vec::new()),
+        };
+        services.push(AccessServiceStatus {
+            name: row.name.clone(),
+            listen_addr: row.listen_addr.clone(),
+            peer: row.peer.clone(),
+            transports,
+            local_bound_addrs,
+        });
+    }
+    AccessStatusFile {
+        node_id: status.node_id.clone(),
+        pid: status.pid,
+        started_at: status.started_at,
+        services,
+    }
+}
+
+/// Periodically rewrite access-status.json, but only when the rendered
+/// snapshot changed (a service connected or disconnected, or its transports
+/// migrated) — the access twin of serve's `status_flush_loop`.
+///
+/// Stops COOPERATIVELY on `stop`: aborting this task would not cancel an
+/// in-flight `spawn_blocking` save (write+fsync+rename runs to completion
+/// on the blocking pool and could recreate the file after the shutdown
+/// cleanup removed it). The run loop therefore signals, then JOINS this
+/// task before removing the file — the loop here must exit on the signal
+/// while letting the current save finish.
+///
+/// `interval` and `save` are seams for the unit test that drives a slow
+/// save against the stop signal; production passes
+/// [`crate::status::STATUS_FLUSH_INTERVAL`] and [`save_access_status`].
+async fn access_status_flush_loop<S, F>(
+    status: AccessStatusTemplate,
+    dialers: Vec<Arc<ServiceDialer>>,
+    mut last: Option<AccessStatusFile>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+    interval: Duration,
+    mut save: S,
+) where
+    S: FnMut(AccessStatusFile, Option<std::path::PathBuf>) -> F,
+    F: Future<Output = Result<std::path::PathBuf>>,
+{
+    loop {
+        // `biased` so a stop that arrives during a save is observed before
+        // the next sleep even starts — no extra tick, no extra save.
+        tokio::select! {
+            biased;
+            _ = &mut stop => break,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        let file = render_access_status(&status, &dialers).await;
+        if last.as_ref() == Some(&file) {
+            continue;
+        }
+        // Only record the file as written on success, so a failed write is
+        // retried on the next tick rather than silently dropped until the
+        // next change.
+        match save(file.clone(), status.state_dir.clone()).await {
+            Ok(_) => last = Some(file),
+            Err(e) => tracing::warn!("failed to write status file: {e}"),
+        }
+    }
+}
+
+/// Persist the rendered access status file via the shared writer.
+///
+/// Runs on the blocking pool: the atomic save fsyncs, and a stalled disk
+/// must never stall an async worker (the listen loops share this runtime).
+async fn save_access_status(
+    file: AccessStatusFile,
+    state_dir: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf> {
+    let writer = StatusWriter::access();
+    let payload = StatusPayload::Access(file);
+    tokio::task::spawn_blocking(move || writer.save_with_state_dir(state_dir.as_deref(), &payload))
+        .await
+        .context("status save task failed")?
 }
 
 /// Per-service dialing state shared by all local-client tasks.
@@ -313,6 +582,21 @@ impl ServiceDialer {
     /// the connection closes, and the next `get_or_dial` replaces it.
     async fn invalidate(&self) {
         self.state.lock().await.conn = None;
+    }
+
+    /// Fresh connection-path report for the cached multiplexed connection,
+    /// or `None` while the service has no live one (issue #59).
+    ///
+    /// The guard is dropped BEFORE the endpoint query so a status render
+    /// never holds channels off their dial path, and the report is queried
+    /// fresh on every call — never cached — so the status file can't serve
+    /// a stale path after a migration.
+    async fn path_report(&self) -> Option<crate::conn_path::PeerPathReport> {
+        let peer = {
+            let guard = self.state.lock().await;
+            guard.conn.as_ref().map(|conn| conn.remote_id())?
+        };
+        crate::conn_path::peer_path_report(&self.ep, peer).await
     }
 }
 
@@ -448,12 +732,12 @@ const PATH_POLL_INTERVAL: Duration = Duration::from_secs(PATH_POLL_INTERVAL_SECS
 
 /// First 8 chars of the peer id + `…`, for log-message readability.
 ///
-/// The full id stays in the `peer=` field so both hosts can be correlated
-/// by grepping the same string; messages only need to be recognizable at a
-/// glance.
+/// Delegates to the shared [`crate::conn_path::short_peer_id`] — the same
+/// shape the `<role> status` tables render — so a short id means one thing
+/// everywhere. The full id stays in the `peer=` field so both hosts can be
+/// correlated by grepping the same string.
 fn short_peer_id(peer: &iroh::EndpointId) -> String {
-    let head: String = peer.to_string().chars().take(8).collect();
-    format!("{head}…")
+    crate::conn_path::short_peer_id(&peer.to_string())
 }
 
 /// Render a fresh connection's active transports for its established log
@@ -549,4 +833,97 @@ fn spawn_path_change_poller(
         }
     })
     .abort_handle()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// PR #62 run 4, acceptance A — the shutdown race, driven directly.
+    ///
+    /// `stop` arriving while a save is IN-FLIGHT must let that save finish
+    /// (the run loop joins the task before removing the file), and must
+    /// prevent any SECOND save: a post-stop tick is exactly the
+    /// resurrection path (rename after removal) that cooperative stopping
+    /// exists to close.
+    ///
+    /// The spy save always FAILS on purpose: a failed save leaves `last`
+    /// unseeded, so every subsequent tick would save again if the loop
+    /// wrongly kept ticking after `stop` — call count 1 is therefore a
+    /// strong assertion, not a vacuous one.
+    #[tokio::test]
+    async fn flush_stop_mid_save_lets_it_finish_and_prevents_a_second_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let template = AccessStatusTemplate {
+            node_id: "race-test".to_string(),
+            pid: 1,
+            started_at: 0,
+            // No services → no dialers → the render is trivially stable;
+            // the save seam below is the only observable.
+            services: Vec::new(),
+            state_dir: Some(tmp.path().to_path_buf()),
+        };
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        // Signalled the moment the slow save STARTS, so the stop below is
+        // provably sent while that save is in-flight.
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let calls_for_save = calls.clone();
+        let started_for_save = started_tx.clone();
+        let flush = tokio::spawn(access_status_flush_loop(
+            template,
+            Vec::new(),
+            None, // unseeded `last`: the first tick always saves
+            stop_rx,
+            Duration::from_millis(20),
+            move |_file, dir| {
+                let calls = calls_for_save.clone();
+                let started = started_for_save.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        let _ = started.try_send(());
+                        // The deliberately slow "blocking" save: its write
+                        // lands AFTER the stop signal below is sent.
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let dir = dir.expect("test always injects a state dir");
+                        std::fs::write(dir.join("access-status.json"), b"slow-save-landed")
+                            .expect("spy save write");
+                    }
+                    Err(anyhow::anyhow!("spy save always fails"))
+                }
+            },
+        ));
+
+        // Synchronize on the slow save being in-flight, THEN stop.
+        started_rx
+            .recv()
+            .await
+            .expect("first save must start before the test stops the loop");
+        let _ = stop_tx.send(());
+
+        // The cooperative stop lets the in-flight save finish before the
+        // loop exits — the join observes both.
+        tokio::time::timeout(Duration::from_secs(2), flush)
+            .await
+            .expect("flush task must stop after the stop signal")
+            .expect("flush task must not panic");
+
+        // Past the in-flight window: with a 20 ms tick, a loop that
+        // (wrongly) kept running would have saved again many times over.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no second save after stop — a post-stop tick is the file-resurrection path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("access-status.json"))
+                .expect("in-flight save must have landed"),
+            "slow-save-landed",
+            "the in-flight save completed and nothing overwrote it afterwards"
+        );
+    }
 }
