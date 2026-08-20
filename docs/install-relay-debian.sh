@@ -92,9 +92,14 @@ done
 # ---------------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo ./install-relay-debian.sh)"
 
-. /etc/os-release
-[ "${ID:-}" = "debian" ] || die "this script targets Debian (found: ${ID:-unknown}); see decision D4."
-[ "${VERSION_ID:-}" = "12" ] || echo "WARN: tested on Debian 12, this is ${VERSION_ID:-?} — continuing." >&2
+# Capture os-release in a subshell — sourcing it into the main shell would
+# clobber script variables (Debian 13's os-release defines VERSION="13 (trixie)",
+# which overwrote the release pin and produced a malformed API URL).
+OS_RELEASE=$(. /etc/os-release 2>/dev/null; printf '%s %s' "${ID:-unknown}" "${VERSION_ID:-unknown}")
+OS_ID=${OS_RELEASE%% *}
+OS_VERSION_ID=${OS_RELEASE#* }
+[ "$OS_ID" = "debian" ] || die "this script targets Debian (found: $OS_ID); see decision D4."
+[ "$OS_VERSION_ID" = "12" ] || echo "WARN: tested on Debian 12, this is $OS_VERSION_ID — continuing." >&2
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -103,7 +108,7 @@ case "$ARCH" in
   *) die "unsupported arch: $ARCH" ;;
 esac
 
-log "Debian ${VERSION_ID:-?} / $TARGET"
+log "Debian ${OS_VERSION_ID} / $TARGET"
 
 # ---------------------------------------------------------------------------
 # Interactive prompts (only when input is missing and a TTY is available)
