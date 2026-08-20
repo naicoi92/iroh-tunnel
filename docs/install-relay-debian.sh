@@ -42,7 +42,7 @@
 #   IROH_RELAY_VERSION   Same as --version (flag wins).
 set -euo pipefail
 
-VERSION="${IROH_RELAY_VERSION:-v1.0.3}"
+IROH_VERSION="${IROH_RELAY_VERSION:-v1.0.3}"
 LATEST=0
 DOMAIN=""
 TOKEN=""
@@ -74,7 +74,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --token) TOKEN="${2:-}"; shift 2 ;;
-    --version) VERSION="${2:-}"; shift 2 ;;
+    --version) IROH_VERSION="${2:-}"; shift 2 ;;
     --latest) LATEST=1; shift ;;
     --acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
     --apply-firewall) APPLY_FIREWALL=1; shift ;;
@@ -94,7 +94,7 @@ done
 
 # Capture os-release in a subshell — sourcing it into the main shell would
 # clobber script variables (Debian 13's os-release defines VERSION="13 (trixie)",
-# which overwrote the release pin and produced a malformed API URL).
+# which overwrote the release pin back when this variable was named VERSION).
 OS_RELEASE=$(. /etc/os-release 2>/dev/null; printf '%s %s' "${ID:-unknown}" "${VERSION_ID:-unknown}")
 OS_ID=${OS_RELEASE%% *}
 OS_VERSION_ID=${OS_RELEASE#* }
@@ -158,16 +158,16 @@ apt-get install -y -qq curl ca-certificates jq tar >/dev/null
 if [ "$LATEST" -eq 1 ]; then
   API_URL="https://api.github.com/repos/n0-computer/iroh/releases/latest"
 else
-  API_URL="https://api.github.com/repos/n0-computer/iroh/releases/tags/$VERSION"
+  API_URL="https://api.github.com/repos/n0-computer/iroh/releases/tags/$IROH_VERSION"
 fi
 log "querying release: $API_URL"
 REL_JSON=$(curl -fsSL "$API_URL") || die "could not fetch release info (check version/network)"
-VERSION=$(jq -r '.tag_name' <<<"$REL_JSON")
+IROH_VERSION=$(jq -r '.tag_name' <<<"$REL_JSON")
 
-ASSET_NAME="iroh-relay-${VERSION}-${TARGET}.tar.gz"
+ASSET_NAME="iroh-relay-${IROH_VERSION}-${TARGET}.tar.gz"
 ASSET_URL=$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name == $n) | .browser_download_url' <<<"$REL_JSON")
 ASSET_DIGEST=$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name == $n) | .digest // empty' <<<"$REL_JSON")
-[ -n "$ASSET_URL" ] || die "asset $ASSET_NAME not found in release $VERSION"
+[ -n "$ASSET_URL" ] || die "asset $ASSET_NAME not found in release $IROH_VERSION"
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -186,7 +186,7 @@ tar -xzf "$TMP_DIR/$ASSET_NAME" -C "$TMP_DIR"
 BIN_FOUND=$(find "$TMP_DIR" -type f -name iroh-relay | head -n 1)
 [ -n "$BIN_FOUND" ] || die "iroh-relay binary not found inside the archive"
 install -m 0755 "$BIN_FOUND" "$BIN_PATH"
-log "installed $BIN_PATH ($($BIN_PATH --version 2>/dev/null || echo "$VERSION"))"
+log "installed $BIN_PATH ($($BIN_PATH --version 2>/dev/null || echo "$IROH_VERSION"))"
 
 # ---------------------------------------------------------------------------
 # QUIC address discovery (optional, §5.4): resolve + validate cert up front.
@@ -354,7 +354,7 @@ fi
 cat <<SUMMARY
 
 =====================================================================
- iroh-relay deployed (version ${VERSION})
+ iroh-relay deployed (version ${IROH_VERSION})
 
  URL          : https://${DOMAIN}   (DNS A record -> the LXC's public IP)
  Health local : curl http://127.0.0.1:${RELAY_PORT}/healthz
