@@ -14,6 +14,8 @@ use clap::Parser;
 use iroh_tunnel::cli::{self, Cli, ConfigAction, Role, RoleCmd, ServiceAction};
 use iroh_tunnel::config_cmd;
 use iroh_tunnel::error::CliError;
+use iroh_tunnel::status::StatusRole;
+use iroh_tunnel::status_cmd;
 use iroh_tunnel::{access, serve, service};
 
 fn main() {
@@ -48,16 +50,24 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let role_str = match &cli.role {
-        Role::Serve { .. } => "serve",
-        Role::Access { .. } => "access",
+    // The dispatch string and the typed role tag come from ONE match on the
+    // CLI enum — an invalid role is unrepresentable downstream.
+    let (role_str, status_role) = match &cli.role {
+        Role::Serve { .. } => ("serve", StatusRole::Serve),
+        Role::Access { .. } => ("access", StatusRole::Access),
     };
     match cli.role {
-        Role::Serve { cmd } | Role::Access { cmd } => dispatch_role_cmd(role_str, cmd).await,
+        Role::Serve { cmd } | Role::Access { cmd } => {
+            dispatch_role_cmd(role_str, status_role, cmd).await
+        }
     }
 }
 
-async fn dispatch_role_cmd(role: &str, cmd: RoleCmd) -> anyhow::Result<()> {
+async fn dispatch_role_cmd(
+    role: &str,
+    status_role: StatusRole,
+    cmd: RoleCmd,
+) -> anyhow::Result<()> {
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
@@ -68,7 +78,7 @@ async fn dispatch_role_cmd(role: &str, cmd: RoleCmd) -> anyhow::Result<()> {
             }
         }
         RoleCmd::Config { action } => dispatch_config(role, action),
-        RoleCmd::Status { json } => iroh_tunnel::status_cmd::run(role, json),
+        RoleCmd::Status { json } => status_cmd::run(status_role, json),
         RoleCmd::Service { action } => dispatch_service(role, action),
     }
 }

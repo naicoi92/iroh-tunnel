@@ -74,7 +74,7 @@ const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
 pub(crate) const STATUS_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Top-level status snapshot written to disk by the serve role.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusFile {
     /// The serve node's public key (hex), as printed by `serve run`.
     pub node_id: String,
@@ -91,7 +91,7 @@ pub struct StatusFile {
 }
 
 /// One row per configured service in the status file.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceStatus {
     pub name: String,
     pub protocol: String,
@@ -107,7 +107,7 @@ pub struct ServiceStatus {
 /// The path fields (`peer`, `transports`, `local_bound_addrs`) are flattened
 /// in from a [`crate::conn_path::PeerPathReport`] so the two schemas cannot
 /// drift apart; the serve role adds only the per-peer `services` merge.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerConnectionStatus {
     /// Connection-path snapshot for this peer (peer id, transports,
     /// endpoint-wide local UDP candidates), flattened into this row.
@@ -124,7 +124,7 @@ pub struct PeerConnectionStatus {
 /// field: the access node registers with relays only to dial out, and which
 /// relay carried a given dial is already answered per service by that
 /// service's `transports`.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccessStatusFile {
     /// The access node's own public key (hex), as printed by `access run`.
     pub node_id: String,
@@ -137,7 +137,7 @@ pub struct AccessStatusFile {
 }
 
 /// One configured service in the access status file (issue #59).
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccessServiceStatus {
     pub name: String,
     /// `host:port` local clients connect to.
@@ -153,6 +153,29 @@ pub struct AccessServiceStatus {
     /// This endpoint's local UDP socket *candidates* (endpoint-wide, not a
     /// per-transport local address — same semantics as the serve file).
     pub local_bound_addrs: Vec<String>,
+}
+
+/// The typed snapshot a role saves — re-tying each schema to its role at
+/// the save boundary.
+///
+/// [`StatusWriter`] is role-tagged and its save methods take this enum,
+/// so a serve writer serializing an access schema (or vice versa) is
+/// caught by the writer's role debug-assert instead of silently writing
+/// the wrong schema under the right file name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatusPayload {
+    Serve(StatusFile),
+    Access(AccessStatusFile),
+}
+
+impl StatusPayload {
+    /// The role whose schema this payload carries.
+    pub fn role(&self) -> StatusRole {
+        match self {
+            StatusPayload::Serve(_) => StatusRole::Serve,
+            StatusPayload::Access(_) => StatusRole::Access,
+        }
+    }
 }
 
 /// Which role a status file belongs to.
@@ -174,6 +197,14 @@ impl StatusRole {
             StatusRole::Access => ACCESS_STATUS_FILE_NAME,
         }
     }
+
+    /// The role's CLI name (`"serve"` / `"access"`).
+    pub fn name(self) -> &'static str {
+        match self {
+            StatusRole::Serve => "serve",
+            StatusRole::Access => "access",
+        }
+    }
 }
 
 /// Atomic writer for one role's status file.
@@ -190,6 +221,11 @@ pub struct StatusWriter(StatusRole);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl StatusWriter {
+    /// Writer targeting `role`'s status file.
+    pub const fn new(role: StatusRole) -> Self {
+        Self(role)
+    }
+
     /// Writer for the serve role (`serve-status.json`).
     pub const fn serve() -> Self {
         Self(StatusRole::Serve)
@@ -252,7 +288,7 @@ impl StatusWriter {
     /// Convenience entry point for production callers — resolves
     /// [`Self::path`] and delegates to [`Self::save_to`]. Returns the path
     /// written.
-    pub fn save(&self, value: &impl Serialize) -> Result<PathBuf> {
+    pub fn save(&self, value: &StatusPayload) -> Result<PathBuf> {
         // Compute the parent dir (the OS state dir + "iroh-tunnel"), so
         // save_to can stay dir-focused and create it if missing.
         let path = self.path()?;
@@ -273,7 +309,7 @@ impl StatusWriter {
     pub fn save_with_state_dir(
         &self,
         state_dir: Option<&Path>,
-        value: &impl Serialize,
+        value: &StatusPayload,
     ) -> Result<PathBuf> {
         match state_dir {
             Some(dir) => self.save_to(dir, value),
@@ -292,12 +328,26 @@ impl StatusWriter {
     /// This is the testable core — production callers use [`Self::save`] or
     /// [`Self::save_with_state_dir`]; tests inject a `tempfile::tempdir()`
     /// here.
-    pub fn save_to(&self, dir: &Path, value: &impl Serialize) -> Result<PathBuf> {
+    pub fn save_to(&self, dir: &Path, value: &StatusPayload) -> Result<PathBuf> {
+        // The payload enum re-ties schema to role at this boundary: a
+        // mismatched writer/payload pair is a programmer error, caught in
+        // debug builds rather than silently writing one role's schema under
+        // the other's file name.
+        debug_assert_eq!(
+            self.0,
+            value.role(),
+            "status writer role must match payload role"
+        );
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create status dir: {}", dir.display()))?;
         let path = dir.join(self.file_name());
-        let content =
-            serde_json::to_string_pretty(value).context("failed to encode status JSON")?;
+        // Serialize the INNER schema — the enum is a type-level tie, not a
+        // JSON tag.
+        let content = match value {
+            StatusPayload::Serve(file) => serde_json::to_string_pretty(file),
+            StatusPayload::Access(file) => serde_json::to_string_pretty(file),
+        }
+        .context("failed to encode status JSON")?;
 
         // Write to a temp file in the same directory, then rename — atomic
         // on POSIX, and on Windows for same-volume same-directory renames.
@@ -417,7 +467,9 @@ mod tests {
     fn save_to_writes_serve_json_file_into_injected_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let status = sample_status();
-        let written = StatusWriter::serve().save_to(tmp.path(), &status).unwrap();
+        let written = StatusWriter::serve()
+            .save_to(tmp.path(), &StatusPayload::Serve(status))
+            .unwrap();
 
         // Path is `<tmp>/serve-status.json`.
         assert_eq!(written, tmp.path().join("serve-status.json"));
@@ -438,7 +490,9 @@ mod tests {
         // injected dir — and must NOT touch the serve file.
         let tmp = tempfile::tempdir().unwrap();
         let status = sample_access_status();
-        let written = StatusWriter::access().save_to(tmp.path(), &status).unwrap();
+        let written = StatusWriter::access()
+            .save_to(tmp.path(), &StatusPayload::Access(status))
+            .unwrap();
 
         assert_eq!(written, tmp.path().join("access-status.json"));
         assert!(
@@ -479,7 +533,9 @@ mod tests {
 
         // On disk the same schema must round-trip through save_to.
         let tmp = tempfile::tempdir().unwrap();
-        StatusWriter::serve().save_to(tmp.path(), &status).unwrap();
+        StatusWriter::serve()
+            .save_to(tmp.path(), &StatusPayload::Serve(status))
+            .unwrap();
         let body = std::fs::read_to_string(tmp.path().join("serve-status.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["connections"][0]["peer"], "peer456");
@@ -523,7 +579,9 @@ mod tests {
         let nested = tmp.path().join("a").join("b").join("c");
         let status = sample_status();
 
-        let written = StatusWriter::serve().save_to(&nested, &status).unwrap();
+        let written = StatusWriter::serve()
+            .save_to(&nested, &StatusPayload::Serve(status))
+            .unwrap();
         assert!(written.exists(), "status file should exist after save_to");
         assert!(nested.is_dir(), "parent dir should have been created");
     }
@@ -535,14 +593,16 @@ mod tests {
         // `.tmp.<pid>.<n>` suffix, so scan for the prefix.
         let tmp = tempfile::tempdir().unwrap();
         let status = sample_status();
-        StatusWriter::serve().save_to(tmp.path(), &status).unwrap();
+        StatusWriter::serve()
+            .save_to(tmp.path(), &StatusPayload::Serve(status))
+            .unwrap();
 
         assert!(
             !leftover_temp_files(tmp.path(), "serve-status.json.tmp").exists(),
             "serve temp file leaked after rename"
         );
         StatusWriter::access()
-            .save_to(tmp.path(), &sample_access_status())
+            .save_to(tmp.path(), &StatusPayload::Access(sample_access_status()))
             .unwrap();
         assert!(
             !leftover_temp_files(tmp.path(), "access-status.json.tmp").exists(),
@@ -556,10 +616,14 @@ mod tests {
         // atomically — no stale contents.
         let tmp = tempfile::tempdir().unwrap();
         let mut status = sample_status();
-        StatusWriter::serve().save_to(tmp.path(), &status).unwrap();
+        StatusWriter::serve()
+            .save_to(tmp.path(), &StatusPayload::Serve(status.clone()))
+            .unwrap();
 
         status.node_id = "xyz789".to_string();
-        StatusWriter::serve().save_to(tmp.path(), &status).unwrap();
+        StatusWriter::serve()
+            .save_to(tmp.path(), &StatusPayload::Serve(status))
+            .unwrap();
 
         let body = std::fs::read_to_string(tmp.path().join("serve-status.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -599,7 +663,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("serve-status.json")).unwrap();
 
         let status = sample_status();
-        let res = StatusWriter::serve().save_to(tmp.path(), &status);
+        let res = StatusWriter::serve().save_to(tmp.path(), &StatusPayload::Serve(status));
 
         if res.is_err() {
             // The load-bearing assertion: the temp file must not linger

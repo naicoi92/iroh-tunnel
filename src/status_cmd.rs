@@ -24,30 +24,39 @@ use crate::status::{AccessStatusFile, StatusFile, StatusRole, StatusWriter};
 
 /// Entry point for `iroh-tunnel <role> status [--json]`.
 ///
-/// `role` is the dispatch string from the CLI (`"serve"` / `"access"`).
-pub fn run(role: &str, json: bool) -> Result<()> {
-    let writer = match role {
-        "serve" => StatusWriter::serve(),
-        "access" => StatusWriter::access(),
-        other => unreachable!("unknown role {other}"),
-    };
+pub fn run(role: StatusRole, json: bool) -> Result<()> {
+    let writer = StatusWriter::new(role);
     let path = writer.path()?;
-    // A missing/unreadable file is "not running", not a hard IO failure the
-    // operator must debug — one plain sentence with the path it looked at.
-    let body = std::fs::read_to_string(&path).map_err(|_| {
-        anyhow!(
-            "{role} is not running (no {} found at {})",
-            writer.file_name(),
-            path.display()
-        )
-    })?;
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        // A missing file is "not running", not a hard IO failure the
+        // operator must debug — one plain sentence with the path it looked
+        // at. Any OTHER read error (permissions, a directory squatting on
+        // the path, …) is a real failure and propagates with its cause:
+        // misdiagnosing those as "stopped" would hide the actual problem.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow!(
+                "{} is not running (no {} found at {})",
+                role.name(),
+                writer.file_name(),
+                path.display()
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("failed to read status file: {}", path.display())));
+        }
+    };
     if json {
         // Verbatim file contents, not a re-serialization: anything piping
         // this command must get byte-identical JSON to reading the file.
+        // Validated first so a corrupt file fails loudly on this path too,
+        // exactly like the table path.
+        let _: serde_json::Value = parse_status_file(&body, &path)?;
         println!("{body}");
         return Ok(());
     }
-    let table = match writer.role() {
+    let table = match role {
         StatusRole::Serve => render_serve_status(&parse_status_file(&body, &path)?),
         StatusRole::Access => render_access_status(&parse_status_file(&body, &path)?),
     };
@@ -60,10 +69,13 @@ fn parse_status_file<T: DeserializeOwned>(body: &str, path: &Path) -> Result<T> 
     serde_json::from_str(body).with_context(|| format!("invalid status file: {}", path.display()))
 }
 
-/// Render the serve status file as a human-readable table.
+/// Render the serve status file as human-readable tables.
 ///
 /// Pure: a function of the file contents only (no uptime math, no clock),
-/// so the golden test output is stable.
+/// so the golden test output is stable. Two sections — the exposed services
+/// (name, protocol, local address, live stream count) and the connected
+/// peers with their transports — so an operator sees both "what am I
+/// exposing" and "who is connected" without reaching for `--json`.
 pub fn render_serve_status(file: &StatusFile) -> String {
     let mut out = format!("node_id: {}\n", file.node_id);
     match &file.home_relay {
@@ -74,23 +86,43 @@ pub fn render_serve_status(file: &StatusFile) -> String {
         "pid: {}  started_at: {}\n",
         file.pid, file.started_at
     ));
-    if file.connections.is_empty() {
-        out.push_str("connections: none");
-        return out;
-    }
-    out.push('\n');
-    let rows: Vec<Vec<Vec<String>>> = file
-        .connections
-        .iter()
-        .map(|conn| {
-            vec![
-                vec![short_peer_id(&conn.path.peer)],
-                vec![conn.services.join(",")],
-                transport_lines(&conn.path.transports, "(none)"),
-            ]
-        })
-        .collect();
-    out.push_str(&render_table(&["PEER", "SERVICES", "TRANSPORTS"], &rows));
+
+    let services = if file.services.is_empty() {
+        "services: none".to_string()
+    } else {
+        let rows: Vec<Vec<Vec<String>>> = file
+            .services
+            .iter()
+            .map(|svc| {
+                vec![
+                    vec![svc.name.clone()],
+                    vec![svc.protocol.clone()],
+                    vec![svc.local_addr.clone()],
+                    // The file's `active_connections` — active streams, see
+                    // the schema docs in `status.rs`.
+                    vec![svc.active_connections.to_string()],
+                ]
+            })
+            .collect();
+        render_table(&["SERVICE", "PROTOCOL", "LOCAL ADDR", "STREAMS"], &rows)
+    };
+    let connections = if file.connections.is_empty() {
+        "connections: none".to_string()
+    } else {
+        let rows: Vec<Vec<Vec<String>>> = file
+            .connections
+            .iter()
+            .map(|conn| {
+                vec![
+                    vec![short_peer_id(&conn.path.peer)],
+                    vec![conn.services.join(",")],
+                    transport_lines(&conn.path.transports, "(none)"),
+                ]
+            })
+            .collect();
+        render_table(&["PEER", "SERVICES", "TRANSPORTS"], &rows)
+    };
+    out.push_str(&format!("\n{services}\n\n{connections}"));
     out
 }
 
@@ -301,6 +333,10 @@ node_id: abc123
 home_relay: https://relay.example/
 pid: 42  started_at: 1700000000
 
+SERVICE  PROTOCOL  LOCAL ADDR      STREAMS
+-------  --------  --------------  -------
+echo     tcp       127.0.0.1:8080  2
+
 PEER       SERVICES  TRANSPORTS
 ---------  --------  -------------------------------------
 1aa27080…  echo      relay https://relay.example/ [active]
@@ -318,6 +354,11 @@ PEER       SERVICES  TRANSPORTS
 node_id: abc123
 home_relay: none
 pid: 42  started_at: 1700000000
+
+SERVICE  PROTOCOL  LOCAL ADDR      STREAMS
+-------  --------  --------------  -------
+echo     tcp       127.0.0.1:8080  2
+
 connections: none";
         assert_eq!(got, want);
     }

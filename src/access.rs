@@ -63,7 +63,7 @@ use crate::config::{AccessConfig, AccessService};
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
-use crate::status::{AccessServiceStatus, AccessStatusFile, StatusWriter};
+use crate::status::{AccessServiceStatus, AccessStatusFile, StatusPayload, StatusWriter};
 
 /// Run the access role until interrupted (Ctrl-C).
 ///
@@ -276,9 +276,10 @@ impl AccessStrategy {
             state_dir,
         };
         let initial = render_access_status(&status, &dialers).await;
-        let seeded = match StatusWriter::access()
-            .save_with_state_dir(status.state_dir.as_deref(), &initial)
-        {
+        let seeded = match StatusWriter::access().save_with_state_dir(
+            status.state_dir.as_deref(),
+            &StatusPayload::Access(initial.clone()),
+        ) {
             Ok(p) => {
                 tracing::info!(path = %p.display(), "wrote status file");
                 Some(initial)
@@ -385,7 +386,10 @@ async fn access_status_flush_loop(
         // Only record the file as written on success, so a failed write is
         // retried on the next tick rather than silently dropped until the
         // next change.
-        match StatusWriter::access().save_with_state_dir(status.state_dir.as_deref(), &file) {
+        match StatusWriter::access().save_with_state_dir(
+            status.state_dir.as_deref(),
+            &StatusPayload::Access(file.clone()),
+        ) {
             Ok(_) => last = Some(file),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }

@@ -570,6 +570,10 @@ node_id: 1aa27080cc694eb1e756c5e9260eb267208f7b677e6a74e53146bf417fb31f84
 home_relay: https://use1-1.relay.iroh.network/
 pid: 8412  started_at: 1755648000
 
+SERVICE  PROTOCOL  LOCAL ADDR      STREAMS
+-------  --------  --------------  -------
+echo     tcp       127.0.0.1:8080  2
+
 PEER       SERVICES  TRANSPORTS
 ---------  --------  -------------------------------------------------
 acc01c0d…  echo      relay https://use1-1.relay.iroh.network/ [active]

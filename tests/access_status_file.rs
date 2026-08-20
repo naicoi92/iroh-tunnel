@@ -168,11 +168,11 @@ multiplex = true
         pre["services"][0]["listen_addr"],
         format!("127.0.0.1:{}", access_addr.port())
     );
+    let pre_transports = pre["services"][0]["transports"]
+        .as_array()
+        .context("services[0].transports must be present as an array")?;
     assert!(
-        pre["services"][0]["transports"]
-            .as_array()
-            .map(Vec::is_empty)
-            .unwrap_or(true),
+        pre_transports.is_empty(),
         "transports must be empty before the first local client connects"
     );
 
@@ -238,7 +238,24 @@ multiplex = true
     assert!(access_table.contains(&format!("127.0.0.1:{}", access_addr.port())));
     assert!(access_table.contains(&serve_node_id[..8]));
 
-    let serve_body = std::fs::read_to_string(state_dir.join("serve-status.json"))?;
+    // The serve file's flush loop runs independently of access's — its
+    // `connections` entry may lag behind Phase 3. Poll until it reflects
+    // the connection before reading it for the render (same pattern the
+    // sibling harness uses for its own serve file).
+    let serve_status_path = state_dir.join("serve-status.json");
+    let _serve_ready = poll_status(
+        &serve_status_path,
+        STATUS_POLL_TIMEOUT,
+        &[&serve_role, &access_role],
+        |status| {
+            status["connections"]
+                .as_array()
+                .map(|c| !c.is_empty())
+                .unwrap_or(false)
+        },
+    )
+    .await?;
+    let serve_body = std::fs::read_to_string(&serve_status_path)?;
     let serve_parsed: StatusFile =
         serde_json::from_str(&serve_body).context("parse serve-status.json")?;
     let serve_table = render_serve_status(&serve_parsed);

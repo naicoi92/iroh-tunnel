@@ -401,7 +401,10 @@ fn save_status_file(
     file: &crate::status::StatusFile,
     state_dir: Option<&Path>,
 ) -> Result<std::path::PathBuf> {
-    crate::status::StatusWriter::serve().save_with_state_dir(state_dir, file)
+    crate::status::StatusWriter::serve().save_with_state_dir(
+        state_dir,
+        &crate::status::StatusPayload::Serve(file.clone()),
+    )
 }
 
 /// Periodically rewrite serve-status.json, but only when the rendered

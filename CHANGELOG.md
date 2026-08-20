@@ -13,9 +13,10 @@
   `local_bound_addrs` candidates.
 
 - **`iroh-tunnel <role> status`**: new subcommand for both roles — prints a
-  human-readable table (node header, per-connection rows on serve /
-  per-service rows on access, transports with `[active]` markers) from the
-  role's status file; `--json` prints the file verbatim. A missing file
+  human-readable table (node header; on serve an exposed-services table
+  plus per-connection rows, on access per-service rows; transports with
+  `[active]` markers) from the role's status file; `--json` prints the file
+  verbatim (validated first — a corrupt file fails loudly). A missing file
   exits 1 with `serve is not running (no serve-status.json found at
   <path>)`-shaped guidance.
 
