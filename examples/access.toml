@@ -10,6 +10,9 @@
 
 [node]
 relay_urls = []
+# relay_token = "<token>"   # only when your relay enforces access.shared_token
+                            # (docs/self-hosted-relay.md — one token for every
+                            # relay in relay_urls; ignored by open relays)
 
 [[services]]
 name = "web"
@@ -18,3 +21,15 @@ protocol = "tcp"
 host = "0.0.0.0"
 port = 8080
 multiplex = true    # one shared connection per service (see README Multiplexing)
+
+# Per-service relay override: dial THIS service's peer through its own relay
+# set instead of [node] relay_urls (empty service list falls back to the
+# node's). The serve peer must itself be registered on those relays.
+#
+# [[services]]
+# name = "db"
+# node_id = "<serve-node-id>"
+# protocol = "tcp"
+# host = "127.0.0.1"
+# port = 5433
+# relay_urls = ["https://relay.example.com"]
