@@ -11,6 +11,11 @@
 
 [node]
 secret_key = "8dZvHJD3cHOj+H7dwW9trgiZkn1WQD3r4zaxAedtDxA="
+# relay_urls = ["https://relay.example.com"]
+# relay_token = "<token>"    # when that relay enforces access.shared_token
+                            # (docs/self-hosted-relay.md). Must include every
+                            # relay your access peers dial you through — a
+                            # relay only carries traffic for connected peers.
 
 [[services]]
 name = "web"
