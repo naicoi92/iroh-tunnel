@@ -1850,7 +1850,6 @@ dependencies = [
  "iroh",
  "iroh-relay",
  "iroh-tunnel",
- "parking_lot",
  "regex",
  "semver",
  "serde",

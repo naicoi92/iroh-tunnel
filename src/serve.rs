@@ -60,6 +60,26 @@ pub async fn run_with_shutdown(
     crate::role_run::run_with_shutdown::<ServeStrategy>(config_path, shutdown).await
 }
 
+/// Run the serve role like [`run_with_shutdown`], but write the status file
+/// into the explicitly given `state_dir` instead of the env-resolved default.
+///
+/// Advanced/testing seam: integration tests point a serve instance at an
+/// isolated tempdir without touching the process-global
+/// `IROH_TUNNEL_STATE_DIR` variable (which cannot be mutated safely while
+/// other test threads exist). Production callers use [`run_with_shutdown`];
+/// operators relocate the file via the env variable instead.
+pub async fn run_with_shutdown_with_state_dir(
+    state_dir: &Path,
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let state_dir = Some(state_dir.to_path_buf());
+    crate::role_run::run_skeleton::<ServeStrategy, _, _>(config_path, |ep, cfg| {
+        ServeStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir)
+    })
+    .await
+}
+
 /// Serve-role implementation of [`RoleStrategy`].
 ///
 /// Owns the genuinely-serve-specific pieces: registers every service's ALPN
@@ -103,6 +123,19 @@ impl RoleStrategy for ServeStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
+        Self::run_loop_with_state_dir(ep, cfg, shutdown, None).await
+    }
+}
+
+impl ServeStrategy {
+    /// [`RoleStrategy::run_loop`] with an optional injected state dir for
+    /// the status file (see [`run_with_shutdown_with_state_dir`]).
+    async fn run_loop_with_state_dir(
+        ep: iroh::Endpoint,
+        cfg: ServeConfig,
+        shutdown: impl Future<Output = ()>,
+        state_dir: Option<std::path::PathBuf>,
+    ) -> Result<()> {
         // Build the ALPN -> target lookup for demultiplexing accepted
         // streams.
         let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
@@ -136,8 +169,9 @@ impl RoleStrategy for ServeStrategy {
                         .unwrap_or_default(),
                 })
                 .collect(),
+            state_dir,
         };
-        match status.render(Vec::new()).save() {
+        match save_status_file(&status.render(Vec::new()), status.state_dir.as_deref()) {
             Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
@@ -204,8 +238,9 @@ struct StatusSnapshot {
     pid: u32,
     started_at: u64,
     services: Vec<StatusServiceRow>,
+    /// Injected state dir (testing seam); `None` → env-resolved default.
+    state_dir: Option<std::path::PathBuf>,
 }
-
 struct StatusServiceRow {
     name: String,
     protocol: String,
@@ -246,7 +281,7 @@ impl StatusSnapshot {
 /// same service (e.g. an access node with `multiplex = false`) is
 /// refcounted, and services are merged across a peer's connections.
 #[derive(Clone, Default)]
-struct PeerTracker(Arc<parking_lot::Mutex<HashMap<iroh::EndpointId, HashMap<String, u64>>>>);
+struct PeerTracker(Arc<std::sync::Mutex<HashMap<iroh::EndpointId, HashMap<String, u64>>>>);
 
 impl PeerTracker {
     /// Record one accepted connection from `peer` for `service`, returning
@@ -256,8 +291,12 @@ impl PeerTracker {
     /// that returns *or panics* cannot leak the entry — the unwind drops the
     /// guard like any local.
     fn track(&self, peer: iroh::EndpointId, service: &str) -> TrackedPeer {
+        // std Mutex is deliberate: the critical section is a few map ops,
+        // the guard is never held across an await, and unlock failures can
+        // only mean a panic mid-section — unwrapping is the right response.
         self.0
             .lock()
+            .unwrap()
             .entry(peer)
             .or_default()
             .entry(service.to_string())
@@ -273,7 +312,7 @@ impl PeerTracker {
     /// Drop one connection from `peer` for `service`; removes the service
     /// (and with it the peer) when its refcount hits zero.
     fn untrack(&self, peer: iroh::EndpointId, service: &str) {
-        let mut guard = self.0.lock();
+        let mut guard = self.0.lock().unwrap();
         let Some(services) = guard.get_mut(&peer) else {
             return;
         };
@@ -295,6 +334,7 @@ impl PeerTracker {
         let mut peers: Vec<_> = self
             .0
             .lock()
+            .unwrap()
             .iter()
             .map(|(peer, services)| {
                 let mut names: Vec<String> = services.keys().cloned().collect();
@@ -302,7 +342,9 @@ impl PeerTracker {
                 (*peer, names)
             })
             .collect();
-        peers.sort_by_key(|(peer, _)| peer.to_string());
+        // Cached key: the node-id string is computed once per peer instead
+        // of once per comparison.
+        peers.sort_by_cached_key(|(peer, _)| peer.to_string());
         peers
     }
 }
@@ -337,13 +379,24 @@ async fn render_connections(
             continue;
         };
         out.push(crate::status::PeerConnectionStatus {
-            peer: report.peer,
+            path: report,
             services,
-            transports: report.transports,
-            local_bound_addrs: report.local_bound_addrs,
         });
     }
     out
+}
+
+/// Persist the rendered status file: into `state_dir` when the testing seam
+/// injected one, otherwise via [`crate::status::StatusFile::save`]
+/// (env-aware default path).
+fn save_status_file(
+    file: &crate::status::StatusFile,
+    state_dir: Option<&Path>,
+) -> Result<std::path::PathBuf> {
+    match state_dir {
+        Some(dir) => file.save_to(dir),
+        None => file.save(),
+    }
 }
 
 /// Periodically rewrite serve-status.json, but only when the rendered
@@ -360,7 +413,7 @@ async fn status_flush_loop(status: StatusSnapshot, ep: iroh::Endpoint, peers: Pe
         // Only record the file as written on success, so a failed write is
         // retried on the next tick rather than silently dropped until the
         // next change.
-        match file.save() {
+        match save_status_file(&file, status.state_dir.as_deref()) {
             Ok(_) => last = Some(file),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }

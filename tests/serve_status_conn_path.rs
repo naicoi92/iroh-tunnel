@@ -3,8 +3,9 @@
 //! Boots serve + access against an IN-PROCESS relay (same harness shape as
 //! `relay_auth.rs`: `iroh::test_utils::run_relay_server`, self-signed cert
 //! trusted via the crate's `test-utils` feature) — no Internet, no n0 relay
-//! network, CI-safe. The serve role's state dir is redirected to a tempdir
-//! through `IROH_TUNNEL_STATE_DIR`, so the test reads a real
+//! network, CI-safe. The serve role's state dir is *injected* via
+//! [`iroh_tunnel::serve::run_with_shutdown_with_state_dir`] (no
+//! process-global env mutation), so the test reads a real
 //! `serve-status.json` exactly as an operator would.
 //!
 //! Phases:
@@ -15,11 +16,6 @@
 //!    transports, and endpoint-wide `local_bound_addrs`.
 //! 3. After the access role shuts down, the entry disappears — untracking
 //!    works and the 5 s flush picks it up.
-//!
-//! Runtime note: the env override is installed *before* the multi-thread
-//! runtime is built (`std::env::set_var` while worker threads already exist
-//! is unsound per the std docs), so the test uses a plain `#[test]` that
-//! constructs the runtime itself.
 
 #![cfg(unix)] // shutdown.rs installs SIGTERM handlers; restrict to unix
 
@@ -46,22 +42,8 @@ const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(25);
 /// its real error instead of spinning to the deadline.
 type SharedRole = Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>>;
 
-#[test]
-fn serve_status_file_reports_connected_peer_paths() {
-    // The env override must be in place before any worker thread exists.
-    let state_tmp = tempfile::tempdir().expect("state tempdir");
-    std::env::set_var("IROH_TUNNEL_STATE_DIR", state_tmp.path());
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("failed to build tokio runtime");
-    rt.block_on(run_scenario(&state_tmp))
-        .expect("scenario failed");
-}
-
-async fn run_scenario(state_tmp: &tempfile::TempDir) -> Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serve_status_file_reports_connected_peer_paths() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -71,6 +53,7 @@ async fn run_scenario(state_tmp: &tempfile::TempDir) -> Result<()> {
         .try_init();
 
     let cfg_tmp = tempfile::tempdir().context("config tempdir")?;
+    let state_tmp = tempfile::tempdir().context("state tempdir")?;
 
     let (_relay_map, relay_url, _server) = run_relay_server().await?;
     let relay = relay_url.to_string();
@@ -138,8 +121,9 @@ multiplex = true
     let (access_tx, access_rx) = oneshot::channel::<()>();
     let serve_spawn = {
         let path = serve_cfg.clone();
+        let state_dir = state_tmp.path().to_path_buf();
         tokio::spawn(async move {
-            iroh_tunnel::serve::run_with_shutdown(&path, async move {
+            iroh_tunnel::serve::run_with_shutdown_with_state_dir(&state_dir, &path, async move {
                 let _ = serve_rx.await;
             })
             .await

@@ -35,6 +35,7 @@
 //! Based on Page 06 v5 §4 (status file schema).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -77,22 +78,23 @@ pub struct ServiceStatus {
 
 /// One currently-connected remote peer in the status file (issue #57).
 ///
-/// Built by the serve role's flush task from [`crate::conn_path`] snapshots
-/// plus its own per-peer service tracking.
+/// The path fields (`peer`, `transports`, `local_bound_addrs`) are flattened
+/// in from a [`crate::conn_path::PeerPathReport`] so the two schemas cannot
+/// drift apart; the serve role adds only the per-peer `services` merge.
 #[derive(Debug, PartialEq, Serialize)]
 pub struct PeerConnectionStatus {
-    /// The remote peer's endpoint id (full node id string).
-    pub peer: String,
+    /// Connection-path snapshot for this peer (peer id, transports,
+    /// endpoint-wide local UDP candidates), flattened into this row.
+    #[serde(flatten)]
+    pub path: crate::conn_path::PeerPathReport,
     /// Service names this peer is connected to (from the connection's ALPN,
     /// merged across all of the peer's connections).
     pub services: Vec<String>,
-    /// Transports iroh currently uses or knows for this peer — see
-    /// [`crate::conn_path`] for the relay/direct semantics.
-    pub transports: Vec<crate::conn_path::TransportStatus>,
-    /// Local UDP socket *candidates* of the serve endpoint (endpoint-wide,
-    /// not a per-transport local address).
-    pub local_bound_addrs: Vec<String>,
 }
+
+/// Monotonic per-process counter making each save's temp file name unique
+/// (see [`StatusFile::save_to`]).
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl StatusFile {
     /// Write the status file under the OS state directory.
@@ -115,8 +117,10 @@ impl StatusFile {
     /// needed.
     ///
     /// Atomic: the JSON is written to a sibling temp file
-    /// (`serve-status.json.tmp`) and renamed into place, so a concurrent
-    /// reader never observes a half-written file. Returns the path written.
+    /// (`serve-status.json.tmp.<pid>.<n>`) and renamed into place, so a
+    /// concurrent reader never observes a half-written file. The temp name is
+    /// unique per save so two processes sharing a state dir cannot interleave
+    /// their temp writes. Returns the path written.
     ///
     /// This is the testable core — production callers use [`Self::save`];
     /// tests inject a `tempfile::tempdir()` here.
@@ -128,13 +132,19 @@ impl StatusFile {
 
         // Write to a temp file in the same directory, then rename — atomic on
         // POSIX, and on Windows for same-volume same-directory renames.
-        let temp = dir.join(format!("{STATUS_FILE_NAME}.tmp"));
+        // `<name>.tmp.<pid>.<counter>` keeps every save's temp file unique
+        // (two processes can share an injected state dir) while the rename
+        // stays single-file atomic.
+        let temp = dir.join(format!(
+            "{STATUS_FILE_NAME}.tmp.{}.{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&temp, &content)
             .with_context(|| format!("failed to write status file: {}", temp.display()))?;
         // If rename fails, the temp file is stale — clean it up so repeated
-        // failures don't accumulate `serve-status.json.tmp` on disk. The
-        // original rename error is still what we return; a cleanup failure is
-        // best-effort.
+        // failures don't accumulate temp files on disk. The original rename
+        // error is still what we return; a cleanup failure is best-effort.
         if let Err(e) = std::fs::rename(&temp, &path) {
             let _ = std::fs::remove_file(&temp);
             return Err(e)
@@ -177,7 +187,12 @@ fn status_file_path() -> Result<PathBuf> {
 /// state.
 fn status_file_path_with(state_dir_override: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
     if let Some(dir) = state_dir_override.filter(|dir| !dir.is_empty()) {
-        return Ok(PathBuf::from(dir).join(STATUS_FILE_NAME));
+        // Absolutize so a relative override (`IROH_TUNNEL_STATE_DIR=.`) does
+        // not silently resolve against a moving CWD — the written path stays
+        // stable for the life of the process.
+        let dir = std::path::absolute(dir)
+            .with_context(|| format!("invalid {ENV_STATE_DIR}: {}", Path::new(dir).display()))?;
+        return Ok(dir.join(STATUS_FILE_NAME));
     }
     // state_dir() is None on Windows; fall back to data_dir() so the file still
     // lands somewhere sensible rather than erroring.
@@ -204,14 +219,16 @@ mod tests {
                 active_connections: 0,
             }],
             connections: vec![PeerConnectionStatus {
-                peer: "peer456".to_string(),
+                path: crate::conn_path::PeerPathReport {
+                    peer: "peer456".to_string(),
+                    transports: vec![crate::conn_path::TransportStatus {
+                        kind: crate::conn_path::TransportKind::Relay,
+                        addr: "https://relay.example/".to_string(),
+                        active: true,
+                    }],
+                    local_bound_addrs: vec!["0.0.0.0:52110".to_string()],
+                },
                 services: vec!["echo".to_string()],
-                transports: vec![crate::conn_path::TransportStatus {
-                    kind: crate::conn_path::TransportKind::Relay,
-                    addr: "https://relay.example/".to_string(),
-                    active: true,
-                }],
-                local_bound_addrs: vec!["0.0.0.0:52110".to_string()],
             }],
         }
     }
@@ -281,14 +298,17 @@ mod tests {
 
     #[test]
     fn save_to_uses_atomic_rename_temp_file_gone() {
-        // After a successful save_to, the sibling `serve-status.json.tmp`
-        // must not linger — atomic rename removes it.
+        // After a successful save_to, no sibling temp file may linger —
+        // atomic rename consumes it. Temp names carry a unique
+        // `.tmp.<pid>.<n>` suffix, so scan for the prefix.
         let tmp = tempfile::tempdir().unwrap();
         let status = sample_status();
         status.save_to(tmp.path()).unwrap();
 
-        let temp = tmp.path().join("serve-status.json.tmp");
-        assert!(!temp.exists(), "temp file should be gone after rename");
+        assert!(
+            !leftover_temp_files(tmp.path()).exists(),
+            "temp file leaked after rename"
+        );
     }
 
     #[test]
@@ -343,10 +363,10 @@ mod tests {
         let res = status.save_to(tmp.path());
 
         if res.is_err() {
-            // The load-bearing assertion: the temp file must not linger after
-            // a rename failure.
+            // The load-bearing assertion: the temp file must not linger
+            // after a rename failure.
             assert!(
-                !tmp.path().join("serve-status.json.tmp").exists(),
+                !leftover_temp_files(tmp.path()).exists(),
                 "temp file leaked after rename failure"
             );
         }
@@ -382,5 +402,36 @@ mod tests {
                 .join("iroh-tunnel")
                 .join("serve-status.json")
         );
+    }
+
+    #[test]
+    fn relative_status_file_path_override_is_absolutized() {
+        // A relative override must resolve against the CWD once, at
+        // resolution time — the returned path is absolute either way.
+        let path = status_file_path_with(Some(std::ffi::OsStr::new("rel/state")))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            Path::new(&path).is_absolute(),
+            "override path must be absolute, got {path}"
+        );
+    }
+
+    /// A stand-in entry for any leftover temp file under `dir` (they are
+    /// named `serve-status.json.tmp.<pid>.<n>`).
+    fn leftover_temp_files(dir: &Path) -> std::path::PathBuf {
+        // Any existing entry starting with the temp prefix counts; used with
+        // `.exists()` so the caller can assert absence.
+        dir.read_dir()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("serve-status.json.tmp")
+            })
+            .map(|e| e.path())
+            .unwrap_or_else(|| dir.join("serve-status.json.tmp.none"))
     }
 }

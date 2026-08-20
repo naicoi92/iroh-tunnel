@@ -85,10 +85,17 @@ pub async fn peer_path_report(ep: &Endpoint, peer: EndpointId) -> Option<PeerPat
         })
         .collect();
     sort_transports(&mut transports);
+    // bound_sockets() ordering is not guaranteed stable across calls; sort
+    // for the same reason transports are sorted — two snapshots of an
+    // unchanged endpoint must compare equal, or the flush loop would
+    // rewrite the status file every 5 s for no real change.
+    let mut local_bound_addrs: Vec<String> =
+        ep.bound_sockets().iter().map(|a| a.to_string()).collect();
+    local_bound_addrs.sort();
     Some(PeerPathReport {
         peer: peer.to_string(),
         transports,
-        local_bound_addrs: ep.bound_sockets().iter().map(|a| a.to_string()).collect(),
+        local_bound_addrs,
     })
 }
 
@@ -101,11 +108,16 @@ fn classify_transport(addr: &TransportAddr) -> Option<(TransportKind, String)> {
     match addr {
         TransportAddr::Relay(url) => Some((TransportKind::Relay, url.to_string())),
         TransportAddr::Ip(addr) => Some((TransportKind::Direct, addr.to_string())),
-        // `Custom` — and any future variant, the enum is non_exhaustive — is
-        // dropped: iroh-tunnel's `Minimal` endpoint preset registers no
-        // custom transports, so one showing up here would be noise, not an
-        // operator-actionable path.
-        _ => None,
+        // Rationale in the doc comment above — but leave a trace instead of
+        // silently vanishing, in case a future endpoint preset ever
+        // registers custom transports.
+        _ => {
+            tracing::debug!(
+                ?addr,
+                "dropping non relay/direct transport from status report"
+            );
+            None
+        }
     }
 }
 
@@ -118,7 +130,14 @@ fn classify_transport(addr: &TransportAddr) -> Option<(TransportKind, String)> {
 /// snapshots, and without a deterministic sort the rendered file would
 /// compare unequal and get rewritten every flush despite no real change.
 fn sort_transports(transports: &mut [TransportStatus]) {
-    transports.sort_by_key(|t| (std::cmp::Reverse(t.active), t.kind, t.addr.clone()));
+    // Chained comparisons instead of a sort_by_key tuple key: avoids
+    // allocating a String key per comparison.
+    transports.sort_by(|a, b| {
+        std::cmp::Reverse(a.active)
+            .cmp(&std::cmp::Reverse(b.active))
+            .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.addr.cmp(&b.addr))
+    });
 }
 
 #[cfg(test)]
@@ -243,5 +262,17 @@ mod tests {
         // #58/#59 reuse).
         let back: PeerPathReport = serde_json::from_value(json).unwrap();
         assert_eq!(back, report);
+    }
+
+    #[tokio::test]
+    async fn peer_path_report_returns_none_for_never_connected_peer() {
+        // A fresh offline endpoint has no remote-map entry for a peer it has
+        // never heard of — `peer_path_report` must return None (the flush
+        // loop's skip path), never an empty report.
+        let ep = iroh::Endpoint::bind(iroh::endpoint::presets::Minimal)
+            .await
+            .unwrap();
+        let stranger = iroh::SecretKey::generate().public();
+        assert!(peer_path_report(&ep, stranger).await.is_none());
     }
 }
