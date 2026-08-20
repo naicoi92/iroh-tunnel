@@ -220,6 +220,12 @@ struct ServiceDialer {
     /// The shared multiplexed connection, if any. Guarded by a tokio Mutex so
     /// concurrent channels serialize the (re)dial instead of racing N dials.
     conn: Mutex<Option<iroh::endpoint::Connection>>,
+    /// The current path-change poller's abort handle, if any. Same
+    /// one-per-service rule as `conn`: `get_or_dial` aborts the previous
+    /// poller before spawning its replacement, so a redial (e.g. after a
+    /// non-fatal open_bi error invalidated the cache) never leaves two
+    /// pollers logging the same peer+service.
+    poller: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl ServiceDialer {
@@ -241,6 +247,7 @@ impl ServiceDialer {
             listen_addr,
             multiplex: svc.multiplex,
             conn: Mutex::new(None),
+            poller: Mutex::new(None),
         }
     }
 
@@ -271,13 +278,25 @@ impl ServiceDialer {
                 self.svc_name
             ),
         );
+        // One poller per service: abort the previous one (if any) before
+        // spawning its replacement — a non-fatal open_bi error (e.g.
+        // StreamLimitReached) invalidates the cache, and the redial would
+        // otherwise leave a second poller logging the same peer+service.
+        // The old poller also ends by itself once its connection closes;
+        // the abort is just eager cleanup.
+        let mut poller_guard = self.poller.lock().await;
+        if let Some(old) = poller_guard.take() {
+            old.abort();
+        }
         // Path-change baseline: whatever the established line just rendered.
-        spawn_path_change_poller(
+        let poller = spawn_path_change_poller(
             &self.ep,
             &conn,
             self.svc_name.clone(),
             report.map(|r| r.transports).unwrap_or_default(),
         );
+        *poller_guard = Some(poller);
+        drop(poller_guard);
         Ok(conn)
     }
 
@@ -454,17 +473,25 @@ async fn log_connection_established(
 /// succeeds, a direct path dies and traffic falls back to relay — while the
 /// multiplexed connection outlives all of them. The poller snapshots the
 /// peer's transports every [`PATH_POLL_INTERVAL`] and logs exactly one line
-/// per real change (what counts as "real" is [`crate::conn_path::diff_transports`]).
+/// per real change (what counts as "real" is
+/// [`crate::conn_path::diff_transports`]).
+///
+/// Semantics: it watches the PEER-level remote map, which iroh shares
+/// across every connection to the same peer — a logged transition can be
+/// driven by a *different* connection's traffic (e.g. the per-channel
+/// service to the same serve peer completing a hole punch), not only by
+/// this connection.
 ///
 /// Lifetime: it holds only a *weak* connection handle (never keeps the
 /// connection alive) and its loop is bounded by `closed()` — the task ends
-/// with the connection, no abort needed.
+/// with the connection. The returned [`tokio::task::AbortHandle`] lets the
+/// owner end it earlier on redial (one poller per service).
 fn spawn_path_change_poller(
     ep: &iroh::Endpoint,
     conn: &iroh::endpoint::Connection,
     svc_name: String,
     initial: Vec<crate::conn_path::TransportStatus>,
-) {
+) -> tokio::task::AbortHandle {
     let peer = conn.remote_id();
     let weak = conn.weak_handle();
     let ep = ep.clone();
@@ -495,5 +522,6 @@ fn spawn_path_change_poller(
             }
             last = next;
         }
-    });
+    })
+    .abort_handle()
 }

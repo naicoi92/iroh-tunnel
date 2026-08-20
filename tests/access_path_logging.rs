@@ -76,7 +76,7 @@ fn captured_lines(sink: &Arc<Mutex<Vec<u8>>>) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn access_logs_connection_paths_on_established() -> Result<()> {
     let sink = Arc::new(Mutex::new(Vec::new()));
-    let _ = tracing_subscriber::fmt()
+    if let Err(e) = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
@@ -88,7 +88,15 @@ async fn access_logs_connection_paths_on_established() -> Result<()> {
         )
         .with_ansi(false)
         .with_writer(LogSink(sink.clone()))
-        .try_init();
+        .try_init()
+    {
+        // A subscriber is already installed, so the LogSink is NOT wired:
+        // every log assertion below would fail as opaque 30 s timeouts.
+        // Surface the root cause instead of swallowing it.
+        eprintln!(
+            "warning: tracing subscriber already installed ({e}); LogSink not wired — log assertions will fail"
+        );
+    }
 
     let cfg_tmp = tempfile::tempdir().context("config tempdir")?;
     let state_tmp = tempfile::tempdir().context("serve state tempdir")?;
@@ -216,7 +224,9 @@ multiplex = false
     let peer_field = format!("peer={serve_node_id}");
     let mux_line = wait_for_line(&sink, |line| {
         line.contains("connected to serve peer (multiplexed")
-            && line.contains("svc_name=echo")
+            // `svc_name` is the trailing field; `ends_with` keeps `echo`
+            // from matching `echo2`.
+            && line.ends_with("svc_name=echo")
             // The full id as the `peer=` field (not a bare substring that
             // could match the id appearing anywhere else in the line).
             && line.contains(&peer_field)
@@ -228,7 +238,7 @@ multiplex = false
 
     let per_channel_line = wait_for_line(&sink, |line| {
         line.contains("connected to serve peer (per-channel")
-            && line.contains("svc_name=echo2")
+            && line.ends_with("svc_name=echo2")
             && line.contains(&peer_field)
             && (line.contains("relay=") || line.contains("direct="))
     })
@@ -236,6 +246,20 @@ multiplex = false
     .context("per-channel established line")?;
     println!("per-channel established: {per_channel_line}");
 
+    // Steady-state pin (issue #58): the poller must be silent while nothing
+    // changes. On this localhost harness a *legitimate* initial migration
+    // (relay→relay+direct) is expected while QUIC address discovery lands —
+    // the per-channel line above already shows direct active — so first let
+    // the initial transitions settle (see `wait_for_quiet`), then hold for
+    // 2× PATH_POLL_INTERVAL (5 s, src/access.rs) and require the
+    // path-changed count not to move.
+    let settled_changes = wait_for_quiet(&sink).await?;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let changes_after = path_changed_count(&sink);
+    assert_eq!(
+        changes_after, settled_changes,
+        "poller must stay silent while nothing changes"
+    );
     drop(mux_client);
     drop(per_channel_client);
     let _ = access_tx.send(());
@@ -275,6 +299,41 @@ async fn wait_for_line(sink: &Arc<Mutex<Vec<u8>>>, pred: impl Fn(&str) -> bool) 
             );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Count captured `path changed` lines so far.
+fn path_changed_count(sink: &Arc<Mutex<Vec<u8>>>) -> usize {
+    captured_lines(sink)
+        .iter()
+        .filter(|l| l.contains("path changed"))
+        .count()
+}
+
+/// Wait until one full poller interval passes with no NEW `path changed`
+/// line, returning the settled count. The initial migrations (localhost
+/// QUIC address discovery landing right after the handshakes) are
+/// legitimate poller output — only *after* they settle is silence the
+/// correct expectation.
+async fn wait_for_quiet(sink: &Arc<Mutex<Vec<u8>>>) -> Result<usize> {
+    // 6 s > one 5 s poller tick (PATH_POLL_INTERVAL, src/access.rs).
+    let quiet_window = Duration::from_secs(6);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut last_count = path_changed_count(sink);
+    let mut last_change_at = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let count = path_changed_count(sink);
+        if count != last_count {
+            last_count = count;
+            last_change_at = tokio::time::Instant::now();
+        }
+        if last_change_at.elapsed() > quiet_window {
+            return Ok(last_count);
+        }
+        if tokio::time::Instant::now() > deadline {
+            anyhow::bail!("path-changed lines never settled within 30 s (last count {last_count})");
+        }
     }
 }
 
@@ -343,7 +402,7 @@ async fn retry_connect(
     serve_role: &SharedRole,
     access_role: &SharedRole,
 ) -> Result<TcpStream> {
-    let deadline = tokio::time::Instant::now() + deadline;
+    let start = tokio::time::Instant::now();
     loop {
         if let Some(res) = role_exited(serve_role).await {
             anyhow::bail!("serve exited early: {res:?}");
@@ -354,7 +413,7 @@ async fn retry_connect(
         match TcpStream::connect(addr).await {
             Ok(s) => return Ok(s),
             Err(e) => {
-                if tokio::time::Instant::now() >= deadline {
+                if start.elapsed() > deadline {
                     anyhow::bail!("could not connect to {addr} within {deadline:?}: {e}");
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
