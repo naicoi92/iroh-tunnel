@@ -35,8 +35,10 @@ const PAYLOAD: &[u8] = b"hello-through-the-path-logs";
 const LOG_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A role task shared with [`retry_connect`]: the connect loop polls it for
-/// early exit (config error, bind race) so a dead role surfaces fast with
-/// its real error instead of spinning to the deadline.
+/// early exit — only a config error fails the role task outright (a bind
+/// failure is logged inside the role's own per-service listen task and the
+/// role keeps running, surfacing later as a connect timeout with the
+/// `failed to bind` line visible in the captured dump).
 type SharedRole = Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>>;
 
 /// Shared log sink: a `MakeWriter` whose `io::Write` appends raw bytes.
@@ -77,7 +79,12 @@ async fn access_logs_connection_paths_on_established() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                // Pin this crate to info even when ambient RUST_LOG (e.g.
+                // `warn`) filters it out — otherwise the asserted INFO
+                // lines never reach the sink and the test fails with two
+                // misleading 30 s timeouts instead of a missing line.
+                .add_directive("iroh_tunnel=info".parse().unwrap()),
         )
         .with_ansi(false)
         .with_writer(LogSink(sink.clone()))
@@ -206,10 +213,13 @@ multiplex = false
     roundtrip(&mut per_channel_client).await?;
 
     // The lines are already in the buffer by now; wait_for_line only scans.
+    let peer_field = format!("peer={serve_node_id}");
     let mux_line = wait_for_line(&sink, |line| {
         line.contains("connected to serve peer (multiplexed")
             && line.contains("svc_name=echo")
-            && line.contains(&serve_node_id)
+            // The full id as the `peer=` field (not a bare substring that
+            // could match the id appearing anywhere else in the line).
+            && line.contains(&peer_field)
             && (line.contains("relay=") || line.contains("direct="))
     })
     .await
@@ -219,7 +229,7 @@ multiplex = false
     let per_channel_line = wait_for_line(&sink, |line| {
         line.contains("connected to serve peer (per-channel")
             && line.contains("svc_name=echo2")
-            && line.contains(&serve_node_id)
+            && line.contains(&peer_field)
             && (line.contains("relay=") || line.contains("direct="))
     })
     .await
@@ -270,27 +280,34 @@ async fn wait_for_line(sink: &Arc<Mutex<Vec<u8>>>, pred: impl Fn(&str) -> bool) 
 
 /// If the role task has already exited, take and resolve it, returning the
 /// result; `None` while it is still running.
+///
+/// One guard held across the finished-check and the take — no
+/// take-then-reinsert window for a concurrent caller to observe an empty
+/// slot.
 async fn role_exited(role: &SharedRole) -> Option<Result<()>> {
-    let handle = role.lock().await.take()?;
-    match handle.is_finished() {
-        true => Some(handle.await.expect("role task panicked")),
-        false => {
-            *role.lock().await = Some(handle);
-            None
-        }
+    let mut guard = role.lock().await;
+    if !guard.as_ref()?.is_finished() {
+        return None;
     }
+    let handle = guard.take()?;
+    drop(guard);
+    Some(handle.await.expect("role task panicked"))
 }
 
-/// Take a role task out of its slot and wait for clean shutdown.
+/// Take a role task out of its slot and wait for clean shutdown, bounded so
+/// a hung role fails with a diagnostic instead of stalling the test.
 async fn finish_role(role: &SharedRole, name: &str) -> Result<()> {
     let handle = role
         .lock()
         .await
         .take()
         .unwrap_or_else(|| panic!("{name} role already finished"));
-    handle
-        .await
-        .unwrap_or_else(|e| panic!("{name} role task panicked: {e}"))
+    match tokio::time::timeout(Duration::from_secs(30), handle).await {
+        // Three layers: Elapsed (bounded), JoinError (panic/cancel), then
+        // the role's own result.
+        Ok(joined) => joined.with_context(|| format!("{name} role task failed to join"))?,
+        Err(_) => Err(anyhow::anyhow!("{name} role did not shut down within 30 s")),
+    }
 }
 
 /// Echo server: loop read→write on each accepted connection until EOF.
@@ -315,9 +332,11 @@ async fn echo_server(listener: TcpListener) {
     }
 }
 
-/// Retry TCP connect until `deadline`, polling both role tasks so an early
-/// exit (config error, bind race) fails fast with the role's real result
-/// instead of a misleading connect timeout.
+/// Retry TCP connect until `deadline`, polling both role tasks so a config
+/// error fails fast with the role's real result instead of a misleading
+/// connect timeout. A bind failure does NOT exit the role (it is logged in
+/// the role's per-service listen task) and still surfaces here as the
+/// deadline, with the `failed to bind` line in the captured dump.
 async fn retry_connect(
     addr: std::net::SocketAddr,
     deadline: Duration,

@@ -254,6 +254,12 @@ impl ServiceDialer {
             return Ok(conn.clone());
         }
         let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
+        // Publish before the (awaiting) established-log query so the cache
+        // mutex is not held across it: concurrent channels see the fresh
+        // connection immediately. The lock WAS held across the dial above,
+        // so the one-connection-per-N-channels semantics are unchanged.
+        *guard = Some(conn.clone());
+        drop(guard);
         let remote_id = conn.remote_id();
         let report =
             log_connection_established(&self.ep, &conn, &self.svc_name, "multiplexed").await;
@@ -272,7 +278,6 @@ impl ServiceDialer {
             self.svc_name.clone(),
             report.map(|r| r.transports).unwrap_or_default(),
         );
-        *guard = Some(conn.clone());
         Ok(conn)
     }
 
@@ -480,19 +485,31 @@ fn spawn_path_change_poller(
             let Some(report) = crate::conn_path::peer_path_report(&ep, peer).await else {
                 continue;
             };
+            // Seed silently while the baseline has never seen an active
+            // path (the established line logged `paths pending`): the
+            // first active snapshot is a resolution, not a migration.
+            if !last.iter().any(|t| t.active) {
+                last = report.transports;
+                continue;
+            }
             if let Some(change) = crate::conn_path::diff_transports(&last, &report.transports) {
                 // A snapshot with no active transports means the connection
-                // is tearing down — the disconnect event covers that.
-                if !change.after_active.is_empty() {
-                    tracing::info!(
-                        peer = %peer,
-                        "{}: path changed {}→{} (now active: {})",
-                        svc_name,
-                        crate::conn_path::render_active_kinds(&change.before_active),
-                        crate::conn_path::render_active_kinds(&change.after_active),
-                        crate::conn_path::render_active_transports(&change.after_active),
-                    );
+                // is tearing down — the disconnect event covers that. Keep
+                // `last` unchanged so the transient all-inactive snapshot
+                // cannot surface later as a spurious `none→…` line: the
+                // next active snapshot diffs against the last *real* path.
+                if change.after_active.is_empty() {
+                    continue;
                 }
+                tracing::info!(
+                    peer = %peer,
+                    svc_name = %svc_name,
+                    "{}: path changed {}→{} (now active: {})",
+                    svc_name,
+                    crate::conn_path::render_active_kinds(&change.before_active),
+                    crate::conn_path::render_active_kinds(&change.after_active),
+                    crate::conn_path::render_active_transports(&change.after_active),
+                );
             }
             last = report.transports;
         }
