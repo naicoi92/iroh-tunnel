@@ -64,9 +64,9 @@ ran on your own machine.
   (glibc **and** musl), macOS `arm64`, and `riscv64` for embedded boards.
 - **Fits any init.** First-class service management for systemd, launchd,
   and BusyBox/SysV init (buildroot-class devices).
-- **Observable by default.** Peer connect/disconnect logs at INFO, an
-  atomic `serve-status.json` with live connection paths for monitoring, and
-  meaningful exit codes.
+- **Observable by default.** Peer connect/disconnect logs at INFO, atomic
+  per-role status files with live connection paths (`iroh-tunnel <role>
+  status` renders them), and meaningful exit codes.
 
 ## How it works
 
@@ -251,10 +251,11 @@ If you omit `--config`, the file is read from the OS config dir:
 | Linux   | `~/.config/iroh-tunnel/{serve,access}.toml` |
 | macOS   | `~/Library/Application Support/iroh-tunnel/{serve,access}.toml` |
 
-Status file (written by serve `run`, for monitoring):
-`~/.local/state/iroh-tunnel/serve-status.json` (Linux) or
-`~/Library/Application Support/iroh-tunnel/serve-status.json` (macOS) — see
-[Monitoring](#monitoring) for the schema.
+Status files (written by `run`, for monitoring):
+`~/.local/state/iroh-tunnel/{serve,access}-status.json` (Linux) or
+`~/Library/Application Support/iroh-tunnel/{serve,access}-status.json`
+(macOS) — see [Monitoring](#monitoring) for the schemas and the
+`<role> status` command.
 
 Sample files ship in [`examples/`](examples/) — `serve.toml` and `access.toml`
 with a throwaway demo key so the compose demo runs as-is.
@@ -475,7 +476,7 @@ Roles:    serve | access
 Commands:
   run       Run in the foreground
   config    Manage config (keygen | add | remove | list | show | edit | path)
-  service   Manage systemd/launchd service (install | start | stop | restart | status | uninstall)
+  status    Print the role's status file as a table (--json for the raw file)
 
 Flags:    -v / -vv   increase logging (debug/trace)  ·  -q quiet (errors only)  ·  --color auto|always|never
 ```
@@ -531,10 +532,80 @@ with one entry per currently-connected peer:
   per-transport local address — iroh does not expose a local→remote path
   mapping.
 
-The file is refreshed every 5 s and rewritten only when something changed;
-a peer disappears from `connections` once its last connection closes. Set
-`IROH_TUNNEL_STATE_DIR` to relocate the file (advanced/testing seam — the
-file lands directly in that directory).
+The serve file is refreshed every 5 s and rewritten only when something
+changed; a peer disappears from `connections` once its last connection
+closes.
+
+`access run` writes `access-status.json` in the same directory — `node_id`
+(the access node), `pid`, `started_at`, and one row per configured service:
+
+```json
+{
+  "name": "echo",
+  "listen_addr": "127.0.0.1:8080",
+  "peer": "1aa27080cc694eb1e756c5e9260eb267208f7b677e6a74e53146bf417fb31f84",
+  "transports": [
+    { "kind": "relay", "addr": "https://use1-1.relay.iroh.network/", "active": true }
+  ],
+  "local_bound_addrs": ["0.0.0.0:57382", "[::]:52921"]
+}
+```
+
+- `peer` — the serve peer the service is configured to dial, taken from the
+  config, so it is present before the first connection.
+- `transports` — the live paths of the service's shared multiplexed
+  connection, queried fresh at each 5 s flush (same relay/direct semantics
+  as the serve file). Empty while the service has no live connection — and
+  always empty for `multiplex = false` services, whose per-channel
+  connections are too short-lived to report.
+- `local_bound_addrs` — the access endpoint's local UDP socket *candidates*
+  (endpoint-wide, same caveat as the serve file).
+
+Read either file with `iroh-tunnel <role> status` — a human-readable table,
+or the raw file with `--json`:
+
+```console
+$ iroh-tunnel serve status
+node_id: 1aa27080cc694eb1e756c5e9260eb267208f7b677e6a74e53146bf417fb31f84
+home_relay: https://use1-1.relay.iroh.network/
+pid: 8412  started_at: 1755648000
+
+PEER       SERVICES  TRANSPORTS
+---------  --------  -------------------------------------------------
+acc01c0d…  echo      relay https://use1-1.relay.iroh.network/ [active]
+
+$ iroh-tunnel access status
+node_id: acc01c0d4c694eb1e756c5e9260eb267208f7b677e6a74e53146bf417fb31f84
+pid: 8460  started_at: 1755648010
+
+SERVICE  LISTEN          PEER       TRANSPORTS
+-------  --------------  ---------  -------------------------------------------------
+echo     127.0.0.1:8080  1aa27080…  relay https://use1-1.relay.iroh.network/ [active]
+                                    direct 192.168.1.10:52618
+
+$ iroh-tunnel access status --json
+{
+  "node_id": "acc01c0d4c694eb1e756c5e9260eb267208f7b677e6a74e53146bf417fb31f84",
+  "pid": 8460,
+  "started_at": 1755648010,
+  "services": [
+    {
+      "name": "echo",
+      "listen_addr": "127.0.0.1:8080",
+      "peer": "1aa27080cc694eb1e756c5e9260eb267208f7b677e6a74e53146bf417fb31f84",
+      "transports": [
+        { "kind": "relay", "addr": "https://use1-1.relay.iroh.network/", "active": true }
+      ],
+      "local_bound_addrs": ["0.0.0.0:57382", "[::]:52921"]
+    }
+  ]
+}
+```
+
+When the role is not running, `status` exits `1` with
+`serve is not running (no serve-status.json found at <path>)` (same shape
+for access). Both files honor `IROH_TUNNEL_STATE_DIR` to relocate them
+(advanced/testing seam — the files land directly in that directory).
 
 ### Log events
 
@@ -591,9 +662,10 @@ protocol today.
 
 **How do I see what the tunnel is doing?**
 `-v`/`-vv` for debug/trace, `RUST_LOG=iroh_tunnel=debug` for full control,
-`serve-status.json` for a monitoring-friendly snapshot, and the
-[exit codes](#exit-codes) for scripting. Both roles log the *remote* NodeId
-on connect/disconnect so the two sides can be correlated.
+`iroh-tunnel <role> status` (or the status files directly) for a
+monitoring-friendly snapshot, and the [exit codes](#exit-codes) for
+scripting. Both roles log the *remote* NodeId on connect/disconnect so the
+two sides can be correlated.
 
 **Can I run serve and access on the same machine?**
 Yes — every quick-start command works in two terminals on one host. The
@@ -632,8 +704,9 @@ For reporting vulnerabilities and the full policy, see
 | `src/proto.rs`             | ALPN protocol constants (`iroh-tunnel/{name}`)         |
 | `src/config.rs`, `src/config_cmd.rs` | config model + `config` subcommands           |
 | `src/service/`             | service backends: `systemd`, `launchd`, BusyBox init   |
-| `src/conn_path.rs`          | peer connection-path reports for status files           |
-| `src/status.rs`            | atomic `serve-status.json` writer                      |
+| `src/conn_path.rs`         | peer connection-path reports for status files          |
+| `src/status.rs`            | atomic per-role status-file writers (`StatusWriter`)   |
+| `src/status_cmd.rs`        | `<role> status`: read the file, render the table       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
 | `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)  |

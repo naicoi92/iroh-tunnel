@@ -30,15 +30,28 @@
 //! - One listen-loop task per service (so each service has its own bound port).
 //! - Each accepted local client becomes its own task, so a failure in one
 //!   tunnel never affects another (NFR-08).
-//! - `host = 0.0.0.0` binds all interfaces (share within the LAN); the default
-//!   `127.0.0.1` keeps it local-only.
+//! - `host = 0.0.0.0` binds all interfaces (share within the LAN); the
+//!   default `127.0.0.1` keeps it local-only.
+//!
+//! ## Status file (issue #59)
+//!
+//! `access run` writes `access-status.json` beside the serve file (same
+//! atomic write, same 5 s change-detect flush): `node_id`, `pid`,
+//! `started_at`, and one row per configured service — `name`,
+//! `listen_addr`, the configured serve `peer`, the live `transports` of the
+//! service's multiplexed connection, and the endpoint's local UDP
+//! candidates. Transports are queried fresh from the cached connection at
+//! each flush (never snapshotted in the cache), and are empty while the
+//! service has no live connection — `multiplex = false` services therefore
+//! always show an empty list (their connections are per-channel and
+//! short-lived).
 //!
 //! Based on Page 04 v2 §1.2 (access dial sequence) and Page 06 v5 §1.2 (access
 //! run CLI behavior). Note: iroh 1.0's connect/ALPN API differs from the
 //! earlier draft the spec was written against — see the API notes inline.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +63,7 @@ use crate::config::{AccessConfig, AccessService};
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
+use crate::status::{AccessServiceStatus, AccessStatusFile, StatusWriter};
 
 /// Run the access role until interrupted (Ctrl-C).
 ///
@@ -73,6 +87,29 @@ pub async fn run_with_shutdown(
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
     crate::role_run::run_with_shutdown::<AccessStrategy>(config_path, shutdown).await
+}
+
+/// Run the access role like [`run_with_shutdown`], but write its status
+/// file into the explicitly given `state_dir` instead of the env-resolved
+/// default.
+///
+/// Advanced/testing seam mirroring
+/// [`crate::serve::run_with_shutdown_with_state_dir`]: integration tests
+/// point an access instance at an isolated tempdir without touching the
+/// process-global `IROH_TUNNEL_STATE_DIR` variable (which cannot be
+/// mutated safely while other test threads exist). Production callers use
+/// [`run_with_shutdown`]; operators relocate the file via the env variable
+/// instead.
+pub async fn run_with_shutdown_with_state_dir(
+    state_dir: &Path,
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let state_dir = Some(state_dir.to_path_buf());
+    crate::role_run::run_skeleton::<AccessStrategy, _, _>(config_path, |ep, cfg| {
+        AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir)
+    })
+    .await
 }
 
 /// Access-role implementation of [`RoleStrategy`].
@@ -157,6 +194,19 @@ impl RoleStrategy for AccessStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
+        Self::run_loop_with_state_dir(ep, cfg, shutdown, None).await
+    }
+}
+
+impl AccessStrategy {
+    /// [`RoleStrategy::run_loop`] with an optional injected state dir for
+    /// the status file (see [`run_with_shutdown_with_state_dir`]).
+    async fn run_loop_with_state_dir(
+        ep: iroh::Endpoint,
+        cfg: AccessConfig,
+        shutdown: impl Future<Output = ()>,
+        state_dir: Option<PathBuf>,
+    ) -> Result<()> {
         // Resolve the node-level relays once (the per-service fallback) and
         // parse every service's node_id before spawning listeners, so a bad
         // config fails fast. Each service resolves its own effective relay
@@ -171,7 +221,12 @@ impl RoleStrategy for AccessStrategy {
         }
 
         let mut handles = Vec::new();
-        for svc in cfg.services {
+        // One dialer per service, kept alive alongside the listener tasks:
+        // the status flush task reads each service's live connection path
+        // from its dialer (issue #59).
+        let mut dialers: Vec<Arc<ServiceDialer>> = Vec::new();
+        let mut status_services: Vec<AccessStatusServiceRow> = Vec::new();
+        for svc in &cfg.services {
             let node_id = svc
                 .node_id
                 .parse::<iroh::EndpointId>()
@@ -186,22 +241,154 @@ impl RoleStrategy for AccessStrategy {
             let dialer = Arc::new(ServiceDialer::new(
                 &ep,
                 node_id,
-                &svc,
+                svc,
                 &effective,
-                listen_addr,
+                listen_addr.clone(),
             ));
-            handles.push(tokio::spawn(listen_loop(dialer)));
+            status_services.push(AccessStatusServiceRow {
+                name: svc.name.clone(),
+                listen_addr,
+                // The parsed id, not the raw config string — the status row
+                // is normalized exactly like every other rendered id.
+                peer: node_id.to_string(),
+            });
+            dialers.push(dialer);
         }
+        // The initial status write happens BEFORE any listener spawns (the
+        // same ordering as serve): no local client can have connected yet,
+        // so the first snapshot deterministically carries every service's
+        // configured peer with empty transports.
+
+        // Operator-facing status snapshot (issue #59), refreshed by the
+        // flush task below as connections come and go. Best-effort: a
+        // failure to write status is logged but does not stop the tunnel.
+        // Same seeding contract as serve's: the initial write seeds the
+        // change detection when it succeeds; a failure seeds `None` so the
+        // first tick retries it.
+        let status = AccessStatusTemplate {
+            node_id: crate::endpoint::node_id_string(&ep),
+            pid: std::process::id(),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            services: status_services,
+            state_dir,
+        };
+        let initial = render_access_status(&status, &dialers).await;
+        let seeded = match StatusWriter::access()
+            .save_with_state_dir(status.state_dir.as_deref(), &initial)
+        {
+            Ok(p) => {
+                tracing::info!(path = %p.display(), "wrote status file");
+                Some(initial)
+            }
+            Err(e) => {
+                tracing::warn!("failed to write status file: {e}");
+                None
+            }
+        };
 
         tracing::info!("access endpoint ready, listening for local clients");
+        let flush = tokio::spawn(access_status_flush_loop(status, dialers.clone(), seeded));
+        for dialer in dialers {
+            handles.push(tokio::spawn(listen_loop(dialer)));
+        }
         shutdown.await;
         // Abort each per-service listener so they stop accepting new local
-        // clients before the endpoint close tears down the in-flight dials.
+        // clients before the endpoint close tears down the in-flight dials;
+        // the flush task with it.
         for h in handles {
             h.abort();
         }
+        flush.abort();
         ep.close().await;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Status file (issue #59)
+// ---------------------------------------------------------------------------
+
+/// Access-status template: everything immutable for the life of the
+/// process. The live per-service transports are rendered into each snapshot
+/// at flush time from the dialers' cached connections.
+struct AccessStatusTemplate {
+    node_id: String,
+    pid: u32,
+    started_at: u64,
+    services: Vec<AccessStatusServiceRow>,
+    /// Injected state dir (testing seam); `None` → env-resolved default.
+    state_dir: Option<PathBuf>,
+}
+
+/// One immutable per-service row of [`AccessStatusTemplate`].
+struct AccessStatusServiceRow {
+    name: String,
+    listen_addr: String,
+    /// Configured serve peer (full node id) — shown even before the first
+    /// connection, so operators can tell "misconfigured peer" apart from
+    /// "not connected yet".
+    peer: String,
+}
+
+/// Render the template into the status file: per service, a fresh
+/// connection-path report of its multiplexed connection (queried NOW, never
+/// a cached snapshot — path migrations can't go stale between flushes), or
+/// the configured peer with empty transports while disconnected.
+async fn render_access_status(
+    status: &AccessStatusTemplate,
+    dialers: &[Arc<ServiceDialer>],
+) -> AccessStatusFile {
+    debug_assert_eq!(
+        status.services.len(),
+        dialers.len(),
+        "one dialer per status row"
+    );
+    let mut services = Vec::with_capacity(status.services.len());
+    for (row, dialer) in status.services.iter().zip(dialers) {
+        let (transports, local_bound_addrs) = match dialer.path_report().await {
+            Some(report) => (report.transports, report.local_bound_addrs),
+            None => (Vec::new(), Vec::new()),
+        };
+        services.push(AccessServiceStatus {
+            name: row.name.clone(),
+            listen_addr: row.listen_addr.clone(),
+            peer: row.peer.clone(),
+            transports,
+            local_bound_addrs,
+        });
+    }
+    AccessStatusFile {
+        node_id: status.node_id.clone(),
+        pid: status.pid,
+        started_at: status.started_at,
+        services,
+    }
+}
+
+/// Periodically rewrite access-status.json, but only when the rendered
+/// snapshot changed (a service connected or disconnected, or its transports
+/// migrated) — the access twin of serve's `status_flush_loop`.
+async fn access_status_flush_loop(
+    status: AccessStatusTemplate,
+    dialers: Vec<Arc<ServiceDialer>>,
+    mut last: Option<AccessStatusFile>,
+) {
+    loop {
+        tokio::time::sleep(crate::status::STATUS_FLUSH_INTERVAL).await;
+        let file = render_access_status(&status, &dialers).await;
+        if last.as_ref() == Some(&file) {
+            continue;
+        }
+        // Only record the file as written on success, so a failed write is
+        // retried on the next tick rather than silently dropped until the
+        // next change.
+        match StatusWriter::access().save_with_state_dir(status.state_dir.as_deref(), &file) {
+            Ok(_) => last = Some(file),
+            Err(e) => tracing::warn!("failed to write status file: {e}"),
+        }
     }
 }
 
@@ -313,6 +500,21 @@ impl ServiceDialer {
     /// the connection closes, and the next `get_or_dial` replaces it.
     async fn invalidate(&self) {
         self.state.lock().await.conn = None;
+    }
+
+    /// Fresh connection-path report for the cached multiplexed connection,
+    /// or `None` while the service has no live one (issue #59).
+    ///
+    /// The guard is dropped BEFORE the endpoint query so a status render
+    /// never holds channels off their dial path, and the report is queried
+    /// fresh on every call — never cached — so the status file can't serve
+    /// a stale path after a migration.
+    async fn path_report(&self) -> Option<crate::conn_path::PeerPathReport> {
+        let peer = {
+            let guard = self.state.lock().await;
+            guard.conn.as_ref().map(|conn| conn.remote_id())?
+        };
+        crate::conn_path::peer_path_report(&self.ep, peer).await
     }
 }
 

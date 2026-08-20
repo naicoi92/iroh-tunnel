@@ -63,6 +63,12 @@ pub enum RoleCmd {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Print the role's status file as a table (`--json` for the raw file).
+    Status {
+        /// Print the status file verbatim instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
     /// System service management (systemd/launchd).
     Service {
         #[command(subcommand)]

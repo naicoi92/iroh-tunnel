@@ -25,7 +25,6 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use iroh::endpoint::Connection;
@@ -35,6 +34,7 @@ use crate::config::ServeConfig;
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
+use crate::status::STATUS_FLUSH_INTERVAL;
 
 /// Run the serve role until interrupted (Ctrl-C).
 ///
@@ -213,9 +213,6 @@ impl ServeStrategy {
         Ok(())
     }
 }
-
-/// How often the status flush task re-checks stream counters.
-const STATUS_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// One served service: where to dial locally + the live stream counter.
 #[derive(Clone)]
@@ -397,17 +394,14 @@ async fn render_connections(
     out
 }
 
-/// Persist the rendered status file: into `state_dir` when the testing seam
-/// injected one, otherwise via [`crate::status::StatusFile::save`]
-/// (env-aware default path).
+/// Persist the rendered status file via the shared writer: into `state_dir`
+/// when the testing seam injected one, otherwise the env-aware default
+/// path (see [`crate::status::StatusWriter`]).
 fn save_status_file(
     file: &crate::status::StatusFile,
     state_dir: Option<&Path>,
 ) -> Result<std::path::PathBuf> {
-    match state_dir {
-        Some(dir) => file.save_to(dir),
-        None => file.save(),
-    }
+    crate::status::StatusWriter::serve().save_with_state_dir(state_dir, file)
 }
 
 /// Periodically rewrite serve-status.json, but only when the rendered

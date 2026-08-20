@@ -68,6 +68,7 @@ async fn dispatch_role_cmd(role: &str, cmd: RoleCmd) -> anyhow::Result<()> {
             }
         }
         RoleCmd::Config { action } => dispatch_config(role, action),
+        RoleCmd::Status { json } => iroh_tunnel::status_cmd::run(role, json),
         RoleCmd::Service { action } => dispatch_service(role, action),
     }
 }

@@ -4,6 +4,21 @@
 
 ### Added
 
+- **Access status file**: `access run` writes `access-status.json` beside
+  the serve file (same atomic write, same 5 s change-detect flush) —
+  `node_id`, `pid`, `started_at`, and one row per configured service with
+  its `listen_addr`, the configured serve `peer`, the live `transports` of
+  its multiplexed connection (empty while not connected, always empty for
+  `multiplex = false` services), and the access endpoint's
+  `local_bound_addrs` candidates.
+
+- **`iroh-tunnel <role> status`**: new subcommand for both roles — prints a
+  human-readable table (node header, per-connection rows on serve /
+  per-service rows on access, transports with `[active]` markers) from the
+  role's status file; `--json` prints the file verbatim. A missing file
+  exits 1 with `serve is not running (no serve-status.json found at
+  <path>)`-shaped guidance.
+
 - **Connection path observability in the serve status file**: the status
   file now carries a `connections` array — one entry per connected peer
   with its full node id, the services (ALPN-demuxed) it is tunneling, the
