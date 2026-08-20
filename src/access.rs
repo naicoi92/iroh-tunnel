@@ -231,23 +231,21 @@ impl AccessStrategy {
                 .node_id
                 .parse::<iroh::EndpointId>()
                 .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
-            let listen_addr = format!("{}:{}", svc.host, svc.port);
+            // Raw `host:port` is what TcpListener::bind consumes; the
+            // status row renders the bracketed-IPv6 form via
+            // format_local_addr — the same normalization as the serve
+            // schema's `local_addr`.
+            let bind_addr = format!("{}:{}", svc.host, svc.port);
             let effective: Vec<iroh::RelayUrl> = if svc.relay_urls.is_empty() {
                 node_relay_urls.clone()
             } else {
                 endpoint::resolve_relay_urls(&svc.relay_urls)
                     .with_context(|| format!("service '{}': invalid relay_urls", svc.name))?
             };
-            let dialer = Arc::new(ServiceDialer::new(
-                &ep,
-                node_id,
-                svc,
-                &effective,
-                listen_addr.clone(),
-            ));
+            let dialer = Arc::new(ServiceDialer::new(&ep, node_id, svc, &effective, bind_addr));
             status_services.push(AccessStatusServiceRow {
                 name: svc.name.clone(),
-                listen_addr,
+                listen_addr: crate::status::format_local_addr(&svc.host, svc.port),
                 // The parsed id, not the raw config string — the status row
                 // is normalized exactly like every other rendered id.
                 peer: node_id.to_string(),
@@ -276,10 +274,7 @@ impl AccessStrategy {
             state_dir,
         };
         let initial = render_access_status(&status, &dialers).await;
-        let seeded = match StatusWriter::access().save_with_state_dir(
-            status.state_dir.as_deref(),
-            &StatusPayload::Access(initial.clone()),
-        ) {
+        let seeded = match save_access_status(initial.clone(), status.state_dir.clone()).await {
             Ok(p) => {
                 tracing::info!(path = %p.display(), "wrote status file");
                 Some(initial)
@@ -386,14 +381,26 @@ async fn access_status_flush_loop(
         // Only record the file as written on success, so a failed write is
         // retried on the next tick rather than silently dropped until the
         // next change.
-        match StatusWriter::access().save_with_state_dir(
-            status.state_dir.as_deref(),
-            &StatusPayload::Access(file.clone()),
-        ) {
+        match save_access_status(file.clone(), status.state_dir.clone()).await {
             Ok(_) => last = Some(file),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
     }
+}
+
+/// Persist the rendered access status file via the shared writer.
+///
+/// Runs on the blocking pool: the atomic save fsyncs, and a stalled disk
+/// must never stall an async worker (the listen loops share this runtime).
+async fn save_access_status(
+    file: AccessStatusFile,
+    state_dir: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf> {
+    let writer = StatusWriter::access();
+    let payload = StatusPayload::Access(file);
+    tokio::task::spawn_blocking(move || writer.save_with_state_dir(state_dir.as_deref(), &payload))
+        .await
+        .context("status save task failed")?
 }
 
 /// Per-service dialing state shared by all local-client tasks.
@@ -654,12 +661,12 @@ const PATH_POLL_INTERVAL: Duration = Duration::from_secs(PATH_POLL_INTERVAL_SECS
 
 /// First 8 chars of the peer id + `…`, for log-message readability.
 ///
-/// The full id stays in the `peer=` field so both hosts can be correlated
-/// by grepping the same string; messages only need to be recognizable at a
-/// glance.
+/// Delegates to the shared [`crate::conn_path::short_peer_id`] — the same
+/// shape the `<role> status` tables render — so a short id means one thing
+/// everywhere. The full id stays in the `peer=` field so both hosts can be
+/// correlated by grepping the same string.
 fn short_peer_id(peer: &iroh::EndpointId) -> String {
-    let head: String = peer.to_string().chars().take(8).collect();
-    format!("{head}…")
+    crate::conn_path::short_peer_id(&peer.to_string())
 }
 
 /// Render a fresh connection's active transports for its established log

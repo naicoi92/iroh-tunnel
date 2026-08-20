@@ -329,15 +329,18 @@ impl StatusWriter {
     /// [`Self::save_with_state_dir`]; tests inject a `tempfile::tempdir()`
     /// here.
     pub fn save_to(&self, dir: &Path, value: &StatusPayload) -> Result<PathBuf> {
-        // The payload enum re-ties schema to role at this boundary: a
-        // mismatched writer/payload pair is a programmer error, caught in
-        // debug builds rather than silently writing one role's schema under
-        // the other's file name.
-        debug_assert_eq!(
-            self.0,
-            value.role(),
-            "status writer role must match payload role"
-        );
+        // The payload enum re-ties schema to role at this boundary. A
+        // mismatched writer/payload pair is a programmer error — bailed in
+        // EVERY build profile (not just debug), because silently writing
+        // one role's schema under the other's file name is a corrupting
+        // failure no test fleet may paper over.
+        if self.0 != value.role() {
+            anyhow::bail!(
+                "status writer role ({}) does not match payload role ({})",
+                self.0.name(),
+                value.role().name()
+            );
+        }
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create status dir: {}", dir.display()))?;
         let path = dir.join(self.file_name());
@@ -378,15 +381,13 @@ impl StatusWriter {
             return Err(e)
                 .with_context(|| format!("failed to finalize status file: {}", path.display()));
         }
-        // Best-effort removal of the pre-rename legacy SERVE file — but
-        // only on serve saves: the rename predates the access file, so an
-        // access writer has no stale file of its own to clean (both roles
-        // share the directory, so a serve save still finds it). Tooling
-        // pointed at the old name would otherwise read a stale snapshot
-        // silently (worse than an error); failure to remove is ignored.
-        if matches!(self.0, StatusRole::Serve) {
-            let _ = std::fs::remove_file(dir.join(LEGACY_STATUS_FILE_NAME));
-        }
+        // Best-effort removal of the pre-rename legacy serve file, on every
+        // successful save of EITHER role: both roles share one state
+        // directory, so an access-only host upgrading from the pre-rename
+        // era must clean the stale file too. Tooling pointed at the old
+        // name would otherwise read a stale snapshot silently (worse than
+        // an error); failure to remove is ignored.
+        let _ = std::fs::remove_file(dir.join(LEGACY_STATUS_FILE_NAME));
         Ok(path)
     }
 }

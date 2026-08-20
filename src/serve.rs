@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 use tokio::net::TcpStream;
 
@@ -176,7 +176,7 @@ impl ServeStrategy {
         // it succeeded — otherwise the first tick would rewrite an identical
         // idle snapshot. A failed initial write seeds `None`, so the first
         // tick retries it.
-        let seeded = match save_status_file(&initial, status.state_dir.as_deref()) {
+        let seeded = match save_status_file(initial.clone(), status.state_dir.clone()).await {
             Ok(p) => {
                 tracing::info!(path = %p.display(), "wrote status file");
                 Some(initial)
@@ -397,14 +397,18 @@ async fn render_connections(
 /// Persist the rendered status file via the shared writer: into `state_dir`
 /// when the testing seam injected one, otherwise the env-aware default
 /// path (see [`crate::status::StatusWriter`]).
-fn save_status_file(
-    file: &crate::status::StatusFile,
-    state_dir: Option<&Path>,
+///
+/// Runs on the blocking pool: the atomic save fsyncs, and a stalled disk
+/// must never stall an async worker (the accept loop shares this runtime).
+async fn save_status_file(
+    file: crate::status::StatusFile,
+    state_dir: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf> {
-    crate::status::StatusWriter::serve().save_with_state_dir(
-        state_dir,
-        &crate::status::StatusPayload::Serve(file.clone()),
-    )
+    let writer = crate::status::StatusWriter::serve();
+    let payload = crate::status::StatusPayload::Serve(file);
+    tokio::task::spawn_blocking(move || writer.save_with_state_dir(state_dir.as_deref(), &payload))
+        .await
+        .context("status save task failed")?
 }
 
 /// Periodically rewrite serve-status.json, but only when the rendered
@@ -425,7 +429,7 @@ async fn status_flush_loop(
         // Only record the file as written on success, so a failed write is
         // retried on the next tick rather than silently dropped until the
         // next change.
-        match save_status_file(&file, status.state_dir.as_deref()) {
+        match save_status_file(file.clone(), status.state_dir.clone()).await {
             Ok(_) => last = Some(file),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }

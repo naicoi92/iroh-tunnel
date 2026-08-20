@@ -50,9 +50,16 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
     if json {
         // Verbatim file contents, not a re-serialization: anything piping
         // this command must get byte-identical JSON to reading the file.
-        // Validated first so a corrupt file fails loudly on this path too,
-        // exactly like the table path.
-        let _: serde_json::Value = parse_status_file(&body, &path)?;
+        // Validated through the SAME typed parse as the table path first —
+        // full parity, so a corrupt file fails identically either way.
+        match role {
+            StatusRole::Serve => {
+                let _: StatusFile = parse_status_file(&body, &path)?;
+            }
+            StatusRole::Access => {
+                let _: AccessStatusFile = parse_status_file(&body, &path)?;
+            }
+        }
         println!("{body}");
         return Ok(());
     }
@@ -162,13 +169,12 @@ pub fn render_access_status(file: &AccessStatusFile) -> String {
     out
 }
 
-/// First 8 chars of a node id + `…` — the same shape as the access role's
-/// log lines (`access::short_peer_id`) so a short id means the same thing
-/// everywhere. The header of each table carries this node's full id; the
-/// `--json` output carries everyone's.
+/// Short node id via the shared [`crate::conn_path::short_peer_id`] — one
+/// definition shared with the access role's log lines, so a short id means
+/// the same thing everywhere. The header of each table carries this node's
+/// full id; the `--json` output carries everyone's.
 fn short_peer_id(peer: &str) -> String {
-    let head: String = peer.chars().take(8).collect();
-    format!("{head}…")
+    crate::conn_path::short_peer_id(peer)
 }
 
 /// One line per transport: `relay <url> [active]` / `direct <addr>`. The

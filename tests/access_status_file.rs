@@ -236,7 +236,10 @@ multiplex = true
     assert!(access_table.contains("node_id: "));
     assert!(access_table.contains("echo"));
     assert!(access_table.contains(&format!("127.0.0.1:{}", access_addr.port())));
-    assert!(access_table.contains(&serve_node_id[..8]));
+    assert!(
+        access_table.contains(&format!("{}…", &serve_node_id[..8])),
+        "access table must show the serve peer's exact short id"
+    );
 
     // The serve file's flush loop runs independently of access's — its
     // `connections` entry may lag behind Phase 3. Poll until it reflects
@@ -262,8 +265,8 @@ multiplex = true
     println!("iroh-tunnel serve status:\n{serve_table}");
     assert!(serve_table.contains("node_id: "));
     assert!(
-        serve_table.contains(&access_node_id[..8]),
-        "serve table must list the connected access peer"
+        serve_table.contains(&format!("{}…", &access_node_id[..8])),
+        "serve table must list the connected access peer's exact short id"
     );
     assert!(serve_table.contains("echo"));
 

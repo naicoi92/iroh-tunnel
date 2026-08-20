@@ -50,24 +50,20 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    // The dispatch string and the typed role tag come from ONE match on the
-    // CLI enum — an invalid role is unrepresentable downstream.
-    let (role_str, status_role) = match &cli.role {
-        Role::Serve { .. } => ("serve", StatusRole::Serve),
-        Role::Access { .. } => ("access", StatusRole::Access),
+    // The typed role tag comes from ONE match on the CLI enum; the dispatch
+    // string is derived from it — an invalid role is unrepresentable, and
+    // the two can never disagree.
+    let status_role = match &cli.role {
+        Role::Serve { .. } => StatusRole::Serve,
+        Role::Access { .. } => StatusRole::Access,
     };
     match cli.role {
-        Role::Serve { cmd } | Role::Access { cmd } => {
-            dispatch_role_cmd(role_str, status_role, cmd).await
-        }
+        Role::Serve { cmd } | Role::Access { cmd } => dispatch_role_cmd(status_role, cmd).await,
     }
 }
 
-async fn dispatch_role_cmd(
-    role: &str,
-    status_role: StatusRole,
-    cmd: RoleCmd,
-) -> anyhow::Result<()> {
+async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Result<()> {
+    let role = status_role.name();
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
