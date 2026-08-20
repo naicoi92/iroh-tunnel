@@ -433,13 +433,18 @@ impl ServiceDialer {
 /// Exposed as `pub` only under the `test-utils` feature so integration
 /// tests derive their wait windows from the real interval instead of a
 /// drifting copy.
-#[cfg(feature = "test-utils")]
-pub const PATH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Single source of the poller cadence value — both cfg variants of
+/// [`PATH_POLL_INTERVAL`] below derive from it, so the value can never
+/// drift between the pub (test-utils) and private twins.
+const PATH_POLL_INTERVAL_SECS: u64 = 5;
 
-/// Private twin of the [`PATH_POLL_INTERVAL`] definition above (identical
-/// value) for builds without `test-utils`.
+#[cfg(feature = "test-utils")]
+pub const PATH_POLL_INTERVAL: Duration = Duration::from_secs(PATH_POLL_INTERVAL_SECS);
+
+/// Private twin of the [`PATH_POLL_INTERVAL`] definition above for builds
+/// without `test-utils`.
 #[cfg(not(feature = "test-utils"))]
-const PATH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const PATH_POLL_INTERVAL: Duration = Duration::from_secs(PATH_POLL_INTERVAL_SECS);
 
 /// First 8 chars of the peer id + `…`, for log-message readability.
 ///
