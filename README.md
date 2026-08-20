@@ -65,7 +65,8 @@ ran on your own machine.
 - **Fits any init.** First-class service management for systemd, launchd,
   and BusyBox/SysV init (buildroot-class devices).
 - **Observable by default.** Peer connect/disconnect logs at INFO, an
-  atomic `status.json` for monitoring, and meaningful exit codes.
+  atomic `serve-status.json` with live connection paths for monitoring, and
+  meaningful exit codes.
 
 ## How it works
 
@@ -250,8 +251,10 @@ If you omit `--config`, the file is read from the OS config dir:
 | Linux   | `~/.config/iroh-tunnel/{serve,access}.toml` |
 | macOS   | `~/Library/Application Support/iroh-tunnel/{serve,access}.toml` |
 
-Status file (written by `run`, for monitoring): `~/.local/state/iroh-tunnel/status.json`
-(Linux) or `~/Library/Application Support/iroh-tunnel/status.json` (macOS).
+Status file (written by serve `run`, for monitoring):
+`~/.local/state/iroh-tunnel/serve-status.json` (Linux) or
+`~/Library/Application Support/iroh-tunnel/serve-status.json` (macOS) — see
+[Monitoring](#monitoring) for the schema.
 
 Sample files ship in [`examples/`](examples/) — `serve.toml` and `access.toml`
 with a throwaway demo key so the compose demo runs as-is.
@@ -305,7 +308,7 @@ own connection), or while a serve peer is not yet upgraded.
   flow-control blocked until another stream closes.
 - A dead multiplexed connection surfaces as EOF on its channels (correct
   port-forward semantics); the next channel dials a fresh connection.
-- In the serve's `status.json`, `active_connections` counts **active
+- In the serve's `serve-status.json`, `active_connections` counts **active
   streams** (in-flight pipes), which is the operator-meaningful number once
   one connection can carry many channels.
 
@@ -455,9 +458,9 @@ kubectl logs deploy/iroh-tunnel-serve | grep NodeId
 - **No host networking needed:** Iroh dials out to its relay network, so the
   pod only needs normal egress. You do **not** need a `Service` or `Ingress`
   in front of the iroh-tunnel pod.
-- **Health:** the binary writes `status.json` to the state dir. A future task
-  adds an HTTP `/healthz` probe; for now, a simple `exec` probe on
-  `iroh-tunnel --version` suffices for liveness.
+- **Health:** the serve binary writes `serve-status.json` to the state dir. A
+  future task adds an HTTP `/healthz` probe; for now, a simple `exec` probe
+  on `iroh-tunnel --version` suffices for liveness.
 
 ---
 
@@ -497,10 +500,41 @@ ready" notices show without any flag. Use `-q` for errors-only, or
 
 ### Monitoring
 
-`run` writes `status.json` (see [Configuration](#configuration) for the
-path) atomically — `node_id`, `home_relay`, uptime, and
+`serve run` writes `serve-status.json` (see [Configuration](#configuration)
+for the path) atomically — `node_id`, `home_relay`, uptime,
 `active_connections` (which counts in-flight **streams**, the
-operator-meaningful number under multiplexing).
+operator-meaningful number under multiplexing), and a `connections` array
+with one entry per currently-connected peer:
+
+```json
+{
+  "peer": "1aa27080cc694eb1e756c5e9260eb267208f7b677e6a74e53146bf417fb31f84",
+  "services": ["echo"],
+  "transports": [
+    { "kind": "relay",  "addr": "https://use1-1.relay.iroh.network/", "active": true },
+    { "kind": "direct", "addr": "192.168.1.10:52618",                 "active": true }
+  ],
+  "local_bound_addrs": ["0.0.0.0:57382", "[::]:52921"]
+}
+```
+
+- `peer` — the remote node's full id; `services` — the service names (from
+  each connection's ALPN) that peer is tunneling, merged across its
+  connections.
+- `transports` — the network paths iroh currently knows for that peer.
+  iroh negotiates relay and direct paths concurrently, so this is a *list
+  with usage*, not a single mode: a peer can be direct-only (hole punching
+  failed), relay-only, or have both active at once. `active` reflects iroh's
+  snapshot at the last flush.
+- `local_bound_addrs` — the serve endpoint's local UDP socket *candidates*
+  (one per address family it bound). They are endpoint-wide, not a
+  per-transport local address — iroh does not expose a local→remote path
+  mapping.
+
+The file is refreshed every 5 s and rewritten only when something changed;
+a peer disappears from `connections` once its last connection closes. Set
+`IROH_TUNNEL_STATE_DIR` to relocate the file (advanced/testing seam — the
+file lands directly in that directory).
 
 ---
 
@@ -527,7 +561,7 @@ protocol today.
 
 **How do I see what the tunnel is doing?**
 `-v`/`-vv` for debug/trace, `RUST_LOG=iroh_tunnel=debug` for full control,
-`status.json` for a monitoring-friendly snapshot, and the
+`serve-status.json` for a monitoring-friendly snapshot, and the
 [exit codes](#exit-codes) for scripting. Both roles log the *remote* NodeId
 on connect/disconnect so the two sides can be correlated.
 
@@ -568,7 +602,8 @@ For reporting vulnerabilities and the full policy, see
 | `src/proto.rs`             | ALPN protocol constants (`iroh-tunnel/{name}`)         |
 | `src/config.rs`, `src/config_cmd.rs` | config model + `config` subcommands           |
 | `src/service/`             | service backends: `systemd`, `launchd`, BusyBox init   |
-| `src/status.rs`            | atomic `status.json` writer                            |
+| `src/conn_path.rs`          | peer connection-path reports for status files           |
+| `src/status.rs`            | atomic `serve-status.json` writer                      |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
 | `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)  |

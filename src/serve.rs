@@ -137,21 +137,26 @@ impl RoleStrategy for ServeStrategy {
                 })
                 .collect(),
         };
-        match status.render().save() {
+        match status.render(Vec::new()).save() {
             Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
 
+        // Live registry of connected peers, fed by the accept loop below and
+        // read by the status flush task (issue #57).
+        let peers = PeerTracker::default();
         tracing::info!("serve endpoint ready, accepting connections");
         let accept_ep = ep.clone();
+        let accept_peers = peers.clone();
         let accept = tokio::spawn(async move {
-            accept_loop(&accept_ep, targets).await;
+            accept_loop(&accept_ep, targets, accept_peers).await;
         });
 
-        // Refresh status.json when any service's active-stream count changes,
-        // at most once per STATUS_FLUSH_INTERVAL — avoids disk churn under
-        // busy stream churn while keeping the file near-live for operators.
-        let flush = tokio::spawn(status_flush_loop(status));
+        // Refresh serve-status.json when the rendered snapshot changes —
+        // stream counters, connected peers, or their transport states — at
+        // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
+        // stream churn, still near-live for operators.
+        let flush = tokio::spawn(status_flush_loop(status, ep.clone(), peers));
 
         // Wait for the injected shutdown signal, then drain in-flight streams
         // before closing the endpoint (T-08). The accept and status tasks are
@@ -209,7 +214,10 @@ struct StatusServiceRow {
 }
 
 impl StatusSnapshot {
-    fn render(&self) -> crate::status::StatusFile {
+    fn render(
+        &self,
+        connections: Vec<crate::status::PeerConnectionStatus>,
+    ) -> crate::status::StatusFile {
         crate::status::StatusFile {
             node_id: self.node_id.clone(),
             home_relay: self.home_relay.clone(),
@@ -225,30 +233,113 @@ impl StatusSnapshot {
                     active_connections: s.active_streams.load(Ordering::Relaxed),
                 })
                 .collect(),
+            connections,
         }
     }
 }
 
-/// Periodically rewrite status.json, but only when a counter changed.
-async fn status_flush_loop(status: StatusSnapshot) {
-    let mut last: Vec<u64> = status
-        .services
-        .iter()
-        .map(|s| s.active_streams.load(Ordering::Relaxed))
-        .collect();
+/// Live registry of which peers are connected over which services (issue #57).
+///
+/// The accept loop tracks `(peer, service)` when a connection is accepted and
+/// untracks it when the connection task ends; the status flush task renders
+/// the registry into `connections`. A peer with several connections to the
+/// same service (e.g. an access node with `multiplex = false`) is
+/// refcounted, and services are merged across a peer's connections.
+#[derive(Clone, Default)]
+struct PeerTracker(Arc<parking_lot::Mutex<HashMap<iroh::EndpointId, HashMap<String, u64>>>>);
+
+impl PeerTracker {
+    /// Record one accepted connection from `peer` for `service`.
+    fn track(&self, peer: iroh::EndpointId, service: &str) {
+        self.0
+            .lock()
+            .entry(peer)
+            .or_default()
+            .entry(service.to_string())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+    }
+
+    /// Drop one connection from `peer` for `service`; removes the service
+    /// (and with it the peer) when its refcount hits zero.
+    fn untrack(&self, peer: iroh::EndpointId, service: &str) {
+        let mut guard = self.0.lock();
+        let Some(services) = guard.get_mut(&peer) else {
+            return;
+        };
+        let Some(count) = services.get_mut(service) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            services.remove(service);
+            if services.is_empty() {
+                guard.remove(&peer);
+            }
+        }
+    }
+
+    /// Point-in-time copy of the registry: `(peer, sorted service names)`,
+    /// sorted by peer id for deterministic output.
+    fn snapshot(&self) -> Vec<(iroh::EndpointId, Vec<String>)> {
+        let mut peers: Vec<_> = self
+            .0
+            .lock()
+            .iter()
+            .map(|(peer, services)| {
+                let mut names: Vec<String> = services.keys().cloned().collect();
+                names.sort();
+                (*peer, names)
+            })
+            .collect();
+        peers.sort_by_key(|(peer, _)| peer.to_string());
+        peers
+    }
+}
+
+/// Render the tracker into the status file's `connections` array: one row
+/// per tracked peer with a fresh [`crate::conn_path::peer_path_report`]
+/// snapshot.
+///
+/// Peers whose iroh remote-map entry has already expired (`remote_info` →
+/// `None`) are skipped — the flush cadence picks them back up if they
+/// reconnect.
+async fn render_connections(
+    ep: &iroh::Endpoint,
+    peers: &PeerTracker,
+) -> Vec<crate::status::PeerConnectionStatus> {
+    let mut out = Vec::new();
+    for (peer, services) in peers.snapshot() {
+        let Some(report) = crate::conn_path::peer_path_report(ep, peer).await else {
+            continue;
+        };
+        out.push(crate::status::PeerConnectionStatus {
+            peer: report.peer,
+            services,
+            transports: report.transports,
+            local_bound_addrs: report.local_bound_addrs,
+        });
+    }
+    out
+}
+
+/// Periodically rewrite serve-status.json, but only when the rendered
+/// snapshot changed (stream counters, peer set, or transport states).
+async fn status_flush_loop(status: StatusSnapshot, ep: iroh::Endpoint, peers: PeerTracker) {
+    let mut last: Option<crate::status::StatusFile> = None;
     loop {
         tokio::time::sleep(STATUS_FLUSH_INTERVAL).await;
-        let now: Vec<u64> = status
-            .services
-            .iter()
-            .map(|s| s.active_streams.load(Ordering::Relaxed))
-            .collect();
-        if now == last {
+        let connections = render_connections(&ep, &peers).await;
+        let file = status.render(connections);
+        if last.as_ref() == Some(&file) {
             continue;
         }
-        last = now;
-        if let Err(e) = status.render().save() {
-            tracing::warn!("failed to write status file: {e}");
+        // Only record the file as written on success, so a failed write is
+        // retried on the next tick rather than silently dropped until the
+        // next change.
+        match file.save() {
+            Ok(_) => last = Some(file),
+            Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
     }
 }
@@ -257,7 +348,11 @@ async fn status_flush_loop(status: StatusSnapshot) {
 ///
 /// Returns only if the endpoint is closed (e.g. after Ctrl-C). Per-connection
 /// errors are logged, not propagated.
-async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarget>) {
+async fn accept_loop(
+    ep: &iroh::Endpoint,
+    targets: HashMap<Vec<u8>, ServiceTarget>,
+    peers: PeerTracker,
+) {
     loop {
         // ep.accept() is a Future yielding Option<Incoming>; None means the
         // endpoint was closed.
@@ -303,9 +398,14 @@ async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarge
             remote_id.to_string(),
             format!("peer disconnected (service {name})"),
         );
+        let conn_peers = peers.clone();
 
         tokio::spawn(async move {
+            // Track the peer for the status file's `connections` array for
+            // as long as this connection lives (issue #57).
+            conn_peers.track(remote_id, &name);
             handle_connection(&conn, target).await;
+            conn_peers.untrack(remote_id, &name);
         });
     }
 }

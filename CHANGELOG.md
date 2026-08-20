@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Connection path observability in the serve status file**: the status
+  file now carries a `connections` array — one entry per connected peer
+  with its full node id, the services (ALPN-demuxed) it is tunneling, the
+  transports iroh currently uses for it (`kind` `relay`/`direct`, `addr`,
+  `active` — iroh negotiates relay and direct paths concurrently, so a peer
+  can be direct-only, relay-only, or have both active at once), and the
+  serve endpoint's local UDP socket candidates (`local_bound_addrs`,
+  endpoint-wide — not a per-transport local address). Refreshed by the 5 s
+  flush task, rewritten only when the rendered snapshot changes; a peer
+  disappears once its last connection closes.
+
+- **`IROH_TUNNEL_STATE_DIR`**: environment override for the directory the
+  status file is written to (advanced/testing seam — the file lands
+  directly in it, no `iroh-tunnel` subpath appended).
+
+### Changed
+
+- **Breaking**: the serve status file was renamed `status.json` →
+  `serve-status.json` (role-scoped, preparing for an access-side status
+  file). Monitoring that reads the old path must update.
+
 ## [0.3.0] — 2026-08-20
 
 Self-hosted relay support: deploy guide + installer, relay authentication,

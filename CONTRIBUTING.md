@@ -71,7 +71,8 @@ explaining why.
 | `src/proto.rs`             | ALPN protocol constants (`iroh-tunnel/{name}`)         |
 | `src/config.rs`, `src/config_cmd.rs` | config model + `config` subcommands           |
 | `src/service/`             | service backends: `systemd`, `launchd`, BusyBox/SysV init |
-| `src/status.rs`            | atomic `status.json` writer                            |
+| `src/conn_path.rs`          | peer connection-path reports for status files           |
+| `src/status.rs`            | atomic `serve-status.json` writer                      |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
 | `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)   |
