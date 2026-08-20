@@ -15,6 +15,18 @@
   flush task, rewritten only when the rendered snapshot changes; a peer
   disappears once its last connection closes.
 
+- **Access connection-path logging + path-change events** (access role):
+  connection-established lines (multiplexed and per-channel) now render the
+  serve peer's active transports (`relay=<url>` / `direct=<addr>`,
+  comma-separated) — full peer id in the `peer=` field for cross-host
+  correlation, short id in the message. Each live multiplexed connection
+  gets a background poller (5 s cadence, bounded by the connection's
+  lifetime — it never keeps the connection alive) that logs a single
+  `path changed` line when iroh migrates paths, e.g. `relay→direct` after
+  a successful hole punch or `direct→relay` when the direct path dies. A
+  new "Log events" glossary in the README documents every line and the
+  relay/direct semantics.
+
 - **`IROH_TUNNEL_STATE_DIR`**: environment override for the directory the
   status file is written to (advanced/testing seam — the file lands
   directly in it, no `iroh-tunnel` subpath appended).

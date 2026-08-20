@@ -40,6 +40,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
@@ -252,24 +253,25 @@ impl ServiceDialer {
         if let Some(conn) = guard.as_ref() {
             return Ok(conn.clone());
         }
-        let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn)
-            .await
-            .inspect(|conn| {
-                let remote_id = conn.remote_id();
-                tracing::info!(
-                    peer = %remote_id,
-                    %self.svc_name,
-                    "connected to serve peer (multiplexed)"
-                );
-                crate::role_run::spawn_disconnect_watcher(
-                    conn,
-                    remote_id.to_string(),
-                    format!(
-                        "disconnected from serve peer (service {}, multiplexed)",
-                        self.svc_name
-                    ),
-                );
-            })?;
+        let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
+        let remote_id = conn.remote_id();
+        let report =
+            log_connection_established(&self.ep, &conn, &self.svc_name, "multiplexed").await;
+        crate::role_run::spawn_disconnect_watcher(
+            &conn,
+            remote_id.to_string(),
+            format!(
+                "disconnected from serve peer (service {}, multiplexed)",
+                self.svc_name
+            ),
+        );
+        // Path-change baseline: whatever the established line just rendered.
+        spawn_path_change_poller(
+            &self.ep,
+            &conn,
+            self.svc_name.clone(),
+            report.map(|r| r.transports).unwrap_or_default(),
+        );
         *guard = Some(conn.clone());
         Ok(conn)
     }
@@ -364,7 +366,10 @@ impl ServiceDialer {
         let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
 
         let remote_id = conn.remote_id();
-        tracing::info!(peer = %remote_id, %self.svc_name, "connected to serve peer");
+        // No poller here: a per-channel connection lives for exactly one
+        // channel (see module docs), so its established line is all the
+        // path context it will ever get.
+        log_connection_established(&self.ep, &conn, &self.svc_name, "per-channel").await;
         crate::role_run::spawn_disconnect_watcher(
             &conn,
             remote_id.to_string(),
@@ -378,4 +383,118 @@ impl ServiceDialer {
         crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Connection-path logging (issue #58)
+// ---------------------------------------------------------------------------
+
+/// How often the multiplexed path-change poller re-snapshots the peer's
+/// transports.
+///
+/// Same rationale as serve's `STATUS_FLUSH_INTERVAL`: 5 s is near-live for
+/// operators while keeping the endpoint query off the hot path — the poller
+/// runs only while its connection lives.
+const PATH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// First 8 chars of the peer id + `…`, for log-message readability.
+///
+/// The full id stays in the `peer=` field so both hosts can be correlated
+/// by grepping the same string; messages only need to be recognizable at a
+/// glance.
+fn short_peer_id(peer: &iroh::EndpointId) -> String {
+    let head: String = peer.to_string().chars().take(8).collect();
+    format!("{head}…")
+}
+
+/// Render a fresh connection's active transports for its established log
+/// line — or `paths pending` when iroh has no active-path snapshot yet
+/// (queried immediately after the handshake).
+fn render_established_paths(report: Option<&crate::conn_path::PeerPathReport>) -> String {
+    report
+        .map(|r| crate::conn_path::render_active_transports(&r.transports))
+        .filter(|rendered| !rendered.is_empty())
+        .unwrap_or_else(|| "paths pending".to_string())
+}
+
+/// Log the connection-established line shared by both dial paths: full peer
+/// id in the `peer=` field, short id plus the active transports
+/// (`relay=<url>` / `direct=<addr>`, comma-separated) in the message.
+/// `mode` is `"multiplexed"` or `"per-channel"`.
+///
+/// Returns the path snapshot for callers that need a baseline — the
+/// multiplexed poller starts diffing from it.
+async fn log_connection_established(
+    ep: &iroh::Endpoint,
+    conn: &iroh::endpoint::Connection,
+    svc_name: &str,
+    mode: &str,
+) -> Option<crate::conn_path::PeerPathReport> {
+    let remote_id = conn.remote_id();
+    let report = crate::conn_path::peer_path_report(ep, remote_id).await;
+    tracing::info!(
+        peer = %remote_id,
+        svc_name = %svc_name,
+        "connected to serve peer ({}, {}) via {}",
+        mode,
+        short_peer_id(&remote_id),
+        render_established_paths(report.as_ref()),
+    );
+    report
+}
+
+/// Spawn the path-change poller for one live multiplexed connection.
+///
+/// iroh migrates between relay and direct paths silently — a hole punch
+/// succeeds, a direct path dies and traffic falls back to relay — while the
+/// multiplexed connection outlives all of them. The poller snapshots the
+/// peer's transports every [`PATH_POLL_INTERVAL`] and logs exactly one line
+/// per real change (what counts as "real" is [`crate::conn_path::diff_transports`]).
+///
+/// Lifetime: it holds only a *weak* connection handle (never keeps the
+/// connection alive) and its loop is bounded by `closed()` — the task ends
+/// with the connection, no abort needed.
+fn spawn_path_change_poller(
+    ep: &iroh::Endpoint,
+    conn: &iroh::endpoint::Connection,
+    svc_name: String,
+    initial: Vec<crate::conn_path::TransportStatus>,
+) {
+    let peer = conn.remote_id();
+    let weak = conn.weak_handle();
+    let ep = ep.clone();
+    tokio::spawn(async move {
+        let mut last = initial;
+        loop {
+            // `biased` so a dead connection always wins the race against a
+            // simultaneously-elapsed sleep: exit without one last useless
+            // snapshot.
+            tokio::select! {
+                biased;
+                _ = weak.closed() => break,
+                _ = tokio::time::sleep(PATH_POLL_INTERVAL) => {}
+            }
+            // The peer's remote-map entry can briefly disappear while iroh
+            // re-negotiates paths; nothing to diff then — the next tick
+            // re-checks.
+            let Some(report) = crate::conn_path::peer_path_report(&ep, peer).await else {
+                continue;
+            };
+            if let Some(change) = crate::conn_path::diff_transports(&last, &report.transports) {
+                // A snapshot with no active transports means the connection
+                // is tearing down — the disconnect event covers that.
+                if !change.after_active.is_empty() {
+                    tracing::info!(
+                        peer = %peer,
+                        "{}: path changed {}→{} (now active: {})",
+                        svc_name,
+                        crate::conn_path::render_active_kinds(&change.before_active),
+                        crate::conn_path::render_active_kinds(&change.after_active),
+                        crate::conn_path::render_active_transports(&change.after_active),
+                    );
+                }
+            }
+            last = report.transports;
+        }
+    });
 }
