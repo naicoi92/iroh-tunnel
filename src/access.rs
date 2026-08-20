@@ -88,7 +88,25 @@ impl RoleStrategy for AccessStrategy {
         // Access only dials out, so no ALPNs are registered. The endpoint
         // resolves the node's secret key (generating+persisting on first run)
         // via the shared RoleDoc::resolve_and_save_key path in the skeleton.
-        endpoint::create_access_endpoint(&cfg.node).await
+        //
+        // The relay map is the UNION of node + per-service relay_urls: every
+        // service dial needs a live relay transport for its URLs (a relay
+        // only carries traffic for peers connected to it). Per-service dials
+        // still attach only that service's own URLs — see run_loop.
+        let extra_relays: Vec<String> = {
+            let mut seen = cfg.node.relay_urls.clone();
+            let mut extras = Vec::new();
+            for svc in &cfg.services {
+                for url in &svc.relay_urls {
+                    if !seen.contains(url) {
+                        seen.push(url.clone());
+                        extras.push(url.clone());
+                    }
+                }
+            }
+            extras
+        };
+        endpoint::create_access_endpoint(&cfg.node, &extra_relays).await
     }
 
     fn print_services(cfg: &Self::Config) {
@@ -120,8 +138,13 @@ impl RoleStrategy for AccessStrategy {
                 Err(_) => svc.node_id.clone(),
             };
             let listen_addr = format!("{}:{}", svc.host, svc.port);
+            let relay_note = if svc.relay_urls.is_empty() {
+                String::new()
+            } else {
+                format!(" [relay override: {}]", svc.relay_urls.len())
+            };
             println!(
-                "Exposed: {} {listen_addr} -> peer {node_id_display} ({}://{listen_addr})",
+                "Exposed: {} {listen_addr} -> peer {node_id_display} ({}://{listen_addr}){relay_note}",
                 svc.name,
                 crate::role_run::protocol_str(svc.protocol)
             );
@@ -133,12 +156,15 @@ impl RoleStrategy for AccessStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
-        // Resolve the relay URLs and parse every service's node_id before
-        // spawning listeners, so a bad config fails fast.
-        let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)?;
+        // Resolve the node-level relays once (the per-service fallback) and
+        // parse every service's node_id before spawning listeners, so a bad
+        // config fails fast. Each service resolves its own effective relay
+        // list — its override when set, else the node's — so dialers carry
+        // only their service's URLs (issue #54).
+        let node_relay_urls = endpoint::resolve_relay_urls(&cfg.node.relay_urls)?;
         if cfg.node.relay_urls.is_empty() {
             tracing::info!(
-                count = relay_urls.len(),
+                count = node_relay_urls.len(),
                 "no relay_urls configured, falling back to n0 default relays"
             );
         }
@@ -150,11 +176,17 @@ impl RoleStrategy for AccessStrategy {
                 .parse::<iroh::EndpointId>()
                 .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
             let listen_addr = format!("{}:{}", svc.host, svc.port);
+            let effective: Vec<iroh::RelayUrl> = if svc.relay_urls.is_empty() {
+                node_relay_urls.clone()
+            } else {
+                endpoint::resolve_relay_urls(&svc.relay_urls)
+                    .with_context(|| format!("service '{}': invalid relay_urls", svc.name))?
+            };
             let dialer = Arc::new(ServiceDialer::new(
                 &ep,
                 node_id,
                 &svc,
-                &relay_urls,
+                &effective,
                 listen_addr,
             ));
             handles.push(tokio::spawn(listen_loop(dialer)));

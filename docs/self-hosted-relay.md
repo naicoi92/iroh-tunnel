@@ -290,18 +290,35 @@ If pve-firewall is enabled on the container, mirror the same rules at the PVE la
 
 ## Wiring the clients
 
-### Rust clients (iroh 1.x)
+### iroh-tunnel (serve + access configs)
+
+Point both roles at your relay and, when it enforces `--enable-token`, set
+the matching `relay_token` (sent as `Authorization: Bearer` on the relay
+connection; ignored by open relays):
+
+```toml
+# serve.toml + access.toml — [node] section
+[node]
+relay_urls = ["https://relay.<domain>"]
+relay_token = "<token>"        # omit when the relay is open
+```
+
+A single service can also override the relay set used to dial ITS peer
+(`[[services]] relay_urls`) — see `examples/access.toml`. Note the serve
+peer must itself be registered on those relays.
+
+### Other Rust clients (iroh 1.x)
 
 ```rust
-// point the endpoint at your relay instead of the default n0 farm:
-let relay_map = RelayMap::from_url(url).with_auth_token(token);
+let relay_map = RelayMap::from_iter([url]).with_auth_token(token);
 let endpoint = iroh::Endpoint::builder()
     .relay_mode(iroh::RelayMode::Custom(relay_map))
     .bind()
     .await?;
 ```
 
-(API per docs.rs `iroh` 1.x — `RelayMap::from_url` + `with_auth_token`.)
+(API per docs.rs `iroh` 1.x — `RelayMap::from_iter` + `with_auth_token`;
+`with_auth_token` covers every relay in the map, home + failover.)
 
 ### Browser / wasm clients
 

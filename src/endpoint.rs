@@ -19,7 +19,9 @@
 use anyhow::{Context, Result};
 use iroh::endpoint::presets::Minimal;
 use iroh::endpoint::{Endpoint, QuicTransportConfig, RelayMode, VarInt};
-use iroh::RelayUrl;
+#[cfg(feature = "test-utils")]
+use iroh::tls::CaTlsConfig;
+use iroh::{RelayMap, RelayUrl};
 
 use std::time::Duration;
 
@@ -53,12 +55,11 @@ use crate::config::{self, NodeConfig};
 /// `alpns` are the service ALPNs this endpoint will accept incoming streams on.
 /// In iroh 1.0 ALPNs are registered on the endpoint at build time (not filtered
 /// per-`accept`), so the serve handler collects every service's ALPN up front
-/// and passes the whole list here.
 pub async fn create_serve_endpoint(node: &NodeConfig, alpns: &[Vec<u8>]) -> Result<Endpoint> {
     // resolve_secret_key returns (key, needs_save); serve callers persist via
     // ServeConfig::resolve_and_save_key, so the boolean is ignored here.
     let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
-    create_endpoint_with_key(key, node, alpns).await
+    create_endpoint_with_key(key, node, &node.relay_urls, alpns).await
 }
 
 /// Build an [`Endpoint`] for the **access** role.
@@ -68,23 +69,47 @@ pub async fn create_serve_endpoint(node: &NodeConfig, alpns: &[Vec<u8>]) -> Resu
 /// handles that via [`config::AccessConfig::resolve_and_save_key`]), so the
 /// access NodeId is stable across restarts. Access only dials out, so no ALPNs
 /// are registered.
-pub async fn create_access_endpoint(node: &NodeConfig) -> Result<Endpoint> {
-    // resolve_secret_key returns (key, needs_save); access callers persist via
-    // AccessConfig::resolve_and_save_key, so the boolean is ignored here.
+///
+/// `extra_relay_urls` carries the per-service relay overrides (issue #54):
+/// the endpoint must be connected to the UNION of node + service relays so
+/// every service's dial has a live relay transport for its URLs (a relay only
+/// carries traffic for peers connected to it). Per-service dials still attach
+/// only that service's own URLs — see [`access::ServiceDialer`].
+pub async fn create_access_endpoint(
+    node: &NodeConfig,
+    extra_relay_urls: &[String],
+) -> Result<Endpoint> {
     let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
-    create_endpoint_with_key(key, node, &[]).await
+    let mut relays = node.relay_urls.clone();
+    for url in extra_relay_urls {
+        if !relays.contains(url) {
+            relays.push(url.clone());
+        }
+    }
+    create_endpoint_with_key(key, node, &relays, &[]).await
 }
 
 async fn create_endpoint_with_key(
     key: iroh::SecretKey,
     node: &NodeConfig,
+    relay_urls: &[String],
     alpns: &[Vec<u8>],
 ) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(Minimal)
         .secret_key(key)
         .transport_config(transport_config(node.max_concurrent_streams));
 
-    builder = builder.relay_mode(relay_mode_from_urls(&node.relay_urls)?);
+    builder = builder.relay_mode(relay_mode_from_urls(
+        relay_urls,
+        node.relay_token.as_deref(),
+    )?);
+
+    // Tests run the endpoint against an in-process relay with a self-signed
+    // certificate (iroh test_utils); production keeps the platform verifier.
+    #[cfg(feature = "test-utils")]
+    {
+        builder = builder.ca_tls_config(CaTlsConfig::insecure_skip_verify());
+    }
 
     // Empty ALPN list is fine for access (outbound only); serve registers every
     // service ALPN so it can accept on all of them.
@@ -130,9 +155,18 @@ fn transport_config(max_streams: Option<u32>) -> QuicTransportConfig {
 /// - Empty → [`RelayMode::Default`] (n0 public relays).
 /// - Non-empty → [`RelayMode::custom`] with the first URL as home relay and
 ///   the rest as failover (relay servers are stateless, so any can serve a
-///   peer; iroh advertises the home relay in the node's endpoint info).
-fn relay_mode_from_urls(relay_urls: &[String]) -> Result<RelayMode> {
+///   peer; iroh advertises the home relay in the endpoint info).
+///
+/// `relay_token` (when Some) is applied to every relay in the map — see
+/// [`NodeConfig::relay_token`] for the single-token semantics.
+fn relay_mode_from_urls(relay_urls: &[String], relay_token: Option<&str>) -> Result<RelayMode> {
     if relay_urls.is_empty() {
+        if relay_token.is_some() {
+            tracing::warn!(
+                "relay_token is set but relay_urls is empty — the token is unused \
+                 while falling back to the n0 default relays"
+            );
+        }
         return Ok(RelayMode::Default);
     }
     let urls: Vec<RelayUrl> = relay_urls
@@ -142,7 +176,14 @@ fn relay_mode_from_urls(relay_urls: &[String]) -> Result<RelayMode> {
                 .with_context(|| format!("invalid relay_url: {s}"))
         })
         .collect::<Result<_>>()?;
-    Ok(RelayMode::custom(urls))
+    let mut map = RelayMap::from_iter(urls);
+    if let Some(token) = relay_token {
+        // Applies the token to every relay in the map (both the home relay
+        // and failovers): sent as `Authorization: Bearer` on the relay
+        // WebSocket upgrade, ignored by relays without access control.
+        map = map.with_auth_token(token);
+    }
+    Ok(RelayMode::Custom(map))
 }
 
 /// The node id (public key) of an [`Endpoint`], as its base32 string form.
@@ -213,7 +254,7 @@ mod tests {
 
     #[test]
     fn empty_relay_urls_yields_default_mode() {
-        let mode = relay_mode_from_urls(&[]).unwrap();
+        let mode = relay_mode_from_urls(&[], None).unwrap();
         assert!(matches!(mode, RelayMode::Default));
     }
 
@@ -239,7 +280,7 @@ mod tests {
             "https://use1-1.relay.n0.iroh.link.".to_string(),
             "https://euw-1.relay.n0.iroh.link.".to_string(),
         ];
-        let mode = relay_mode_from_urls(&urls).unwrap();
+        let mode = relay_mode_from_urls(&urls, None).unwrap();
         match mode {
             RelayMode::Custom(map) => {
                 // both URLs present in the map (urls() collects into Vec here)
@@ -260,9 +301,33 @@ mod tests {
     }
 
     #[test]
+    fn relay_token_is_applied_to_all_map_entries() {
+        // with_auth_token must cover home + failover entries alike — the
+        // relay transport for any of these URLs authenticates with it.
+        let urls = vec![
+            "https://relay-a.example".to_string(),
+            "https://relay-b.example".to_string(),
+        ];
+        let mode = relay_mode_from_urls(&urls, Some("sekrit-token")).unwrap();
+        match mode {
+            RelayMode::Custom(map) => {
+                for url in map.urls::<Vec<RelayUrl>>() {
+                    let cfg = map.get(&url).expect("map entry present");
+                    assert_eq!(
+                        cfg.auth_token.as_deref(),
+                        Some("sekrit-token"),
+                        "token missing on {url}"
+                    );
+                }
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn invalid_relay_url_errors() {
         let urls = vec!["not a url".to_string()];
-        let err = relay_mode_from_urls(&urls).unwrap_err();
+        let err = relay_mode_from_urls(&urls, None).unwrap_err();
         assert!(format!("{err:#}").contains("invalid relay_url"));
     }
 
@@ -270,7 +335,7 @@ mod tests {
     async fn access_endpoint_binds_and_has_node_id() {
         // ephemeral key, default (n0) relays
         let node = NodeConfig::default();
-        let ep = create_access_endpoint(&node).await.unwrap();
+        let ep = create_access_endpoint(&node, &[]).await.unwrap();
         let id = node_id_string(&ep);
         // iroh 1.0's PublicKey Display is lowercase hex (32 bytes => 64 chars).
         // (Parsing accepts both hex and base32, but Display emits hex.)
@@ -286,6 +351,7 @@ mod tests {
             secret_key: enc,
             relay_urls: vec![],
             max_concurrent_streams: None,
+            relay_token: None,
         };
         let ep = create_serve_endpoint(&node, &[b"iroh-tunnel/db".to_vec()])
             .await
@@ -303,8 +369,9 @@ mod tests {
             secret_key: enc,
             relay_urls: vec![],
             max_concurrent_streams: None,
+            relay_token: None,
         };
-        let ep = create_access_endpoint(&node).await.unwrap();
+        let ep = create_access_endpoint(&node, &[]).await.unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());
     }
 

@@ -12,7 +12,12 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "iroh-tunnel"
-path = "src/main.rs"
+
+[features]
+# Enables the insecure relay-TLS trust override used by integration tests
+# (in-process relay with a self-signed certificate). Never enable in
+# production builds: it disables relay certificate verification.
+test-utils = ["iroh/test-utils"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -34,6 +39,13 @@ regex = "1.13"
 
 [dev-dependencies]
 tempfile = "3.27"
+# In-process relay server for the relay-auth integration tests.
+iroh = { version = "1.0", features = ["test-utils"] }
+# AccessControl types for the token relay in tests/relay_auth.rs.
+iroh-relay = "1.0"
+# Turns on this crate's own `test-utils` feature for integration tests
+# (self-dependency feature unification).
+iroh-tunnel = { path = ".", features = ["test-utils"] }
 
 [build-dependencies]
 # vergen-gitcl 9.x — inject git tag into APP_VERSION at build time.

@@ -75,6 +75,16 @@ pub struct NodeConfig {
     pub secret_key: String,
     #[serde(default)]
     pub relay_urls: Vec<String>,
+    /// Auth token for relays that require one — the `relay_token` your
+    /// self-hosted relay checks via `access.shared_token`
+    /// (docs/self-hosted-relay.md). Sent as `Authorization: Bearer` on the
+    /// relay connection; ignored by relays without access control.
+    ///
+    /// One token for every configured relay: mixing relays with different
+    /// tokens is not supported. Only meaningful together with non-empty
+    /// `relay_urls` (the n0 default fallback relays need no token).
+    #[serde(default)]
+    pub relay_token: Option<String>,
     /// Concurrent bidirectional-stream budget per QUIC connection (both
     /// roles, since 0.2.0). `None`/absent keeps noq's default (100).
     ///
@@ -94,6 +104,14 @@ impl NodeConfig {
         if let Some(max) = self.max_concurrent_streams {
             if max == 0 {
                 anyhow::bail!("invalid max_concurrent_streams {max}: must be >= 1");
+            }
+        }
+        if let Some(token) = &self.relay_token {
+            if token.trim().is_empty() {
+                anyhow::bail!("invalid relay_token: must not be empty or whitespace");
+            }
+            if token.chars().any(char::is_whitespace) {
+                anyhow::bail!("invalid relay_token: must not contain whitespace");
             }
         }
         Ok(())
@@ -134,6 +152,19 @@ pub struct AccessService {
     /// stay forward-compatible.
     #[serde(default = "default_multiplex")]
     pub multiplex: bool,
+    /// Per-service relay override (access role): the relay URLs used to dial
+    /// THIS service's serve peer, instead of `[node] relay_urls`.
+    ///
+    /// Empty/absent (default) → the node-level `relay_urls` apply. The
+    /// endpoint stays connected to the union of node + service relays (with
+    /// the node `relay_token`), while this service's dials attach only the
+    /// URLs listed here.
+    ///
+    /// Serve-side note: the serve peer must itself be reachable through
+    /// these relays (its own `relay_urls` should include them) — a relay
+    /// only carries traffic for peers connected to it.
+    #[serde(default)]
+    pub relay_urls: Vec<String>,
 }
 
 /// Default for [`AccessService::multiplex`].
@@ -360,6 +391,14 @@ impl AccessConfig {
                 );
             }
             validate_port(svc.port)?;
+            for url in &svc.relay_urls {
+                if !url.starts_with("https://") {
+                    anyhow::bail!(
+                        "invalid relay_url '{url}' on service '{}': must be https://",
+                        svc.name
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -588,6 +627,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 5432,
                 multiplex: true,
+                relay_urls: vec![],
             }],
             ..Default::default()
         };
@@ -596,9 +636,56 @@ mod tests {
     }
 
     #[test]
+    fn access_validation_rejects_non_https_service_relay() {
+        // Per-service relay overrides must be https, with the service name
+        // in the error so the offending entry is identifiable.
+        let cfg = AccessConfig {
+            services: vec![AccessService {
+                name: "web".into(),
+                node_id: "a".repeat(64),
+                protocol: Protocol::Tcp,
+                host: "127.0.0.1".into(),
+                port: 8080,
+                multiplex: true,
+                relay_urls: vec!["http://insecure.relay".into()],
+            }],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid relay_url"), "got: {msg}");
+        assert!(msg.contains("'web'"), "service name missing: {msg}");
+    }
+
+    #[test]
+    fn relay_token_validation_rejects_empty_and_whitespace() {
+        for bad in [Some(""), Some("   "), Some("has space")] {
+            let cfg = ServeConfig {
+                node: NodeConfig {
+                    relay_token: bad.map(str::to_string),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let err = cfg.validate().unwrap_err();
+            assert!(format!("{err:#}").contains("relay_token"));
+        }
+    }
+
+    #[test]
+    fn relay_token_accepts_plain_secret() {
+        let cfg = ServeConfig {
+            node: NodeConfig {
+                relay_token: Some("deadbeef1234".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cfg.validate().unwrap();
+    }
+
+    #[test]
     fn access_validation_accepts_hex_node_id() {
-        // iroh 1.0's PublicKey::Display emits lowercase hex (64 chars). A node
-        // id copied straight from `serve` output must validate.
         let hex_id = "a".repeat(64);
         let cfg = AccessConfig {
             services: vec![AccessService {
@@ -608,6 +695,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 5432,
                 multiplex: true,
+                relay_urls: vec![],
             }],
             ..Default::default()
         };
