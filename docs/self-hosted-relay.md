@@ -55,7 +55,7 @@ Internet ──► LXC public IP (e.g. 203.0.113.10) — Debian 12, systemd
 |---|---|---|---|
 | D1 | Traffic gateway | **Caddy** (default) | zero-config ACME, streaming without buffering; swap later *with measurements*, not before |
 | D2 | Access control | **`shared_token` mandatory** (public IP = internet-facing) | an open relay on the internet will be abused |
-| D3 | QUIC addr discovery | Off initially | minimum viable step; enable later if needed |
+| D3 | QUIC addr discovery | Off by default; `--enable-quic` available | parity item for native↔native peers (n0's farm runs it); browser peers can't use it — see §5.4 |
 | D4 | LXC OS | **Debian 12** | glibc binary compat + official Caddy apt repo |
 | D5 | Metrics | On (9090, loopback) | measure real throughput instead of assuming |
 
@@ -82,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/docs/inst
 # Or from a checkout of this repo — copy the script into the LXC and run as root:
 scp docs/install-relay-debian.sh root@<LXC-IP>:/tmp/
 ssh root@<LXC-IP> 'bash /tmp/install-relay-debian.sh --domain relay.<domain>'
-# Extra flags: --acme-email <email> · --apply-firewall (ufw) · --version v1.0.3 | --latest · --token <t>
+# Extra flags: --acme-email <email> · --apply-firewall (ufw) · --enable-quic (§5.4) · --version v1.0.3 | --latest · --token <t>
 # Re-runs are idempotent — the token is reused from the existing config.
 ```
 
@@ -123,17 +123,63 @@ also gets Caddy's **official apt repo** (systemd unit + auto-restart included).
 measurements show proxy CPU as the bottleneck, switch to nginx/HAProxy L4 or drop
 the gateway. Don't optimize early without numbers.
 
-### 5.4 UDP (QUIC address discovery) — when enabled
+### 5.4 UDP (QUIC address discovery) — optional, `--enable-quic`
 
-UDP 7824 is a **separate** service (endpoints learn their public address via QUIC),
-independent from the data path (WS/3340). Caddy does not proxy UDP — expose it
-directly:
+QAD is a **separate** service from the data path (WS/3340): endpoints connect via
+QUIC to the relay host on **UDP 7824** and learn their observed public IP:port.
+Better candidates → higher direct-connection (hole-punch) success → less traffic
+falling back onto the relay.
 
-- No NAT in the LXC → just **open `7824/udp` in the firewall** (pve-firewall or iptables inside the LXC).
-- The relay needs its own TLS for QUIC: `enable_quic_addr_discovery = true` +
-  `[tls] cert_mode = "Manual"` + rcgen/ACME certs (see the iroh-relay README,
-  "dev mode with QUIC address discovery").
-- Phase 1: **OFF** (hole-punching works regardless; discovery only improves address accuracy).
+**Who benefits — and who doesn't** (verified in iroh v1.0.3 source):
+
+- Every native client that gets its relay from a URL **already probes UDP 7824
+  automatically** — `RelayMap::from_iter` docs: *"The RelayConfigs in the
+  RelayMap will have the default QUIC address discovery ports"*. No client-side
+  flag or config needed; enabling it server-side is enough.
+- Browser/wasm peers are excluded (`cfg(not(wasm_browser))`) — they cannot do
+  QAD (or UDP hole-punching) at all. For them this changes nothing.
+- Without QAD, native peers still hole-punch (candidates exchanged with peers,
+  portmapper, addr propagation) — QAD is parity with n0's farm, not a
+  prerequisite. Enable it if your fleet has NAT-heavy native peers.
+
+**What enabling requires** (all handled by `--enable-quic`):
+
+| Requirement | Detail |
+|---|---|
+| TLS cert the clients trust | The QUIC listener does a real rustls handshake against the relay hostname — a self-signed cert is silently rejected by default client roots, making QAD a no-op. Default: reuse **Caddy's own ACME cert** for the domain (auto-detected from `/var/lib/caddy/.local/share/caddy/certificates/`). |
+| Explicit `quic_bind_addr` | **Footgun**: the default inherits the IP from `http_bind_addr` — with our loopback bind that would be `127.0.0.1:7824` (dead). The script sets `quic_bind_addr = "0.0.0.0:7824"`. |
+| Firewall | Open `7824/udp` inbound (the script opens it with `--apply-firewall`). |
+
+```toml
+# appended to /etc/iroh-relay/config.toml by --enable-quic
+[tls]
+cert_mode = "Reloading"                  # re-reads cert+key every 24h — no restart on rotation
+manual_cert_path = "/var/lib/caddy/.local/share/caddy/certificates/acme-.../<domain>/<domain>.crt"
+manual_key_path  = ".../<domain>.key"
+quic_bind_addr = "0.0.0.0:7824"          # explicit — default inherits http_bind_addr's loopback IP
+```
+
+**Renewal is fully automatic.** Caddy renews its cert in place (~day 60 of 90);
+the relay's `Reloading` mode re-reads the files every 24h
+(`DEFAULT_CERT_RELOAD_INTERVAL`, verified in `iroh-relay/src/server/resolver.rs`)
+— *"certificate rotation takes effect without restarting the server"*. A failed
+reload keeps the previous cert in use (≈30 days of slack to notice). The initial
+load is validated at install time: the server refuses to start without a usable
+cert, so the script fails early with a clear message instead.
+
+Alternative cert sources (both fine, no script changes needed — pass
+`--quic-cert/--quic-key`):
+
+- **Let's Encrypt via DNS-01** (certbot + provider API token): independent of
+  ports 80/443, coexists with Caddy, auto-renew via certbot's timer.
+- **Self-generated CA (rcgen)**: only works if you control the client code and
+  add the CA to each endpoint's TLS config — otherwise clients reject it and QAD
+  silently no-ops.
+
+Residual risk: Caddy's storage layout is **not a public API** — a Caddy upgrade
+could move the files, in which case QAD degrades silently (relay keeps the old
+cert until it expires). The verification checklist below has a QAD-specific
+check for that.
 
 ### 5.5 config.toml + systemd (auto-restart)
 
@@ -267,6 +313,9 @@ configured. The relay accepts the shared token either as
 - [ ] `curl -sI https://relay.<domain>/healthz` = 200 (Caddy TLS + relay alive)
 - [ ] Client logs: endpoints register through the new relay (no more n0 hostnames)
 - [ ] Connections succeed through the new relay; throughput measurable via metrics 9090
+- [ ] QAD (if `--enable-quic`): `ss -ulnp | grep 7824` on the LXC shows the relay
+      listening; client `net_report` logs show address discovery succeeding; re-check
+      after a Caddy upgrade (storage layout is not a public API — §5.4)
 - [ ] `systemctl restart iroh-relay` + LXC `reboot` → clients reconnect, all services come back
 - [ ] From the internet: only 80/443 (and 7824/udp if enabled) open; 3340/9090 unreachable
 - [ ] Without a token → the relay refuses access (shared_token works)
@@ -278,7 +327,9 @@ configured. The relay accepts the shared token either as
   sha256 `digest`. Default pin v1.0.3; `--latest` for the newest release.
 - **Idle timeout** — the server WS-pings every 15s, safe with Caddy defaults; if
   you later put another LB/cloud in front, verify its idle timeout is >15s.
-- **QUIC discovery (D3)** — needs its own TLS + UDP firewall opening; separate effort.
+- **QUIC discovery (D3)** — implemented via `--enable-quic` (§5.4); reuses Caddy's
+  ACME cert with automatic 24h reload pickup. Residual: Caddy storage layout is not
+  a public API — an upgrade can silently break QAD (checklist above catches it).
 - **SPOF** — one relay is one failure point (acceptable: it's signaling + fallback
   only; the direct path stays alive when the relay dies).
 - IPv6 — if the LXC has public IPv6, consider an AAAA record + Caddy listen; add later if needed.

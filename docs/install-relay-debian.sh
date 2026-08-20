@@ -12,6 +12,7 @@
 # Usage:
 #   ./install-relay-debian.sh [--domain relay.example.com] [--token <token>]
 #       [--version v1.0.3 | --latest] [--acme-email <email>] [--apply-firewall]
+#       [--enable-quic]
 #
 # Or straight from this repo (bash script — pipe into bash, NOT sh):
 #   curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/docs/install-relay-debian.sh \
@@ -29,6 +30,12 @@
 #   --acme-email <e>   Email for the ACME account (optional).
 #   --apply-firewall   Apply ufw rules: allow 80,443/tcp + SSH port, default deny.
 #                      Without it the script only prints instructions (§5.7).
+#   --enable-quic      Enable QUIC address discovery (§5.4) on UDP <port>.
+#                      Re-run without it to disable QAD again.
+#   --quic-cert <p>    PEM cert chain for QAD. Default: auto-detect Caddy's
+#                      ACME cert for --domain under /var/lib/caddy.
+#   --quic-key <p>     PEM private key for QAD (same auto-detect default).
+#   --quic-port <n>    QAD UDP port (default 7824).
 #   -h, --help         Show this help.
 #
 # Env:
@@ -41,6 +48,10 @@ DOMAIN=""
 TOKEN=""
 ACME_EMAIL=""
 APPLY_FIREWALL=0
+ENABLE_QUIC=0
+QUIC_CERT=""
+QUIC_KEY=""
+QUIC_PORT=7824
 
 CONFIG_DIR=/etc/iroh-relay
 CONFIG_FILE=$CONFIG_DIR/config.toml
@@ -48,8 +59,9 @@ STATE_DIR=/var/lib/iroh-relay
 BIN_PATH=/usr/local/bin/iroh-relay
 RELAY_PORT=3340
 METRICS_PORT=9090
+CADDY_CERTS=/var/lib/caddy/.local/share/caddy/certificates
 
-usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "==> $*"; }
@@ -58,7 +70,7 @@ log() { echo "==> $*"; }
 # Args
 # ---------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
-  case "$1" in --domain | --token | --version | --acme-email) [ $# -ge 2 ] || die "$1 requires a value" ;; esac
+  case "$1" in --domain | --token | --version | --acme-email | --quic-cert | --quic-key | --quic-port) [ $# -ge 2 ] || die "$1 requires a value" ;; esac
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --token) TOKEN="${2:-}"; shift 2 ;;
@@ -66,6 +78,10 @@ while [ $# -gt 0 ]; do
     --latest) LATEST=1; shift ;;
     --acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
     --apply-firewall) APPLY_FIREWALL=1; shift ;;
+    --enable-quic) ENABLE_QUIC=1; shift ;;
+    --quic-cert) QUIC_CERT="${2:-}"; shift 2 ;;
+    --quic-key) QUIC_KEY="${2:-}"; shift 2 ;;
+    --quic-port) QUIC_PORT="${2:-}"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
@@ -168,6 +184,26 @@ install -m 0755 "$BIN_FOUND" "$BIN_PATH"
 log "installed $BIN_PATH ($($BIN_PATH --version 2>/dev/null || echo "$VERSION"))"
 
 # ---------------------------------------------------------------------------
+# QUIC address discovery (optional, §5.4): resolve + validate cert up front.
+# The server refuses to start if enable_quic_addr_discovery has no usable TLS,
+# so fail here with a clear message instead of bricking the service below.
+# ---------------------------------------------------------------------------
+if [ "$ENABLE_QUIC" -eq 1 ]; then
+  if [ -z "$QUIC_CERT" ] || [ -z "$QUIC_KEY" ]; then
+    log "auto-detecting Caddy ACME cert for ${DOMAIN} in ${CADDY_CERTS}"
+    QUIC_CERT=$(find "$CADDY_CERTS" -type f -path "*${DOMAIN}*" \( -name '*.crt' -o -name 'cert.pem' \) 2>/dev/null | head -n 1)
+    QUIC_KEY=$(find "$CADDY_CERTS" -type f -path "*${DOMAIN}*" \( -name '*.key' -o -name 'key.pem' \) 2>/dev/null | head -n 1)
+  fi
+  if [ -z "$QUIC_CERT" ] || [ ! -r "$QUIC_CERT" ]; then
+    die "QAD: cert not found/readable (${QUIC_CERT:-auto-detect failed}). Hit https://${DOMAIN} once so Caddy issues it, or pass --quic-cert."
+  fi
+  if [ -z "$QUIC_KEY" ] || [ ! -r "$QUIC_KEY" ]; then
+    die "QAD: key not found/readable (${QUIC_KEY:-auto-detect failed}). Pass --quic-key."
+  fi
+  log "QAD enabled: udp/${QUIC_PORT}, cert ${QUIC_CERT}"
+fi
+
+# ---------------------------------------------------------------------------
 # Config (loopback binds — the binary's defaults are [::], NOT loopback)
 # ---------------------------------------------------------------------------
 log "writing $CONFIG_FILE"
@@ -180,6 +216,19 @@ metrics_bind_addr = "127.0.0.1:${METRICS_PORT}" # default is [::]:9090 — loopb
 
 access.shared_token = ["${TOKEN}"]
 EOF
+if [ "$ENABLE_QUIC" -eq 1 ]; then
+  cat >> "$CONFIG_FILE" <<EOF
+
+# QUIC address discovery (§5.4) — Reloading mode re-reads cert+key every 24h,
+# so Caddy's renewals are picked up automatically without a restart.
+[tls]
+cert_mode = "Reloading"
+manual_cert_path = "${QUIC_CERT}"
+manual_key_path = "${QUIC_KEY}"
+# explicit bind: the default inherits the IP from http_bind_addr (127.0.0.1) — QAD would be unreachable
+quic_bind_addr = "0.0.0.0:${QUIC_PORT}"
+EOF
+fi
 chmod 0600 "$CONFIG_FILE"
 
 # ---------------------------------------------------------------------------
@@ -229,7 +278,9 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now iroh-relay.service iroh-relay-health.timer
+systemctl enable iroh-relay.service iroh-relay-health.timer >/dev/null
+systemctl restart iroh-relay   # restart also starts when inactive; re-runs pick up config changes
+systemctl start iroh-relay-health.timer
 
 log "waiting for /healthz (max 15s)"
 HEALTH_OK=0
@@ -279,14 +330,14 @@ if [ "$APPLY_FIREWALL" -eq 1 ]; then
   ufw allow "${SSH_PORT}/tcp" comment 'ssh admin'
   ufw allow 80/tcp comment 'caddy http + acme'
   ufw allow 443/tcp comment 'caddy https'
-  # udp/7824: only when QUIC addr discovery is enabled (decision D3 — currently OFF)
+  [ "$ENABLE_QUIC" -eq 1 ] && ufw allow "${QUIC_PORT}/udp" comment 'quic addr discovery'
   ufw --force enable
 else
   cat <<FIREWALL
 
 ==> Firewall (not applied — re-run with --apply-firewall, or configure manually):
-    ufw allow ${SSH_PORT}/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable
-    (3340/9090 are bound to 127.0.0.1 — no rules needed. udp/7824 only if D3 is enabled.)
+    ufw allow ${SSH_PORT}/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable$( [ "$ENABLE_QUIC" -eq 1 ] && printf ' \\\n    && ufw allow %s/udp' "$QUIC_PORT" )
+    (3340/9090 are bound to 127.0.0.1 — no rules needed.)
     If pve-firewall is enabled on the container: mirror the rules at the PVE layer.
 
 FIREWALL
@@ -304,6 +355,7 @@ cat <<SUMMARY
  Health local : curl http://127.0.0.1:${RELAY_PORT}/healthz
  Health public: curl -sI https://${DOMAIN}/healthz   (once DNS + ACME are done)
  Metrics      : curl http://127.0.0.1:${METRICS_PORT}/metrics
+ QAD          : $( [ "$ENABLE_QUIC" -eq 1 ] && echo "enabled — udp/${QUIC_PORT} (cert ${QUIC_CERT})" || echo 'disabled (enable with --enable-quic)')
 
  Access token (keep secret — both client sides need it):
    ${TOKEN}
