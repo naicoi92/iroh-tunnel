@@ -217,15 +217,19 @@ struct ServiceDialer {
     svc_name: String,
     listen_addr: String,
     multiplex: bool,
-    /// The shared multiplexed connection, if any. Guarded by a tokio Mutex so
-    /// concurrent channels serialize the (re)dial instead of racing N dials.
-    conn: Mutex<Option<iroh::endpoint::Connection>>,
-    /// The current path-change poller's abort handle, if any. Same
-    /// one-per-service rule as `conn`: `get_or_dial` aborts the previous
-    /// poller before spawning its replacement, so a redial (e.g. after a
-    /// non-fatal open_bi error invalidated the cache) never leaves two
-    /// pollers logging the same peer+service.
-    poller: Mutex<Option<tokio::task::AbortHandle>>,
+    /// The shared multiplexed connection and its poller, behind ONE lock:
+    /// the one-connection-and-one-poller-per-service rule is structural —
+    /// a redial replaces both atomically under the same guard, with no
+    /// cross-lock ordering to reason about. Concurrent channels serialize
+    /// the (re)dial here instead of racing N dials.
+    state: Mutex<ConnState>,
+}
+
+/// The cached multiplexed connection plus its path-change poller —
+/// the pair `get_or_dial` swaps atomically on every (re)dial.
+struct ConnState {
+    conn: Option<iroh::endpoint::Connection>,
+    poller: Option<tokio::task::AbortHandle>,
 }
 
 impl ServiceDialer {
@@ -246,47 +250,53 @@ impl ServiceDialer {
             svc_name: svc.name.clone(),
             listen_addr,
             multiplex: svc.multiplex,
-            conn: Mutex::new(None),
-            poller: Mutex::new(None),
+            state: Mutex::new(ConnState {
+                conn: None,
+                poller: None,
+            }),
         }
     }
-
     /// Get the shared multiplexed connection, dialing it if there is none.
     ///
     /// The lock is held across the retry loop on purpose: N concurrent
     /// channels produce exactly one connection, not N.
     async fn get_or_dial(&self) -> Result<iroh::endpoint::Connection> {
-        let mut guard = self.conn.lock().await;
-        if let Some(conn) = guard.as_ref() {
+        let mut guard = self.state.lock().await;
+        if let Some(conn) = guard.conn.as_ref() {
             return Ok(conn.clone());
         }
         let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
         let remote_id = conn.remote_id();
 
-        // Register the replacement poller BEFORE publishing the connection
-        // and before any further await: while the conn guard is still held,
-        // registration order always matches publish order, so a racing
-        // invalidate+redial can never end with the OLD poller as the
-        // survivor. One poller per service (abort the previous one); the
-        // old poller also ends by itself once its connection closes — the
-        // abort is just eager cleanup. The baseline starts empty:
-        // `conn_path::poller_step` seeds silently on its first tick.
-        let mut poller_guard = self.poller.lock().await;
-        if let Some(old) = poller_guard.take() {
+        // One snapshot, two consumers. The query awaits UNDER the guard —
+        // correctness over lock-holder courtesy: sharing this snapshot
+        // between the established line and the poller baseline closes the
+        // blind window where a fast hole punch (landing inside the first
+        // poll tick) would be swallowed by the poller's silent seeding and
+        // never diffed or logged. A `None` report (paths pending) degrades
+        // to an empty baseline — the seed path handles exactly that case.
+        let report = crate::conn_path::peer_path_report(&self.ep, remote_id).await;
+        let baseline = report
+            .as_ref()
+            .map(|r| r.transports.clone())
+            .unwrap_or_default();
+
+        // Swap poller + connection atomically under the same guard, so a
+        // racing invalidate+redial can never end with the OLD poller as the
+        // survivor. The old poller also ends by itself once its connection
+        // closes — the abort is just eager cleanup.
+        if let Some(old) = guard.poller.take() {
             old.abort();
         }
-        let poller = spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), Vec::new());
-        *poller_guard = Some(poller);
-        drop(poller_guard);
-
-        // Publish (then drop the cache mutex) before the awaiting
-        // established-log query: concurrent channels see the fresh
-        // connection immediately. The lock WAS held across the dial above,
-        // so the one-connection-per-N-channels semantics are unchanged.
-        *guard = Some(conn.clone());
+        let poller = spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), baseline);
+        *guard = ConnState {
+            conn: Some(conn.clone()),
+            poller: Some(poller),
+        };
         drop(guard);
 
-        log_connection_established(&self.ep, &conn, &self.svc_name, "multiplexed").await;
+        // Emit after publish (no guard needed — the snapshot is in hand).
+        log_connection_established(remote_id, &self.svc_name, "multiplexed", report.as_ref());
         crate::role_run::spawn_disconnect_watcher(
             &conn,
             remote_id.to_string(),
@@ -299,9 +309,10 @@ impl ServiceDialer {
     }
 
     /// Drop the cached multiplexed connection (it died); the next channel
-    /// dials a fresh one.
+    /// dials a fresh one. The poller is left alone — it ends by itself when
+    /// the connection closes, and the next `get_or_dial` replaces it.
     async fn invalidate(&self) {
-        *self.conn.lock().await = None;
+        self.state.lock().await.conn = None;
     }
 }
 
@@ -391,7 +402,8 @@ impl ServiceDialer {
         // No poller here: a per-channel connection lives for exactly one
         // channel (see module docs), so its established line is all the
         // path context it will ever get.
-        log_connection_established(&self.ep, &conn, &self.svc_name, "per-channel").await;
+        let report = crate::conn_path::peer_path_report(&self.ep, remote_id).await;
+        log_connection_established(remote_id, &self.svc_name, "per-channel", report.as_ref());
         crate::role_run::spawn_disconnect_watcher(
             &conn,
             remote_id.to_string(),
@@ -417,6 +429,16 @@ impl ServiceDialer {
 /// Same rationale as serve's `STATUS_FLUSH_INTERVAL`: 5 s is near-live for
 /// operators while keeping the endpoint query off the hot path — the poller
 /// runs only while its connection lives.
+///
+/// Exposed as `pub` only under the `test-utils` feature so integration
+/// tests derive their wait windows from the real interval instead of a
+/// drifting copy.
+#[cfg(feature = "test-utils")]
+pub const PATH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Private twin of the [`PATH_POLL_INTERVAL`] definition above (identical
+/// value) for builds without `test-utils`.
+#[cfg(not(feature = "test-utils"))]
 const PATH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// First 8 chars of the peer id + `…`, for log-message readability.
@@ -439,25 +461,26 @@ fn render_established_paths(report: Option<&crate::conn_path::PeerPathReport>) -
         .unwrap_or_else(|| "paths pending".to_string())
 }
 
-/// Log the connection-established line shared by both dial paths: full peer
-/// id in the `peer=` field, short id plus the active transports
+/// Emit the connection-established line shared by both dial paths: full
+/// peer id in the `peer=` field, short id plus the active transports
 /// (`relay=<url>` / `direct=<addr>`, comma-separated) in the message.
 /// `mode` is `"multiplexed"` or `"per-channel"`.
-async fn log_connection_established(
-    ep: &iroh::Endpoint,
-    conn: &iroh::endpoint::Connection,
+///
+/// Pure — no endpoint query; callers hand in the snapshot they already
+/// own (the multiplexed path shares one query with the poller baseline).
+fn log_connection_established(
+    remote_id: iroh::EndpointId,
     svc_name: &str,
     mode: &str,
+    report: Option<&crate::conn_path::PeerPathReport>,
 ) {
-    let remote_id = conn.remote_id();
-    let report = crate::conn_path::peer_path_report(ep, remote_id).await;
     tracing::info!(
         peer = %remote_id,
         svc_name = %svc_name,
         "connected to serve peer ({}, {}) via {}",
         mode,
         short_peer_id(&remote_id),
-        render_established_paths(report.as_ref()),
+        render_established_paths(report),
     );
 }
 
@@ -474,7 +497,10 @@ async fn log_connection_established(
 /// across every connection to the same peer — a logged transition can be
 /// driven by a *different* connection's traffic (e.g. the per-channel
 /// service to the same serve peer completing a hole punch), not only by
-/// this connection.
+/// this connection. N multiplexed services dialing the same peer therefore
+/// each log their own line per transition (differing only in `svc_name`)
+/// and run N remote_info queries per interval; operators deduplicate by
+/// the `peer=` field.
 ///
 /// Lifetime: it holds only a *weak* connection handle (never keeps the
 /// connection alive) and its loop is bounded by `closed()` — the task ends

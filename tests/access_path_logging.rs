@@ -34,9 +34,9 @@ const PAYLOAD: &[u8] = b"hello-through-the-path-logs";
 /// How long to wait for a log line to show up in the capture.
 const LOG_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Poller cadence — kept in sync with `PATH_POLL_INTERVAL` in
-/// src/access.rs (private there, so this file carries its own copy).
-const PATH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Poller cadence — the real one from the crate (`test-utils` exposes it),
+/// so the derived windows below can never drift from production timing.
+use iroh_tunnel::access::PATH_POLL_INTERVAL;
 
 /// Quiet window for [`wait_for_quiet`]: one poller tick plus slack.
 const QUIET_WINDOW: Duration = Duration::from_secs(PATH_POLL_INTERVAL.as_secs() + 1);
@@ -216,8 +216,14 @@ multiplex = false
 
     // Multiplexed service: one client establishes the shared connection and
     // its established log line.
-    let mut mux_client =
-        retry_connect(mux_addr, Duration::from_secs(30), &serve_role, &access_role).await?;
+    let mut mux_client = retry_connect(
+        mux_addr,
+        Duration::from_secs(30),
+        &serve_role,
+        &access_role,
+        &sink,
+    )
+    .await?;
     roundtrip(&mut mux_client).await?;
 
     // Per-channel service: the dial (and its log line) happens per client.
@@ -226,6 +232,7 @@ multiplex = false
         Duration::from_secs(30),
         &serve_role,
         &access_role,
+        &sink,
     )
     .await?;
     roundtrip(&mut per_channel_client).await?;
@@ -375,7 +382,7 @@ async fn finish_role(role: &SharedRole, name: &str) -> Result<()> {
         .lock()
         .await
         .take()
-        .unwrap_or_else(|| panic!("{name} role already finished"));
+        .with_context(|| format!("{name} role already finished before shutdown"))?;
     match tokio::time::timeout(Duration::from_secs(30), handle).await {
         // Three layers: Elapsed (bounded), JoinError (panic/cancel), then
         // the role's own result.
@@ -408,14 +415,16 @@ async fn echo_server(listener: TcpListener) {
 
 /// Retry TCP connect until `deadline`, polling both role tasks so a config
 /// error fails fast with the role's real result instead of a misleading
-/// connect timeout. A bind failure does NOT exit the role (it is logged in
-/// the role's per-service listen task) and still surfaces here as the
-/// deadline, with the `failed to bind` line in the captured dump.
+/// connect timeout. A bind failure does NOT exit the role (it is logged by
+/// the role's per-service listen task) — the captured sink is scanned for
+/// the `failed to bind` line each round so a bind race bails immediately
+/// instead of burning the whole deadline.
 async fn retry_connect(
     addr: std::net::SocketAddr,
     deadline: Duration,
     serve_role: &SharedRole,
     access_role: &SharedRole,
+    sink: &Arc<Mutex<Vec<u8>>>,
 ) -> Result<TcpStream> {
     let start = tokio::time::Instant::now();
     loop {
@@ -428,6 +437,15 @@ async fn retry_connect(
         match TcpStream::connect(addr).await {
             Ok(s) => return Ok(s),
             Err(e) => {
+                if captured_lines(sink)
+                    .iter()
+                    .any(|l| l.contains("failed to bind"))
+                {
+                    anyhow::bail!(
+                        "role reported a bind failure (see captured logs); \
+                         connect to {addr} will never succeed"
+                    );
+                }
                 if start.elapsed() > deadline {
                     anyhow::bail!("could not connect to {addr} within {deadline:?}: {e}");
                 }
