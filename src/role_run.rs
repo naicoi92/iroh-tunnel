@@ -145,20 +145,28 @@ pub(crate) trait RoleStrategy {
 }
 
 /// Drive a role end-to-end: load → resolve key → endpoint → print → loop →
-/// shutdown footer.
+/// shutdown footer, with the role's run-loop supplied as a parameter.
+///
+/// This is the single definition site of the orchestration; the plain
+/// [`run_with_shutdown`] wraps it with the strategy's stock `run_loop`, and
+/// the serve role's state-dir injection seam
+/// (`serve::run_with_shutdown_with_state_dir`) wraps it with a closure that
+/// carries the injected dir — neither duplicates the skeleton.
 ///
 /// Production callers wrap this with [`shutdown::wait_for_signal`]; tests
 /// inject a `oneshot::Receiver` so the role can be driven without sending
 /// real signals.
 ///
 /// The status-file write (serve-only) and any other post-build hooks live
-/// inside the strategy's `run_loop` — that's where the role has access to
-/// both the loaded config and the live endpoint, and where the timing fits
+/// inside the run-loop closure — that's where the role has access to both
+/// the loaded config and the live endpoint, and where the timing fits
 /// between "endpoint ready" and "shutdown received".
-pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
-    config_path: &Path,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
+pub(crate) async fn run_skeleton<S, F, Fut>(config_path: &Path, run_loop: F) -> Result<()>
+where
+    S: RoleStrategy,
+    F: FnOnce(iroh::Endpoint, S::Config) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
     // Load and validate the config, then resolve+persist the secret key. Both
     // steps are shared across roles via the RoleDoc trait.
     let mut cfg = S::Config::load(config_path)?;
@@ -180,14 +188,22 @@ pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
     S::print_services(&cfg);
 
     tracing::info!("endpoint ready");
-    // Drive the role-specific loop. The strategy MUST honor `shutdown`.
-    S::run_loop(ep, cfg, shutdown).await?;
+    // Drive the role-specific loop. It MUST honor `shutdown`.
+    run_loop(ep, cfg).await?;
 
     // Shared shutdown footer: drain in-flight streams. The endpoint close
-    // itself happens inside `run_loop` because each role needs to abort its
-    // accept task(s) before closing.
+    // itself happens inside the run loop because each role needs to abort
+    // its accept task(s) before closing.
     shutdown::drain_connections(Duration::from_secs(5)).await;
     Ok(())
+}
+
+/// Drive a role end-to-end with its stock [`RoleStrategy::run_loop`].
+pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    run_skeleton::<S, _, _>(config_path, |ep, cfg| S::run_loop(ep, cfg, shutdown)).await
 }
 
 #[cfg(test)]

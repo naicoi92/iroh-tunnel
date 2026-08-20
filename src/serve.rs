@@ -60,6 +60,26 @@ pub async fn run_with_shutdown(
     crate::role_run::run_with_shutdown::<ServeStrategy>(config_path, shutdown).await
 }
 
+/// Run the serve role like [`run_with_shutdown`], but write the status file
+/// into the explicitly given `state_dir` instead of the env-resolved default.
+///
+/// Advanced/testing seam: integration tests point a serve instance at an
+/// isolated tempdir without touching the process-global
+/// `IROH_TUNNEL_STATE_DIR` variable (which cannot be mutated safely while
+/// other test threads exist). Production callers use [`run_with_shutdown`];
+/// operators relocate the file via the env variable instead.
+pub async fn run_with_shutdown_with_state_dir(
+    state_dir: &Path,
+    config_path: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let state_dir = Some(state_dir.to_path_buf());
+    crate::role_run::run_skeleton::<ServeStrategy, _, _>(config_path, |ep, cfg| {
+        ServeStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir)
+    })
+    .await
+}
+
 /// Serve-role implementation of [`RoleStrategy`].
 ///
 /// Owns the genuinely-serve-specific pieces: registers every service's ALPN
@@ -103,6 +123,19 @@ impl RoleStrategy for ServeStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
+        Self::run_loop_with_state_dir(ep, cfg, shutdown, None).await
+    }
+}
+
+impl ServeStrategy {
+    /// [`RoleStrategy::run_loop`] with an optional injected state dir for
+    /// the status file (see [`run_with_shutdown_with_state_dir`]).
+    async fn run_loop_with_state_dir(
+        ep: iroh::Endpoint,
+        cfg: ServeConfig,
+        shutdown: impl Future<Output = ()>,
+        state_dir: Option<std::path::PathBuf>,
+    ) -> Result<()> {
         // Build the ALPN -> target lookup for demultiplexing accepted
         // streams.
         let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
@@ -136,22 +169,39 @@ impl RoleStrategy for ServeStrategy {
                         .unwrap_or_default(),
                 })
                 .collect(),
+            state_dir,
         };
-        match status.render().save() {
-            Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
-            Err(e) => tracing::warn!("failed to write status file: {e}"),
-        }
+        let initial = status.render(Vec::new());
+        // Seed the flush loop's change detection with the initial write when
+        // it succeeded — otherwise the first tick would rewrite an identical
+        // idle snapshot. A failed initial write seeds `None`, so the first
+        // tick retries it.
+        let seeded = match save_status_file(&initial, status.state_dir.as_deref()) {
+            Ok(p) => {
+                tracing::info!(path = %p.display(), "wrote status file");
+                Some(initial)
+            }
+            Err(e) => {
+                tracing::warn!("failed to write status file: {e}");
+                None
+            }
+        };
 
+        // Live registry of connected peers, fed by the accept loop below and
+        // read by the status flush task (issue #57).
+        let peers = PeerTracker::default();
         tracing::info!("serve endpoint ready, accepting connections");
         let accept_ep = ep.clone();
+        let accept_peers = peers.clone();
         let accept = tokio::spawn(async move {
-            accept_loop(&accept_ep, targets).await;
+            accept_loop(&accept_ep, targets, accept_peers).await;
         });
 
-        // Refresh status.json when any service's active-stream count changes,
-        // at most once per STATUS_FLUSH_INTERVAL — avoids disk churn under
-        // busy stream churn while keeping the file near-live for operators.
-        let flush = tokio::spawn(status_flush_loop(status));
+        // Refresh serve-status.json when the rendered snapshot changes —
+        // stream counters, connected peers, or their transport states — at
+        // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
+        // stream churn, still near-live for operators.
+        let flush = tokio::spawn(status_flush_loop(status, ep.clone(), peers, seeded));
 
         // Wait for the injected shutdown signal, then drain in-flight streams
         // before closing the endpoint (T-08). The accept and status tasks are
@@ -199,8 +249,9 @@ struct StatusSnapshot {
     pid: u32,
     started_at: u64,
     services: Vec<StatusServiceRow>,
+    /// Injected state dir (testing seam); `None` → env-resolved default.
+    state_dir: Option<std::path::PathBuf>,
 }
-
 struct StatusServiceRow {
     name: String,
     protocol: String,
@@ -209,7 +260,10 @@ struct StatusServiceRow {
 }
 
 impl StatusSnapshot {
-    fn render(&self) -> crate::status::StatusFile {
+    fn render(
+        &self,
+        connections: Vec<crate::status::PeerConnectionStatus>,
+    ) -> crate::status::StatusFile {
         crate::status::StatusFile {
             node_id: self.node_id.clone(),
             home_relay: self.home_relay.clone(),
@@ -225,30 +279,158 @@ impl StatusSnapshot {
                     active_connections: s.active_streams.load(Ordering::Relaxed),
                 })
                 .collect(),
+            connections,
         }
     }
 }
 
-/// Periodically rewrite status.json, but only when a counter changed.
-async fn status_flush_loop(status: StatusSnapshot) {
-    let mut last: Vec<u64> = status
-        .services
-        .iter()
-        .map(|s| s.active_streams.load(Ordering::Relaxed))
-        .collect();
+/// Live registry of which peers are connected over which services (issue #57).
+///
+/// The accept loop tracks `(peer, service)` when a connection is accepted and
+/// untracks it when the connection task ends; the status flush task renders
+/// the registry into `connections`. A peer with several connections to the
+/// same service (e.g. an access node with `multiplex = false`) is
+/// refcounted, and services are merged across a peer's connections.
+#[derive(Clone, Default)]
+struct PeerTracker(Arc<std::sync::Mutex<HashMap<iroh::EndpointId, HashMap<String, u64>>>>);
+
+impl PeerTracker {
+    /// Record one accepted connection from `peer` for `service`, returning
+    /// the RAII handle that untracks it.
+    ///
+    /// The guard's [`Drop`] decrements the refcount, so a connection task
+    /// that returns *or panics* cannot leak the entry — the unwind drops the
+    /// guard like any local.
+    fn track(&self, peer: iroh::EndpointId, service: &str) -> TrackedPeer {
+        // std Mutex is deliberate: the critical section is a few map ops,
+        // the guard is never held across an await, and unlock failures can
+        // only mean a panic mid-section — unwrapping is the right response.
+        self.0
+            .lock()
+            .unwrap()
+            .entry(peer)
+            .or_default()
+            .entry(service.to_string())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        TrackedPeer {
+            peers: self.clone(),
+            peer,
+            service: service.to_string(),
+        }
+    }
+
+    /// Drop one connection from `peer` for `service`; removes the service
+    /// (and with it the peer) when its refcount hits zero.
+    fn untrack(&self, peer: iroh::EndpointId, service: &str) {
+        let mut guard = self.0.lock().unwrap();
+        let Some(services) = guard.get_mut(&peer) else {
+            return;
+        };
+        let Some(count) = services.get_mut(service) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            services.remove(service);
+            if services.is_empty() {
+                guard.remove(&peer);
+            }
+        }
+    }
+
+    /// Point-in-time copy of the registry: `(peer, sorted service names)`,
+    /// sorted by peer id for deterministic output.
+    fn snapshot(&self) -> Vec<(iroh::EndpointId, Vec<String>)> {
+        let mut peers: Vec<_> = self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(peer, services)| {
+                let mut names: Vec<String> = services.keys().cloned().collect();
+                names.sort();
+                (*peer, names)
+            })
+            .collect();
+        // Cached key: the node-id string is computed once per peer instead
+        // of once per comparison.
+        peers.sort_by_cached_key(|(peer, _)| peer.to_string());
+        peers
+    }
+}
+
+/// RAII untrack handle returned by [`PeerTracker::track`].
+struct TrackedPeer {
+    peers: PeerTracker,
+    peer: iroh::EndpointId,
+    service: String,
+}
+
+impl Drop for TrackedPeer {
+    fn drop(&mut self) {
+        self.peers.untrack(self.peer, &self.service);
+    }
+}
+
+/// Render the tracker into the status file's `connections` array: one row
+/// per tracked peer with a fresh [`crate::conn_path::peer_path_report`]
+/// snapshot.
+///
+/// Peers whose iroh remote-map entry has already expired (`remote_info` →
+/// `None`) are skipped — the flush cadence picks them back up if they
+/// reconnect.
+async fn render_connections(
+    ep: &iroh::Endpoint,
+    peers: &PeerTracker,
+) -> Vec<crate::status::PeerConnectionStatus> {
+    let mut out = Vec::new();
+    for (peer, services) in peers.snapshot() {
+        let Some(report) = crate::conn_path::peer_path_report(ep, peer).await else {
+            continue;
+        };
+        out.push(crate::status::PeerConnectionStatus {
+            path: report,
+            services,
+        });
+    }
+    out
+}
+
+/// Persist the rendered status file: into `state_dir` when the testing seam
+/// injected one, otherwise via [`crate::status::StatusFile::save`]
+/// (env-aware default path).
+fn save_status_file(
+    file: &crate::status::StatusFile,
+    state_dir: Option<&Path>,
+) -> Result<std::path::PathBuf> {
+    match state_dir {
+        Some(dir) => file.save_to(dir),
+        None => file.save(),
+    }
+}
+
+/// Periodically rewrite serve-status.json, but only when the rendered
+/// snapshot changed (stream counters, peer set, or transport states).
+async fn status_flush_loop(
+    status: StatusSnapshot,
+    ep: iroh::Endpoint,
+    peers: PeerTracker,
+    mut last: Option<crate::status::StatusFile>,
+) {
     loop {
         tokio::time::sleep(STATUS_FLUSH_INTERVAL).await;
-        let now: Vec<u64> = status
-            .services
-            .iter()
-            .map(|s| s.active_streams.load(Ordering::Relaxed))
-            .collect();
-        if now == last {
+        let connections = render_connections(&ep, &peers).await;
+        let file = status.render(connections);
+        if last.as_ref() == Some(&file) {
             continue;
         }
-        last = now;
-        if let Err(e) = status.render().save() {
-            tracing::warn!("failed to write status file: {e}");
+        // Only record the file as written on success, so a failed write is
+        // retried on the next tick rather than silently dropped until the
+        // next change.
+        match save_status_file(&file, status.state_dir.as_deref()) {
+            Ok(_) => last = Some(file),
+            Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
     }
 }
@@ -257,7 +439,11 @@ async fn status_flush_loop(status: StatusSnapshot) {
 ///
 /// Returns only if the endpoint is closed (e.g. after Ctrl-C). Per-connection
 /// errors are logged, not propagated.
-async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarget>) {
+async fn accept_loop(
+    ep: &iroh::Endpoint,
+    targets: HashMap<Vec<u8>, ServiceTarget>,
+    peers: PeerTracker,
+) {
     loop {
         // ep.accept() is a Future yielding Option<Incoming>; None means the
         // endpoint was closed.
@@ -303,8 +489,14 @@ async fn accept_loop(ep: &iroh::Endpoint, targets: HashMap<Vec<u8>, ServiceTarge
             remote_id.to_string(),
             format!("peer disconnected (service {name})"),
         );
+        let conn_peers = peers.clone();
 
         tokio::spawn(async move {
+            // Track the peer for the status file's `connections` array for
+            // as long as this connection lives (issue #57). The guard
+            // untracks on drop — normal return or panic unwind alike — so
+            // the refcount can never leak.
+            let _tracked = conn_peers.track(remote_id, &name);
             handle_connection(&conn, target).await;
         });
     }
@@ -356,5 +548,88 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget) {
             }
             counter.fetch_sub(1, Ordering::Relaxed);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer() -> iroh::EndpointId {
+        iroh::SecretKey::generate().public()
+    }
+
+    #[test]
+    fn track_refcounts_connections_until_the_last_untrack() {
+        let tracker = PeerTracker::default();
+        let p = peer();
+        let first = tracker.track(p, "echo");
+        let second = tracker.track(p, "echo");
+
+        let expected = vec![(p, vec!["echo".to_string()])];
+        assert_eq!(tracker.snapshot(), expected);
+
+        drop(first);
+        assert_eq!(
+            tracker.snapshot(),
+            expected,
+            "one connection left — the entry must survive"
+        );
+
+        drop(second);
+        assert!(
+            tracker.snapshot().is_empty(),
+            "peer must disappear with its last connection"
+        );
+    }
+
+    #[test]
+    fn guard_untracks_via_drop_without_any_explicit_call() {
+        // The panic-safety contract: nothing calls `untrack` manually —
+        // dropping the guard (as an unwind would) must clean up.
+        let tracker = PeerTracker::default();
+        let p = peer();
+        {
+            let _tracked = tracker.track(p, "echo");
+            assert_eq!(tracker.snapshot(), vec![(p, vec!["echo".to_string()])]);
+        }
+        assert!(tracker.snapshot().is_empty());
+    }
+
+    #[test]
+    fn services_merge_across_a_peers_connections() {
+        let tracker = PeerTracker::default();
+        let p = peer();
+        let web = tracker.track(p, "web");
+        let echo = tracker.track(p, "echo");
+
+        // Service names sorted within the peer's row.
+        assert_eq!(
+            tracker.snapshot(),
+            vec![(p, vec!["echo".to_string(), "web".to_string()])]
+        );
+
+        drop(web);
+        assert_eq!(tracker.snapshot(), vec![(p, vec!["echo".to_string()])]);
+        drop(echo);
+        assert!(tracker.snapshot().is_empty());
+    }
+
+    #[test]
+    fn snapshot_orders_peers_deterministically() {
+        let tracker = PeerTracker::default();
+        let peers: Vec<_> = (0..3).map(|_| peer()).collect();
+        // Hold every guard so all peers stay tracked.
+        let guards: Vec<_> = peers.iter().map(|p| tracker.track(*p, "echo")).collect();
+
+        let mut expected: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
+        expected.sort();
+        let got: Vec<String> = tracker
+            .snapshot()
+            .into_iter()
+            .map(|(p, _)| p.to_string())
+            .collect();
+        assert_eq!(got, expected);
+        drop(guards);
     }
 }
