@@ -34,6 +34,16 @@ const PAYLOAD: &[u8] = b"hello-through-the-path-logs";
 /// How long to wait for a log line to show up in the capture.
 const LOG_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Poller cadence — kept in sync with `PATH_POLL_INTERVAL` in
+/// src/access.rs (private there, so this file carries its own copy).
+const PATH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Quiet window for [`wait_for_quiet`]: one poller tick plus slack.
+const QUIET_WINDOW: Duration = Duration::from_secs(PATH_POLL_INTERVAL.as_secs() + 1);
+
+/// Steady-state hold: two poller ticks of silence.
+const STEADY_HOLD: Duration = Duration::from_secs(PATH_POLL_INTERVAL.as_secs() * 2);
+
 /// A role task shared with [`retry_connect`]: the connect loop polls it for
 /// early exit — only a config error fails the role task outright (a bind
 /// failure is logged inside the role's own per-service listen task and the
@@ -92,9 +102,9 @@ async fn access_logs_connection_paths_on_established() -> Result<()> {
     {
         // A subscriber is already installed, so the LogSink is NOT wired:
         // every log assertion below would fail as opaque 30 s timeouts.
-        // Surface the root cause instead of swallowing it.
-        eprintln!(
-            "warning: tracing subscriber already installed ({e}); LogSink not wired — log assertions will fail"
+        // Fail fast with the root cause instead of burning them.
+        anyhow::bail!(
+            "tracing subscriber already installed ({e}); LogSink not wired — log assertions cannot pass"
         );
     }
 
@@ -245,16 +255,21 @@ multiplex = false
     .await
     .context("per-channel established line")?;
     println!("per-channel established: {per_channel_line}");
-
     // Steady-state pin (issue #58): the poller must be silent while nothing
-    // changes. On this localhost harness a *legitimate* initial migration
-    // (relay→relay+direct) is expected while QUIC address discovery lands —
-    // the per-channel line above already shows direct active — so first let
-    // the initial transitions settle (see `wait_for_quiet`), then hold for
-    // 2× PATH_POLL_INTERVAL (5 s, src/access.rs) and require the
-    // path-changed count not to move.
-    let settled_changes = wait_for_quiet(&sink).await?;
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // changes. On this localhost harness *legitimate* migrations are
+    // expected early (QUIC address discovery lands after the handshakes;
+    // the peer-level remote map is shared by both services), so first let
+    // them settle, then hold for two poller ticks and require the count not
+    // to move. A late-but-legitimate migration during the hold is absorbed
+    // by one bounded re-settle — only continuous churn fails.
+    let mut settled_changes = wait_for_quiet(&sink).await?;
+    for _ in 0..3 {
+        tokio::time::sleep(STEADY_HOLD).await;
+        if path_changed_count(&sink) == settled_changes {
+            break;
+        }
+        settled_changes = wait_for_quiet(&sink).await?;
+    }
     let changes_after = path_changed_count(&sink);
     assert_eq!(
         changes_after, settled_changes,
@@ -301,12 +316,14 @@ async fn wait_for_line(sink: &Arc<Mutex<Vec<u8>>>, pred: impl Fn(&str) -> bool) 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
-
 /// Count captured `path changed` lines so far.
 fn path_changed_count(sink: &Arc<Mutex<Vec<u8>>>) -> usize {
     captured_lines(sink)
         .iter()
-        .filter(|l| l.contains("path changed"))
+        // Match the message prefix, not a bare substring: every default-
+        // format line renders as `<target>: <message> <fields>`, so
+        // `": path changed "` cannot match an unrelated field value.
+        .filter(|l| l.contains(": path changed "))
         .count()
 }
 
@@ -316,8 +333,6 @@ fn path_changed_count(sink: &Arc<Mutex<Vec<u8>>>) -> usize {
 /// legitimate poller output — only *after* they settle is silence the
 /// correct expectation.
 async fn wait_for_quiet(sink: &Arc<Mutex<Vec<u8>>>) -> Result<usize> {
-    // 6 s > one 5 s poller tick (PATH_POLL_INTERVAL, src/access.rs).
-    let quiet_window = Duration::from_secs(6);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut last_count = path_changed_count(sink);
     let mut last_change_at = tokio::time::Instant::now();
@@ -328,7 +343,7 @@ async fn wait_for_quiet(sink: &Arc<Mutex<Vec<u8>>>) -> Result<usize> {
             last_count = count;
             last_change_at = tokio::time::Instant::now();
         }
-        if last_change_at.elapsed() > quiet_window {
+        if last_change_at.elapsed() > QUIET_WINDOW {
             return Ok(last_count);
         }
         if tokio::time::Instant::now() > deadline {

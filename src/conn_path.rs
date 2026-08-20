@@ -274,18 +274,22 @@ pub(crate) fn render_active_kinds(transports: &[TransportStatus]) -> String {
 ///   line;
 /// - otherwise [`diff_transports`] decides; a real change renders exactly
 ///   one line, `path changed <kinds>→<kinds> (now active: <transports>)`.
+///
+/// `snapshot` is taken by value (the caller owns `report.transports` and
+/// never reuses it), so every branch except the teardown keep returns the
+/// moved vec intact — no per-tick clones.
 pub(crate) fn poller_step(
     last: &[TransportStatus],
-    snapshot: &[TransportStatus],
+    snapshot: Vec<TransportStatus>,
 ) -> (Option<String>, Vec<TransportStatus>) {
     let has_active = |ts: &[TransportStatus]| ts.iter().any(|t| t.active);
     if !has_active(last) {
-        return (None, snapshot.to_vec());
+        return (None, snapshot);
     }
-    if !has_active(snapshot) {
+    if !has_active(&snapshot) {
         return (None, last.to_vec());
     }
-    match diff_transports(last, snapshot) {
+    match diff_transports(last, &snapshot) {
         Some(change) => {
             let line = format!(
                 "path changed {}→{} (now active: {})",
@@ -293,9 +297,9 @@ pub(crate) fn poller_step(
                 render_active_kinds(&change.after_active),
                 render_active_transports(&change.after_active),
             );
-            (Some(line), snapshot.to_vec())
+            (Some(line), snapshot)
         }
-        None => (None, snapshot.to_vec()),
+        None => (None, snapshot),
     }
 }
 
@@ -576,10 +580,11 @@ mod tests {
     #[test]
     fn poller_step_seeds_silently_when_baseline_never_active() {
         // `paths pending` at connect time: the first active snapshot is a
-        // resolution, not a migration — no line, baseline moves forward.
+        // resolution, not a migration — no line, baseline moves forward
+        // (the moved snapshot, no clone).
         let last = vec![status(TransportKind::Relay, "https://r/", false)];
         let snapshot = vec![status(TransportKind::Relay, "https://r/", true)];
-        let (line, next) = poller_step(&last, &snapshot);
+        let (line, next) = poller_step(&last, snapshot.clone());
         assert_eq!(line, None);
         assert_eq!(next, snapshot);
     }
@@ -587,10 +592,10 @@ mod tests {
     #[test]
     fn poller_step_keeps_baseline_on_all_inactive_snapshot() {
         // Teardown blip: the disconnect event covers death; the baseline
-        // stays on the last real path.
+        // stays on the last real path (the only branch that clones).
         let last = vec![status(TransportKind::Relay, "https://r/", true)];
         let snapshot = vec![status(TransportKind::Relay, "https://r/", false)];
-        let (line, next) = poller_step(&last, &snapshot);
+        let (line, next) = poller_step(&last, snapshot);
         assert_eq!(line, None);
         assert_eq!(next, last);
     }
@@ -602,12 +607,12 @@ mod tests {
         // never a spurious `none→direct` in between.
         let relay = vec![status(TransportKind::Relay, "https://r/", true)];
         let blip = vec![status(TransportKind::Relay, "https://r/", false)];
-        let (line, last) = poller_step(&relay, &blip);
+        let (line, last) = poller_step(&relay, blip);
         assert_eq!(line, None);
         assert_eq!(last, relay);
 
         let direct = vec![status(TransportKind::Direct, "203.0.113.7:41641", true)];
-        let (line, next) = poller_step(&last, &direct);
+        let (line, next) = poller_step(&last, direct.clone());
         assert_eq!(
             line.as_deref(),
             Some("path changed relay→direct (now active: direct=203.0.113.7:41641)")
@@ -624,7 +629,7 @@ mod tests {
             status(TransportKind::Relay, "https://r/", true),
             status(TransportKind::Direct, "10.0.0.2:1", false),
         ];
-        let (line, next) = poller_step(&last, &snapshot);
+        let (line, next) = poller_step(&last, snapshot.clone());
         assert_eq!(line, None);
         assert_eq!(next, snapshot);
     }

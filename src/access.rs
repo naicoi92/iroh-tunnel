@@ -261,15 +261,32 @@ impl ServiceDialer {
             return Ok(conn.clone());
         }
         let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
-        // Publish before the (awaiting) established-log query so the cache
-        // mutex is not held across it: concurrent channels see the fresh
+        let remote_id = conn.remote_id();
+
+        // Register the replacement poller BEFORE publishing the connection
+        // and before any further await: while the conn guard is still held,
+        // registration order always matches publish order, so a racing
+        // invalidate+redial can never end with the OLD poller as the
+        // survivor. One poller per service (abort the previous one); the
+        // old poller also ends by itself once its connection closes — the
+        // abort is just eager cleanup. The baseline starts empty:
+        // `conn_path::poller_step` seeds silently on its first tick.
+        let mut poller_guard = self.poller.lock().await;
+        if let Some(old) = poller_guard.take() {
+            old.abort();
+        }
+        let poller = spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), Vec::new());
+        *poller_guard = Some(poller);
+        drop(poller_guard);
+
+        // Publish (then drop the cache mutex) before the awaiting
+        // established-log query: concurrent channels see the fresh
         // connection immediately. The lock WAS held across the dial above,
         // so the one-connection-per-N-channels semantics are unchanged.
         *guard = Some(conn.clone());
         drop(guard);
-        let remote_id = conn.remote_id();
-        let report =
-            log_connection_established(&self.ep, &conn, &self.svc_name, "multiplexed").await;
+
+        log_connection_established(&self.ep, &conn, &self.svc_name, "multiplexed").await;
         crate::role_run::spawn_disconnect_watcher(
             &conn,
             remote_id.to_string(),
@@ -278,25 +295,6 @@ impl ServiceDialer {
                 self.svc_name
             ),
         );
-        // One poller per service: abort the previous one (if any) before
-        // spawning its replacement — a non-fatal open_bi error (e.g.
-        // StreamLimitReached) invalidates the cache, and the redial would
-        // otherwise leave a second poller logging the same peer+service.
-        // The old poller also ends by itself once its connection closes;
-        // the abort is just eager cleanup.
-        let mut poller_guard = self.poller.lock().await;
-        if let Some(old) = poller_guard.take() {
-            old.abort();
-        }
-        // Path-change baseline: whatever the established line just rendered.
-        let poller = spawn_path_change_poller(
-            &self.ep,
-            &conn,
-            self.svc_name.clone(),
-            report.map(|r| r.transports).unwrap_or_default(),
-        );
-        *poller_guard = Some(poller);
-        drop(poller_guard);
         Ok(conn)
     }
 
@@ -445,15 +443,12 @@ fn render_established_paths(report: Option<&crate::conn_path::PeerPathReport>) -
 /// id in the `peer=` field, short id plus the active transports
 /// (`relay=<url>` / `direct=<addr>`, comma-separated) in the message.
 /// `mode` is `"multiplexed"` or `"per-channel"`.
-///
-/// Returns the path snapshot for callers that need a baseline — the
-/// multiplexed poller starts diffing from it.
 async fn log_connection_established(
     ep: &iroh::Endpoint,
     conn: &iroh::endpoint::Connection,
     svc_name: &str,
     mode: &str,
-) -> Option<crate::conn_path::PeerPathReport> {
+) {
     let remote_id = conn.remote_id();
     let report = crate::conn_path::peer_path_report(ep, remote_id).await;
     tracing::info!(
@@ -464,7 +459,6 @@ async fn log_connection_established(
         short_peer_id(&remote_id),
         render_established_paths(report.as_ref()),
     );
-    report
 }
 
 /// Spawn the path-change poller for one live multiplexed connection.
@@ -516,7 +510,7 @@ fn spawn_path_change_poller(
             // while the baseline has never seen an active path, baseline
             // kept through teardown blips, otherwise a single line per
             // real migration.
-            let (line, next) = crate::conn_path::poller_step(&last, &report.transports);
+            let (line, next) = crate::conn_path::poller_step(&last, report.transports);
             if let Some(line) = line {
                 tracing::info!(peer = %peer, svc_name = %svc_name, "{}", line);
             }
