@@ -23,7 +23,10 @@
 
 - **Breaking**: the serve status file was renamed `status.json` →
   `serve-status.json` (role-scoped, preparing for an access-side status
-  file). Monitoring that reads the old path must update.
+  file). Monitoring that reads the old path must update. On the first
+  successful write of the new file, a pre-rename `status.json` in the same
+  directory is removed best-effort, so upgraded nodes never leave a stale
+  snapshot behind for old-path tooling to read silently.
 
 ## [0.3.0] — 2026-08-20
 

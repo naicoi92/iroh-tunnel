@@ -85,6 +85,10 @@ pub async fn peer_path_report(ep: &Endpoint, peer: EndpointId) -> Option<PeerPat
         })
         .collect();
     sort_transports(&mut transports);
+    // Equal (kind, addr, active) rows are adjacent after sorting; collapse
+    // them so iroh reporting a duplicate path (e.g. after re-hole-punch
+    // attempts or duplicate relay entries) never duplicates status rows.
+    transports.dedup();
     // bound_sockets() ordering is not guaranteed stable across calls; sort
     // for the same reason transports are sorted — two snapshots of an
     // unchanged endpoint must compare equal, or the flush loop would

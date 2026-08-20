@@ -171,10 +171,21 @@ impl ServeStrategy {
                 .collect(),
             state_dir,
         };
-        match save_status_file(&status.render(Vec::new()), status.state_dir.as_deref()) {
-            Ok(p) => tracing::info!(path = %p.display(), "wrote status file"),
-            Err(e) => tracing::warn!("failed to write status file: {e}"),
-        }
+        let initial = status.render(Vec::new());
+        // Seed the flush loop's change detection with the initial write when
+        // it succeeded — otherwise the first tick would rewrite an identical
+        // idle snapshot. A failed initial write seeds `None`, so the first
+        // tick retries it.
+        let seeded = match save_status_file(&initial, status.state_dir.as_deref()) {
+            Ok(p) => {
+                tracing::info!(path = %p.display(), "wrote status file");
+                Some(initial)
+            }
+            Err(e) => {
+                tracing::warn!("failed to write status file: {e}");
+                None
+            }
+        };
 
         // Live registry of connected peers, fed by the accept loop below and
         // read by the status flush task (issue #57).
@@ -190,7 +201,7 @@ impl ServeStrategy {
         // stream counters, connected peers, or their transport states — at
         // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
         // stream churn, still near-live for operators.
-        let flush = tokio::spawn(status_flush_loop(status, ep.clone(), peers));
+        let flush = tokio::spawn(status_flush_loop(status, ep.clone(), peers, seeded));
 
         // Wait for the injected shutdown signal, then drain in-flight streams
         // before closing the endpoint (T-08). The accept and status tasks are
@@ -401,8 +412,12 @@ fn save_status_file(
 
 /// Periodically rewrite serve-status.json, but only when the rendered
 /// snapshot changed (stream counters, peer set, or transport states).
-async fn status_flush_loop(status: StatusSnapshot, ep: iroh::Endpoint, peers: PeerTracker) {
-    let mut last: Option<crate::status::StatusFile> = None;
+async fn status_flush_loop(
+    status: StatusSnapshot,
+    ep: iroh::Endpoint,
+    peers: PeerTracker,
+    mut last: Option<crate::status::StatusFile>,
+) {
     loop {
         tokio::time::sleep(STATUS_FLUSH_INTERVAL).await;
         let connections = render_connections(&ep, &peers).await;

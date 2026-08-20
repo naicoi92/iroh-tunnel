@@ -161,12 +161,17 @@ multiplex = true
 
     // Phase 2 — serve-status.json reports the access peer.
     let status_path = state_tmp.path().join("serve-status.json");
-    let with_peer = poll_status(&status_path, STATUS_POLL_TIMEOUT, |status| {
-        !status["connections"]
-            .as_array()
-            .map(Vec::is_empty)
-            .unwrap_or(true)
-    })
+    let with_peer = poll_status(
+        &status_path,
+        STATUS_POLL_TIMEOUT,
+        &[&serve_role, &access_role],
+        |status| {
+            !status["connections"]
+                .as_array()
+                .map(Vec::is_empty)
+                .unwrap_or(true)
+        },
+    )
     .await?;
     assert_eq!(with_peer["node_id"], serve_node_id);
 
@@ -204,12 +209,17 @@ multiplex = true
     let _ = access_tx.send(());
     finish_role(&access_role, "access").await?;
 
-    let emptied = poll_status(&status_path, STATUS_POLL_TIMEOUT, |status| {
-        status["connections"]
-            .as_array()
-            .map(Vec::is_empty)
-            .unwrap_or(true)
-    })
+    let emptied = poll_status(
+        &status_path,
+        STATUS_POLL_TIMEOUT,
+        &[&serve_role],
+        |status| {
+            status["connections"]
+                .as_array()
+                .map(Vec::is_empty)
+                .unwrap_or(true)
+        },
+    )
     .await?;
     assert_eq!(
         emptied["connections"].as_array().unwrap().len(),
@@ -229,7 +239,13 @@ async fn role_exited(role: &SharedRole) -> Option<Result<()>> {
     let mut guard = role.lock().await;
     match guard.as_ref() {
         Some(handle) if handle.is_finished() => {
+            // Take the handle out and DROP the lock before awaiting: a guard
+            // held across the await would block `retry_connect` and
+            // `finish_role` on this slot if a future edit ever awaits an
+            // unfinished handle here — a fast-fail path must not turn into
+            // a hang.
             let handle = guard.take().expect("checked is_finished above");
+            drop(guard);
             Some(handle.await.expect("role task panicked"))
         }
         _ => None,
@@ -252,14 +268,26 @@ async fn finish_role(role: &SharedRole, name: &str) -> Result<()> {
 }
 
 /// Re-read the status file until `pred` accepts it, returning the last parse.
+///
+/// `watch` lists role tasks that must still be running while we poll: if
+/// one exits, its real result fails the test immediately instead of an
+/// opaque timeout later.
 async fn poll_status(
     path: &std::path::Path,
     timeout: Duration,
+    watch: &[&SharedRole],
     pred: impl Fn(&serde_json::Value) -> bool,
 ) -> Result<serde_json::Value> {
     let start = std::time::Instant::now();
     let mut last_parse: Option<serde_json::Value> = None;
     loop {
+        // Fast-fail: a watched role exiting mid-poll means the file will
+        // never reach the expected state — surface the role's real result.
+        for role in watch {
+            if let Some(result) = role_exited(role).await {
+                anyhow::bail!("watched role exited while waiting for the status file: {result:?}");
+            }
+        }
         if let Ok(body) = std::fs::read_to_string(path) {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
                 if pred(&value) {

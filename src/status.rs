@@ -43,6 +43,11 @@ use serde::Serialize;
 /// File name of the serve status file (role-scoped).
 const STATUS_FILE_NAME: &str = "serve-status.json";
 
+/// Pre-rename file name, removed best-effort on the first successful save
+/// of the renamed file so upgraded nodes don't leave a stale snapshot that
+/// tooling still pointed at the old name would read silently.
+const LEGACY_STATUS_FILE_NAME: &str = "status.json";
+
 /// Environment variable overriding the status file's directory entirely
 /// (advanced/testing seam; empty is treated as unset).
 const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
@@ -140,7 +145,15 @@ impl StatusFile {
             std::process::id(),
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::write(&temp, &content)
+        // Write + fsync the temp file before renaming: the atomic-rename
+        // guarantee below covers concurrent readers, and the fsync covers
+        // durability — without it a crash right after the rename can leave
+        // an empty destination. One save per change (throttled by the flush
+        // loop), so the cost is negligible.
+        let mut file = std::fs::File::create(&temp)
+            .with_context(|| format!("failed to create status temp file: {}", temp.display()))?;
+        std::io::Write::write_all(&mut file, content.as_bytes())
+            .and_then(|()| file.sync_all())
             .with_context(|| format!("failed to write status file: {}", temp.display()))?;
         // If rename fails, the temp file is stale — clean it up so repeated
         // failures don't accumulate temp files on disk. The original rename
@@ -150,6 +163,12 @@ impl StatusFile {
             return Err(e)
                 .with_context(|| format!("failed to finalize status file: {}", path.display()));
         }
+        // Best-effort removal of the pre-rename legacy file: tooling still
+        // pointed at the old name would otherwise read a stale snapshot
+        // silently (worse than an error). The file is this crate's own
+        // artifact in its own state dir, so removing it on first successful
+        // save of the renamed file is safe; failure to remove is ignored.
+        let _ = std::fs::remove_file(dir.join(LEGACY_STATUS_FILE_NAME));
         Ok(path)
     }
 }
@@ -187,9 +206,10 @@ fn status_file_path() -> Result<PathBuf> {
 /// state.
 fn status_file_path_with(state_dir_override: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
     if let Some(dir) = state_dir_override.filter(|dir| !dir.is_empty()) {
-        // Absolutize so a relative override (`IROH_TUNNEL_STATE_DIR=.`) does
-        // not silently resolve against a moving CWD — the written path stays
-        // stable for the life of the process.
+        // Absolutize so a relative override (`IROH_TUNNEL_STATE_DIR=.`) is
+        // resolved against the CWD at resolution time. Note this runs per
+        // save — a process that changes its CWD would change the target
+        // dir; pin the resolved path once if that ever becomes a concern.
         let dir = std::path::absolute(dir)
             .with_context(|| format!("invalid {ENV_STATE_DIR}: {}", Path::new(dir).display()))?;
         return Ok(dir.join(STATUS_FILE_NAME));
@@ -380,9 +400,15 @@ mod tests {
         // lands directly in it, no `iroh-tunnel` subpath.
         let path =
             status_file_path_with(Some(std::ffi::OsStr::new("/tmp/status-override"))).unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/status-override").join("serve-status.json")
+        // Suffix assertions instead of exact-equality: `std::path::absolute`
+        // yields a drive-rooted path with backslashes on Windows, so an
+        // exact `PathBuf` compare would fail on a supported platform. What
+        // the test actually proves: the override replaces the dir entirely
+        // (absolute, no `iroh-tunnel` subpath) and keeps the file name.
+        assert!(path.is_absolute());
+        assert!(
+            path.ends_with(std::path::Path::new("status-override").join("serve-status.json")),
+            "override must replace the dir entirely, got {path:?}"
         );
     }
 
