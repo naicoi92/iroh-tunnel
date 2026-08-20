@@ -35,11 +35,15 @@ dirs = "6"
 which = "8"
 edit = "0.1"
 data-encoding = "2.11"
-# Unix pid-liveness probe (`kill(pid, 0)`) for the `<role> status` command.
-# Already in the dependency tree via iroh/tokio on every platform, so this
-# direct dependency adds no new code to the build — it only lets us call it.
-libc = "0.2"
 regex = "1.13"
+
+[target.'cfg(unix)'.dependencies]
+# Unix pid-liveness probe (`kill(pid, 0)`) for the `<role> status` command.
+# Section split mirrors the cfg(unix) call site in src/status_cmd.rs —
+# non-unix builds never compile that code and never link libc. Already in
+# the dependency tree via iroh/tokio on every platform, so this adds no new
+# code to the build — it only lets us call it directly.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27"

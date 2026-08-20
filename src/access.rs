@@ -285,37 +285,67 @@ impl AccessStrategy {
             }
         };
 
-        // Resolve the status path BEFORE `status` moves into the flush
-        // task: on graceful shutdown the run loop removes the file, so a
-        // `<role> status` reader never mistakes a stale snapshot for a live
-        // role. A crash skips this cleanup — the reader-side pid-liveness
-        // warning covers exactly that case.
-        let status_path = StatusWriter::access().path_for_state_dir(status.state_dir.as_deref());
+        // Graceful-cleanup inputs captured BEFORE `status` moves into the
+        // flush task: the state-dir choice (the ownership-checked removal
+        // resolves its own path from it) and the cooperative stop channel.
+        let cleanup_state_dir = status.state_dir.clone();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 
         tracing::info!("access endpoint ready, listening for local clients");
-        let flush = tokio::spawn(access_status_flush_loop(status, dialers.clone(), seeded));
+        let mut flush = tokio::spawn(access_status_flush_loop(
+            status,
+            dialers.clone(),
+            seeded,
+            stop_rx,
+            crate::status::STATUS_FLUSH_INTERVAL,
+            save_access_status,
+        ));
         for dialer in dialers {
             handles.push(tokio::spawn(listen_loop(dialer)));
         }
         shutdown.await;
         // Abort each per-service listener so they stop accepting new local
-        // clients before the endpoint close tears down the in-flight dials;
-        // the flush task with it.
+        // clients before the endpoint close tears down the in-flight dials.
         for h in handles {
             h.abort();
         }
-        flush.abort();
+        // Signal the flush task to stop (dropping the sender alone would
+        // also close the channel, but only at scope end — far too late).
+        let _ = stop_tx.send(());
+        // Stop the flush task COOPERATIVELY and JOIN it: aborting would not
+        // cancel an in-flight spawn_blocking save (write+fsync+rename runs
+        // to completion on the blocking pool and could recreate the file
+        // AFTER the cleanup removal). The task exits only at an await
+        // point and every save is awaited inside its loop — a successful
+        // join therefore proves none of its saves is still running. On a
+        // pathological stall (>5 s for one fsync) the join is abandoned
+        // and the removal is SKIPPED: a possibly-stale file (surfaced by
+        // the reader-side pid warning) beats a resurrection race that
+        // cannot be won once the save is in-flight.
+        let flush_abort = flush.abort_handle();
+        let flush_stopped = tokio::time::timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .is_ok();
+        if !flush_stopped {
+            tracing::warn!(
+                "status flush task did not stop within 5s; aborting it and KEEPING \
+                 the status file (removal could race its in-flight save)"
+            );
+            flush_abort.abort();
+        }
         ep.close().await;
-        // Best-effort status-file removal on graceful exit (the flush task
-        // is already aborted, so nothing can rewrite it afterwards). A
-        // missing file was never written — not an error; any other failure
-        // is logged at debug, the exit path must stay clean.
-        if let Ok(path) = &status_path {
-            if let Err(e) = tokio::fs::remove_file(path).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::debug!("failed to remove status file: {e}");
-                }
-            }
+        // Remove the status file only after a clean join AND only if it
+        // still belongs to THIS process (its `pid` field decides — two
+        // instances can share a state dir, and an idle peer would not
+        // recreate its own file after a blind removal). A crash never runs
+        // this path; the reader-side pid-liveness warning covers the stale
+        // file it leaves behind.
+        if flush_stopped {
+            crate::status::remove_own_status_file(
+                StatusWriter::access(),
+                cleanup_state_dir.as_deref(),
+            )
+            .await;
         }
         Ok(())
     }
@@ -385,13 +415,36 @@ async fn render_access_status(
 /// Periodically rewrite access-status.json, but only when the rendered
 /// snapshot changed (a service connected or disconnected, or its transports
 /// migrated) — the access twin of serve's `status_flush_loop`.
-async fn access_status_flush_loop(
+///
+/// Stops COOPERATIVELY on `stop`: aborting this task would not cancel an
+/// in-flight `spawn_blocking` save (write+fsync+rename runs to completion
+/// on the blocking pool and could recreate the file after the shutdown
+/// cleanup removed it). The run loop therefore signals, then JOINS this
+/// task before removing the file — the loop here must exit on the signal
+/// while letting the current save finish.
+///
+/// `interval` and `save` are seams for the unit test that drives a slow
+/// save against the stop signal; production passes
+/// [`crate::status::STATUS_FLUSH_INTERVAL`] and [`save_access_status`].
+async fn access_status_flush_loop<S, F>(
     status: AccessStatusTemplate,
     dialers: Vec<Arc<ServiceDialer>>,
     mut last: Option<AccessStatusFile>,
-) {
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+    interval: Duration,
+    mut save: S,
+) where
+    S: FnMut(AccessStatusFile, Option<std::path::PathBuf>) -> F,
+    F: Future<Output = Result<std::path::PathBuf>>,
+{
     loop {
-        tokio::time::sleep(crate::status::STATUS_FLUSH_INTERVAL).await;
+        // `biased` so a stop that arrives during a save is observed before
+        // the next sleep even starts — no extra tick, no extra save.
+        tokio::select! {
+            biased;
+            _ = &mut stop => break,
+            _ = tokio::time::sleep(interval) => {}
+        }
         let file = render_access_status(&status, &dialers).await;
         if last.as_ref() == Some(&file) {
             continue;
@@ -399,7 +452,7 @@ async fn access_status_flush_loop(
         // Only record the file as written on success, so a failed write is
         // retried on the next tick rather than silently dropped until the
         // next change.
-        match save_access_status(file.clone(), status.state_dir.clone()).await {
+        match save(file.clone(), status.state_dir.clone()).await {
             Ok(_) => last = Some(file),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
@@ -780,4 +833,97 @@ fn spawn_path_change_poller(
         }
     })
     .abort_handle()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// PR #62 run 4, acceptance A — the shutdown race, driven directly.
+    ///
+    /// `stop` arriving while a save is IN-FLIGHT must let that save finish
+    /// (the run loop joins the task before removing the file), and must
+    /// prevent any SECOND save: a post-stop tick is exactly the
+    /// resurrection path (rename after removal) that cooperative stopping
+    /// exists to close.
+    ///
+    /// The spy save always FAILS on purpose: a failed save leaves `last`
+    /// unseeded, so every subsequent tick would save again if the loop
+    /// wrongly kept ticking after `stop` — call count 1 is therefore a
+    /// strong assertion, not a vacuous one.
+    #[tokio::test]
+    async fn flush_stop_mid_save_lets_it_finish_and_prevents_a_second_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let template = AccessStatusTemplate {
+            node_id: "race-test".to_string(),
+            pid: 1,
+            started_at: 0,
+            // No services → no dialers → the render is trivially stable;
+            // the save seam below is the only observable.
+            services: Vec::new(),
+            state_dir: Some(tmp.path().to_path_buf()),
+        };
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        // Signalled the moment the slow save STARTS, so the stop below is
+        // provably sent while that save is in-flight.
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let calls_for_save = calls.clone();
+        let started_for_save = started_tx.clone();
+        let flush = tokio::spawn(access_status_flush_loop(
+            template,
+            Vec::new(),
+            None, // unseeded `last`: the first tick always saves
+            stop_rx,
+            Duration::from_millis(20),
+            move |_file, dir| {
+                let calls = calls_for_save.clone();
+                let started = started_for_save.clone();
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        let _ = started.try_send(());
+                        // The deliberately slow "blocking" save: its write
+                        // lands AFTER the stop signal below is sent.
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let dir = dir.expect("test always injects a state dir");
+                        std::fs::write(dir.join("access-status.json"), b"slow-save-landed")
+                            .expect("spy save write");
+                    }
+                    Err(anyhow::anyhow!("spy save always fails"))
+                }
+            },
+        ));
+
+        // Synchronize on the slow save being in-flight, THEN stop.
+        started_rx
+            .recv()
+            .await
+            .expect("first save must start before the test stops the loop");
+        let _ = stop_tx.send(());
+
+        // The cooperative stop lets the in-flight save finish before the
+        // loop exits — the join observes both.
+        tokio::time::timeout(Duration::from_secs(2), flush)
+            .await
+            .expect("flush task must stop after the stop signal")
+            .expect("flush task must not panic");
+
+        // Past the in-flight window: with a 20 ms tick, a loop that
+        // (wrongly) kept running would have saved again many times over.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no second save after stop — a post-stop tick is the file-resurrection path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("access-status.json"))
+                .expect("in-flight save must have landed"),
+            "slow-save-landed",
+            "the in-flight save completed and nothing overwrote it afterwards"
+        );
+    }
 }

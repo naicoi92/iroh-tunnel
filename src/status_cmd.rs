@@ -17,10 +17,11 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::conn_path::TransportStatus;
-use crate::status::{AccessStatusFile, StatusFile, StatusRole, StatusWriter};
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
+
+use crate::conn_path::TransportStatus;
+use crate::status::{AccessStatusFile, StatusFile, StatusPayload, StatusRole, StatusWriter};
 
 /// Entry point for `iroh-tunnel <role> status [--json]`.
 ///
@@ -47,17 +48,16 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
                 .context(format!("failed to read status file: {}", path.display())));
         }
     };
-    // (pid, started_at) — both schemas carry them; the liveness warning
-    // below needs them before the output shape diverges.
-    let (pid, started_at) = match role {
-        StatusRole::Serve => {
-            let file: StatusFile = parse_status_file(&body, &path)?;
-            (file.pid, file.started_at)
-        }
-        StatusRole::Access => {
-            let file: AccessStatusFile = parse_status_file(&body, &path)?;
-            (file.pid, file.started_at)
-        }
+    // Parse ONCE into the role-typed payload; the liveness warning and the
+    // renderer both read the same value — no double-parse drift between
+    // the two.
+    let payload = match role {
+        StatusRole::Serve => StatusPayload::Serve(parse_status_file(&body, &path)?),
+        StatusRole::Access => StatusPayload::Access(parse_status_file(&body, &path)?),
+    };
+    let (pid, started_at) = match &payload {
+        StatusPayload::Serve(file) => (file.pid, file.started_at),
+        StatusPayload::Access(file) => (file.pid, file.started_at),
     };
     // Cross-check the writer's pid: a graceful shutdown removes the file,
     // but a crash or `kill -9` leaves it behind — stale, yet often still
@@ -69,11 +69,9 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
         // Already validated through the typed parse above.
         return print_line(&body);
     }
-    let table = match role {
-        StatusRole::Serve => render_serve_status(&parse_status_file::<StatusFile>(&body, &path)?),
-        StatusRole::Access => {
-            render_access_status(&parse_status_file::<AccessStatusFile>(&body, &path)?)
-        }
+    let table = match &payload {
+        StatusPayload::Serve(file) => render_serve_status(file),
+        StatusPayload::Access(file) => render_access_status(file),
     };
     print_line(&table)
 }
@@ -99,16 +97,39 @@ fn print_line(line: &str) -> Result<()> {
 /// there is no portable probe, so no warning is better than a wrong one.
 #[cfg(unix)]
 fn warn_if_writer_dead(role: StatusRole, pid: u32, started_at: u64) {
+    let Some(pid) = validate_pid(pid) else {
+        eprintln!(
+            "warning: {} status file carries an invalid pid ({pid}); showing last snapshot from epoch {started_at}",
+            role.name()
+        );
+        return;
+    };
     // SAFETY: kill(2) with signal 0 performs existence and permission
-    // checks only — no signal is ever delivered.
-    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-        || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied;
+    // checks only — no signal is ever delivered. `pid` is a positive i32
+    // (validated above), so it addresses exactly one process, never a
+    // process group.
+    let ret = unsafe { libc::kill(pid, 0) };
+    // Read errno IMMEDIATELY after the call, off the bound `ret` — a
+    // chained expression could observe a different syscall's errno.
+    let alive =
+        ret == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied;
     if !alive {
         eprintln!(
             "warning: {} appears stopped (pid {pid} not running); showing last snapshot from epoch {started_at}",
             role.name()
         );
     }
+}
+
+/// Map a status-file `pid` onto a probe-able unix pid.
+///
+/// `0` (all processes) and anything that wraps negative as `pid_t`
+/// (process-group semantics under kill(2)) can never address one real
+/// writer process — both are reported as invalid rather than guessed
+/// "alive" by a stray probe.
+#[cfg(unix)]
+fn validate_pid(pid: u32) -> Option<libc::pid_t> {
+    libc::pid_t::try_from(pid).ok().filter(|pid| *pid > 0)
 }
 
 /// Non-unix twin of [`warn_if_writer_dead`]: no portable pid-liveness
@@ -446,5 +467,22 @@ services: none";
         assert_eq!(short_peer_id(SERVE_PEER), "1aa27080…");
         // Shorter ids are kept whole, with the ellipsis marking truncation.
         assert_eq!(short_peer_id("peer456"), "peer456…");
+    }
+
+    /// PR #62 run 4, acceptance C — pid boundaries must never reach
+    /// kill(2): pid 0 addresses every process, and a u32 above i32::MAX
+    /// wraps to a NEGATIVE pid_t (process-group semantics) in the syscall
+    /// ABI. Both are "invalid pid" warnings, not liveness guesses.
+    #[cfg(unix)]
+    #[test]
+    fn validate_pid_rejects_zero_and_i32_wraparound() {
+        assert_eq!(validate_pid(0), None, "pid 0 would address every process");
+        assert_eq!(
+            validate_pid(4_000_000_000),
+            None,
+            "above i32::MAX wraps negative as pid_t — process-group semantics"
+        );
+        assert_eq!(validate_pid(1), Some(1));
+        assert_eq!(validate_pid(i32::MAX as u32), Some(i32::MAX));
     }
 }

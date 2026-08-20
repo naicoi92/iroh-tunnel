@@ -421,6 +421,49 @@ pub(crate) fn format_local_addr(host: &str, port: u16) -> String {
     }
 }
 
+/// Just the `pid` field of a status file — the minimal probe
+/// [`remove_own_status_file`] needs, so the ownership check works against
+/// both roles' schemas (unknown fields are ignored by serde).
+#[derive(Deserialize)]
+struct StatusFilePid {
+    pid: u32,
+}
+
+/// Remove `writer`'s status file on graceful shutdown — but only while it
+/// is still OURS.
+///
+/// Two processes can share one state dir (the injected seam allows it, and
+/// nothing else about the layout forbids it). The flush loop only rewrites
+/// when the rendered snapshot CHANGES, so a co-resident idle instance would
+/// not necessarily recreate its file after a blind removal — `<role>
+/// status` would then report "not running" for a live role until its next
+/// real change. The file's own `pid` field decides ownership: remove only
+/// when it matches the current process. A missing file (never written),
+/// unreadable file, or one that fails to parse is skipped — nothing to
+/// clean, or not ours to judge.
+pub(crate) async fn remove_own_status_file(writer: StatusWriter, state_dir: Option<&Path>) {
+    let Ok(path) = writer.path_for_state_dir(state_dir) else {
+        return;
+    };
+    let owns = match tokio::fs::read_to_string(&path).await {
+        Ok(body) => {
+            matches!(
+                serde_json::from_str::<StatusFilePid>(&body),
+                Ok(probe) if probe.pid == std::process::id()
+            )
+        }
+        Err(_) => false,
+    };
+    if !owns {
+        return;
+    }
+    if let Err(e) = tokio::fs::remove_file(&path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!("failed to remove status file: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +794,70 @@ mod tests {
             Path::new(&path).is_absolute(),
             "override path must be absolute, got {path}"
         );
+    }
+    #[tokio::test]
+    async fn remove_own_status_file_spares_a_foreign_pid() {
+        // Two processes sharing one state dir: this process's shutdown
+        // cleanup must NOT remove a file another live instance wrote.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        StatusWriter::access()
+            .save_to(
+                &dir,
+                &StatusPayload::Access(sample_access_status_with_pid(1)),
+            )
+            .unwrap();
+
+        remove_own_status_file(StatusWriter::access(), Some(&dir)).await;
+
+        assert!(
+            dir.join("access-status.json").exists(),
+            "a file owned by another pid must survive this process's cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_own_status_file_removes_own_pid() {
+        // The file carries THIS process's pid — graceful shutdown owns it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        StatusWriter::serve()
+            .save_to(
+                &dir,
+                &StatusPayload::Serve(sample_status_with_pid(std::process::id())),
+            )
+            .unwrap();
+
+        remove_own_status_file(StatusWriter::serve(), Some(&dir)).await;
+
+        assert!(
+            !dir.join("serve-status.json").exists(),
+            "our own status file must be removed on cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_own_status_file_skips_missing_file() {
+        // Never written (or already gone) — cleanup is a no-op, not an
+        // error.
+        let tmp = tempfile::tempdir().unwrap();
+        remove_own_status_file(StatusWriter::serve(), Some(tmp.path())).await;
+        assert!(!tmp.path().join("serve-status.json").exists());
+    }
+
+    /// [`sample_status`] with a chosen top-level `pid` for the ownership
+    /// tests.
+    fn sample_status_with_pid(pid: u32) -> StatusFile {
+        let mut status = sample_status();
+        status.pid = pid;
+        status
+    }
+
+    /// [`sample_access_status`] with a chosen top-level `pid`.
+    fn sample_access_status_with_pid(pid: u32) -> AccessStatusFile {
+        let mut status = sample_access_status();
+        status.pid = pid;
+        status
     }
 
     /// A stand-in entry for any leftover temp file under `dir` (they are
