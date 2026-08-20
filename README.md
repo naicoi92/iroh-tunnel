@@ -536,6 +536,36 @@ a peer disappears from `connections` once its last connection closes. Set
 `IROH_TUNNEL_STATE_DIR` to relocate the file (advanced/testing seam — the
 file lands directly in that directory).
 
+### Log events
+
+INFO lines are the access role's log glossary — one line per connection
+lifecycle event, each carrying the **remote peer's full node id** in the
+`peer=` field (grep the same id on the serve host to correlate the two
+sides), the service name in `svc_name=`, and the peer's active transports
+rendered compactly: `relay=<url>` / `direct=<addr>`, comma-separated.
+
+| Event | Sample line | Meaning |
+|-------|-------------|---------|
+| Connected (multiplexed) | `INFO … svc_name=echo peer=<serve id> connected to serve peer (multiplexed, 1aa27080…) via relay=https://use1-1.relay.iroh.network/` | First successful dial of the service's shared long-lived connection (see [Multiplexing](#multiplexing-020)); re-logged on every redial after a disconnect. |
+| Connected (per channel) | `INFO … svc_name=echo peer=<serve id> connected to serve peer (per-channel, 1aa27080…) via direct=192.168.1.10:52618` | `multiplex = false`: one connection per local client, logged at each dial. |
+| Path changed | `INFO … svc_name=echo peer=<serve id> path changed relay→direct (now active: direct=203.0.113.7:41641)` | The multiplexed connection migrated between paths — a hole punch succeeded (`relay→direct`) or the direct path died and traffic fell back (`direct→relay`). Checked every 5 s; silent while nothing changes. Not emitted for per-channel connections (they are too short-lived). |
+| Disconnected | `INFO … peer=<serve id> disconnected from serve peer (service echo, multiplexed)` | The connection closed (error or shutdown); a multiplexed service redials on its next channel. |
+
+Transport semantics — same as the status file's `transports` array (see
+[Monitoring](#monitoring)):
+
+- `relay=<url>` — traffic for this peer currently flows through that relay
+  server.
+- `direct=<addr>` — a direct IP path to the peer is in use.
+- iroh negotiates both concurrently, so a line can list one or both:
+  direct can be active right away (same network), relay-only means hole
+  punching has not succeeded, and both active means direct is in use with
+  relay kept as fallback. `via paths pending` means iroh had no
+  active-path snapshot at log time — the next `path changed` line will
+  show the real path.
+- Only the peer's *remote-side* transports are logged; iroh 1.0 does not
+  expose a local→remote address mapping per path.
+
 ---
 
 ## FAQ / Troubleshooting
