@@ -13,6 +13,12 @@
 #   ./install-relay-debian.sh [--domain relay.example.com] [--token <token>]
 #       [--version v1.0.3 | --latest] [--acme-email <email>] [--apply-firewall]
 #
+# Or straight from this repo (bash script — pipe into bash, NOT sh):
+#   curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/docs/install-relay-debian.sh \
+#     | bash -s -- --domain relay.example.com [--apply-firewall]
+#   (non-root: ... | sudo bash -s -- --domain ... ; no TTY → pass --domain, a
+#    missing --token is generated automatically and printed in the summary)
+#
 # Options:
 #   --domain <d>       Public hostname of the relay (A record -> LXC public IP).
 #                      If omitted the script prompts (requires a TTY).
@@ -43,7 +49,7 @@ BIN_PATH=/usr/local/bin/iroh-relay
 RELAY_PORT=3340
 METRICS_PORT=9090
 
-usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "==> $*"; }

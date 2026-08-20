@@ -69,7 +69,17 @@ official apt repo + writes the Caddyfile, and prints firewall instructions
 what the script does (for cross-checking / manual overrides).
 
 ```bash
-# From a checkout of this repo — copy the script into the LXC and run as root:
+# On the LXC directly — no checkout needed (bash script: pipe into bash, NOT sh):
+curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/docs/install-relay-debian.sh \
+  | bash -s -- --domain relay.<domain>
+# Non-root:  ... | sudo bash -s -- --domain relay.<domain>
+# Piped stdin is not a TTY → always pass --domain; a missing --token is
+# generated automatically and printed in the summary. Add --apply-firewall
+# to have ufw rules applied in the same run.
+```
+
+```bash
+# Or from a checkout of this repo — copy the script into the LXC and run as root:
 scp docs/install-relay-debian.sh root@<LXC-IP>:/tmp/
 ssh root@<LXC-IP> 'bash /tmp/install-relay-debian.sh --domain relay.<domain>'
 # Extra flags: --acme-email <email> · --apply-firewall (ufw) · --version v1.0.3 | --latest · --token <t>
