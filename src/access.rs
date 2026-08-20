@@ -485,33 +485,15 @@ fn spawn_path_change_poller(
             let Some(report) = crate::conn_path::peer_path_report(&ep, peer).await else {
                 continue;
             };
-            // Seed silently while the baseline has never seen an active
-            // path (the established line logged `paths pending`): the
-            // first active snapshot is a resolution, not a migration.
-            if !last.iter().any(|t| t.active) {
-                last = report.transports;
-                continue;
+            // One pure tick (see `conn_path::poller_step`): silent seed
+            // while the baseline has never seen an active path, baseline
+            // kept through teardown blips, otherwise a single line per
+            // real migration.
+            let (line, next) = crate::conn_path::poller_step(&last, &report.transports);
+            if let Some(line) = line {
+                tracing::info!(peer = %peer, svc_name = %svc_name, "{}", line);
             }
-            if let Some(change) = crate::conn_path::diff_transports(&last, &report.transports) {
-                // A snapshot with no active transports means the connection
-                // is tearing down — the disconnect event covers that. Keep
-                // `last` unchanged so the transient all-inactive snapshot
-                // cannot surface later as a spurious `none→…` line: the
-                // next active snapshot diffs against the last *real* path.
-                if change.after_active.is_empty() {
-                    continue;
-                }
-                tracing::info!(
-                    peer = %peer,
-                    svc_name = %svc_name,
-                    "{}: path changed {}→{} (now active: {})",
-                    svc_name,
-                    crate::conn_path::render_active_kinds(&change.before_active),
-                    crate::conn_path::render_active_kinds(&change.after_active),
-                    crate::conn_path::render_active_transports(&change.after_active),
-                );
-            }
-            last = report.transports;
+            last = next;
         }
     });
 }
