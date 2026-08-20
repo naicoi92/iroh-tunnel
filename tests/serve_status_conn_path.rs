@@ -15,9 +15,15 @@
 //!    transports, and endpoint-wide `local_bound_addrs`.
 //! 3. After the access role shuts down, the entry disappears — untracking
 //!    works and the 5 s flush picks it up.
+//!
+//! Runtime note: the env override is installed *before* the multi-thread
+//! runtime is built (`std::env::set_var` while worker threads already exist
+//! is unsound per the std docs), so the test uses a plain `#[test]` that
+//! constructs the runtime itself.
 
 #![cfg(unix)] // shutdown.rs installs SIGTERM handlers; restrict to unix
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -35,8 +41,27 @@ const PAYLOAD: &[u8] = b"hello-through-the-status-file";
 /// How long to wait for the 5 s status flush to reflect a change.
 const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(25);
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn serve_status_file_reports_connected_peer_paths() -> Result<()> {
+/// A role task shared with [`retry_connect`]: the connect loop polls it for
+/// early exit (config error, bind race) so a dead role surfaces fast with
+/// its real error instead of spinning to the deadline.
+type SharedRole = Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>>;
+
+#[test]
+fn serve_status_file_reports_connected_peer_paths() {
+    // The env override must be in place before any worker thread exists.
+    let state_tmp = tempfile::tempdir().expect("state tempdir");
+    std::env::set_var("IROH_TUNNEL_STATE_DIR", state_tmp.path());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(run_scenario(&state_tmp))
+        .expect("scenario failed");
+}
+
+async fn run_scenario(state_tmp: &tempfile::TempDir) -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -46,10 +71,6 @@ async fn serve_status_file_reports_connected_peer_paths() -> Result<()> {
         .try_init();
 
     let cfg_tmp = tempfile::tempdir().context("config tempdir")?;
-    let state_tmp = tempfile::tempdir().context("state tempdir")?;
-    // Redirect the serve role's status file BEFORE the role boots. The test
-    // binary is single-test, so the process-global override is uncontended.
-    std::env::set_var("IROH_TUNNEL_STATE_DIR", state_tmp.path());
 
     let (_relay_map, relay_url, _server) = run_relay_server().await?;
     let relay = relay_url.to_string();
@@ -115,7 +136,7 @@ multiplex = true
 
     let (serve_tx, serve_rx) = oneshot::channel::<()>();
     let (access_tx, access_rx) = oneshot::channel::<()>();
-    let serve_handle = {
+    let serve_spawn = {
         let path = serve_cfg.clone();
         tokio::spawn(async move {
             iroh_tunnel::serve::run_with_shutdown(&path, async move {
@@ -124,7 +145,7 @@ multiplex = true
             .await
         })
     };
-    let access_handle = {
+    let access_spawn = {
         let path = access_cfg.clone();
         tokio::spawn(async move {
             iroh_tunnel::access::run_with_shutdown(&path, async move {
@@ -133,17 +154,25 @@ multiplex = true
             .await
         })
     };
+    let serve_role: SharedRole = Arc::new(tokio::sync::Mutex::new(Some(serve_spawn)));
+    let access_role: SharedRole = Arc::new(tokio::sync::Mutex::new(Some(access_spawn)));
 
     // Phase 1 — the tunnel works (this also establishes the connection the
     // status file must then report).
-    let mut client = retry_connect(access_addr, Duration::from_secs(30)).await?;
+    let mut client = retry_connect(
+        access_addr,
+        Duration::from_secs(30),
+        &serve_role,
+        &access_role,
+    )
+    .await?;
     client.write_all(PAYLOAD).await?;
     client.flush().await?;
     let mut got = vec![0u8; PAYLOAD.len()];
-    client
-        .read_exact(&mut got)
+    tokio::time::timeout(Duration::from_secs(10), client.read_exact(&mut got))
         .await
-        .context("no echo through the in-process relay")?;
+        .context("no echo through the in-process relay within 10s")?
+        .context("echo read failed")?;
     assert_eq!(got.as_slice(), PAYLOAD);
 
     // Phase 2 — serve-status.json reports the access peer.
@@ -189,11 +218,7 @@ multiplex = true
     // Phase 3 — access goes away, the peer entry disappears.
     drop(client);
     let _ = access_tx.send(());
-    tokio::time::timeout(Duration::from_secs(15), access_handle)
-        .await
-        .context("access did not shut down within 15s")?
-        .context("access task panicked")?
-        .context("access returned error")?;
+    finish_role(&access_role, "access").await?;
 
     let emptied = poll_status(&status_path, STATUS_POLL_TIMEOUT, |status| {
         status["connections"]
@@ -209,12 +234,36 @@ multiplex = true
     );
 
     let _ = serve_tx.send(());
-    tokio::time::timeout(Duration::from_secs(15), serve_handle)
-        .await
-        .context("serve did not shut down within 15s")?
-        .context("serve task panicked")?
-        .context("serve returned error")?;
+    finish_role(&serve_role, "serve").await?;
     echo.abort();
+    Ok(())
+}
+
+/// If the role task has already exited, take and resolve it, returning the
+/// result; `None` while it is still running.
+async fn role_exited(role: &SharedRole) -> Option<Result<()>> {
+    let mut guard = role.lock().await;
+    match guard.as_ref() {
+        Some(handle) if handle.is_finished() => {
+            let handle = guard.take().expect("checked is_finished above");
+            Some(handle.await.expect("role task panicked"))
+        }
+        _ => None,
+    }
+}
+
+/// Take a role task out of its slot and wait for clean shutdown.
+async fn finish_role(role: &SharedRole, name: &str) -> Result<()> {
+    let handle = role
+        .lock()
+        .await
+        .take()
+        .with_context(|| format!("{name} task already consumed"))?;
+    tokio::time::timeout(Duration::from_secs(15), handle)
+        .await
+        .with_context(|| format!("{name} did not shut down within 15s"))?
+        .with_context(|| format!("{name} task panicked"))?
+        .with_context(|| format!("{name} returned error"))?;
     Ok(())
 }
 
@@ -269,10 +318,23 @@ async fn echo_server(listener: TcpListener) {
     }
 }
 
-/// Retry TCP connect until `deadline` so the test isn't racy on startup.
-async fn retry_connect(addr: std::net::SocketAddr, deadline: Duration) -> Result<TcpStream> {
+/// Retry TCP connect until `deadline`, polling both role tasks so an early
+/// exit (config error, bind race) fails fast with the role's real error
+/// instead of a misleading connect timeout.
+async fn retry_connect(
+    addr: std::net::SocketAddr,
+    deadline: Duration,
+    serve_role: &SharedRole,
+    access_role: &SharedRole,
+) -> Result<TcpStream> {
     let start = std::time::Instant::now();
     loop {
+        if let Some(res) = role_exited(serve_role).await {
+            anyhow::bail!("serve exited early: {res:?}");
+        }
+        if let Some(res) = role_exited(access_role).await {
+            anyhow::bail!("access exited early: {res:?}");
+        }
         match TcpStream::connect(addr).await {
             Ok(s) => return Ok(s),
             Err(e) => {

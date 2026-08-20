@@ -249,8 +249,13 @@ impl StatusSnapshot {
 struct PeerTracker(Arc<parking_lot::Mutex<HashMap<iroh::EndpointId, HashMap<String, u64>>>>);
 
 impl PeerTracker {
-    /// Record one accepted connection from `peer` for `service`.
-    fn track(&self, peer: iroh::EndpointId, service: &str) {
+    /// Record one accepted connection from `peer` for `service`, returning
+    /// the RAII handle that untracks it.
+    ///
+    /// The guard's [`Drop`] decrements the refcount, so a connection task
+    /// that returns *or panics* cannot leak the entry — the unwind drops the
+    /// guard like any local.
+    fn track(&self, peer: iroh::EndpointId, service: &str) -> TrackedPeer {
         self.0
             .lock()
             .entry(peer)
@@ -258,6 +263,11 @@ impl PeerTracker {
             .entry(service.to_string())
             .and_modify(|n| *n += 1)
             .or_insert(1);
+        TrackedPeer {
+            peers: self.clone(),
+            peer,
+            service: service.to_string(),
+        }
     }
 
     /// Drop one connection from `peer` for `service`; removes the service
@@ -294,6 +304,19 @@ impl PeerTracker {
             .collect();
         peers.sort_by_key(|(peer, _)| peer.to_string());
         peers
+    }
+}
+
+/// RAII untrack handle returned by [`PeerTracker::track`].
+struct TrackedPeer {
+    peers: PeerTracker,
+    peer: iroh::EndpointId,
+    service: String,
+}
+
+impl Drop for TrackedPeer {
+    fn drop(&mut self) {
+        self.peers.untrack(self.peer, &self.service);
     }
 }
 
@@ -402,10 +425,11 @@ async fn accept_loop(
 
         tokio::spawn(async move {
             // Track the peer for the status file's `connections` array for
-            // as long as this connection lives (issue #57).
-            conn_peers.track(remote_id, &name);
+            // as long as this connection lives (issue #57). The guard
+            // untracks on drop — normal return or panic unwind alike — so
+            // the refcount can never leak.
+            let _tracked = conn_peers.track(remote_id, &name);
             handle_connection(&conn, target).await;
-            conn_peers.untrack(remote_id, &name);
         });
     }
 }
@@ -456,5 +480,88 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget) {
             }
             counter.fetch_sub(1, Ordering::Relaxed);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer() -> iroh::EndpointId {
+        iroh::SecretKey::generate().public()
+    }
+
+    #[test]
+    fn track_refcounts_connections_until_the_last_untrack() {
+        let tracker = PeerTracker::default();
+        let p = peer();
+        let first = tracker.track(p, "echo");
+        let second = tracker.track(p, "echo");
+
+        let expected = vec![(p, vec!["echo".to_string()])];
+        assert_eq!(tracker.snapshot(), expected);
+
+        drop(first);
+        assert_eq!(
+            tracker.snapshot(),
+            expected,
+            "one connection left — the entry must survive"
+        );
+
+        drop(second);
+        assert!(
+            tracker.snapshot().is_empty(),
+            "peer must disappear with its last connection"
+        );
+    }
+
+    #[test]
+    fn guard_untracks_via_drop_without_any_explicit_call() {
+        // The panic-safety contract: nothing calls `untrack` manually —
+        // dropping the guard (as an unwind would) must clean up.
+        let tracker = PeerTracker::default();
+        let p = peer();
+        {
+            let _tracked = tracker.track(p, "echo");
+            assert_eq!(tracker.snapshot(), vec![(p, vec!["echo".to_string()])]);
+        }
+        assert!(tracker.snapshot().is_empty());
+    }
+
+    #[test]
+    fn services_merge_across_a_peers_connections() {
+        let tracker = PeerTracker::default();
+        let p = peer();
+        let web = tracker.track(p, "web");
+        let echo = tracker.track(p, "echo");
+
+        // Service names sorted within the peer's row.
+        assert_eq!(
+            tracker.snapshot(),
+            vec![(p, vec!["echo".to_string(), "web".to_string()])]
+        );
+
+        drop(web);
+        assert_eq!(tracker.snapshot(), vec![(p, vec!["echo".to_string()])]);
+        drop(echo);
+        assert!(tracker.snapshot().is_empty());
+    }
+
+    #[test]
+    fn snapshot_orders_peers_deterministically() {
+        let tracker = PeerTracker::default();
+        let peers: Vec<_> = (0..3).map(|_| peer()).collect();
+        // Hold every guard so all peers stay tracked.
+        let guards: Vec<_> = peers.iter().map(|p| tracker.track(*p, "echo")).collect();
+
+        let mut expected: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
+        expected.sort();
+        let got: Vec<String> = tracker
+            .snapshot()
+            .into_iter()
+            .map(|(p, _)| p.to_string())
+            .collect();
+        assert_eq!(got, expected);
+        drop(guards);
     }
 }

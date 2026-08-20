@@ -26,8 +26,11 @@
 //!   can inject a `tempfile` tempdir; `save()` is a one-line delegate.
 //! - `status_file_path()` honors the `IROH_TUNNEL_STATE_DIR` environment
 //!   variable (an advanced/testing override of the *entire* directory the
-//!   file lands in — the `iroh-tunnel` subpath is not appended). Integration
-//!   tests use it to point a serve instance at a tempdir.
+//!   file lands in — the `iroh-tunnel` subpath is not appended; an empty
+//!   value is treated as unset). The resolver is a pure function of the
+//!   override value, so unit tests cover it without mutating process-global
+//!   environment; integration tests set the real variable before the tokio
+//!   runtime exists.
 //!
 //! Based on Page 06 v5 §4 (status file schema).
 
@@ -38,6 +41,10 @@ use serde::Serialize;
 
 /// File name of the serve status file (role-scoped).
 const STATUS_FILE_NAME: &str = "serve-status.json";
+
+/// Environment variable overriding the status file's directory entirely
+/// (advanced/testing seam; empty is treated as unset).
+const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
 
 /// Top-level status snapshot written to disk by the serve role.
 #[derive(Debug, PartialEq, Serialize)]
@@ -153,13 +160,23 @@ pub(crate) fn format_local_addr(host: &str, port: u16) -> String {
 
 /// Resolve the status file path under the OS state directory.
 ///
-/// The `IROH_TUNNEL_STATE_DIR` environment variable, when set, replaces the
-/// resolved base dir *entirely* — the file lands directly in it (no
-/// `iroh-tunnel` subpath). This is an advanced/testing seam: it lets
-/// integration tests point a serve instance at a tempdir without touching the
-/// real state dir, and lets packaging relocate the file.
+/// The `IROH_TUNNEL_STATE_DIR` environment variable, when set to a
+/// non-empty value, replaces the resolved base dir *entirely* — the file
+/// lands directly in it (no `iroh-tunnel` subpath). This is an
+/// advanced/testing seam: it lets integration tests point a serve instance
+/// at a tempdir without touching the real state dir, and lets packaging
+/// relocate the file. An empty value is treated as unset (standard env-var
+/// semantics) so a stray `IROH_TUNNEL_STATE_DIR=` cannot make the path
+/// relative to the current working directory.
 fn status_file_path() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("IROH_TUNNEL_STATE_DIR") {
+    status_file_path_with(std::env::var_os(ENV_STATE_DIR).as_deref())
+}
+
+/// Pure core of [`status_file_path`]: the path as a function of an optional
+/// env-override value, kept separate so tests never mutate process-global
+/// state.
+fn status_file_path_with(state_dir_override: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
+    if let Some(dir) = state_dir_override.filter(|dir| !dir.is_empty()) {
         return Ok(PathBuf::from(dir).join(STATUS_FILE_NAME));
     }
     // state_dir() is None on Windows; fall back to data_dir() so the file still
@@ -190,7 +207,7 @@ mod tests {
                 peer: "peer456".to_string(),
                 services: vec!["echo".to_string()],
                 transports: vec![crate::conn_path::TransportStatus {
-                    kind: "relay".to_string(),
+                    kind: crate::conn_path::TransportKind::Relay,
                     addr: "https://relay.example/".to_string(),
                     active: true,
                 }],
@@ -338,21 +355,32 @@ mod tests {
     }
 
     #[test]
-    fn save_honors_iroh_tunnel_state_dir_override() {
-        // The env seam: with IROH_TUNNEL_STATE_DIR set, `save()` must land
-        // the file directly in that dir (no `iroh-tunnel` subpath) instead
-        // of the real OS state dir. Env mutation is process-global; no other
-        // unit test reads this variable, so the override is safe here.
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("IROH_TUNNEL_STATE_DIR", tmp.path());
+    fn status_file_path_override_lands_directly_in_the_dir() {
+        // Pure resolver: an override replaces the whole directory — the file
+        // lands directly in it, no `iroh-tunnel` subpath.
+        let path =
+            status_file_path_with(Some(std::ffi::OsStr::new("/tmp/status-override"))).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/status-override").join("serve-status.json")
+        );
+    }
 
-        let written = sample_status().save().unwrap();
-
-        std::env::remove_var("IROH_TUNNEL_STATE_DIR");
-        assert_eq!(written, tmp.path().join("serve-status.json"));
-        assert!(
-            written.exists(),
-            "status file should exist under the override dir"
+    #[test]
+    fn empty_status_file_path_override_is_treated_as_unset() {
+        // Standard env semantics: an empty value must not be honored — it
+        // would make the path relative to the CWD. It resolves exactly like
+        // an absent variable: the OS state dir + `iroh-tunnel` subpath.
+        let empty = status_file_path_with(Some(std::ffi::OsStr::new(""))).unwrap();
+        let unset = status_file_path_with(None).unwrap();
+        assert_eq!(empty, unset);
+        assert_eq!(
+            unset,
+            dirs::state_dir()
+                .or_else(dirs::data_dir)
+                .unwrap()
+                .join("iroh-tunnel")
+                .join("serve-status.json")
         );
     }
 }

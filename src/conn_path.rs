@@ -42,11 +42,24 @@ pub struct PeerPathReport {
     pub local_bound_addrs: Vec<String>,
 }
 
+/// The kind of network path a transport uses.
+///
+/// Serialized lowercase (`"relay"` / `"direct"`) — the documented status-file
+/// schema stays byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    /// Via a relay server (`TransportAddr::Relay`).
+    Relay,
+    /// Direct IP path (`TransportAddr::Ip`).
+    Direct,
+}
+
 /// One transport path to a remote peer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransportStatus {
     /// `"relay"` (via a relay server URL) or `"direct"` (IP path).
-    pub kind: String,
+    pub kind: TransportKind,
     /// The relay URL or `SocketAddr` (`host:port`, IPv6 bracketed) in use.
     pub addr: String,
     /// Whether iroh is actively sending on this transport at query time.
@@ -65,7 +78,7 @@ pub async fn peer_path_report(ep: &Endpoint, peer: EndpointId) -> Option<PeerPat
         .filter_map(|addr_info| {
             let (kind, addr) = classify_transport(addr_info.addr())?;
             Some(TransportStatus {
-                kind: kind.to_string(),
+                kind,
                 addr,
                 active: matches!(addr_info.usage(), TransportAddrUsage::Active),
             })
@@ -84,10 +97,10 @@ pub async fn peer_path_report(ep: &Endpoint, peer: EndpointId) -> Option<PeerPat
 /// `Custom` transports are dropped: iroh-tunnel's `Minimal` endpoint preset
 /// registers no custom transports, so one showing up here would be noise, not
 /// an operator-actionable path.
-fn classify_transport(addr: &TransportAddr) -> Option<(&'static str, String)> {
+fn classify_transport(addr: &TransportAddr) -> Option<(TransportKind, String)> {
     match addr {
-        TransportAddr::Relay(url) => Some(("relay", url.to_string())),
-        TransportAddr::Ip(addr) => Some(("direct", addr.to_string())),
+        TransportAddr::Relay(url) => Some((TransportKind::Relay, url.to_string())),
+        TransportAddr::Ip(addr) => Some((TransportKind::Direct, addr.to_string())),
         // `Custom` — and any future variant, the enum is non_exhaustive — is
         // dropped: iroh-tunnel's `Minimal` endpoint preset registers no
         // custom transports, so one showing up here would be noise, not an
@@ -96,20 +109,16 @@ fn classify_transport(addr: &TransportAddr) -> Option<(&'static str, String)> {
     }
 }
 
-/// Order transports for output: active before inactive, relay before direct
-/// within each group. Stable, so iroh's own ordering survives inside a group.
+/// Order transports for output into a total order: active before inactive,
+/// then [`TransportKind::Relay`] before [`TransportKind::Direct`] (enum
+/// declaration order), then by `addr` as the final tie-break.
+///
+/// The tie-break matters for the flush loop's change detection: iroh's own
+/// ordering within an equal (active, kind) group can differ between
+/// snapshots, and without a deterministic sort the rendered file would
+/// compare unequal and get rewritten every flush despite no real change.
 fn sort_transports(transports: &mut [TransportStatus]) {
-    transports.sort_by_key(sort_key);
-}
-
-/// Sort key: active transports first (false < true, so invert), then relay
-/// (rank 0) before direct (rank 1).
-fn sort_key(t: &TransportStatus) -> (std::cmp::Reverse<bool>, u8) {
-    let relay_first = match t.kind.as_str() {
-        "relay" => 0u8,
-        _ => 1u8,
-    };
-    (std::cmp::Reverse(t.active), relay_first)
+    transports.sort_by_key(|t| (std::cmp::Reverse(t.active), t.kind, t.addr.clone()));
 }
 
 #[cfg(test)]
@@ -131,18 +140,18 @@ mod tests {
     #[test]
     fn classify_maps_relay_url() {
         let (kind, addr) = classify_transport(&relay_addr()).unwrap();
-        assert_eq!(kind, "relay");
+        assert_eq!(kind, TransportKind::Relay);
         assert_eq!(addr, "https://use1-1.relay.iroh.network/");
     }
 
     #[test]
     fn classify_maps_direct_socket_addr() {
         let (kind, addr) = classify_transport(&direct_addr()).unwrap();
-        assert_eq!(kind, "direct");
+        assert_eq!(kind, TransportKind::Direct);
         assert_eq!(addr, "192.168.1.10:54321");
 
         let (kind, addr) = classify_transport(&direct_addr_v6()).unwrap();
-        assert_eq!(kind, "direct");
+        assert_eq!(kind, TransportKind::Direct);
         // SocketAddr's Display already brackets IPv6 literals.
         assert_eq!(addr, "[2001:db8::1]:443");
     }
@@ -156,36 +165,56 @@ mod tests {
 
     #[test]
     fn sort_puts_active_first_then_relay() {
-        let mk = |kind: &str, active: bool| TransportStatus {
-            kind: kind.to_string(),
+        let mk = |kind: TransportKind, active: bool| TransportStatus {
+            kind,
             addr: "x".to_string(),
             active,
         };
-        let mut transports = vec![mk("relay", false), mk("direct", true), mk("direct", false)];
+        let mut transports = vec![
+            mk(TransportKind::Relay, false),
+            mk(TransportKind::Direct, true),
+            mk(TransportKind::Direct, false),
+        ];
         sort_transports(&mut transports);
 
-        assert_eq!(transports[0], mk("direct", true)); // the only active one
-        assert_eq!(transports[1], mk("relay", false)); // relay before direct
-        assert_eq!(transports[2], mk("direct", false));
+        assert_eq!(transports[0], mk(TransportKind::Direct, true)); // the only active one
+        assert_eq!(transports[1], mk(TransportKind::Relay, false)); // relay before direct
+        assert_eq!(transports[2], mk(TransportKind::Direct, false));
     }
 
     #[test]
-    fn sort_is_stable_within_a_group() {
+    fn sort_tiebreaks_by_addr_within_equal_groups() {
+        // Same (active, kind) — the addr tie-break must make the order a
+        // total order, so two snapshots with the same set always render
+        // equal (no spurious status rewrites).
         let mk = |addr: &str| TransportStatus {
-            kind: "relay".to_string(),
+            kind: TransportKind::Relay,
             addr: addr.to_string(),
             active: true,
         };
-        let mut transports = vec![mk("b"), mk("a"), mk("c")];
+        let mut transports = vec![mk("c"), mk("a"), mk("b")];
         sort_transports(&mut transports);
-        // All equal keys — original order preserved.
         assert_eq!(
             transports
                 .iter()
                 .map(|t| t.addr.as_str())
                 .collect::<Vec<_>>(),
-            vec!["b", "a", "c"]
+            vec!["a", "b", "c"]
         );
+    }
+
+    #[test]
+    fn transport_kind_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(TransportKind::Relay).unwrap(),
+            serde_json::json!("relay")
+        );
+        assert_eq!(
+            serde_json::to_value(TransportKind::Direct).unwrap(),
+            serde_json::json!("direct")
+        );
+        let back: TransportKind = serde_json::from_value(serde_json::json!("direct")).unwrap();
+        assert_eq!(back, TransportKind::Direct);
     }
 
     #[test]
@@ -193,7 +222,7 @@ mod tests {
         let report = PeerPathReport {
             peer: "k7gp…nodeid".to_string(),
             transports: vec![TransportStatus {
-                kind: "relay".to_string(),
+                kind: TransportKind::Relay,
                 addr: "https://use1-1.relay.iroh.network/".to_string(),
                 active: true,
             }],
