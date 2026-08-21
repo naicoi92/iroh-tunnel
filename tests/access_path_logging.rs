@@ -273,7 +273,8 @@ multiplex = false
     let serve_connect_line = wait_for_line(&sink, |line| {
         line.contains(": peer connected via ")
             && line.contains(&serve_peer_field)
-            && line.contains("service=echo")
+            // Trailing-field boundary: `echo` must not match `echo2`'s line.
+            && line.ends_with("service=echo")
     })
     .await
     .context("serve peer-connected line")?;
