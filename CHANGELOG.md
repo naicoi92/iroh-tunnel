@@ -1,7 +1,14 @@
 # Changelog
 
-
 ## [Unreleased]
+
+## [0.4.1] — 2026-08-21
+
+### Added
+
+- **Serve connect lines carry the peer's path**: `peer connected via
+  relay=<url>` / `direct=<addr>` (symmetric with the access role's
+  established lines); `via paths pending` right after a handshake.
 
 ## [0.4.0] — 2026-08-21
 

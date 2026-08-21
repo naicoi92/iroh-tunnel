@@ -613,11 +613,12 @@ for access). Both files honor `IROH_TUNNEL_STATE_DIR` to relocate them
 
 ### Log events
 
-INFO lines are the access role's log glossary — one line per connection
+INFO lines are both roles' log glossary — one line per connection
 lifecycle event, each carrying the **remote peer's full node id** in the
-`peer=` field (grep the same id on the serve host to correlate the two
-sides), the service name in `svc_name=`, and the peer's active transports
-rendered compactly: `relay=<url>` / `direct=<addr>`, comma-separated.
+`peer=` field (grep the same id on the other host to correlate the two
+sides), the service name (`svc_name=` on access, `service=` on serve),
+and the peer's active transports rendered compactly: `relay=<url>` /
+`direct=<addr>`, comma-separated.
 
 | Event | Sample line | Meaning |
 |-------|-------------|---------|
@@ -625,6 +626,7 @@ rendered compactly: `relay=<url>` / `direct=<addr>`, comma-separated.
 | Connected (per channel) | `INFO … svc_name=echo peer=<serve id> connected to serve peer (per-channel, 1aa27080…) via direct=192.168.1.10:52618` | `multiplex = false`: one connection per local client, logged at each dial. |
 | Path changed | `INFO … svc_name=echo peer=<serve id> path changed relay→direct (now active: direct=203.0.113.7:41641)` | The multiplexed connection migrated between paths — a hole punch succeeded (`relay→direct`) or the direct path died and traffic fell back (`direct→relay`). Checked every 5 s; silent while nothing changes. Not emitted for per-channel connections (they are too short-lived). |
 | Disconnected | `INFO … peer=<serve id> disconnected from serve peer (service echo, multiplexed)` | The connection closed (error or shutdown); a multiplexed service redials on its next channel. |
+| Peer connected (serve) | `INFO … service=echo peer=<access id> peer connected via relay=https://use1-1.relay.iroh.network/` | Serve side of a connect: the access peer dialed in (multiplexed or per-channel — serve cannot tell), carrying that peer's active transports. `via paths pending` right after the handshake resolves on the next status flush (see `connections` in [Monitoring](#monitoring)). |
 
 Transport semantics — same as the status file's `transports` array (see
 [Monitoring](#monitoring)):

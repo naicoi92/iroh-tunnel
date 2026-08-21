@@ -123,6 +123,7 @@ async fn access_logs_connection_paths_on_established() -> Result<()> {
     let serve_key = SecretKey::generate();
     let serve_node_id = serve_key.public().to_string();
     let access_key = SecretKey::generate();
+    let access_node_id = access_key.public().to_string();
 
     let serve_cfg = cfg_tmp.path().join("serve.toml");
     std::fs::write(
@@ -262,6 +263,21 @@ multiplex = false
     .await
     .context("per-channel established line")?;
     println!("per-channel established: {per_channel_line}");
+
+    // The serve role's accept side logs the same connect with the peer's
+    // active transports (`peer connected via …`) — symmetric with the
+    // access established lines. Right after the handshake the snapshot may
+    // still be empty, so accept the `paths pending` rendering too; the
+    // transports rendering itself is unit-tested in conn_path.
+    let serve_peer_field = format!("peer={access_node_id}");
+    let serve_connect_line = wait_for_line(&sink, |line| {
+        line.contains(": peer connected via ")
+            && line.contains(&serve_peer_field)
+            && line.contains("service=echo")
+    })
+    .await
+    .context("serve peer-connected line")?;
+    println!("serve peer connected: {serve_connect_line}");
     // Steady-state pin (issue #58): the poller must be silent while nothing
     // changes. On this localhost harness *legitimate* migrations are
     // expected early (QUIC address discovery lands after the handshakes;
