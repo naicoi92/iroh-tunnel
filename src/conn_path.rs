@@ -252,6 +252,20 @@ pub(crate) fn render_active_transports(transports: &[TransportStatus]) -> String
         .join(", ")
 }
 
+/// Render a fresh connection's active transports for its established log
+/// line — or `paths pending` when iroh has no active-path snapshot yet
+/// (queried immediately after the handshake).
+///
+/// Shared by both roles' connect lines: access dials in
+/// (`connected to serve peer … via <this>`) and serve accepts
+/// (`peer connected via <this>`).
+pub(crate) fn render_established_paths(report: Option<&PeerPathReport>) -> String {
+    report
+        .map(|r| render_active_transports(&r.transports))
+        .filter(|rendered| !rendered.is_empty())
+        .unwrap_or_else(|| "paths pending".to_string())
+}
+
 /// The active kind names of a snapshot, `+`-joined for the from/to clauses
 /// of a path-change line: `relay`, `direct`, or `relay+direct`. An empty
 /// active set renders as `none`.

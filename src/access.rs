@@ -740,14 +740,9 @@ fn short_peer_id(peer: &iroh::EndpointId) -> String {
     crate::conn_path::short_peer_id(&peer.to_string())
 }
 
-/// Render a fresh connection's active transports for its established log
-/// line — or `paths pending` when iroh has no active-path snapshot yet
-/// (queried immediately after the handshake).
+/// Delegate to the shared renderer in [`crate::conn_path`] — see its docs.
 fn render_established_paths(report: Option<&crate::conn_path::PeerPathReport>) -> String {
-    report
-        .map(|r| crate::conn_path::render_active_transports(&r.transports))
-        .filter(|rendered| !rendered.is_empty())
-        .unwrap_or_else(|| "paths pending".to_string())
+    crate::conn_path::render_established_paths(report)
 }
 
 /// Emit the connection-established line shared by both dial paths: full

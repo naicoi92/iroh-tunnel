@@ -551,7 +551,18 @@ async fn accept_loop(
         let name = proto::name_from_alpn(&alpn)
             .map(String::from)
             .unwrap_or_else(|| format!("{alpn:02x?}"));
-        tracing::info!(peer = %remote_id, service = %name, "peer connected");
+        // Query the fresh path so the connect line carries it — symmetric
+        // with the access role's established lines (`via relay=…`). Right
+        // after the handshake iroh may not have an active-path snapshot
+        // yet; that renders as `paths pending` and the status file's
+        // `connections` array catches up on its next flush.
+        let report = crate::conn_path::peer_path_report(ep, remote_id).await;
+        tracing::info!(
+            peer = %remote_id,
+            service = %name,
+            "peer connected via {}",
+            crate::conn_path::render_established_paths(report.as_ref())
+        );
 
         // Watcher: emit a disconnect line when the QUIC connection closes. The
         // weak handle is registered while `conn` is still alive (before the
