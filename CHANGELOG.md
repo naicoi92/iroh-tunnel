@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-08-26
+
+### Changed
+
+- **Dependencies**: iroh 1.0.0 → **1.1.0** (pulling iroh-relay/iroh-base
+  1.1.0, noq 1.2.0; MSRV unchanged at 1.91). The tunnel protocol and
+  config surface are unchanged — a 0.4.2 node interoperates with older
+  iroh-tunnel peers (mixed 0.4.2 ↔ 0.4.1 verified in both role pairings;
+  older versions share the same wire protocol) and with self-hosted
+  iroh-relay 1.0.x/1.1.x. See the new README "Version compatibility"
+  section for the full matrix and wire-level analysis (SNI removal,
+  `CustomAddr` serialization, pkarr discovery).
+
+### Added
+
+- **README "Version compatibility" section**: peer/relay compatibility
+  matrix for the iroh 1.1.0 upgrade, plus the operational improvements it
+  brings (relay rate-limit warnings, priority messages during relay
+  reconnect backoff, net-report probes via proxy).
+
+### Fixed
+
+- **Docker demo image builds again**: the source-build `Dockerfile` had
+  silently broken when the crate gained its library target and `build.rs` —
+  the dummy dependency-cache layer no longer matched the crate's targets
+  (it failed on the missing `src/lib.rs`, and after compensation the
+  post-swap rebuild failed with `APP_VERSION` undefined at compile time),
+  and the builder/runtime glibc pairing no longer matched
+  (`rust:1.91-slim` is now Debian 13). Replaced the fragile cache trick
+  with a straight copy-and-build and pinned the builder to
+  `rust:1.91-slim-bookworm` to match the `distroless/cc-debian12` runtime.
+  Release images (`Dockerfile.goreleaser`, prebuilt binaries) were never
+  affected.
+
+### Docs
+
+- **Self-hosted relay**: installer default pin bumped to **v1.1.0** and the
+  guide's fact table re-verified against the v1.1.0 crate source (ports,
+  bind defaults, 15 s WS-ping, `/healthz`, access control, asset names —
+  all unchanged from v1.0.3).
+
 ## [0.4.1] — 2026-08-21
 
 ### Added
