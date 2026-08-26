@@ -2,19 +2,18 @@
 #
 # Build stage uses rust:1.91-slim; the runtime stage is distroless so the final
 # image carries only the statically-resolvable binary + its shared libs.
+#
+# No dependency-cache dummy layer: the crate's build.rs (APP_VERSION via
+# vergen-gitcl) and the lib+bin target pair made the "build with dummy
+# sources, overwrite, rebuild" trick fragile — the post-swap cargo run
+# failed with APP_VERSION undefined at compile time. Source changes
+# therefore recompile dependencies; release images use
+# Dockerfile.goreleaser (prebuilt binaries) and are unaffected.
 
 # ---- build stage ----
-FROM rust:1.91-slim AS builder
-
-# Build dependencies first (cached layer): copy only the manifest so dependency
-# compilation is reused unless Cargo.toml/Cargo.lock change.
+FROM rust:1.91-slim-bookworm AS builder
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && cargo build --release \
-    && rm -rf src target/release/deps/iroh_tunnel*
-
-# Now copy the real source and build the binary.
-COPY src/ ./src/
+COPY . .
 RUN cargo build --release
 
 # ---- runtime stage ----

@@ -9,22 +9,24 @@ the behavior, and can actually measure throughput instead of guessing. Two peers
 still prefer direct (hole-punched) connections — the relay is signaling + fallback.
 
 Fact sources: `iroh-relay/README.md` @ n0-computer/iroh, docs.rs `iroh_relay::server`,
-and `iroh-relay/src/main.rs` — cross-checked against release **v1.0.3** (re-verified
-2026-08-20: v1.0.3 is still latest; asset names and per-asset sha256 digests confirmed
-via the GitHub Releases API; `*-unknown-linux-musl` variants exist too).
+and `iroh-relay/src/main.rs` — cross-checked against release **v1.1.0** (re-verified
+2026-08-26 against the v1.1.0 crate source: ports, bind defaults, ping cadence,
+`/healthz`, access control, and asset names incl. `*-unknown-linux-musl` variants
+confirmed unchanged from v1.0.3; per-asset sha256 digests fetched live by the
+installer via the GitHub Releases API).
 
 ## Verified facts (no guessing)
 
 | Fact | Value | Source |
 |---|---|---|
-| Prebuilt binary | `iroh-relay` in GitHub Releases n0-computer/iroh (v1.0.3) — `*-unknown-linux-gnu` (glibc) | releases page + API |
+| Prebuilt binary | `iroh-relay` in GitHub Releases n0-computer/iroh (v1.1.0) — `*-unknown-linux-gnu` (glibc) | releases page + API |
 | Relay path + protocol | `/relay` = **WebSocket upgrade, binary frames**; server WS-pings every **15s** | docs.rs + protos/relay.rs |
 | HTTP port | **3340** (`--dev` = plain HTTP, no TLS) | README |
 | Health endpoint | **`/healthz`** (HTTP 200) | docs.rs |
 | Network probes | `/ping`, `/generate_204` | docs.rs |
 | QUIC addr discovery | port **7824/udp**, needs `enable_quic_addr_discovery` + its own TLS — separate from the data path (WS/3340) | README |
 | Metrics | `enable_metrics = true`; separate HTTP server on **9090** `/metrics` (`metrics_bind_addr`) | main.rs |
-| **Bind defaults** | `http_bind_addr` defaults to **`[::]`** (all interfaces — `--dev` only changes the port 80→3340, it does NOT bind loopback); `metrics_bind_addr` defaults to **`[::]:9090`**. Loopback must be set explicitly. | main.rs v1.0.3 |
+| **Bind defaults** | `http_bind_addr` defaults to **`[::]`** (all interfaces — `--dev` only changes the port 80→3340, it does NOT bind loopback); `metrics_bind_addr` defaults to **`[::]:9090`**. Loopback must be set explicitly. | main.rs v1.1.0 |
 | Config | TOML via `--config-path` (short `-c`); dev flag `--dev` | main.rs |
 | Access control | `everyone` (default) / allowlist–denylist / `shared_token` (Bearer header or `?token=` query) / HTTP callout | README |
 | Token env | `IROH_RELAY_ACCESS_TOKEN` (overrides config, single token) | README |
@@ -82,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/docs/inst
 # Or from a checkout of this repo — copy the script into the LXC and run as root:
 scp docs/install-relay-debian.sh root@<LXC-IP>:/tmp/
 ssh root@<LXC-IP> 'bash /tmp/install-relay-debian.sh --domain relay.<domain>'
-# Extra flags: --acme-email <email> · --apply-firewall (ufw) · --enable-quic (§5.4) · --enable-token (D2) · --version v1.0.3 | --latest · --token <t>
+# Extra flags: --acme-email <email> · --apply-firewall (ufw) · --enable-quic (§5.4) · --enable-token (D2) · --version v1.1.0 | --latest · --token <t>
 # Re-runs are idempotent — the persisted token survives open/token toggling.
 ```
 
@@ -99,7 +101,7 @@ pct start 8120 && pct enter 8120
 # Inside the LXC — binary from the release (the script resolves the asset + digest via the API):
 apt-get update && apt-get install -y curl ca-certificates
 curl -fsSL -o /tmp/r.tar.gz \
-  "https://github.com/n0-computer/iroh/releases/download/v1.0.3/iroh-relay-v1.0.3-x86_64-unknown-linux-gnu.tar.gz"
+  "https://github.com/n0-computer/iroh/releases/download/v1.1.0/iroh-relay-v1.1.0-x86_64-unknown-linux-gnu.tar.gz"
 tar -xzf /tmp/r.tar.gz -C /tmp && install -m 0755 /tmp/iroh-relay*/iroh-relay /usr/local/bin/
 ```
 
@@ -130,7 +132,7 @@ QUIC to the relay host on **UDP 7824** and learn their observed public IP:port.
 Better candidates → higher direct-connection (hole-punch) success → less traffic
 falling back onto the relay.
 
-**Who benefits — and who doesn't** (verified in iroh v1.0.3 source):
+**Who benefits — and who doesn't** (verified in iroh v1.1.0 source):
 
 - Every native client that gets its relay from a URL **already probes UDP 7824
   automatically** — `RelayMap::from_iter` docs: *"The RelayConfigs in the
@@ -342,7 +344,7 @@ configured. The relay accepts the shared token either as
 
 - **Release asset names** — resolved: the script queries the GitHub API for
   `iroh-relay-<ver>-<target>-unknown-linux-gnu.tar.gz` and verifies the asset's
-  sha256 `digest`. Default pin v1.0.3; `--latest` for the newest release.
+  sha256 `digest`. Default pin v1.1.0; `--latest` for the newest release.
 - **Idle timeout** — the server WS-pings every 15s, safe with Caddy defaults; if
   you later put another LB/cloud in front, verify its idle timeout is >15s.
 - **QUIC discovery (D3)** — implemented via `--enable-quic` (§5.4); reuses Caddy's

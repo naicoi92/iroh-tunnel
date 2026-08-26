@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./install-relay-debian.sh [--domain relay.example.com] [--token <token>]
-#       [--version v1.0.3 | --latest] [--acme-email <email>] [--apply-firewall]
+#       [--version v1.1.0 | --latest] [--acme-email <email>] [--apply-firewall]
 #       [--enable-quic]
 #
 # Or straight from this repo (bash script — pipe into bash, NOT sh):
@@ -28,7 +28,7 @@
 #                      it to open the relay again.
 #   --token <t>        Access token (only used with --enable-token). If
 #                      omitted: reuse the persisted token or generate one.
-#   --version <v>      Pin a release version (default: v1.0.3).
+#   --version <v>      Pin a release version (default: v1.1.0).
 #   --latest           Use the latest release instead of the pin.
 #   --acme-email <e>   Email for the ACME account (optional).
 #   --apply-firewall   Apply ufw rules: allow 80,443/tcp + SSH port, default deny.
@@ -45,7 +45,7 @@
 #   IROH_RELAY_VERSION   Same as --version (flag wins).
 set -euo pipefail
 
-IROH_VERSION="${IROH_RELAY_VERSION:-v1.0.3}"
+IROH_VERSION="${IROH_RELAY_VERSION:-v1.1.0}"
 LATEST=0
 DOMAIN=""
 TOKEN=""

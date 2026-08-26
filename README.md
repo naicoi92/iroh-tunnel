@@ -35,6 +35,7 @@ ran on your own machine.
 - [Use cases](#use-cases)
 - [Configuration](#configuration)
 - [Multiplexing (0.2.0)](#multiplexing-020)
+- [Version compatibility](#version-compatibility)
 - [Run as a system service](#run-as-a-system-service)
 - [Docker & Kubernetes](#docker--kubernetes)
 - [Operations](#operations)
@@ -312,6 +313,37 @@ own connection), or while a serve peer is not yet upgraded.
 - In the serve's `serve-status.json`, `active_connections` counts **active
   streams** (in-flight pipes), which is the operator-meaningful number once
   one connection can carry many channels.
+
+---
+
+## Version compatibility
+
+**0.4.2 upgrades iroh 1.0.0 → 1.1.0.** The tunnel's own protocol is
+unchanged — same ALPNs, same QUIC stream semantics — so a 0.4.2 node talks
+to any older iroh-tunnel peer:
+
+| Peers | Compatible? |
+|---|---|
+| 0.4.2 ↔ 0.1.0–0.4.1, either role | ✅ — mixed 0.4.2 ↔ 0.4.1 verified in **both role pairings** over the n0 relay farm; older versions share the same wire protocol. No new rollout order; only the pre-existing [0.2.0 multiplexing rule](#multiplexing-020) applies (upgrade serve before an access enables `multiplex = true`) |
+| 0.4.2 ↔ self-hosted iroh-relay 1.0.x | ✅ — relay protocol unchanged; a 1.1.0 client simply gets no rate-limit notifications from a 1.0.x relay |
+| 0.4.2 ↔ self-hosted iroh-relay 1.1.x | ✅ — recommended: invalid-message hardening (1.0.2+), live per-client rate limits (1.0.2+), rate-limit notifications (1.1.0) |
+| 0.4.2 ↔ n0 public relay farm | ✅ — n0 keeps the farm current |
+
+What iroh 1.1.0 changes on the wire, and why none of it affects older
+peers:
+
+- **SNI is no longer sent** in the TLS ClientHello to relays — relay
+  servers never read it, so this is compatible in both directions.
+- **`CustomAddr` serialization changed** (the release's one breaking item)
+  — it only affects iroh's *experimental custom transports*, which
+  iroh-tunnel does not use.
+- **A pkarr resolver was added** to the n0 discovery preset (1.0.3) —
+  strictly additive.
+
+Operational improvements the upgrade brings: the client **warns when a
+relay rate-limits it**, relay connections keep answering priority messages
+during reconnect backoff, and net-report HTTP probes honor a configured
+proxy.
 
 ---
 
