@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Windows in CI**: the `lint` and `test` jobs now run on `windows-latest`
+  alongside `ubuntu-latest`. `cargo fmt --check` stays Linux-only.
+
+### Fixed
+
+- **Integration tests run on Windows.** All five files in `tests/` were gated
+  with `#![cfg(unix)]`, so they compiled to nothing there and `serve`/`access`
+  had no coverage on that platform.
+
 ## [0.4.2] — 2026-08-26
 
 ### Changed

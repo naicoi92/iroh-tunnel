@@ -30,6 +30,7 @@ mod systemd;
 /// interval internally and has no user-settable knob for it. The field stays
 /// shared so the policy reads as one coherent thing, even if one platform
 /// ignores the backoff.
+#[allow(dead_code)] // unused on targets without a service backend
 pub(crate) struct RestartPolicy {
     /// Restart the service when it exits with a non-zero status.
     pub on_failure: bool,
@@ -42,6 +43,7 @@ pub(crate) struct RestartPolicy {
 impl RestartPolicy {
     /// The policy iroh-tunnel ships with: restart on crash, 5 s backoff.
     /// Matches the previous hard-coded values in both templates.
+    #[allow(dead_code)] // unused on targets without a service backend
     pub const DEFAULT: RestartPolicy = RestartPolicy {
         on_failure: true,
         delay_secs: 5,
@@ -229,6 +231,7 @@ fn unsupported() -> Result<()> {
 ///
 /// Prefer `which` (so a system install is used); fall back to the current
 /// executable so `cargo run -- service install` works during development.
+#[allow(dead_code)] // unused on targets without a service backend
 pub(super) fn resolve_binary() -> Result<PathBuf> {
     if let Ok(p) = which::which("iroh-tunnel") {
         return Ok(p);

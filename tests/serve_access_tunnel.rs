@@ -40,8 +40,6 @@
 //! cargo test --test serve_access_tunnel -- --ignored --nocapture
 //! ```
 
-#![cfg(unix)] // shutdown.rs installs SIGTERM handlers; restrict to unix
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
