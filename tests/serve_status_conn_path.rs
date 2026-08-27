@@ -17,8 +17,6 @@
 //! 3. After the access role shuts down, the entry disappears — untracking
 //!    works and the 5 s flush picks it up.
 
-#![cfg(unix)] // shutdown.rs installs SIGTERM handlers; restrict to unix
-
 use std::sync::Arc;
 use std::time::Duration;
 

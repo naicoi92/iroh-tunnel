@@ -25,8 +25,6 @@
 //! `test-utils` feature (see `endpoint.rs`), mirroring how iroh's own tests
 //! drive `run_relay_server`.
 
-#![cfg(unix)] // shutdown.rs installs SIGTERM handlers; restrict to unix
-
 use std::sync::Arc;
 use std::time::Duration;
 

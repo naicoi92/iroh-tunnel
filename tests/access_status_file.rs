@@ -20,8 +20,6 @@
 //!    the pure functions `iroh-tunnel access status` prints — without
 //!    spawning the binary.
 
-#![cfg(unix)] // shutdown.rs installs SIGTERM handlers; restrict to unix
-
 use std::sync::Arc;
 use std::time::Duration;
 

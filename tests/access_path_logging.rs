@@ -14,8 +14,6 @@
 //! active from the handshake on; `direct=` accepted as the flexible
 //! fallback).
 
-#![cfg(unix)] // shutdown.rs installs SIGTERM handlers; restrict to unix
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
