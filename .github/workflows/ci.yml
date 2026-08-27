@@ -22,8 +22,14 @@ jobs:
   # lint: format check + clippy. Cheap, fast, fail-fast on style issues.
   # ---------------------------------------------------------------------------
   lint:
-    name: lint
-    runs-on: ubuntu-latest
+    name: lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report both platforms on a failure instead of cancelling the sibling:
+      # a Windows-only lint break should not hide the Linux result.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     env:
       # sccache wraps rustc to cache compilation output across runs. Set at job
       # level so every `cargo` invocation (fmt/clippy/build) is covered.
@@ -48,7 +54,9 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
+      # Formatting is platform-independent; checking it once is enough.
       - name: cargo fmt
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
@@ -58,8 +66,12 @@ jobs:
   # test: unit + integration tests. Runs in parallel with `lint`.
   # ---------------------------------------------------------------------------
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
