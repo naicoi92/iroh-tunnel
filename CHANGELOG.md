@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Windows service backend (SCM)**: `service install/uninstall/start/stop/restart/status`
+  now work on Windows, joining systemd, BusyBox init and launchd. `stop` sends
+  SERVICE_CONTROL_STOP, routed into the roles' shutdown path. Windows has no
+  per-user services, so `ServiceScope::User` is rejected and installing needs
+  an elevated prompt.
 - **Windows in CI**: the `lint` and `test` jobs now run on `windows-latest`
   alongside `ubuntu-latest`. `cargo fmt --check` stays Linux-only.
 

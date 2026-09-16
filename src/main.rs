@@ -22,6 +22,21 @@ fn main() {
     let parsed = Cli::parse();
     cli::init_tracing(parsed.verbose, parsed.quiet);
 
+    // Hand over before a runtime exists: the dispatcher blocks this thread
+    // and the runtime belongs to the service thread.
+    #[cfg(windows)]
+    if let Some((role, config)) = service_run_request(&parsed) {
+        match resolve_config_path(role.name(), config)
+            .and_then(|path| service::run_as_service(role, &path))
+        {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -65,7 +80,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Result<()> {
     let role = status_role.name();
     match cmd {
-        RoleCmd::Run { config } => {
+        RoleCmd::Run { config, service } => {
+            if service {
+                anyhow::bail!("--service is only supported on Windows");
+            }
             let path = resolve_config_path(role, config)?;
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
@@ -77,6 +95,21 @@ async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Res
         RoleCmd::Config { action } => dispatch_config(role, action),
         RoleCmd::Status { json } => status_cmd::run(status_role, json),
         RoleCmd::Service { action } => dispatch_service(role, action),
+    }
+}
+
+#[cfg(windows)]
+fn service_run_request(cli: &Cli) -> Option<(StatusRole, Option<PathBuf>)> {
+    let (role, cmd) = match &cli.role {
+        Role::Serve { cmd } => (StatusRole::Serve, cmd),
+        Role::Access { cmd } => (StatusRole::Access, cmd),
+    };
+    match cmd {
+        RoleCmd::Run {
+            config,
+            service: true,
+        } => Some((role, config.clone())),
+        _ => None,
     }
 }
 
