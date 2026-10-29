@@ -46,6 +46,9 @@ cargo test --all-features -- --ignored         # one test takes ~70 s
 
 ## Code quality gates
 
+Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
+changes and cite applicable rule IDs in Standards reviews.
+
 CI runs exactly these three commands on every pull request, in a `lint` and a
 `test` job. Run them locally before pushing:
 
