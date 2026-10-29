@@ -1,5 +1,13 @@
 # Issue #81 rework evidence
 
+## Latest independent local verification
+
+Parent verified source `2c1b6195e603bceb5087335666ae5b558b405e00` on macOS arm64 with Rust 1.99.1: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked --all-features` (134 passed, four ignored), `cargo test --locked --test quick_run -- --nocapture` (14 passed), and `cargo build --locked --release --no-default-features` all passed. Combined log SHA-256: `9cd19565246e770809d458ed5aeb8603fe2cbac5d7870345fd1fcfa3bf2d7c53`. Production normal/build feature graph excludes `test-utils` (log SHA-256 `a31a14f7a230b9537840e9a1bffd3043c123adb547997a1c317cd2dab291e8c5`); the release binary ignored `IROH_TUNNEL_TEST_CONFIG_DIR` in a `serve config path` smoke check.
+
+Independent Standards and Spec follow-up reviews covered this source. The forced address-in-use process test verifies retry and reaping. A non-collision bind failure has not been forced in a process test; this is a test-helper coverage limit, not a passing result. Linux/Windows CI and Rust 1.91 results must be checked on the final PR head. Production verified-TLS forwarding, forced transport selection and final release artifacts remain outside this evidence; #97 remains open.
+
+The sections below are historical observations at their stated source revisions, not claims that older limitations or review statuses apply to the latest head.
+
 ## Contract and test plan (before fixes)
 
 Baseline `bc943290d8393658851995fa99592c54eb071c2d`; merge integration
