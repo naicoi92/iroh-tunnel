@@ -1,8 +1,8 @@
 # Redesign traceability ledger
 
-Baseline audit: 2026-10-29, documentation commit `a95076a91539ec121f6b4b877c2d60f1adbdf2e0`. Tracker comments and native dependencies are live; refresh before pickup or acceptance. This ledger is an audit snapshot, not implementation or acceptance evidence. Coverage descriptions below preserve the pre-remediation audit; later issue comments and #98–#101 supply remediation and must be consulted. Proposed and deferred policies are not approved. See [acceptance scenarios](redesign-acceptance.md) and [specification](redesign-spec.md).
+Baseline audit: 2026-10-29, documentation commit `a95076a91539ec121f6b4b877c2d60f1adbdf2e0`. Tracker comments and native dependencies are live; refresh before pickup or acceptance. This ledger is an audit snapshot, not implementation or acceptance evidence. The tables below retain the original audit findings; the current owner and evidence index following them records remediation. Live issue bodies and native blockers remain authoritative. Proposed and deferred policies are not approved. See [acceptance scenarios](redesign-acceptance.md) and [specification](redesign-spec.md).
 
-## Stories 1–72: complete trace table
+## Historical audit: stories 1–72
 
 Source every row: #68 `/body`, `## User Stories`, corresponding numbered paragraph. Exact child AC references resolve above. “Explicit” = child Traceability includes story; “implicit” = semantic coverage only. Parent #68 remains scope fallback for every story.
 
@@ -153,7 +153,7 @@ Source every row: #68 `/body`, `## User Stories`, corresponding numbered paragra
 
 | 72 | As a maintainer, I want protocol, service, security and release decisions traced to acceptance criteria, so that implementation can be reviewed independently. | [#97](https://github.com/naicoi92/iroh-tunnel/issues/97) → [97.AC1](https://github.com/naicoi92/iroh-tunnel/issues/97), [97.AC2](https://github.com/naicoi92/iroh-tunnel/issues/97) | PARTIAL: #97 generic release AC does not explicitly require total rule/story/AC-to-test trace or approvals; parent scope carries requirement. |
 
-## Confirmed rule trace — every confirmed TC/CFG/RO/TCP/UDP/SM/DIST/CLI rule
+## Historical audit: confirmed rule trace
 
 Exact rule wording from baseline spec, line cited. Acceptance IDs below retain draft status except confirmed behavior independently ratified by user decision. Rule coverage does not approve neighboring proposals.
 
@@ -209,3 +209,104 @@ Exact rule wording from baseline spec, line cited. Acceptance IDs below retain d
 - Issue comments added after the audit clarify missing acceptance for #81, #82, #84, #87, #88, #90, #91, #93–#97. Live issue comments and blockers are authoritative.
 - Every row needs an issue owner, scenario, final-artifact evidence and #97 release disposition. Pre-remediation PARTIAL/MISSING labels are retained as historical findings, not current coverage verdicts.
 - #81 commit `bc943290d8393658851995fa99592c54eb071c2d` has worker-reported tests, but independent review blocked acceptance. No implementation or release has been accepted by this ledger.
+
+## Current confirmed-rule ownership and evidence
+
+Scenario IDs below identify the confirmed rule. Each linked issue's current acceptance criteria and the relevant section of [acceptance scenarios](redesign-acceptance.md) specify observable evidence. Final integration gate is #97. Status remains `NOT_RUN / BLOCKED` until independently accepted; an unresolved decision blocks only dependent behavior.
+
+| Rule / scenario | Current issue owner(s) | Final gate |
+|---|---|---|
+| TC-01 | #81, #82 | #97 |
+| TC-02 | #85; decision #75 | #97 |
+| TC-03 | #81 | #97 |
+| CFG-01, CFG-02 | #84 | #97 |
+| CFG-03 | #83 | #97 |
+| RO-01, RO-02 | #87; decision #77 | #97 |
+| TCP-01, TCP-02 | #83, #86; decision #76 | #97 |
+| UDP-01, UDP-02, UDP-03 | #88, #89; decisions #71, #73, #74, #78 | #97 |
+| SM-01, SM-02, SM-03 | #90, #91 | #97 |
+| SM-05 | #91; decision #79 | #97 |
+| DIST-01 | #93, #94, #96 | #97 |
+| DIST-02 | #95, #96, #100; decision #80 | #97 |
+| CLI-01, CLI-02 | #81, #82 | #97 |
+
+CFG-04/05, SM-04, DIST-03 and CLI-03 include proposals or deferred decisions; they are not silently promoted to approved policy. #98/#99 own configuration and identity decisions and their approved implementation. #101 owns selected Iroh upgrade and final-version evidence.
+
+## Current story ownership and evidence
+
+Each scenario ID `Sxx` refers to the numbered #68 story and the current linked issue body. Evidence is the real process, platform, artifact or decision evidence specified in the corresponding issue section of [acceptance scenarios](redesign-acceptance.md); all stories have final integration gate #97. Implementation/evidence status is `NOT_RUN` or `BLOCKED` until independently accepted; #81 worker reports are not acceptance. #98/#99 own unresolved configuration lifecycle, #100 signed artifact production and #101 selected Iroh upgrade.
+
+| Story / scenario | Current primary issue and AC | Final gate | Status |
+|---|---|---|---|
+| S01 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S02 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S03 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S04 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S05 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S06 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S07 | [#83](https://github.com/naicoi92/iroh-tunnel/issues/83) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S08 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S09 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S10 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S11 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S12 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S13 | [#82](https://github.com/naicoi92/iroh-tunnel/issues/82) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S14 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S15 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S16 | [#85](https://github.com/naicoi92/iroh-tunnel/issues/85) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S17 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S18 | [#81](https://github.com/naicoi92/iroh-tunnel/issues/81) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S19 | [#86](https://github.com/naicoi92/iroh-tunnel/issues/86) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S20 | [#83](https://github.com/naicoi92/iroh-tunnel/issues/83) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S21 | [#83](https://github.com/naicoi92/iroh-tunnel/issues/83) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S22 | [#83](https://github.com/naicoi92/iroh-tunnel/issues/83) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S23 | [#88](https://github.com/naicoi92/iroh-tunnel/issues/88) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S24 | [#88](https://github.com/naicoi92/iroh-tunnel/issues/88) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S25 | [#88](https://github.com/naicoi92/iroh-tunnel/issues/88) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S26 | [#88](https://github.com/naicoi92/iroh-tunnel/issues/88) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S27 | [#88](https://github.com/naicoi92/iroh-tunnel/issues/88) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S28 | [#88](https://github.com/naicoi92/iroh-tunnel/issues/88) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S29 | [#88](https://github.com/naicoi92/iroh-tunnel/issues/88) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S30 | [#89](https://github.com/naicoi92/iroh-tunnel/issues/89) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S31 | [#89](https://github.com/naicoi92/iroh-tunnel/issues/89) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S32 | [#89](https://github.com/naicoi92/iroh-tunnel/issues/89) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S33 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S34 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S35 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S36 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S37 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S38 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S39 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S40 | [#84](https://github.com/naicoi92/iroh-tunnel/issues/84) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S41 | [#87](https://github.com/naicoi92/iroh-tunnel/issues/87) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S42 | [#87](https://github.com/naicoi92/iroh-tunnel/issues/87) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S43 | [#87](https://github.com/naicoi92/iroh-tunnel/issues/87) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S44 | [#87](https://github.com/naicoi92/iroh-tunnel/issues/87) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S45 | [#90](https://github.com/naicoi92/iroh-tunnel/issues/90) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S46 | [#91](https://github.com/naicoi92/iroh-tunnel/issues/91) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S47 | [#91](https://github.com/naicoi92/iroh-tunnel/issues/91) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S48 | [#91](https://github.com/naicoi92/iroh-tunnel/issues/91) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S49 | [#91](https://github.com/naicoi92/iroh-tunnel/issues/91) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S50 | [#91](https://github.com/naicoi92/iroh-tunnel/issues/91) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S51 | [#91](https://github.com/naicoi92/iroh-tunnel/issues/91) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S52 | [#91](https://github.com/naicoi92/iroh-tunnel/issues/91) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S53 | [#92](https://github.com/naicoi92/iroh-tunnel/issues/92) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S54 | [#90](https://github.com/naicoi92/iroh-tunnel/issues/90) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S55 | [#90](https://github.com/naicoi92/iroh-tunnel/issues/90) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S56 | [#93](https://github.com/naicoi92/iroh-tunnel/issues/93) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S57 | [#93](https://github.com/naicoi92/iroh-tunnel/issues/93) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S58 | [#93](https://github.com/naicoi92/iroh-tunnel/issues/93) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S59 | [#94](https://github.com/naicoi92/iroh-tunnel/issues/94) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S60 | [#94](https://github.com/naicoi92/iroh-tunnel/issues/94) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S61 | [#96](https://github.com/naicoi92/iroh-tunnel/issues/96) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S62 | [#95](https://github.com/naicoi92/iroh-tunnel/issues/95) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S63 | [#96](https://github.com/naicoi92/iroh-tunnel/issues/96) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S64 | [#95](https://github.com/naicoi92/iroh-tunnel/issues/95) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S65 | [#95](https://github.com/naicoi92/iroh-tunnel/issues/95) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S66 | [#95](https://github.com/naicoi92/iroh-tunnel/issues/95) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S67 | [#95](https://github.com/naicoi92/iroh-tunnel/issues/95) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S68 | [#95](https://github.com/naicoi92/iroh-tunnel/issues/95) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S69 | [#96](https://github.com/naicoi92/iroh-tunnel/issues/96) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S70 | [#97](https://github.com/naicoi92/iroh-tunnel/issues/97) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S71 | [#97](https://github.com/naicoi92/iroh-tunnel/issues/97) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
+| S72 | [#97](https://github.com/naicoi92/iroh-tunnel/issues/97) — current issue acceptance and clarification | #97 | NOT_RUN / BLOCKED |
