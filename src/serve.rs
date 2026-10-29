@@ -50,7 +50,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
 
 /// Run an in-memory quick configuration without persisting its identity.
 pub async fn run_quick(cfg: ServeConfig) -> Result<()> {
-    cfg.validate()?;
+    cfg.validate()
+        .map_err(|e| crate::error::CliError::Config(format!("serve quick mode: {e}")))?;
     crate::role_run::run_config::<ServeStrategy, _, _>(cfg, |ep, cfg| {
         ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal())
     })

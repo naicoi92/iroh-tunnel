@@ -149,6 +149,33 @@ cargo run --release -- --help
 
 Two terminals, two machines — or two windows on one machine to try it out.
 
+### Ephemeral quick TCP tunnel
+
+No config file is needed. Start Serve with a fixed target, then copy its public
+NodeId into Access:
+
+```sh
+iroh-tunnel serve --name postgres --target 127.0.0.1:5432
+# In another terminal/host, substitute the printed Serve NodeId:
+iroh-tunnel access --name postgres --listen 127.0.0.1:15432 --node-id <SERVE_NODE_ID>
+```
+
+Short equivalents: `serve -n postgres -t 127.0.0.1:5432` and
+`access -n postgres -l 127.0.0.1:15432 -N <SERVE_NODE_ID>`.
+TCP is default (`-p tcp` / `--protocol tcp`); quick UDP is not supported.
+Target/listen accept numeric IPv4 or bracketed IPv6 sockets, e.g.
+`--target '[::1]:5432'` and `--listen '[::1]:15432'`.
+Use `--relay-url https://your-relay.example` on both roles for a custom relay.
+Both quick roles generate fresh ephemeral identities on restart, without
+creating or changing config files or keys. Do not mix quick flags with configured
+subcommands; use separate `run --config PATH` for saved settings.
+
+**NodeId is public identity, not target authorization.** Knowing NodeId and
+service name lets a peer attempt access. Target services must enforce their own access protection;
+the tunnel does not add an authorization scheme.
+
+### Configured tunnel
+
 **1. On the serve host** (the machine with the local service, e.g. postgres
 on `:5432`):
 

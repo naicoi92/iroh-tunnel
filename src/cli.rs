@@ -38,6 +38,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Role {
     /// Serve role: publish local services into Iroh.
+    #[command(args_conflicts_with_subcommands = true)]
     Serve {
         #[command(flatten)]
         quick: ServeQuickArgs,
@@ -45,6 +46,7 @@ pub enum Role {
         cmd: Option<RoleCmd>,
     },
     /// Access role: consume remote services to local.
+    #[command(args_conflicts_with_subcommands = true)]
     Access {
         #[command(flatten)]
         quick: AccessQuickArgs,
@@ -79,7 +81,7 @@ pub struct AccessQuickArgs {
     /// Local TCP listen socket address.
     #[arg(short, long)]
     pub listen: Option<std::net::SocketAddr>,
-    /// Serve NodeId.
+    /// Serve NodeId (public identity, not authorization; protect the target service).
     #[arg(short = 'N', long)]
     pub node_id: Option<String>,
     /// Protocol (TCP only in quick mode).

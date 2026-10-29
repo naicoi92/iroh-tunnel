@@ -63,16 +63,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Role::Serve { quick, cmd: None } => {
             if quick.protocol != "tcp" {
-                anyhow::bail!("quick mode supports only tcp protocol");
+                return Err(CliError::Config(
+                    "serve quick mode supports only tcp protocol; use --protocol tcp".into(),
+                )
+                .into());
             }
-            let target = quick.target.context("--target is required")?;
+            let target = quick.target.ok_or_else(|| {
+                CliError::Config("serve quick mode: --target IP:PORT is required".into())
+            })?;
             let cfg = iroh_tunnel::config::ServeConfig {
                 node: iroh_tunnel::config::NodeConfig {
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
                 services: vec![iroh_tunnel::config::ServeService {
-                    name: quick.name.context("--name is required")?,
+                    name: quick.name.ok_or_else(|| {
+                        CliError::Config("serve quick mode: --name is required".into())
+                    })?,
                     protocol: iroh_tunnel::config::Protocol::Tcp,
                     host: target.ip().to_string(),
                     port: target.port(),
@@ -82,20 +89,29 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Role::Access { quick, cmd: None } => {
             if quick.protocol != "tcp" {
-                anyhow::bail!("quick mode supports only tcp protocol");
+                return Err(CliError::Config(
+                    "access quick mode supports only tcp protocol; use --protocol tcp".into(),
+                )
+                .into());
             }
-            let listen = quick.listen.context("--listen is required")?;
-            let node_id = quick.node_id.context("--node-id is required")?;
-            node_id
-                .parse::<iroh::EndpointId>()
-                .context("invalid node-id")?;
+            let listen = quick.listen.ok_or_else(|| {
+                CliError::Config("access quick mode: --listen IP:PORT is required".into())
+            })?;
+            let node_id = quick.node_id.ok_or_else(|| {
+                CliError::Config("access quick mode: --node-id is required".into())
+            })?;
+            node_id.parse::<iroh::EndpointId>().map_err(|e| {
+                CliError::Config(format!("access quick mode: invalid --node-id: {e}"))
+            })?;
             let cfg = iroh_tunnel::config::AccessConfig {
                 node: iroh_tunnel::config::NodeConfig {
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
                 services: vec![iroh_tunnel::config::AccessService {
-                    name: quick.name.context("--name is required")?,
+                    name: quick.name.ok_or_else(|| {
+                        CliError::Config("access quick mode: --name is required".into())
+                    })?,
                     node_id,
                     protocol: iroh_tunnel::config::Protocol::Tcp,
                     host: listen.ip().to_string(),
