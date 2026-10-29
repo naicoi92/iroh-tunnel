@@ -1,0 +1,10 @@
+NodeId: 8dd142b8dbd551f61dc10a334923a630f1e84de5e82b8878e3bc282f4ae9dd31
+Exposed: compat 127.0.0.1:61258 -> peer af693863e72ae23f22196dcb175982345d64c104702be204198df6e5a7bdf807 (tcp://127.0.0.1:61258)
+2026-10-29T13:42:36.961111Z  INFO endpoint ready
+2026-10-29T13:42:36.967269Z  INFO wrote status file path=/TMP/iroh-85-snupu_dp/access/state/access-status.json
+2026-10-29T13:42:36.967313Z  INFO access endpoint ready, listening for local clients
+2026-10-29T13:42:36.967409Z  INFO listening for local clients listen_addr=127.0.0.1:61258
+2026-10-29T13:42:43.792494Z  INFO connected to serve peer (multiplexed, af693863…) via relay=https://use1-1.relay.n0.iroh.link/ peer=af693863e72ae23f22196dcb175982345d64c104702be204198df6e5a7bdf807 svc_name=compat
+2026-10-29T13:42:44.542799Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:42:44.542987Z  INFO disconnected from serve peer (service compat, multiplexed) peer=af693863e72ae23f22196dcb175982345d64c104702be204198df6e5a7bdf807
+2026-10-29T13:42:44.933436Z  INFO draining connections (timeout 5s)...

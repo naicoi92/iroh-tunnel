@@ -1,0 +1,10 @@
+NodeId: 9cc6d53ca9fa7cc618813e1270771bf1e374c3e77028e76cd4a1b408c77f5197
+Serving: compat tcp://127.0.0.1:65054
+[2m2026-10-29T12:45:46.225213Z[0m [32m INFO[0m endpoint ready
+[2m2026-10-29T12:45:46.230449Z[0m [32m INFO[0m wrote status file [3mpath[0m[2m=[0m/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-dd8mx1wd/serve/state/serve-status.json
+[2m2026-10-29T12:45:46.230468Z[0m [32m INFO[0m serve endpoint ready, accepting connections
+[2m2026-10-29T12:45:53.368981Z[0m [32m INFO[0m peer connected via relay=https://use1-1.relay.n0.iroh.link/ [3mpeer[0m[2m=[0mfface8ad200f7663322231b9c813d649ef0eac2587b40adc2a861606582fb4fb [3mservice[0m[2m=[0mcompat
+[2m2026-10-29T12:45:53.722509Z[0m [32m INFO[0m peer disconnected (service compat) [3mpeer[0m[2m=[0mfface8ad200f7663322231b9c813d649ef0eac2587b40adc2a861606582fb4fb
+[2m2026-10-29T12:45:53.722633Z[0m [33m WARN[0m stream error: connection lost
+[2m2026-10-29T12:45:54.603159Z[0m [32m INFO[0m received SIGINT (Ctrl+C)
+[2m2026-10-29T12:45:54.949793Z[0m [32m INFO[0m draining connections (timeout 5s)...

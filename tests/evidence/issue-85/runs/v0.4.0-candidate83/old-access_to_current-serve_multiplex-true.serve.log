@@ -1,0 +1,9 @@
+NodeId: 89e7104f7cffadea22b36260fcdaac63a3277cc2c1e17189106d857f9b42e80d
+Serving: compat tcp://127.0.0.1:60943
+2026-10-29T13:41:29.325320Z  INFO endpoint ready
+2026-10-29T13:41:29.333651Z  INFO wrote status file path=/TMP/iroh-85-q6_7k3g3/serve/state/serve-status.json
+2026-10-29T13:41:29.333677Z  INFO serve endpoint ready, accepting connections
+2026-10-29T13:41:36.635060Z  INFO peer connected via relay=https://use1-1.relay.n0.iroh.link/ peer=f698ad9e34de778dfaa2ab4051057987c3509091ea22da3914dc9811fe831823 service=compat
+2026-10-29T13:41:37.185455Z  INFO peer disconnected (service compat) peer=f698ad9e34de778dfaa2ab4051057987c3509091ea22da3914dc9811fe831823
+2026-10-29T13:41:38.124747Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:41:38.532136Z  INFO draining connections (timeout 5s)...

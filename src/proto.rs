@@ -5,12 +5,10 @@
 //! can't collide with other protocols multiplexed on the same QUIC
 //! connection.
 //!
-//! Since 0.2.0 one connection carries many streams (multiplexing), but the
-//! ALPN is deliberately UNCHANGED: there is no protocol negotiation. The
-//! rollout contract is serve-first — a 0.2.0 serve is fully
-//! backward-compatible with any access, while multiplexing access nodes
-//! require a 0.2.0+ serve (otherwise set `multiplex = false` on the access
-//! service). See the README "Multiplexing" section.
+//! One connection carries many streams; multiplexing is always enabled.
+//! The ALPN is unchanged and there is no protocol negotiation. Legacy
+//! `multiplex` configuration cannot disable connection reuse. Interoperability
+//! with 0.4 peers is a separate release acceptance gate (#85).
 //!
 //! Implements T-03 (Page 05 v3 §5.1).
 //

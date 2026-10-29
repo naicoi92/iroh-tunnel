@@ -1,0 +1,10 @@
+2026-10-29T13:41:39.073235Z  WARN secret_key empty, generated new key, saving to config
+NodeId: 6c776cefbaa76f70e2a5d13a7b3b832b6591d08dffd5e25f4ffc83f1eeba29f5
+Serving: compat tcp://127.0.0.1:60998
+2026-10-29T13:41:39.084840Z  INFO endpoint ready
+2026-10-29T13:41:39.092542Z  INFO wrote status file path=/TMP/iroh-85-2nxiqpox/serve/state/serve-status.json
+2026-10-29T13:41:39.092564Z  INFO serve endpoint ready, accepting connections
+2026-10-29T13:41:46.323057Z  INFO peer connected peer=3613bcf4b37215358d7c67c1d1d9a64139326929e57dd28af7841775f55a7a11 service=compat
+2026-10-29T13:41:46.685080Z  INFO peer disconnected (service compat) peer=3613bcf4b37215358d7c67c1d1d9a64139326929e57dd28af7841775f55a7a11
+2026-10-29T13:41:47.561624Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:41:47.886235Z  INFO draining connections (timeout 5s)...

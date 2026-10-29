@@ -1,0 +1,14 @@
+2026-10-29T13:42:56.455884Z  WARN secret_key empty, generated new key, saving to config
+NodeId: c54ca783bbbbd64a9b1dbe3e341552d70cdf9458f388364d449e0333021e899a
+Serving: compat tcp://127.0.0.1:61340
+2026-10-29T13:42:56.462894Z  INFO endpoint ready
+2026-10-29T13:42:56.468447Z  INFO wrote status file path=/TMP/iroh-85-n7fs9p7s/serve/state/serve-status.json
+2026-10-29T13:42:56.468464Z  INFO serve endpoint ready, accepting connections
+2026-10-29T13:43:03.701399Z  INFO peer connected via relay=https://use1-1.relay.n0.iroh.link/ peer=1c0cc06e8954e2c034e29e0f867ad8c4ca350e780619e6aa7f73a6d880825905 service=compat
+2026-10-29T13:43:04.061348Z  INFO peer connected via relay=https://use1-1.relay.n0.iroh.link/, direct=172.16.0.163:53156 peer=1c0cc06e8954e2c034e29e0f867ad8c4ca350e780619e6aa7f73a6d880825905 service=compat
+2026-10-29T13:43:04.063817Z  INFO peer disconnected (service compat) peer=1c0cc06e8954e2c034e29e0f867ad8c4ca350e780619e6aa7f73a6d880825905
+2026-10-29T13:43:04.063842Z  WARN stream error: connection lost
+2026-10-29T13:43:04.064449Z  INFO peer disconnected (service compat) peer=1c0cc06e8954e2c034e29e0f867ad8c4ca350e780619e6aa7f73a6d880825905
+2026-10-29T13:43:04.064464Z  WARN stream error: connection lost
+2026-10-29T13:43:04.939220Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:43:05.246343Z  INFO draining connections (timeout 5s)...

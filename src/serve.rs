@@ -1,8 +1,8 @@
 //! Serve role: publish local services into Iroh.
 //!
 //! Implements T-06. Loads the serve config, builds an [`Endpoint`] that
-//! registers every service's ALPN (legacy + multiplex variants — see
-//! [`crate::proto`]), then accepts incoming connections and pipes every
+//! registers every service's ALPN (see [`crate::proto`]), then accepts
+//! incoming connections and pipes every
 //! bidirectional stream on each to the matching local TCP service.
 //!
 //! ## Concurrency model
@@ -346,7 +346,7 @@ impl StatusSnapshot {
 /// The accept loop tracks `(peer, service)` when a connection is accepted and
 /// untracks it when the connection task ends; the status flush task renders
 /// the registry into `connections`. A peer with several connections to the
-/// same service (e.g. an access node with `multiplex = false`) is
+/// same service (e.g. a legacy access peer) is
 /// refcounted, and services are merged across a peer's connections.
 #[derive(Clone, Default)]
 struct PeerTracker(Arc<std::sync::Mutex<HashMap<iroh::EndpointId, HashMap<String, u64>>>>);

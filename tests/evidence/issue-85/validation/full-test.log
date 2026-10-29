@@ -1,0 +1,200 @@
+   Compiling iroh-tunnel v0.4.2 (/private/tmp/iroh-tunnel-issue-85-current)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.51s
+     Running unittests src/lib.rs (/tmp/iroh-85-test-target/debug/deps/iroh_tunnel-ebf86017a0eb2c17)
+
+running 114 tests
+test config::tests::node_max_concurrent_streams_defaults_to_none ... ok
+test config::tests::access_multiplex_rejects_string ... ok
+test config::tests::node_max_concurrent_streams_parses ... ok
+test config::tests::protocol_serializes_lowercase ... ok
+test config::tests::node_max_concurrent_streams_rejects_zero ... ok
+test config::tests::relay_token_accepts_plain_secret ... ok
+test config::tests::relay_token_validation_rejects_empty_and_whitespace ... ok
+test config::tests::access_resolve_and_save_key_generates_and_persists ... ok
+test config::tests::access_resolve_and_save_key_no_save_when_present ... ok
+test config::tests::resolve_wrong_length_errors ... ok
+test config::tests::resolve_empty_generates_key_and_needs_save ... ok
+test config::tests::resolve_invalid_base64_errors ... ok
+test config::tests::serve_load_missing_file_errors ... ok
+test config::tests::access_multiplex_defaults_to_true ... ok
+test config::tests::access_validation_rejects_non_https_service_relay ... ok
+test config::tests::access_validation_rejects_short_node_id ... ok
+test config::tests::validation_rejects_duplicate_name ... ok
+test config::tests::access_validation_accepts_hex_node_id ... ok
+test config::tests::access_multiplex_parses_bool ... ok
+test config::tests::validation_rejects_non_https_relay ... ok
+test config::tests::validation_rejects_uppercase_name ... ok
+test config::tests::validation_rejects_zero_port ... ok
+test conn_path::tests::classify_drops_custom_transports ... ok
+test conn_path::tests::diff_counts_active_flip_as_removal ... ok
+test conn_path::tests::diff_counts_addr_swap_inside_one_kind ... ok
+test conn_path::tests::diff_reports_kind_gaining_active_transport ... ok
+test conn_path::tests::diff_reports_kind_losing_last_active_transport ... ok
+test conn_path::tests::classify_maps_direct_socket_addr ... ok
+test conn_path::tests::diff_returns_none_for_no_active_change ... ok
+test conn_path::tests::classify_maps_relay_url ... ok
+test conn_path::tests::poller_step_keeps_baseline_on_all_inactive_snapshot ... ok
+test conn_path::tests::poller_step_returns_none_and_forward_baseline_on_no_change ... ok
+test conn_path::tests::poller_step_seeds_silently_when_baseline_never_active ... ok
+test config::tests::serve_load_bad_toml_errors ... ok
+test config::tests::save_roundtrip_writes_file ... ok
+test conn_path::tests::poller_step_transient_inactive_then_real_change_is_one_line ... ok
+test conn_path::tests::peer_path_report_serializes_with_documented_field_names ... ok
+test conn_path::tests::render_active_kinds_lists_unique_kinds_or_none ... ok
+test conn_path::tests::render_active_transports_skips_inactive_and_joins_with_comma ... ok
+test config::tests::serve_load_valid ... ok
+test conn_path::tests::sort_puts_active_first_then_relay ... ok
+test conn_path::tests::sort_tiebreaks_by_addr_within_equal_groups ... ok
+test conn_path::tests::transport_kind_display_matches_serde_form ... ok
+test conn_path::tests::transport_kind_serializes_lowercase ... ok
+test endpoint::tests::empty_relay_urls_yields_default_mode ... ok
+test endpoint::tests::build_dial_addr_with_empty_urls_is_just_the_node_id ... ok
+test endpoint::tests::invalid_relay_url_errors ... ok
+test endpoint::tests::resolve_relay_urls_errors_on_invalid_url ... ok
+test endpoint::tests::build_dial_addr_attaches_every_relay_url ... ok
+test endpoint::tests::resolve_relay_urls_parses_configured_urls ... ok
+test endpoint::tests::relay_token_is_applied_to_all_map_entries ... ok
+test endpoint::tests::resolve_relay_urls_falls_back_to_n0_defaults_when_empty ... ok
+test endpoint::tests::n0_default_relay_urls_returns_n0_hostnames ... ok
+test endpoint::tests::custom_relay_urls_parse_into_custom_mode ... ok
+test pipe::tests::frame_codec_preserves_multiple_boundaries ... ok
+test pipe::tests::frame_codec_rejects_oversized_length ... ok
+test pipe::tests::frame_codec_roundtrips_one_datagram ... ok
+test proto::tests::alpn_for_builds_prefixed_string ... ok
+test proto::tests::alpn_roundtrips ... ok
+test proto::tests::alpn_stays_under_quic_limit_for_valid_names ... ok
+test proto::tests::name_from_alpn_rejects_invalid_utf8 ... ok
+test proto::tests::name_from_alpn_rejects_other_protocols ... ok
+test proto::tests::name_from_alpn_strips_prefix ... ok
+test pipe::tests::tcp_half_close_propagates_eof ... ok
+test role_run::tests::backoff_does_not_overflow_on_huge_input ... ok
+test role_run::tests::backoff_schedule_doubles_then_caps_at_max ... ok
+test pipe::tests::tcp_copies_bytes_in_both_directions ... ok
+test role_run::tests::backoff_schedule_starts_at_1s_and_caps_at_30s ... ok
+test role_run::tests::protocol_str_matches_serde_form ... ok
+test serve::tests::guard_untracks_via_drop_without_any_explicit_call ... ok
+test serve::tests::services_merge_across_a_peers_connections ... ok
+test serve::tests::track_refcounts_connections_until_the_last_untrack ... ok
+test service::launchd::tests::domain_target_system_is_plain_system ... ok
+test service::launchd::tests::plist_default_policy_emits_keepalive_successful_exit_false ... ok
+test service::launchd::tests::plist_disabled_policy_omits_keepalive_block ... ok
+test service::launchd::tests::plist_escapes_xml_metacharacters_in_paths ... ok
+test service::launchd::tests::plist_is_valid_xml_and_has_label ... ok
+test service::launchd::tests::plist_path_user_is_under_launchagents ... ok
+test service::launchd::tests::service_target_uses_gui_domain_for_user_scope ... ok
+test service::launchd::tests::service_target_uses_system_domain_for_system_scope ... ok
+test serve::tests::snapshot_orders_peers_deterministically ... ok
+test service::tests::restart_policy_default_matches_previous_hardcoded_values ... ok
+test service::tests::scope_variants_exist ... ok
+test pipe::tests::tcp_larger_payload_roundtrips_intact ... ok
+test status::tests::empty_status_file_path_override_is_treated_as_unset ... ok
+test status::tests::access_status_serializes_with_documented_schema ... ok
+test status::tests::format_local_addr_brackets_ipv6_literal ... ok
+test status::tests::format_local_addr_passes_hostname_through_unchanged ... ok
+test status::tests::format_local_addr_passes_ipv4_through_unchanged ... ok
+test status::tests::relative_status_file_path_override_is_absolutized ... ok
+test service::tests::resolve_binary_returns_a_path ... ok
+test status::tests::remove_own_status_file_skips_missing_file ... ok
+test conn_path::tests::peer_path_report_returns_none_for_never_connected_peer ... ok
+test endpoint::tests::serve_endpoint_with_same_key_has_same_node_id ... ok
+test endpoint::tests::access_endpoint_binds_and_has_node_id ... ok
+test endpoint::tests::access_endpoint_with_same_key_has_same_node_id ... ok
+test status::tests::connections_array_serializes_with_documented_schema ... ok
+test status::tests::status_file_path_override_lands_directly_in_the_dir ... ok
+test status::tests::writer_selects_the_role_scoped_file_name ... ok
+test status::tests::remove_own_status_file_removes_own_pid ... ok
+test status_cmd::tests::access_table_golden ... ok
+test status_cmd::tests::access_table_without_services ... ok
+test status::tests::remove_own_status_file_spares_a_foreign_pid ... ok
+test status_cmd::tests::serve_table_golden ... ok
+test status_cmd::tests::serve_table_without_connections_or_relay ... ok
+test status_cmd::tests::short_peer_id_takes_first_eight_chars ... ok
+test status_cmd::tests::validate_pid_rejects_zero_and_i32_wraparound ... ok
+test status::tests::save_to_cleans_up_temp_file_when_rename_fails ... ok
+test status::tests::save_to_writes_access_json_file_into_injected_dir ... ok
+test status::tests::save_to_creates_missing_parent_dir ... ok
+test status::tests::save_to_writes_serve_json_file_into_injected_dir ... ok
+test status::tests::save_to_overwrites_existing_status ... ok
+test status::tests::save_to_uses_atomic_rename_temp_file_gone ... ok
+test access::tests::flush_stop_mid_save_lets_it_finish_and_prevents_a_second_save ... ok
+
+test result: ok. 114 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+     Running unittests src/main.rs (/tmp/iroh-85-test-target/debug/deps/iroh_tunnel-ae13885efdd9b950)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/access_path_logging.rs (/tmp/iroh-85-test-target/debug/deps/access_path_logging-8c7722f74af4625e)
+
+running 1 test
+test access_logs_connection_paths_on_established ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.25s
+
+     Running tests/access_status_file.rs (/tmp/iroh-85-test-target/debug/deps/access_status_file-4552671cd0b7ee1c)
+
+running 1 test
+test access_status_file_reports_service_paths_and_renders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.57s
+
+     Running tests/interop_0_4.rs (/tmp/iroh-85-test-target/debug/deps/interop_0_4-7ba56938c63a6101)
+
+running 1 test
+test released_0_4_and_current_exchange_tcp_bytes_in_both_directions ... ignored, requires authentic 0.4 and separately built production executables; see evidence README
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/quick_run.rs (/tmp/iroh-85-test-target/debug/deps/quick_run-fd6306c847fe555f)
+
+running 14 tests
+test quick_operator_contract_explains_target_protection ... ok
+test configured_subcommands_allow_implicit_tcp_default ... ok
+test quick_config_errors_use_existing_exit_classification ... ok
+test access_ready_retries_occupied_port_and_reaps_first_child ... ok
+test test_config_root_rejects_relative_paths ... ok
+test quick_roles_preserve_existing_config_and_keys_across_ephemeral_restarts ... ok
+test quick_roles_do_not_create_config_or_keys_in_empty_home ... ok
+test invalid_quick_inputs_fail_without_config_or_key_writes ... ok
+test mixed_quick_flags_and_subcommands_are_rejected ... ok
+test quick_short_flags_forward_bytes_to_fixed_target ... ok
+test quick_ipv6_listener_forwards_bytes ... ok
+test quick_ipv6_target_forwards_bytes ... ok
+test quick_tcp_forwards_bytes_to_fixed_target ... ok
+test quick_long_and_short_flags_reach_same_fixed_target ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.33s
+
+     Running tests/relay_auth.rs (/tmp/iroh-85-test-target/debug/deps/relay_auth-5838cf6a869f7318)
+
+running 3 tests
+test tokened_relay_roundtrips_bytes ... ok
+test per_service_relay_override_roundtrips ... ok
+test wrong_token_never_roundtrips ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.62s
+
+     Running tests/serve_access_tunnel.rs (/tmp/iroh-85-test-target/debug/deps/serve_access_tunnel-2f11e2e35398831c)
+
+running 4 tests
+test multiplex_false_matches_legacy_behavior ... ignored, requires Internet + n0 relay network; run with --ignored
+test multiplex_survives_idle_beyond_timeout ... ignored, requires Internet + n0 relay network; run with --ignored; slow ~70s
+test multiplex_two_streams_share_one_connection ... ignored, requires Internet + n0 relay network; run with --ignored
+test serve_access_tunnel_roundtrips_bytes ... ignored, requires Internet + n0 relay network; run with --ignored
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/serve_status_conn_path.rs (/tmp/iroh-85-test-target/debug/deps/serve_status_conn_path-c4ef0c071eb0a003)
+
+running 1 test
+test serve_status_file_reports_connected_peer_paths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.68s
+
+   Doc-tests iroh_tunnel
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

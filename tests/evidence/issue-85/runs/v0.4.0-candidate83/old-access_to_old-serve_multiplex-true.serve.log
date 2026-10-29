@@ -1,0 +1,10 @@
+2026-10-29T13:41:09.942746Z  WARN secret_key empty, generated new key, saving to config
+NodeId: 15abf0ea55dae77238c52be34b49830af636bb175f5ea220a68e340ad988e860
+Serving: compat tcp://127.0.0.1:60863
+2026-10-29T13:41:09.953728Z  INFO endpoint ready
+2026-10-29T13:41:09.965946Z  INFO wrote status file path=/TMP/iroh-85-uv383jes/serve/state/serve-status.json
+2026-10-29T13:41:09.965956Z  INFO serve endpoint ready, accepting connections
+2026-10-29T13:41:17.346539Z  INFO peer connected peer=4099fde5adb6edfc7cd8476b2815cd9ff601b165c5d6e147375ad546cb1adfc6 service=compat
+2026-10-29T13:41:17.789082Z  INFO peer disconnected (service compat) peer=4099fde5adb6edfc7cd8476b2815cd9ff601b165c5d6e147375ad546cb1adfc6
+2026-10-29T13:41:18.695793Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:41:19.061760Z  INFO draining connections (timeout 5s)...
