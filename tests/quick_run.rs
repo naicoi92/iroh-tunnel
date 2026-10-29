@@ -786,3 +786,138 @@ async fn target_dial_failure_closes_only_affected_channel_without_replay() -> Re
     }).await.context("target failure isolation timeout")??;
     Ok(())
 }
+
+async fn accept_target_channel(
+    client: &mut TcpStream,
+    target: &TcpListener,
+    marker: &[u8],
+) -> Result<TcpStream> {
+    // QUIC opens the stream lazily: send bytes before waiting for target accept.
+    client.write_all(marker).await?;
+    let (mut socket, _) = target.accept().await?;
+    let mut received = vec![0; marker.len()];
+    socket.read_exact(&mut received).await?;
+    assert_eq!(received, marker, "target channel marker differs");
+    Ok(socket)
+}
+
+async fn assert_tcp_exchange(
+    client: &mut TcpStream,
+    target: &mut TcpStream,
+    request: &[u8],
+    response: &[u8],
+) -> Result<()> {
+    client.write_all(request).await?;
+    let mut received = vec![0; request.len()];
+    target.read_exact(&mut received).await?;
+    assert_eq!(received, request, "target request differs");
+    target.write_all(response).await?;
+    let mut received = vec![0; response.len()];
+    client.read_exact(&mut received).await?;
+    assert_eq!(received, response, "client response differs");
+    Ok(())
+}
+
+// TCP-02 / #86: reset an established target socket while another channel
+// remains live. Unlike dial failure, both channels first exchange exact bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn established_target_reset_closes_only_affected_channel_without_replay() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let temp = tempfile::tempdir()?;
+        let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+        let target = TcpListener::bind("127.0.0.1:0").await?;
+        let target_addr = target.local_addr()?.to_string();
+        let relay = relay.to_string();
+        let serve_log = temp.path().join("serve-reset.log");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        isolated(&mut command, temp.path());
+        let mut serve = Process(
+            command
+                .env("NO_COLOR", "1")
+                .env("RUST_LOG", "iroh_tunnel=debug")
+                .env("IROH_TUNNEL_STATE_DIR", temp.path())
+                .args(["serve", "-n", "echo", "-t", &target_addr, "--relay-url", &relay])
+                .stdout(std::fs::File::create(&serve_log)?)
+                .stderr(Stdio::null())
+                .spawn()?,
+            None,
+        );
+        let serve_status = status(&temp.path().join("serve-status.json"), &mut serve).await?;
+        let node = serve_status["node_id"].as_str().context("serve node id")?;
+        let (mut access, listen) =
+            access_ready(temp.path(), temp.path(), false, false, node, &relay).await?;
+        let outcome = tokio::time::timeout(Duration::from_secs(45), async {
+            let mut healthy = TcpStream::connect(listen).await?;
+            let mut target_healthy =
+                accept_target_channel(&mut healthy, &target, b"healthy-open").await?;
+            assert_tcp_exchange(
+                &mut healthy, &mut target_healthy, b"healthy-before-reset", b"healthy-before-reply",
+            ).await?;
+            let mut affected = TcpStream::connect(listen).await?;
+            let mut target_affected =
+                accept_target_channel(&mut affected, &target, b"affected-open").await?;
+            assert_tcp_exchange(
+                &mut affected, &mut target_affected, b"affected-before-reset", b"affected-before-reply",
+            ).await?;
+            // Read final marker before reset so buffered-data loss cannot hide replay.
+            affected.write_all(b"affected-final-marker").await?;
+            let mut final_marker = [0; 21];
+            target_affected.read_exact(&mut final_marker).await?;
+            assert_eq!(&final_marker, b"affected-final-marker");
+            target_affected.set_zero_linger()?;
+            assert_eq!(target_affected.linger()?, Some(Duration::ZERO));
+            drop(target_affected);
+            let mut byte = [0; 1];
+            let closed = tokio::time::timeout(Duration::from_secs(15), affected.read(&mut byte))
+                .await.context("affected client did not terminate after target reset")?;
+            assert!(matches!(closed, Ok(0) | Err(_)), "unexpected affected data: {closed:?}");
+            assert_tcp_exchange(
+                &mut healthy, &mut target_healthy, b"healthy-after-reset", b"healthy-after-reply",
+            ).await?;
+            let mut new_client = TcpStream::connect(listen).await?;
+            let mut new_target =
+                accept_target_channel(&mut new_client, &target, b"new-open").await?;
+            assert_tcp_exchange(
+                &mut new_client, &mut new_target, b"new-after-reset", b"new-after-reply",
+            ).await?;
+            // A finite observation window cannot prove absence forever. It catches
+            // immediate replay/reconnect and trailing bytes on every survivor.
+            let mut healthy_target_byte = [0; 1];
+            let mut healthy_client_byte = [0; 1];
+            let mut new_target_byte = [0; 1];
+            let mut new_client_byte = [0; 1];
+            let quiet = tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::select! {
+                    result = target.accept() => format!("unexpected target accept/replay: {result:?}"),
+                    result = target_healthy.read(&mut healthy_target_byte) => format!("unsolicited healthy target data/closure: {result:?}"),
+                    result = healthy.read(&mut healthy_client_byte) => format!("unsolicited healthy client data/closure: {result:?}"),
+                    result = new_target.read(&mut new_target_byte) => format!("unsolicited new target data/closure: {result:?}"),
+                    result = new_client.read(&mut new_client_byte) => format!("unsolicited new client data/closure: {result:?}"),
+                }
+            }).await;
+            assert!(quiet.is_err(), "{}", quiet.unwrap());
+            let log = std::fs::read_to_string(&serve_log)?;
+            assert_eq!(log.matches("peer connected via").count(), 1, "{log}");
+            eprintln!("established target reset: affected closed ({closed:?}); healthy/new exact exchanges; 2s no observable replay; one peer connection; serve log: {log}");
+            Ok::<_, anyhow::Error>(())
+        }).await.context("established target reset scenario timeout");
+
+        // Fixture termination, not graceful application shutdown acceptance.
+        for process in [&mut access, &mut serve] {
+            process.0.kill().context("kill fixture role")?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while process.0.try_wait()?.is_none() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            }).await.context("fixture role reap timeout")??;
+            eprintln!("fixture role {} killed and reaped within 5s", process.0.id());
+        }
+        tokio::time::timeout(Duration::from_secs(5), server.shutdown())
+            .await.context("local relay shutdown timeout")??;
+        eprintln!("local relay shutdown within 5s");
+        outcome??;
+        Ok::<_, anyhow::Error>(())
+    }).await.context("established target reset test timeout")??;
+    Ok(())
+}
