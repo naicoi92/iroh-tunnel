@@ -1,0 +1,9 @@
+NodeId: d142258a7c963d97d4c8cc6b701ef1460e1213887915c434ef0c2d5d5b629de0
+Serving: compat tcp://127.0.0.1:64432
+[2m2026-10-29T12:44:10.296439Z[0m [32m INFO[0m endpoint ready
+[2m2026-10-29T12:44:10.307305Z[0m [32m INFO[0m wrote status file [3mpath[0m[2m=[0m/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-ywaqeibs/serve/state/serve-status.json
+[2m2026-10-29T12:44:10.307345Z[0m [32m INFO[0m serve endpoint ready, accepting connections
+[2m2026-10-29T12:44:17.527009Z[0m [32m INFO[0m peer connected via relay=https://use1-1.relay.n0.iroh.link/ [3mpeer[0m[2m=[0m55a8fb1ab87b730985a373437b2687063c47f5d799bac4da141a089643259506 [3mservice[0m[2m=[0mcompat
+[2m2026-10-29T12:44:18.480794Z[0m [32m INFO[0m peer disconnected (service compat) [3mpeer[0m[2m=[0m55a8fb1ab87b730985a373437b2687063c47f5d799bac4da141a089643259506
+[2m2026-10-29T12:44:19.323587Z[0m [32m INFO[0m received SIGINT (Ctrl+C)
+[2m2026-10-29T12:44:19.625057Z[0m [32m INFO[0m draining connections (timeout 5s)...
