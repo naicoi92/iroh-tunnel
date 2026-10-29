@@ -1,0 +1,12 @@
+test_cleanup_failure_makes_runner_exit_nonzero (test_tcp_compat.TcpCompatTests.test_cleanup_failure_makes_runner_exit_nonzero) ... ok
+test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) ... ok
+test_graceful_cleanup_keeps_pass (test_tcp_compat.TcpCompatTests.test_graceful_cleanup_keeps_pass) ... ok
+test_real_child_nonzero_shutdown_forbids_pass (test_tcp_compat.TcpCompatTests.test_real_child_nonzero_shutdown_forbids_pass) ... ok
+test_shared_connection_observation_accepts_one_dial (test_tcp_compat.TcpCompatTests.test_shared_connection_observation_accepts_one_dial) ... ok
+test_shared_connection_observation_rejects_multiple_dials (test_tcp_compat.TcpCompatTests.test_shared_connection_observation_rejects_multiple_dials) ... ok
+test_two_overlapping_channels_preserve_distinct_bytes (test_tcp_compat.TcpCompatTests.test_two_overlapping_channels_preserve_distinct_bytes) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.374s
+
+OK

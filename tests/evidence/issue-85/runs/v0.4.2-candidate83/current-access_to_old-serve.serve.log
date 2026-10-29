@@ -1,0 +1,10 @@
+2026-10-29T13:42:36.831998Z  WARN secret_key empty, generated new key, saving to config
+NodeId: af693863e72ae23f22196dcb175982345d64c104702be204198df6e5a7bdf807
+Serving: compat tcp://127.0.0.1:61253
+2026-10-29T13:42:36.840427Z  INFO endpoint ready
+2026-10-29T13:42:36.848502Z  INFO wrote status file path=/TMP/iroh-85-snupu_dp/serve/state/serve-status.json
+2026-10-29T13:42:36.848523Z  INFO serve endpoint ready, accepting connections
+2026-10-29T13:42:44.140724Z  INFO peer connected via relay=https://use1-1.relay.n0.iroh.link/ peer=8dd142b8dbd551f61dc10a334923a630f1e84de5e82b8878e3bc282f4ae9dd31 service=compat
+2026-10-29T13:42:44.543152Z  INFO peer disconnected (service compat) peer=8dd142b8dbd551f61dc10a334923a630f1e84de5e82b8878e3bc282f4ae9dd31
+2026-10-29T13:42:45.472628Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:42:45.782314Z  INFO draining connections (timeout 5s)...

@@ -1,0 +1,11 @@
+{
+  "case": "TCP-COMPAT-01",
+  "started_at": "2026-10-29T12:41:00.165842+00:00",
+  "platform": "macOS-15.7.3-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "user_id": 501,
+  "variants": [],
+  "outcome": "BLOCKED",
+  "error": "FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent'",
+  "finished_at": "2026-10-29T12:41:00.251741+00:00"
+}

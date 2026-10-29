@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking iroh-tunnel v0.4.2 (/private/tmp/iroh-tunnel-issue-85-current)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.82s

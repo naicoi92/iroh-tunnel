@@ -1,0 +1,22 @@
+   Compiling iroh-tunnel v0.4.2 (/private/tmp/iroh-tunnel-issue-85-current)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.34s
+     Running tests/interop_0_4.rs (/tmp/iroh-85-test-target/debug/deps/interop_0_4-7ba56938c63a6101)
+
+running 1 test
+old-access_to_old-serve_multiplex-true: FAIL RuntimeError: Serve status: process exited 1
+current-access_to_current-serve: FAIL RuntimeError: Serve status: process exited 2
+old-access_to_current-serve_multiplex-true: FAIL RuntimeError: Serve status: process exited 2
+current-access_to_old-serve: FAIL RuntimeError: Serve status: process exited 1
+old-access_to_current-serve_multiplex-false: FAIL RuntimeError: Serve status: process exited 2
+old-access_to_old-serve_multiplex-false: FAIL RuntimeError: Serve status: process exited 1
+Error: TCP compatibility runner failed; inspect evidence output
+test released_0_4_and_current_exchange_tcp_bytes_in_both_directions ... FAILED
+
+failures:
+
+failures:
+    released_0_4_and_current_exchange_tcp_bytes_in_both_directions
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+error: test failed, to rerun pass `--test interop_0_4`

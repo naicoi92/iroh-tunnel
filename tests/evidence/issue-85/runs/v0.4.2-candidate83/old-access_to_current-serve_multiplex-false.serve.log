@@ -1,0 +1,13 @@
+NodeId: 5fdd612390445a9432061629f94de03bf4dfc5091f664a4414246978c705f7e6
+Serving: compat tcp://127.0.0.1:61296
+2026-10-29T13:42:46.345880Z  INFO endpoint ready
+2026-10-29T13:42:46.352365Z  INFO wrote status file path=/TMP/iroh-85-40a66ehz/serve/state/serve-status.json
+2026-10-29T13:42:46.352398Z  INFO serve endpoint ready, accepting connections
+2026-10-29T13:42:53.667861Z  INFO peer connected via relay=https://use1-1.relay.n0.iroh.link/ peer=4d1b6f660dbf8e61dd1855404515c3816ee51477288f2517b662e107646e6cd1 service=compat
+2026-10-29T13:42:54.351866Z  INFO peer connected via relay=https://use1-1.relay.n0.iroh.link/, direct=192.168.139.3:58260 peer=4d1b6f660dbf8e61dd1855404515c3816ee51477288f2517b662e107646e6cd1 service=compat
+2026-10-29T13:42:54.354297Z  INFO peer disconnected (service compat) peer=4d1b6f660dbf8e61dd1855404515c3816ee51477288f2517b662e107646e6cd1
+2026-10-29T13:42:54.354313Z  WARN stream error: connection lost
+2026-10-29T13:42:54.698968Z  INFO peer disconnected (service compat) peer=4d1b6f660dbf8e61dd1855404515c3816ee51477288f2517b662e107646e6cd1
+2026-10-29T13:42:54.699401Z  WARN stream error: connection lost
+2026-10-29T13:42:55.580389Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:42:55.916377Z  INFO draining connections (timeout 5s)...

@@ -1,0 +1,128 @@
+{
+  "captured_at": "2026-10-29T12:45:03.832676+00:00",
+  "issues": {
+    "85": {
+      "body": "## Parent\n\n#68\n\n## What to build\n\nPreserve TCP interoperability with iroh-tunnel 0.4 where feasible, without introducing a wire-version negotiation framework.\n\n## Acceptance criteria\n\n- [ ] Test real 0.4 Access \u2192 redesigned Serve and redesigned Access \u2192 real 0.4 Serve against a TCP target; record exact versions and outcomes.\n- [ ] If either path fails, document the compatibility trade-off and obtain the user's decision before a breaking release; do not silently declare compatibility.\n- [ ] Do not add a version-negotiation framework for this redesign. Test other supported peer combinations as applicable.\n\n## Traceability\n\nTC-02; AC-TC-02; story 16. The compatibility test is not yet performed. Refer to #68 and the resolution of #75.\n\n## Blocked by\n\nNative issue dependencies are authoritative. Real executable end-to-end evidence is required; disclose unavailable environments.\n",
+      "comments": [
+        {
+          "id": "IC_kwDOTHfByc8AAAABgs0S9Q",
+          "author": {
+            "login": "naicoi92"
+          },
+          "authorAssociation": "OWNER",
+          "body": "## Readiness and supporting artifacts \u00b7 audit 2026\n\nShared rule/acceptance reference: https://github.com/naicoi92/iroh-tunnel/issues/68#issuecomment-6489433346\n\nAcceptance checklist and traceability are in this issue body. No implementation or E2E completion is asserted by this audit.\n\nOpen native blockers at audit: #75, #81. Live dependency status is authoritative. Issue acceptance criteria must be met and relevant real-path or platform evidence recorded before closure. Local design diagrams are not yet published and are not claimed as GitHub-accessible evidence.\n",
+          "createdAt": "2026-10-29T06:14:42Z",
+          "includesCreatedEdit": false,
+          "isMinimized": false,
+          "minimizedReason": "",
+          "reactionGroups": [],
+          "url": "https://github.com/naicoi92/iroh-tunnel/issues/85#issuecomment-6489445109",
+          "viewerDidAuthor": true
+        }
+      ],
+      "number": 85,
+      "state": "OPEN",
+      "title": "Verify TCP interoperability with iroh-tunnel 0.4",
+      "url": "https://github.com/naicoi92/iroh-tunnel/issues/85",
+      "native_blocked_by": [
+        {
+          "number": 75,
+          "title": "Decide tunnel wire compatibility contract",
+          "state": "closed",
+          "html_url": "https://github.com/naicoi92/iroh-tunnel/issues/75"
+        },
+        {
+          "number": 81,
+          "title": "Run a TCP tunnel with quick flags",
+          "state": "closed",
+          "html_url": "https://github.com/naicoi92/iroh-tunnel/issues/81"
+        }
+      ]
+    },
+    "75": {
+      "body": "## Parent\n\n#68\n\n## What to build\n\nAgree how independently versioned peers negotiate compatibility and fail without downgrade.\n\n## Acceptance criteria\n\n- [ ] Decision records compatibility and incompatible-peer outcomes, including version evolution.\n- [ ] Acceptance scenarios are reviewed with the user; do not implement an unapproved wire protocol.\n\n## Traceability\n\nTC-02; AC-TC-02; story 16. Refer to #68.\n\n## Blocked by\n\nNative issue dependencies are authoritative; see the dependency list.\n\nHuman decision or evidence gate; do not implement unresolved policy by assumption.\n",
+      "comments": [
+        {
+          "id": "IC_kwDOTHfByc8AAAABgsz9Rg",
+          "author": {
+            "login": "naicoi92"
+          },
+          "authorAssociation": "OWNER",
+          "body": "## Readiness and supporting artifacts \u00b7 audit 2026\n\nShared rule/acceptance reference: https://github.com/naicoi92/iroh-tunnel/issues/68#issuecomment-6489433346\n\nConfirmed: incompatible peers fail clearly without silent downgrade. Wire version negotiation is open.\n\nOpen native blockers at audit: none. Live dependency status is authoritative. Issue acceptance criteria must be met and relevant real-path or platform evidence recorded before closure. Local design diagrams are not yet published and are not claimed as GitHub-accessible evidence.\n",
+          "createdAt": "2026-10-29T06:14:19Z",
+          "includesCreatedEdit": false,
+          "isMinimized": false,
+          "minimizedReason": "",
+          "reactionGroups": [],
+          "url": "https://github.com/naicoi92/iroh-tunnel/issues/75#issuecomment-6489439558",
+          "viewerDidAuthor": true
+        },
+        {
+          "id": "IC_kwDOTHfByc8AAAABgs2L1g",
+          "author": {
+            "login": "naicoi92"
+          },
+          "authorAssociation": "OWNER",
+          "body": "## Partial decision \u2014 user confirmed\n\nWire protocol version is independent of binary release version. Peers with compatible wire versions may interoperate; incompatible versions fail clearly without silent downgrade. Exact negotiation, version compatibility rules and acceptance details remain open. Do not close this issue yet.",
+          "createdAt": "2026-10-29T06:16:52Z",
+          "includesCreatedEdit": false,
+          "isMinimized": false,
+          "minimizedReason": "",
+          "reactionGroups": [],
+          "url": "https://github.com/naicoi92/iroh-tunnel/issues/75#issuecomment-6489476054",
+          "viewerDidAuthor": true
+        },
+        {
+          "id": "IC_kwDOTHfByc8AAAABgtPQAQ",
+          "author": {
+            "login": "naicoi92"
+          },
+          "authorAssociation": "OWNER",
+          "body": "## Supersession and 0.4 compatibility clarification\n\nThe earlier partial suggestion to introduce an independent wire-version framework is superseded: the user does not want expanded version checking or negotiation in this redesign and expects existing 0.4 connections not to break. Existing repository protocol documentation describes service ALPN without version negotiation; this is not evidence that redesigned peers interoperate. Verify old Access \u2192 new Serve and new Access \u2192 old Serve with actual 0.4 artifacts and report any compatibility limits. Exact scope remains open; do not close this issue or implement a new negotiation framework by assumption.",
+          "createdAt": "2026-10-29T06:43:18Z",
+          "includesCreatedEdit": false,
+          "isMinimized": false,
+          "minimizedReason": "",
+          "reactionGroups": [],
+          "url": "https://github.com/naicoi92/iroh-tunnel/issues/75#issuecomment-6489886721",
+          "viewerDidAuthor": true
+        },
+        {
+          "id": "IC_kwDOTHfByc8AAAABgtRUZA",
+          "author": {
+            "login": "naicoi92"
+          },
+          "authorAssociation": "OWNER",
+          "body": "## Partial decision \u2014 user confirmed\n\nPreserve TCP compatibility with 0.4 where feasible. Test both 0.4 Access \u2192 redesigned Serve and redesigned Access \u2192 0.4 Serve. If either fails, report the trade-off for user decision; compatibility is not an unconditional release gate. Do not add a version-negotiation framework for this redesign. The compatibility test has not run.",
+          "createdAt": "2026-10-29T06:45:16Z",
+          "includesCreatedEdit": false,
+          "isMinimized": false,
+          "minimizedReason": "",
+          "reactionGroups": [],
+          "url": "https://github.com/naicoi92/iroh-tunnel/issues/75#issuecomment-6489920612",
+          "viewerDidAuthor": true
+        },
+        {
+          "id": "IC_kwDOTHfByc8AAAABgtVVTw",
+          "author": {
+            "login": "naicoi92"
+          },
+          "authorAssociation": "OWNER",
+          "body": "## Resolution \u2014 supersedes original acceptance wording\n\nUser decided not to introduce a wire-version negotiation framework. Seek TCP interoperability with iroh-tunnel 0.4 where feasible; test both old Access \u2192 new Serve and new Access \u2192 old Serve, and present any failure for user decision before a breaking release. Exact test results are implementation evidence tracked by #85, not a condition for closing this decision issue. This supersedes the original request to design negotiation/version evolution.",
+          "createdAt": "2026-10-29T06:48:58Z",
+          "includesCreatedEdit": false,
+          "isMinimized": false,
+          "minimizedReason": "",
+          "reactionGroups": [],
+          "url": "https://github.com/naicoi92/iroh-tunnel/issues/75#issuecomment-6489986383",
+          "viewerDidAuthor": true
+        }
+      ],
+      "number": 75,
+      "state": "CLOSED",
+      "title": "Decide tunnel wire compatibility contract",
+      "url": "https://github.com/naicoi92/iroh-tunnel/issues/75",
+      "native_blocked_by": []
+    }
+  }
+}

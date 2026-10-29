@@ -1,0 +1,14 @@
+2026-10-29T13:41:58.221305Z  WARN secret_key empty, generated new key, saving to config
+NodeId: 39bb1b56e3b6a85d5d25f8c57ae13e5a1a8adf5695e5f14b0d5cf1a2165ee69f
+Serving: compat tcp://127.0.0.1:61079
+2026-10-29T13:41:58.231404Z  INFO endpoint ready
+2026-10-29T13:41:58.237641Z  INFO wrote status file path=/TMP/iroh-85-9tuu8a_n/serve/state/serve-status.json
+2026-10-29T13:41:58.237658Z  INFO serve endpoint ready, accepting connections
+2026-10-29T13:42:05.406488Z  INFO peer connected peer=538cf5ee1045359fde001d9090ea9b2cc01b4186e9b5d0c140cc4df137d3ac98 service=compat
+2026-10-29T13:42:05.763505Z  INFO peer connected peer=538cf5ee1045359fde001d9090ea9b2cc01b4186e9b5d0c140cc4df137d3ac98 service=compat
+2026-10-29T13:42:05.765973Z  INFO peer disconnected (service compat) peer=538cf5ee1045359fde001d9090ea9b2cc01b4186e9b5d0c140cc4df137d3ac98
+2026-10-29T13:42:05.766001Z  WARN stream error: connection lost
+2026-10-29T13:42:05.766428Z  INFO peer disconnected (service compat) peer=538cf5ee1045359fde001d9090ea9b2cc01b4186e9b5d0c140cc4df137d3ac98
+2026-10-29T13:42:05.766449Z  WARN stream error: connection lost
+2026-10-29T13:42:06.645344Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:42:06.951920Z  INFO draining connections (timeout 5s)...

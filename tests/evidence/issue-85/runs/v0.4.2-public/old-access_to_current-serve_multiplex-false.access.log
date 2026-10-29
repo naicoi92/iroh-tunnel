@@ -1,0 +1,11 @@
+[2m2026-10-29T12:45:46.316542Z[0m [33m WARN[0m secret_key empty, generated new key, saving to config
+NodeId: fface8ad200f7663322231b9c813d649ef0eac2587b40adc2a861606582fb4fb
+Exposed: compat 127.0.0.1:65059 -> peer 9cc6d53ca9fa7cc618813e1270771bf1e374c3e77028e76cd4a1b408c77f5197 (tcp://127.0.0.1:65059)
+[2m2026-10-29T12:45:46.325398Z[0m [32m INFO[0m endpoint ready
+[2m2026-10-29T12:45:46.329655Z[0m [32m INFO[0m wrote status file [3mpath[0m[2m=[0m/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-dd8mx1wd/access/state/access-status.json
+[2m2026-10-29T12:45:46.329669Z[0m [32m INFO[0m access endpoint ready, listening for local clients
+[2m2026-10-29T12:45:46.329705Z[0m [32m INFO[0m listening for local clients [3mlisten_addr[0m[2m=[0m127.0.0.1:65059
+[2m2026-10-29T12:45:53.065268Z[0m [32m INFO[0m connected to serve peer (per-channel, 9cc6d53c…) via relay=https://use1-1.relay.n0.iroh.link/ [3mpeer[0m[2m=[0m9cc6d53ca9fa7cc618813e1270771bf1e374c3e77028e76cd4a1b408c77f5197 [3msvc_name[0m[2m=[0mcompat
+[2m2026-10-29T12:45:53.721707Z[0m [32m INFO[0m disconnected from serve peer (service compat) [3mpeer[0m[2m=[0m9cc6d53ca9fa7cc618813e1270771bf1e374c3e77028e76cd4a1b408c77f5197
+[2m2026-10-29T12:45:53.722051Z[0m [32m INFO[0m received SIGINT (Ctrl+C)
+[2m2026-10-29T12:45:54.090052Z[0m [32m INFO[0m draining connections (timeout 5s)...
