@@ -715,3 +715,74 @@ fn quick_operator_contract_explains_target_protection() -> Result<()> {
     assert!(help.contains("public identity, not authorization"));
     Ok(())
 }
+
+// TCP-02 / #86: the first target socket remains live while the second target
+// dial is refused. Distinct markers and a rebound listener expose replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn target_dial_failure_closes_only_affected_channel_without_replay() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let temp = tempfile::tempdir()?;
+        let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+        let target = TcpListener::bind("127.0.0.1:0").await?;
+        let target_addr = target.local_addr()?;
+        let relay = relay.to_string();
+        let serve_log = temp.path().join("serve.log");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        isolated(&mut command, temp.path());
+        let mut serve = Process(
+            command.env("NO_COLOR", "1").env("RUST_LOG", "iroh_tunnel=debug")
+                .env("IROH_TUNNEL_STATE_DIR", temp.path())
+                .args(["serve", "-n", "echo", "-t", &target_addr.to_string(), "--relay-url", &relay])
+                .stdout(std::fs::File::create(&serve_log)?)
+                .stderr(Stdio::null()).spawn()?,
+            None,
+        );
+        let serve_status = status(&temp.path().join("serve-status.json"), &mut serve).await?;
+        let node = serve_status["node_id"].as_str().context("serve node id")?;
+        let (_access, listen) = access_ready(temp.path(), temp.path(), false, false, node, &relay).await?;
+        let mut healthy = TcpStream::connect(listen).await?;
+        healthy.write_all(b"healthy-first").await?;
+        let (mut target_healthy, _) = target.accept().await?;
+        let mut first = [0; 13];
+        target_healthy.read_exact(&mut first).await?;
+        assert_eq!(&first, b"healthy-first");
+        target_healthy.write_all(b"healthy-reply").await?;
+        let mut reply = [0; 13];
+        healthy.read_exact(&mut reply).await?;
+        assert_eq!(&reply, b"healthy-reply");
+
+        // Existing accepted socket survives closing the listening socket.
+        drop(target);
+        let mut failed = TcpStream::connect(listen).await?;
+        failed.write_all(b"failed-marker").await?;
+        let mut byte = [0; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(15), failed.read(&mut byte)).await?;
+        assert!(matches!(closed, Ok(0) | Err(_)), "failed channel remained readable: {closed:?}");
+        let target = TcpListener::bind(target_addr).await?;
+        healthy.write_all(b"healthy-after").await?;
+        let mut after = [0; 13];
+        target_healthy.read_exact(&mut after).await?;
+        assert_eq!(&after, b"healthy-after");
+        target_healthy.write_all(b"after-reply!!").await?;
+        healthy.read_exact(&mut reply).await?;
+        assert_eq!(&reply, b"after-reply!!");
+        assert!(tokio::time::timeout(Duration::from_secs(2), target.accept()).await.is_err(), "unexpected target connection/replay");
+        let mut new_client = TcpStream::connect(listen).await?;
+        new_client.write_all(b"new-request").await?;
+        let (mut new_target, _) = target.accept().await?;
+        let mut new_request = [0; 11];
+        new_target.read_exact(&mut new_request).await?;
+        assert_eq!(&new_request, b"new-request");
+        new_target.write_all(b"new-response").await?;
+        let mut new_response = [0; 12];
+        new_client.read_exact(&mut new_response).await?;
+        assert_eq!(&new_response, b"new-response");
+        assert!(tokio::time::timeout(Duration::from_secs(2), target.accept()).await.is_err(), "unexpected extra target connection/replay");
+        let log = std::fs::read_to_string(&serve_log)?;
+        assert_eq!(log.matches("peer connected via").count(), 1, "{log}");
+        assert!(log.contains("stream=2") && log.contains("stream=3") && log.contains("failed to connect local service"), "{log}");
+        eprintln!("target failure isolated; failed channel closed; healthy exact markers survived; no new target connection; serve log: {log}");
+        Ok::<_, anyhow::Error>(())
+    }).await.context("target failure isolation timeout")??;
+    Ok(())
+}
