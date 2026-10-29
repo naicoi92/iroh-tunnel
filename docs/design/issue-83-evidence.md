@@ -33,6 +33,7 @@ confirmed real-process seam; supporting local tests use public config boundaries
 | CFG-03, app-owned saves | Real `config add`, `remove`, `keygen` commands strip all retained service fields while preserving comments, relay settings and key (except requested key rotation); inline services covered |
 | CFG-03, identity save | Public generated-key persistence removes field for both roles; rejected mutation leaves file/key unchanged |
 | User editor clarification | Actual `config edit` launches disposable Unix editor fixture; file matches editor output exactly, including service `multiplex = false` |
+| Observable config parse/write errors | Actual `config keygen` process reports malformed TOML and read-only-file write failure; original file and key remain unchanged for these failure modes, and diagnostics do not contain the key |
 | TCP-01, AC-TCP-03, #83 AC2, CFG-MULTIPLEX-01 | `tests/configured_multiplex.rs`: true/false/omitted, real configured Serve and Access processes, two overlapping TCP clients, exact distinct bidirectional bytes and follow-up, one Serve connection plus stream 2, no legacy warning |
 | #83 AC1, S07, CFG-RUN-01 (supporting) | Same three variants save through actual config command, restart both processes, retain public identities/service/target, repeat byte exchange and connection-reuse observation |
 
@@ -98,6 +99,28 @@ with streams 1 and 2; same target `127.0.0.1:50972` reached after restart at
 path migration is possible; this is not forced-relay-only or direct-path proof.
 Requests: `first request`, `other request`; replies: `first response`,
 `other response`; first channel follow-up: `still open` echoed exactly.
+
+## Review rework: parse and write failures
+
+Tests added after independent review, against candidate `ab1fd7b`: both passed
+on existing behavior before changelog or implementation changes; no behavioral
+RED is claimed. `malformed_config_reports_parse_error_and_preserves_file` checks
+exit 2, parse diagnostic, unchanged file and no key in output.
+`config_write_error_is_reported_and_readonly_file_preserved` checks exit 1,
+write diagnostic, unchanged legacy file/key and no key in output. The latter
+uses Unix read-only mode with a preflight check; privileged users who bypass
+permissions explicitly skip it. It exercises failure opening an existing file,
+not a partial write or a general atomicity guarantee. Windows write-failure
+injection is not covered. Applicable standards RS-05, RS-10, RS-11, RS-13,
+RS-14 and RS-15. External-editor contract remains unchanged.
+
+On macOS arm64, non-root uid 501, Rust 1.91.1: each new test passed
+individually against existing behavior; `cargo +1.91.1 fmt --all -- --check`,
+`cargo +1.91.1 clippy --all-targets --all-features --locked -- -D warnings`,
+`cargo +1.91.1 test --all-features --locked` (142 passed, 4 public-relay tests
+ignored), and targeted `cargo +1.91.1 test --all-features --locked --test
+config_multiplex_compat --test configured_multiplex` (8 + 3 passed) all passed.
+No public relay tests were run with disabled TLS verification.
 
 ## Limits and review gate
 

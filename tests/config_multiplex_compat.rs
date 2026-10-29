@@ -195,6 +195,61 @@ fn rejected_config_add_preserves_legacy_file_and_key() -> Result<()> {
 }
 
 #[test]
+fn malformed_config_reports_parse_error_and_preserves_file() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("access.toml");
+    let key = encode_secret_key(&iroh::SecretKey::generate());
+    let source = format!("[node]\nsecret_key = \"{key}\"\n\n[[services]\n");
+    std::fs::write(&path, &source)?;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        .args(["access", "config", "keygen", "--config"])
+        .arg(&path)
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("failed to parse config"));
+    assert!(!stderr.contains(&key), "diagnostic exposed secret key");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&key));
+    assert!(
+        std::fs::read_to_string(&path)? == source,
+        "parse failure changed config"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn config_write_error_is_reported_and_readonly_file_preserved() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("access.toml");
+    let key = encode_secret_key(&iroh::SecretKey::generate());
+    let source = format!("[node]\nsecret_key = \"{key}\"\n\n[[services]]\nname = \"echo\"\nnode_id = \"{}\"\nprotocol = \"tcp\"\nport = 5432\nmultiplex = false\n", iroh::SecretKey::generate().public());
+    std::fs::write(&path, &source)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+    // Privileged processes can bypass mode bits; never claim coverage in that case.
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        eprintln!("skipped: process bypasses read-only file permissions");
+        return Ok(());
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        .args(["access", "config", "keygen", "--config"])
+        .arg(&path)
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("failed to write config"));
+    assert!(!stderr.contains(&key), "diagnostic exposed secret key");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&key));
+    assert!(
+        std::fs::read_to_string(&path)? == source,
+        "write failure changed config"
+    );
+    Ok(())
+}
+
+#[test]
 fn generated_identity_save_drops_legacy_fields_for_both_roles() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("role.toml");
