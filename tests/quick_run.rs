@@ -67,6 +67,50 @@ async fn quick_short_flags_forward_bytes_to_fixed_target() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quick_long_and_short_flags_reach_same_fixed_target() -> Result<()> {
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let target_addr = target.local_addr()?.to_string();
+    let fixture = async {
+        for (expected, reply) in [
+            (b"long request".as_slice(), b"long response".as_slice()),
+            (b"short request".as_slice(), b"short response".as_slice()),
+        ] {
+            let (mut stream, _) = target.accept().await?;
+            let mut request = vec![0; expected.len()];
+            stream.read_exact(&mut request).await?;
+            anyhow::ensure!(request == expected, "wrong target request");
+            stream.write_all(reply).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let sessions = async {
+        tcp_session(
+            false,
+            false,
+            &target_addr,
+            b"long request",
+            b"long response",
+        )
+        .await?;
+        tcp_session(
+            true,
+            false,
+            &target_addr,
+            b"short request",
+            b"short response",
+        )
+        .await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(180), async {
+        tokio::try_join!(fixture, sessions)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quick_ipv6_target_forwards_bytes() -> Result<()> {
     tcp_roundtrip(false, true, false).await
 }
@@ -86,9 +130,6 @@ async fn tcp_roundtrip(short: bool, ipv6_target: bool, ipv6_listen: bool) -> Res
             }
         }
     }
-    let temp = tempfile::tempdir()?;
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let relay = relay.to_string();
     let target = TcpListener::bind(if ipv6_target {
         "[::1]:0"
     } else {
@@ -96,14 +137,35 @@ async fn tcp_roundtrip(short: bool, ipv6_target: bool, ipv6_listen: bool) -> Res
     })
     .await?;
     let target_addr = target.local_addr()?.to_string();
-    let fixture = tokio::spawn(async move {
+    let fixture = async {
         let (mut stream, _) = target.accept().await?;
         let mut request = [0u8; 7];
         stream.read_exact(&mut request).await?;
         anyhow::ensure!(&request == b"request", "wrong target request");
         stream.write_all(b"response").await?;
         Ok::<_, anyhow::Error>(())
-    });
+    };
+    tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::try_join!(
+            fixture,
+            tcp_session(short, ipv6_listen, &target_addr, b"request", b"response")
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+async fn tcp_session(
+    short: bool,
+    ipv6_listen: bool,
+    target_addr: &str,
+    payload: &[u8],
+    expected_response: &[u8],
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let relay = relay.to_string();
     let listener = TcpListener::bind(if ipv6_listen {
         "[::1]:0"
     } else {
@@ -118,7 +180,7 @@ async fn tcp_roundtrip(short: bool, ipv6_target: bool, ipv6_listen: bool) -> Res
             "-n",
             "echo",
             "-t",
-            &target_addr,
+            target_addr,
             "-p",
             "tcp",
             "--relay-url",
@@ -130,7 +192,7 @@ async fn tcp_roundtrip(short: bool, ipv6_target: bool, ipv6_listen: bool) -> Res
             "--name",
             "echo",
             "--target",
-            &target_addr,
+            target_addr,
             "--relay-url",
             &relay,
         ]
@@ -177,11 +239,10 @@ async fn tcp_roundtrip(short: bool, ipv6_target: bool, ipv6_listen: bool) -> Res
         }
     })
     .await?;
-    client.write_all(b"request").await?;
-    let mut response = [0u8; 8];
+    client.write_all(payload).await?;
+    let mut response = vec![0u8; expected_response.len()];
     tokio::time::timeout(Duration::from_secs(30), client.read_exact(&mut response)).await??;
-    assert_eq!(&response, b"response");
-    fixture.await??;
+    assert_eq!(response, expected_response);
     // Status describes observed paths, not a forced-relay assertion.
     tokio::time::sleep(Duration::from_secs(6)).await;
     for role_name in ["serve", "access"] {
@@ -189,7 +250,9 @@ async fn tcp_roundtrip(short: bool, ipv6_target: bool, ipv6_listen: bool) -> Res
             std::fs::read_to_string(temp.path().join(format!("{role_name}-status.json")))?;
         eprintln!("{role_name} status: {snapshot}");
     }
-    eprintln!("roundtrip short={short} target={target_addr} listen={listen}: request -> response");
+    eprintln!(
+        "roundtrip short={short} target={target_addr} listen={listen}: exact request and response"
+    );
     Ok(())
 }
 
