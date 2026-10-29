@@ -67,6 +67,39 @@ impl From<ServeCli> for Cli {
     }
 }
 
+/// Standalone Access command line, sharing the all-in-one role arguments.
+#[derive(Parser, Debug)]
+#[command(name = "iroh-tunnel-access", version = APP_VERSION, about = "Consume remote services via Iroh", args_conflicts_with_subcommands = true)]
+pub struct AccessCli {
+    /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    /// Quiet mode (only errors).
+    #[arg(short, long)]
+    pub quiet: bool,
+    /// Color output: auto | always | never.
+    #[arg(long, default_value = "auto")]
+    pub color: String,
+    #[command(flatten)]
+    pub quick: AccessQuickArgs,
+    #[command(subcommand)]
+    pub cmd: Option<RoleCmd>,
+}
+
+impl From<AccessCli> for Cli {
+    fn from(cli: AccessCli) -> Self {
+        Self {
+            verbose: cli.verbose,
+            quiet: cli.quiet,
+            color: cli.color,
+            role: Role::Access {
+                quick: cli.quick,
+                cmd: cli.cmd,
+            },
+        }
+    }
+}
+
 /// Top-level role: serve or access.
 #[derive(Subcommand, Debug)]
 pub enum Role {

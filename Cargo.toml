@@ -17,6 +17,10 @@ name = "iroh-tunnel"
 name = "iroh-tunnel-serve"
 path = "src/bin/iroh-tunnel-serve.rs"
 
+[[bin]]
+name = "iroh-tunnel-access"
+path = "src/bin/iroh-tunnel-access.rs"
+
 [features]
 # Enables the insecure relay-TLS trust override used by integration tests
 # (in-process relay with a self-signed certificate). Never enable in

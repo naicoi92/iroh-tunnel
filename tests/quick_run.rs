@@ -85,7 +85,7 @@ async fn access_ready(
     node: &str,
     relay: &str,
 ) -> Result<(Process, std::net::SocketAddr)> {
-    access_ready_with_collision_probe(home, state, short, ipv6, node, relay, None).await
+    access_ready_with_collision_probe(home, state, short, ipv6, node, relay, None, None).await
 }
 
 struct CollisionProbe {
@@ -101,6 +101,7 @@ async fn access_ready_with_collision_probe(
     node: &str,
     relay: &str,
     probe: Option<&mut CollisionProbe>,
+    binary: Option<&std::path::Path>,
 ) -> Result<(Process, std::net::SocketAddr)> {
     for attempt in 0..8 {
         let injected = probe.as_ref().filter(|_| attempt == 0);
@@ -116,15 +117,23 @@ async fn access_ready_with_collision_probe(
         let address = listen.to_string();
         let log_path = state.join(format!("access-listener-{attempt}.log"));
         let log = std::fs::File::create(&log_path)?;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        let mut command = Command::new(
+            binary.unwrap_or_else(|| std::path::Path::new(env!("CARGO_BIN_EXE_iroh-tunnel"))),
+        );
         isolated(&mut command, home);
+        if let Some(binary) = binary {
+            let directory = binary.parent().context("standalone binary directory")?;
+            command.current_dir(directory).env("PATH", directory);
+        }
         command
             .env("IROH_TUNNEL_STATE_DIR", state)
             .stdout(log)
             .stderr(Stdio::null());
+        if binary.is_none() {
+            command.arg("access");
+        }
         if short {
             command.args([
-                "access",
                 "-n",
                 "echo",
                 "-l",
@@ -138,7 +147,6 @@ async fn access_ready_with_collision_probe(
             ]);
         } else {
             command.args([
-                "access",
                 "--name",
                 "echo",
                 "--listen",
@@ -203,6 +211,7 @@ async fn access_ready_retries_occupied_port_and_reaps_first_child() -> Result<()
         "0000000000000000000000000000000000000000000000000000000000000000",
         &relay.to_string(),
         Some(&mut probe),
+        None,
     )
     .await?;
     assert_ne!(listen, probe.first_address);
@@ -288,6 +297,70 @@ async fn tcp_session_with_standalone_serve(target_addr: &str) -> Result<()> {
     let mut response = [0; 8];
     tokio::time::timeout(Duration::from_secs(30), client.read_exact(&mut response)).await??;
     assert_eq!(&response, b"response");
+    Ok(())
+}
+
+// #82 AC-CLI-02: copied standalone Access needs no other installed binary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standalone_access_forwards_tcp_without_other_binaries_installed() -> Result<()> {
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let target_addr = target.local_addr()?.to_string();
+    let fixture = async {
+        let (mut stream, _) = target.accept().await?;
+        let mut request = [0; 7];
+        stream.read_exact(&mut request).await?;
+        assert_eq!(&request, b"request");
+        stream.write_all(b"response").await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    let session = async {
+        let home = tempfile::tempdir()?;
+        let bin_dir = tempfile::tempdir()?;
+        let all_in_one = std::path::Path::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        let name = format!("iroh-tunnel-access{}", std::env::consts::EXE_SUFFIX);
+        let standalone = bin_dir.path().join(&name);
+        std::fs::copy(all_in_one.with_file_name(&name), &standalone)
+            .context("standalone Access binary must be built")?;
+        let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+        let relay = relay.to_string();
+        let mut serve = role(
+            home.path(),
+            home.path(),
+            &[
+                "serve",
+                "--name",
+                "echo",
+                "--target",
+                &target_addr,
+                "--relay-url",
+                &relay,
+            ],
+        )?;
+        let serve_status = status(&home.path().join("serve-status.json"), &mut serve).await?;
+        let node = serve_status["node_id"].as_str().context("serve node id")?;
+        let (_access, listen) = access_ready_with_collision_probe(
+            home.path(),
+            home.path(),
+            false,
+            false,
+            node,
+            &relay,
+            None,
+            Some(&standalone),
+        )
+        .await?;
+        let mut client = TcpStream::connect(listen).await?;
+        client.write_all(b"request").await?;
+        let mut response = [0; 8];
+        tokio::time::timeout(Duration::from_secs(30), client.read_exact(&mut response)).await??;
+        assert_eq!(&response, b"response");
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::try_join!(fixture, session)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
     Ok(())
 }
 
