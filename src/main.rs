@@ -58,7 +58,70 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Role::Access { .. } => StatusRole::Access,
     };
     match cli.role {
-        Role::Serve { cmd } | Role::Access { cmd } => dispatch_role_cmd(status_role, cmd).await,
+        Role::Serve { cmd: Some(cmd), .. } | Role::Access { cmd: Some(cmd), .. } => {
+            dispatch_role_cmd(status_role, cmd).await
+        }
+        Role::Serve { quick, cmd: None } => {
+            if quick.protocol != "tcp" {
+                return Err(CliError::Config(
+                    "serve quick mode supports only tcp protocol; use --protocol tcp".into(),
+                )
+                .into());
+            }
+            let target = quick.target.ok_or_else(|| {
+                CliError::Config("serve quick mode: --target IP:PORT is required".into())
+            })?;
+            let cfg = iroh_tunnel::config::ServeConfig {
+                node: iroh_tunnel::config::NodeConfig {
+                    relay_urls: quick.relay_url.into_iter().collect(),
+                    ..Default::default()
+                },
+                services: vec![iroh_tunnel::config::ServeService {
+                    name: quick.name.ok_or_else(|| {
+                        CliError::Config("serve quick mode: --name is required".into())
+                    })?,
+                    protocol: iroh_tunnel::config::Protocol::Tcp,
+                    host: target.ip().to_string(),
+                    port: target.port(),
+                }],
+            };
+            serve::run_quick(cfg).await
+        }
+        Role::Access { quick, cmd: None } => {
+            if quick.protocol != "tcp" {
+                return Err(CliError::Config(
+                    "access quick mode supports only tcp protocol; use --protocol tcp".into(),
+                )
+                .into());
+            }
+            let listen = quick.listen.ok_or_else(|| {
+                CliError::Config("access quick mode: --listen IP:PORT is required".into())
+            })?;
+            let node_id = quick.node_id.ok_or_else(|| {
+                CliError::Config("access quick mode: --node-id is required".into())
+            })?;
+            node_id.parse::<iroh::EndpointId>().map_err(|e| {
+                CliError::Config(format!("access quick mode: invalid --node-id: {e}"))
+            })?;
+            let cfg = iroh_tunnel::config::AccessConfig {
+                node: iroh_tunnel::config::NodeConfig {
+                    relay_urls: quick.relay_url.into_iter().collect(),
+                    ..Default::default()
+                },
+                services: vec![iroh_tunnel::config::AccessService {
+                    name: quick.name.ok_or_else(|| {
+                        CliError::Config("access quick mode: --name is required".into())
+                    })?,
+                    node_id,
+                    protocol: iroh_tunnel::config::Protocol::Tcp,
+                    host: listen.ip().to_string(),
+                    port: listen.port(),
+                    multiplex: true,
+                    relay_urls: vec![],
+                }],
+            };
+            access::run_quick(cfg).await
+        }
     }
 }
 
@@ -84,12 +147,7 @@ async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Res
 /// OS-specific default (`~/.config/iroh-tunnel/{role}.toml` on Linux,
 /// `~/Library/Application Support/iroh-tunnel/{role}.toml` on macOS).
 fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    if let Some(p) = config {
-        return Ok(p);
-    }
-    let dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?;
-    Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")))
+    config_cmd::resolve_config_path(role, config.as_deref())
 }
 
 /// Make `path` absolute for embedding in a system service file.

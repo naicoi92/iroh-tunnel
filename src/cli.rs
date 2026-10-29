@@ -38,15 +38,58 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Role {
     /// Serve role: publish local services into Iroh.
+    #[command(args_conflicts_with_subcommands = true)]
     Serve {
+        #[command(flatten)]
+        quick: ServeQuickArgs,
         #[command(subcommand)]
-        cmd: RoleCmd,
+        cmd: Option<RoleCmd>,
     },
     /// Access role: consume remote services to local.
+    #[command(args_conflicts_with_subcommands = true)]
     Access {
+        #[command(flatten)]
+        quick: AccessQuickArgs,
         #[command(subcommand)]
-        cmd: RoleCmd,
+        cmd: Option<RoleCmd>,
     },
+}
+
+/// Quick Serve options; omit when using a role command.
+#[derive(Args, Debug)]
+pub struct ServeQuickArgs {
+    /// Service name.
+    #[arg(short, long)]
+    pub name: Option<String>,
+    /// Fixed TCP target socket address.
+    #[arg(short, long)]
+    pub target: Option<std::net::SocketAddr>,
+    /// Protocol (TCP only in quick mode).
+    #[arg(short, long, default_value = "tcp")]
+    pub protocol: String,
+    /// Relay URL used by both peers.
+    #[arg(long)]
+    pub relay_url: Option<String>,
+}
+
+/// Quick Access options; omit when using a role command.
+#[derive(Args, Debug)]
+pub struct AccessQuickArgs {
+    /// Service name.
+    #[arg(short, long)]
+    pub name: Option<String>,
+    /// Local TCP listen socket address.
+    #[arg(short, long)]
+    pub listen: Option<std::net::SocketAddr>,
+    /// Serve NodeId (public identity, not authorization; protect the target service).
+    #[arg(short = 'N', long)]
+    pub node_id: Option<String>,
+    /// Protocol (TCP only in quick mode).
+    #[arg(short, long, default_value = "tcp")]
+    pub protocol: String,
+    /// Relay URL used by both peers.
+    #[arg(long)]
+    pub relay_url: Option<String>,
 }
 
 /// Commands available per role.

@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Ephemeral quick TCP commands**: `serve -n NAME -t IP:PORT` and
+  `access -n NAME -l IP:PORT -N NODE_ID` (also long options), TCP by
+  default, optional `--relay-url`, no configuration/key writes. Configured
+  subcommands reject mixed quick flags; invalid quick settings use the
+  existing config-error exit class with role-specific diagnostics. NodeId
+  is public identity, not target authorization; protect exposed services.
+
 - **Windows in CI**: the `lint` and `test` jobs now run on `windows-latest`
   alongside `ubuntu-latest`. `cargo fmt --check` stays Linux-only.
 

@@ -48,6 +48,16 @@ pub async fn run(config_path: &Path) -> Result<()> {
     .await
 }
 
+/// Run an in-memory quick configuration without persisting its identity.
+pub async fn run_quick(cfg: ServeConfig) -> Result<()> {
+    cfg.validate()
+        .map_err(|e| crate::error::CliError::Config(format!("serve quick mode: {e}")))?;
+    crate::role_run::run_config::<ServeStrategy, _, _>(cfg, |ep, cfg| {
+        ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal())
+    })
+    .await
+}
+
 /// Run the serve role until the caller-provided `shutdown` future resolves.
 ///
 /// Same as [`run`], but the shutdown signal is injected. Production wires
