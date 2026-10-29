@@ -2,8 +2,8 @@
 
 ## Current review status
 
-**Candidate evidence, not final acceptance.** Expanded real matrices passed 6/6
-against each authentic v0.4.0 and v0.4.2 macOS arm64 release, using unmerged
+**Integrated-source correspondence, not final release acceptance.** Expanded real matrices passed 6/6
+against each authentic v0.4.0 and v0.4.2 macOS arm64 release, using
 #83 candidate runtime `a7a03be91716494eed29b8c20b350596589231f3` and harness
 source commit `598887723bc46329a5a79a8fbdbf9a01c9808ed1` (script SHA256
 `686e506805b4dda7b0b96282e827cc79685d999af4a7da17f15796bfef085886`).
@@ -17,8 +17,16 @@ checkout path replaced with `<runtime-checkout>`. Public IDs are disposable.
 First observer run failed because legacy Serve connection events were not
 recognized; this was instrumentation error, not evidence of incompatibility.
 Original failed run remains outside repository at
-`/tmp/issue85-candidate83-0.4.0-a7a03be`. #83 remains unmerged; rerun against
-final integrated runtime and independent Standards/Spec review remain required.
+`/tmp/issue85-candidate83-0.4.0-a7a03be`. #83 merged as
+`d254bc11bbeae6591a8f25019dfa34f1a63b0569`. Its Git tree and candidate
+`a7a03be91716494eed29b8c20b350596589231f3` tree are both
+`639c9b9bafce2dda0e1e2f816e129c1d84da18bc` (empty Git diff). The binary
+was built from the candidate, not the merged SHA; identical trees substantiate
+integrated source correspondence, not a build or run of a final release artifact.
+At integration HEAD `4df1657d62664d4aaf070a0299f1297441a01d74`, the diff
+from merged main contains only `tests/interop_0_4.rs` and #85 test/evidence
+files, no runtime changes. This correspondence removes the prior mandatory rerun
+solely for #83 integration; independent Standards/Spec review remains required.
 See [REWORK.md](REWORK.md) for original criterion mapping and validation boundary.
 
 ## Historical result and boundary
@@ -205,7 +213,8 @@ One Access and one Serve connection-established event required for shared
 variants; old Access false requires two. Status peer rows are not proof of
 connection sharing. Missing/changed observability fails closed. Cleanup must
 SIGINT and wait for exit 0 on every still-live role; forced kill or premature
-exit fails even after byte exchange. These checks passed against the unmerged #83 candidate, not a final integrated runtime.
+exit fails even after byte exchange. These checks passed against the #83 candidate binary, whose source tree matches
+merged main; they did not run a final release artifact.
 Isolated tests cannot substitute for that real run.
 
 ## Historical validation, red evidence and review limits

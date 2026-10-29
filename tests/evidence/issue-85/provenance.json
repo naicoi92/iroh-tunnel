@@ -72,7 +72,7 @@
     "tests/evidence/issue-85/tcp_compat.py": "f27b978feeca5c95fca9bcbf20cb19a842a66b0a8b07a5ace15edcb13fc30785"
   },
   "historical_capture_commit": "44f8d082b8fc7a9aad6cad8c6c807dbfc465fba3",
-  "rework_status": "Expanded real matrices run against unmerged #83 candidate; final main-integrated runtime acceptance remains pending.",
+  "rework_status": "Expanded real matrices ran against #83 candidate binary; its source tree matches merged main. Final release acceptance remains pending.",
   "reworked_harness_files": {
     "tests/interop_0_4.rs": "728e1a7cd5d35224e2c038ca7d1ebcea97a2215c4f051d89bbcfb5218661aeb1",
     "tests/evidence/issue-85/tcp_compat.py": "e84234fbbba219699af0b76269c5eb2dedc8916c918da71e593ca7a3cf894b32",
@@ -88,6 +88,12 @@
       "runs/v0.4.0-candidate83",
       "runs/v0.4.2-candidate83"
     ],
-    "note": "Candidate #83 not merged; not final or main runtime. First observer run failed due to legacy Serve connection-event instrumentation; retained outside repository."
+    "note": "Binary built from candidate, not merged SHA; identical source trees substantiate integrated source correspondence, not a final release artifact. First observer run failed due to legacy Serve connection-event instrumentation; retained outside repository.",
+    "integration_correspondence": {
+      "merged_main_sha": "d254bc11bbeae6591a8f25019dfa34f1a63b0569",
+      "candidate_and_merged_tree": "639c9b9bafce2dda0e1e2f816e129c1d84da18bc",
+      "integration_head": "4df1657d62664d4aaf070a0299f1297441a01d74",
+      "integration_diff": "Only tests/interop_0_4.rs and tests/evidence/issue-85/; no runtime changes."
+    }
   }
 }
