@@ -179,3 +179,27 @@ A prior parent test invocation accidentally ran in the original checkout; its re
   update, forced relay/direct or release-matrix claims; these remain other issues.
 - Existing untracked `.codegraph/` left untouched, never staged. No push or issue
   edits/closure performed. Documentation-only evidence commit follows code SHA.
+
+## Follow-up isolation/readiness contract
+
+- All quick-run subprocesses use an absolute test-feature config root and isolated
+  XDG/HOME. `config path` verifies both role defaults point into that root;
+  preservation snapshots seed those exact files. Production without test-utils
+  ignores the test override and retains OS config resolution.
+- Access process readiness requires its post-bind listener log, not status or
+  pre-bind endpoint log. Retry only explicit address-in-use bind failures, with
+  bounded attempts and child cleanup. Other bind failures and timeouts fail.
+  Existing same-target and independent IPv6 process roundtrips remain intact.
+
+### Follow-up worker validation
+
+macOS arm64, Rust 1.99.1; RS-01, RS-05, RS-08, RS-11, RS-13–16.
+`cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features
+--locked -- -D warnings`, and `cargo test --locked --test quick_run` passed
+(13 tests, including both IPv6 cases). Initial runs exposed ANSI-colored log
+fields and unbracketed IPv6 listener output; readiness matching was corrected
+and rerun. `cargo build --locked --no-default-features` passed; with an absolute
+`IROH_TUNNEL_TEST_CONFIG_DIR` set, production `serve config path` returned
+`HOME/Library/Application Support/iroh-tunnel/serve.toml`, not the override.
+No native Linux/Windows, Rust 1.91, or verified-TLS production forwarding run.
+Collision retry branch not forced in this run. Independent reviews still required.

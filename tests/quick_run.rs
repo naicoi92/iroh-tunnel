@@ -38,6 +38,14 @@ async fn status(path: &std::path::Path, child: &mut Process) -> Result<serde_jso
     }
 }
 
+fn isolated(command: &mut Command, home: &std::path::Path) {
+    command
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("IROH_TUNNEL_TEST_CONFIG_DIR", home)
+        .env("RUST_LOG", "iroh_tunnel=info");
+}
+
 fn role(home: &std::path::Path, state: &std::path::Path, args: &[&str]) -> Result<Process> {
     eprintln!(
         "spawn {} {args:?}; HOME={} IROH_TUNNEL_STATE_DIR={}",
@@ -45,15 +53,100 @@ fn role(home: &std::path::Path, state: &std::path::Path, args: &[&str]) -> Resul
         home.display(),
         state.display()
     );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    isolated(&mut command, home);
     Ok(Process(
-        Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        command
             .args(args)
-            .env("HOME", home)
             .env("IROH_TUNNEL_STATE_DIR", state)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,
     ))
+}
+
+// Status and the endpoint-ready message precede bind. Only the listener's
+// address-bearing log confirms that this process owns the selected port.
+async fn access_ready(
+    home: &std::path::Path,
+    state: &std::path::Path,
+    short: bool,
+    ipv6: bool,
+    node: &str,
+    relay: &str,
+) -> Result<(Process, std::net::SocketAddr)> {
+    for attempt in 0..8 {
+        let reservation = TcpListener::bind(if ipv6 { "[::1]:0" } else { "127.0.0.1:0" }).await?;
+        let listen = reservation.local_addr()?;
+        drop(reservation);
+        let address = listen.to_string();
+        let log_path = state.join(format!("access-listener-{attempt}.log"));
+        let log = std::fs::File::create(&log_path)?;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        isolated(&mut command, home);
+        command
+            .env("IROH_TUNNEL_STATE_DIR", state)
+            .stdout(log)
+            .stderr(Stdio::null());
+        if short {
+            command.args([
+                "access",
+                "-n",
+                "echo",
+                "-l",
+                &address,
+                "-N",
+                node,
+                "-p",
+                "tcp",
+                "--relay-url",
+                relay,
+            ]);
+        } else {
+            command.args([
+                "access",
+                "--name",
+                "echo",
+                "--listen",
+                &address,
+                "--node-id",
+                node,
+                "--relay-url",
+                relay,
+            ]);
+        }
+        let mut process = Process(command.spawn()?);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let log = std::fs::read_to_string(&log_path)?;
+            if log.lines().any(|line| {
+                line.contains("listening for local clients")
+                    && line.contains("listen_addr")
+                    && line.contains(&format!("{}:{}", listen.ip(), listen.port()))
+            }) {
+                return Ok((process, listen));
+            }
+            if let Some(line) = log.lines().find(|line| line.contains("failed to bind")) {
+                // OS error numbers are stable even when error text is localized.
+                let in_use = if cfg!(windows) {
+                    "os error 10048"
+                } else if cfg!(target_os = "macos") {
+                    "os error 48"
+                } else {
+                    "os error 98"
+                };
+                anyhow::ensure!(line.contains(in_use), "access bind failed: {line}");
+                break;
+            }
+            if let Some(exit) = process.0.try_wait()? {
+                anyhow::bail!("access exited before listener ready: {exit}; {log}");
+            }
+            anyhow::ensure!(Instant::now() < deadline, "access listener timeout: {log}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        drop(process);
+    }
+    anyhow::bail!("access listener address in use after 8 attempts")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -166,14 +259,6 @@ async fn tcp_session(
     let temp = tempfile::tempdir()?;
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let relay = relay.to_string();
-    let listener = TcpListener::bind(if ipv6_listen {
-        "[::1]:0"
-    } else {
-        "127.0.0.1:0"
-    })
-    .await?;
-    let listen = listener.local_addr()?;
-    drop(listener);
     let serve_args = if short {
         vec![
             "serve",
@@ -200,45 +285,9 @@ async fn tcp_session(
     let mut serve = role(temp.path(), temp.path(), &serve_args)?;
     let serve_status = status(&temp.path().join("serve-status.json"), &mut serve).await?;
     let node = serve_status["node_id"].as_str().context("serve node id")?;
-    let listen_string = listen.to_string();
-    let access_args = if short {
-        vec![
-            "access",
-            "-n",
-            "echo",
-            "-l",
-            &listen_string,
-            "-N",
-            node,
-            "-p",
-            "tcp",
-            "--relay-url",
-            &relay,
-        ]
-    } else {
-        vec![
-            "access",
-            "--name",
-            "echo",
-            "--listen",
-            &listen_string,
-            "--node-id",
-            node,
-            "--relay-url",
-            &relay,
-        ]
-    };
-    let mut access = role(temp.path(), temp.path(), &access_args)?;
-    status(&temp.path().join("access-status.json"), &mut access).await?;
-    let mut client = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if let Ok(client) = TcpStream::connect(listen).await {
-                break client;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await?;
+    let (_access, listen) =
+        access_ready(temp.path(), temp.path(), short, ipv6_listen, node, &relay).await?;
+    let mut client = TcpStream::connect(listen).await?;
     client.write_all(payload).await?;
     let mut response = vec![0u8; expected_response.len()];
     tokio::time::timeout(Duration::from_secs(30), client.read_exact(&mut response)).await??;
@@ -286,33 +335,32 @@ async fn ephemeral_restarts(home: &std::path::Path, relay: &str) -> Result<()> {
         let mut ids = Vec::new();
         for _ in 0..2 {
             let state = tempfile::tempdir()?;
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let listen = listener.local_addr()?.to_string();
-            drop(listener);
-            let args = if role_name == "serve" {
-                vec![
-                    "serve",
-                    "-n",
-                    "echo",
-                    "-t",
-                    "127.0.0.1:12345",
-                    "--relay-url",
-                    &relay,
-                ]
+            let mut process = if role_name == "serve" {
+                role(
+                    home,
+                    state.path(),
+                    &[
+                        "serve",
+                        "-n",
+                        "echo",
+                        "-t",
+                        "127.0.0.1:12345",
+                        "--relay-url",
+                        relay,
+                    ],
+                )?
             } else {
-                vec![
-                    "access",
-                    "-n",
-                    "echo",
-                    "-l",
-                    &listen,
-                    "-N",
+                access_ready(
+                    home,
+                    state.path(),
+                    true,
+                    false,
                     "0000000000000000000000000000000000000000000000000000000000000000",
-                    "--relay-url",
-                    &relay,
-                ]
+                    relay,
+                )
+                .await?
+                .0
             };
-            let mut process = role(home, state.path(), &args)?;
             let json = status(
                 &state.path().join(format!("{role_name}-status.json")),
                 &mut process,
@@ -327,27 +375,21 @@ async fn ephemeral_restarts(home: &std::path::Path, relay: &str) -> Result<()> {
     Ok(())
 }
 
-// Synthetic fixtures only; never read operator keys. Both current and target
-// default config locations are populated so quick mode cannot silently pick one.
+// Synthetic fixtures only; seed the actual test-feature default config path.
 fn existing_user_files(home: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>> {
     let mut files = Vec::new();
     let key = iroh_tunnel::config::encode_secret_key(&iroh::SecretKey::from_bytes(&[42; 32]));
-    for dir in [
-        ".config/iroh-tunnel",
-        "Library/Application Support/iroh-tunnel",
-    ] {
-        std::fs::create_dir_all(home.join(dir))?;
-        for name in ["serve.toml", "access.toml", "identity.key"] {
-            let path = home.join(dir).join(name);
-            let bytes = if name.ends_with(".toml") {
-                format!("# synthetic preservation fixture\n[node]\nsecret_key = {key:?}\nrelay_urls = [\"https://127.0.0.1:1\"]\n")
-                    .into_bytes()
-            } else {
-                key.as_bytes().to_vec()
-            };
-            std::fs::write(&path, &bytes)?;
-            files.push((path, bytes));
-        }
+    let dir = home.join("iroh-tunnel");
+    std::fs::create_dir_all(&dir)?;
+    for name in ["serve.toml", "access.toml", "identity.key"] {
+        let path = dir.join(name);
+        let bytes = if name.ends_with(".toml") {
+            format!("# synthetic preservation fixture\n[node]\nsecret_key = {key:?}\nrelay_urls = [\"https://127.0.0.1:1\"]\n").into_bytes()
+        } else {
+            key.as_bytes().to_vec()
+        };
+        std::fs::write(&path, &bytes)?;
+        files.push((path, bytes));
     }
     Ok(files)
 }
@@ -408,9 +450,10 @@ fn rejected(args: &[&str], diagnostic: &str) -> Result<()> {
             }
         })
         .collect();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    isolated(&mut command, home.path());
+    let mut child = command
         .args(&actual_args)
-        .env("HOME", home.path())
         .env("IROH_TUNNEL_STATE_DIR", state.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -549,17 +592,37 @@ fn quick_config_errors_use_existing_exit_classification() -> Result<()> {
 fn configured_subcommands_allow_implicit_tcp_default() -> Result<()> {
     for role_name in ["serve", "access"] {
         let home = tempfile::tempdir()?;
-        let output = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
-            .args([role_name, "config", "path"])
-            .env("HOME", home.path())
-            .output()?;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        isolated(&mut command, home.path());
+        let output = command.args([role_name, "config", "path"]).output()?;
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains(role_name));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            home.path()
+                .join("iroh-tunnel")
+                .join(format!("{role_name}.toml"))
+                .to_str()
+                .unwrap()
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn test_config_root_rejects_relative_paths() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    isolated(&mut command, home.path());
+    let output = command
+        .env("IROH_TUNNEL_TEST_CONFIG_DIR", "relative")
+        .args(["serve", "config", "path"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must be absolute"));
     Ok(())
 }
 
@@ -568,9 +631,10 @@ fn quick_operator_contract_explains_target_protection() -> Result<()> {
     let readme = include_str!("../README.md");
     assert!(readme.contains("NodeId is public identity, not target authorization"));
     assert!(readme.contains("Target services must enforce their own access protection"));
-    let output = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
-        .args(["access", "--help"])
-        .output()?;
+    let home = tempfile::tempdir()?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    isolated(&mut command, home.path());
+    let output = command.args(["access", "--help"]).output()?;
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("public identity, not authorization"));

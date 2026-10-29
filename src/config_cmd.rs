@@ -17,7 +17,7 @@
 //!
 //! Based on Page 06 v5 §1.2 (config subcommand) and §1.5 (config actions).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use toml_edit::DocumentMut;
@@ -192,11 +192,21 @@ pub fn path(role: &str, config: Option<&Path>) -> Result<()> {
 // helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve a config path: explicit override wins, otherwise the OS-specific
-/// default (`<config_dir>/iroh-tunnel/{role}.toml`).
-fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<PathBuf> {
-    if let Some(p) = override_path {
-        return Ok(p.to_path_buf());
+/// Resolve a role configuration path. An explicit path takes precedence over
+/// the platform default. With `test-utils`, an absolute test config root may
+/// replace the platform root; a relative override is rejected.
+///
+/// Returns an error when the platform root is unavailable or the test root is
+/// not absolute. Production builds resolve defaults with `dirs::config_dir()`.
+pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<std::path::PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.to_path_buf());
+    }
+    #[cfg(feature = "test-utils")]
+    if let Some(dir) = std::env::var_os("IROH_TUNNEL_TEST_CONFIG_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        anyhow::ensure!(dir.is_absolute(), "test config directory must be absolute");
+        return Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")));
     }
     let dir = dirs::config_dir().context("could not determine config directory")?;
     Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")))

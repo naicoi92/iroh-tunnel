@@ -147,12 +147,7 @@ async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Res
 /// OS-specific default (`~/.config/iroh-tunnel/{role}.toml` on Linux,
 /// `~/Library/Application Support/iroh-tunnel/{role}.toml` on macOS).
 fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    if let Some(p) = config {
-        return Ok(p);
-    }
-    let dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?;
-    Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")))
+    config_cmd::resolve_config_path(role, config.as_deref())
 }
 
 /// Make `path` absolute for embedding in a system service file.
