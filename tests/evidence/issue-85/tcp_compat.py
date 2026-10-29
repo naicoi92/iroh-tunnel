@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import signal
 import socket
 import subprocess
@@ -135,11 +136,19 @@ def exchange_channels(address, record, observe):
 
 
 def observe_connections(access_log, serve_log, shared):
-    access_count = access_log.read_text().count("connected to serve peer (")
-    serve_count = serve_log.read_text().count("peer connected via ")
+    ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    prefix = r"^(?:\S+\s+INFO\s+|INFO\s+)?"
+    access_event = re.compile(prefix + r"connected to serve peer \(")
+    # v0.4.0 emits the bare message; newer versions include path information.
+    serve_event = re.compile(prefix + r"peer connected (?:via .+|peer=\S+ service=\S+)$")
+    access_lines = ansi.sub("", access_log.read_text()).splitlines()
+    serve_lines = ansi.sub("", serve_log.read_text()).splitlines()
+    access_count = sum(bool(access_event.match(line)) for line in access_lines)
+    serve_count = sum(bool(serve_event.match(line)) for line in serve_lines)
     expected = 1 if shared else 2
     if access_count != expected or serve_count != expected:
-        raise RuntimeError(f"connection count: access={access_count}, serve={serve_count}, expected={expected}")
+        raise RuntimeError(f"connection count: access={access_count}, serve={serve_count}, expected={expected}; "
+                           "missing or changed connection telemetry cannot establish sharing")
     return {"shared_required": shared, "access_connections": access_count,
             "serve_connections": serve_count,
             "basis": "connection-established log events with two overlapping TCP channels"}

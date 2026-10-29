@@ -60,6 +60,46 @@ class TcpCompatTests(unittest.TestCase):
             observation = compat.observe_connections(access, serve, False)
             self.assertEqual(observation["serve_connections"], 2)
 
+    def test_authentic_serve_log_formats_and_disconnects(self):
+        legacy = ("\x1b[2m2026-10-29T13:38:41.440042Z\x1b[0m "
+                  "\x1b[32m INFO\x1b[0m peer connected "
+                  "\x1b[3mpeer\x1b[0m\x1b[2m=\x1b[0m45260f "
+                  "\x1b[3mservice\x1b[0m\x1b[2m=\x1b[0mcompat\n")
+        current = ("\x1b[2m2026-10-29T13:38:21.556087Z\x1b[0m "
+                   "\x1b[32m INFO\x1b[0m peer connected via relay=https://example.invalid/ "
+                   "\x1b[3mpeer\x1b[0m\x1b[2m=\x1b[0m803461 "
+                   "\x1b[3mservice\x1b[0m\x1b[2m=\x1b[0mcompat\n")
+        disconnect = "2026-10-29T13:38:22Z INFO peer disconnected (service compat) peer=803461\n"
+        with tempfile.TemporaryDirectory() as root:
+            access, serve = Path(root) / "access", Path(root) / "serve"
+            access.write_text("connected to serve peer (multiplexed)\n")
+            for event in (legacy, current):
+                with self.subTest(event=event):
+                    serve.write_text(event + disconnect)
+                    self.assertEqual(compat.observe_connections(access, serve, True)["serve_connections"], 1)
+                    serve.write_text(event * 2 + disconnect)
+                    with self.assertRaisesRegex(RuntimeError, "connection count"):
+                        compat.observe_connections(access, serve, True)
+                    access.write_text("connected to serve peer (per-channel)\n" * 2)
+                    self.assertEqual(compat.observe_connections(access, serve, False)["serve_connections"], 2)
+                    access.write_text("connected to serve peer (multiplexed)\n")
+
+    def test_missing_or_misleading_serve_telemetry_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            access, serve = Path(root) / "access", Path(root) / "serve"
+            access.write_text("connected to serve peer (multiplexed)\n")
+            for text in ("", "peer disconnected (service compat) peer=abc\n",
+                         "INFO not peer connected peer=abc service=compat\n",
+                         "INFO peer connectedness peer=abc service=compat\n"):
+                with self.subTest(text=text):
+                    serve.write_text(text)
+                    with self.assertRaisesRegex(RuntimeError, "connection count"):
+                        compat.observe_connections(access, serve, True)
+            access.write_text("disconnected from serve peer (service compat)\n")
+            serve.write_text("INFO peer connected peer=abc service=compat\n")
+            with self.assertRaisesRegex(RuntimeError, "connection count"):
+                compat.observe_connections(access, serve, True)
+
     def test_graceful_cleanup_keeps_pass(self):
         child = Mock(pid=42, returncode=0)
         child.poll.return_value = None
