@@ -344,13 +344,18 @@ HTTP clients, SSH sessions).
 
 ## Version compatibility
 
-**0.4.2 upgrades iroh 1.0.0 → 1.1.0.** The tunnel's own protocol is
-unchanged — same ALPNs, same QUIC stream semantics — so a 0.4.2 node talks
-to any older iroh-tunnel peer:
+**Historical 0.4.2 release:** iroh was upgraded from 1.0.0 to 1.1.0
+without changing the tunnel ALPN. The following describes that release, not
+proof of compatibility for this redesign. Mixed 0.4.2 ↔ 0.4.1 was verified
+in both role pairings over the n0 relay farm.
 
-| Peers | Compatible? |
+The current Access role always reuses a connection, so a pre-0.2.0 Serve
+peer cannot support multiple channels; upgrade Serve first. Compatibility
+with 0.4 peers is tracked separately in #85.
+
+| Peers | Historical 0.4.2 release evidence |
 |---|---|
-| 0.4.2 ↔ 0.1.0–0.4.1, either role | ✅ — mixed 0.4.2 ↔ 0.4.1 verified in **both role pairings** over the n0 relay farm; older versions share the same wire protocol. No new rollout order; the [always-on multiplex contract](#multiplexing-020) requires a Serve peer that accepts multiple streams |
+| 0.4.2 ↔ 0.4.1, either role | ✅ — verified in both role pairings over the n0 relay farm |
 | 0.4.2 ↔ self-hosted iroh-relay 1.0.x | ✅ — relay protocol unchanged; a 1.1.0 client simply gets no rate-limit notifications from a 1.0.x relay |
 | 0.4.2 ↔ self-hosted iroh-relay 1.1.x | ✅ — recommended: invalid-message hardening (1.0.2+), live per-client rate limits (1.0.2+), rate-limit notifications (1.1.0) |
 | 0.4.2 ↔ n0 public relay farm | ✅ — n0 keeps the farm current |
