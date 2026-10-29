@@ -3,5 +3,3 @@ reviews:
   auto_review:
     enabled: true
     drafts: true
-    base_branches:
-      - '^redesign/integration-v2$'

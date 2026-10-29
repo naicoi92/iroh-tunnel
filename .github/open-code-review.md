@@ -2,7 +2,7 @@
 
 **Temporarily disabled:** On 2026-10-29, the repository's OpenCodeReview (OCR) workflow was disabled manually after provider HTTP 429 failures. CodeRabbit is the selected replacement, subject to an actual successful review on the exact PR head. Repository YAML alone does not establish GitHub App access.
 
-The active redesign integration branch is `redesign/integration-v2`. Each task retains independent Standards and Spec review and Linux/Windows CI gates; a cancelled OCR check is not a passing review. To restore OCR after the temporary suspension, run `gh workflow enable open-code-review.yml --repo naicoi92/iroh-tunnel` and verify its configuration and provider access before relying on it.
+Each redesign task targets `main` in its own pull request and retains independent Standards and Spec review and Linux/Windows CI gates; a cancelled OCR check is not a passing review. To restore OCR after the temporary suspension, run `gh workflow enable open-code-review.yml --repo naicoi92/iroh-tunnel` and verify its configuration and provider access before relying on it.
 
 [Alibaba's open-source `open-code-review` CLI](https://github.com/alibaba/open-code-review) reads diffs, calls a configurable LLM, and posts structured inline and summary review comments when enabled.
 
