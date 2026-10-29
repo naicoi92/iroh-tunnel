@@ -1,6 +1,16 @@
 # Issue #85 — bounded TCP interoperability evidence
 
-## Result and boundary
+## Current review status
+
+**Historical evidence only; expanded acceptance pending.** Reworked harness now
+requires two overlapping independent channels, exact bytes in two rounds,
+connection-established counts (shared where applicable), and graceful role
+cleanup. Only isolated/unit safety checks run at this stage. Fresh production
+executable built from **#83-integrated runtime** must run expanded real matrix
+before final #85 acceptance. Existing `runs/` do not establish that result.
+See [REWORK.md](REWORK.md) for criterion/test mapping and validation boundary.
+
+## Historical result and boundary
 
 **Observed PASS, macOS arm64 only:** authentic published **v0.4.0** and **v0.4.2**
 Access → current Serve, and current Access → each released Serve. Current means
@@ -25,7 +35,10 @@ variant, **not** shared-connection concurrency, reuse, lifecycle, UDP or #86.
 | `v0.4.2-public` | 1.1.0 | 6/6 PASS | `runs/v0.4.2-public/` |
 | `v0.4.0-final` | 1.0.0 | 6/6 PASS, final harness | `runs/v0.4.0-final/` |
 
-Current lock: Iroh/iroh-relay **1.1.0**, Tokio **1.53.0**. See
+Baseline lock: Iroh/iroh-relay **1.1.0**, Tokio **1.53.1**.
+Original metadata incorrectly said Tokio 1.53.0; correction checked against
+tracked `Cargo.lock`, not a new build/run. Original provenance and checksum
+manifest retained in `historical/44f8d08/`; historical logs/results untouched. See
 `provenance.json` for source/tag SHAs, source lockfile hashes, release URLs,
 GitHub API archive digests, published checksum lines, extracted binary hashes,
 current build command, compiler and host. Published archives matched **both**
@@ -71,8 +84,8 @@ disabled, no certificate bypass. Both authentic old and production new processes
 rejected configuration **before connecting**: `must be https://`. Historical
 `runs/local-http-rejected/` preserves all six startup failures and original Cargo
 output. Its intermediate harness called these `FAIL`; classify them as
-**BLOCKED fixture selection**, not wire incompatibility. Current harness records
-startup errors as `BLOCKED`. Do not treat this local attempt as a real tunnel.
+**BLOCKED fixture selection**, not wire incompatibility. Reworked harness records
+startup errors as `BLOCKED` (cleanup errors independently force FAIL). Do not treat this local attempt as a real tunnel.
 
 Self-signed local HTTPS would require modifying authentic binaries or trust:
 `src/config.rs` requires HTTPS; production `src/endpoint.rs` has no custom CA
@@ -100,14 +113,21 @@ commands and captured evidence do not make external infrastructure deterministic
 
 ## Reproduce safely
 
-Requirements: same baseline tracked sources, Cargo/Rust, Python 3 (run used
-3.14), GitHub CLI authenticated for asset/issue reads, macOS arm64 to run these
+Requirements: pinned runtime and harness sources, Cargo/Rust, uv with available
+Python 3 (historical run used 3.14), GitHub CLI authenticated for asset/issue reads, macOS arm64 to run these
 exact assets. Use fresh output directories; runner refuses overwrite. No sudo,
 install, service changes, push, PR or merge needed.
 
 ```sh
-# From repository root. Production artifact must stay separate from test target.
-git rev-parse HEAD  # evidence runtime source: 5ad24007401d33fd6977fbb2d2b52894e7133333
+# From harness checkout; pin actual harness commit, not runtime baseline.
+HARNESS_DIR="$PWD"
+HARNESS_REF=$(git rev-parse HEAD)
+printf 'harness_ref=%s\n' "$HARNESS_REF"
+# Historical runtime replay ONLY. This baseline has no #85 harness.
+RUNTIME_REF=5ad24007401d33fd6977fbb2d2b52894e7133333
+# For new acceptance replace RUNTIME_REF with reviewed #83-integrated commit.
+# Do not call baseline replay current acceptance.
+git worktree add --detach /tmp/issue85-runtime "$RUNTIME_REF"
 mkdir -p /tmp/issue85-artifacts/v0.4.0 /tmp/issue85-artifacts/v0.4.2
 for v in 0.4.0 0.4.2; do
   gh release download "v$v" --repo naicoi92/iroh-tunnel \
@@ -121,15 +141,21 @@ for v in 0.4.0 0.4.2; do
     tar -xzf "iroh-tunnel-$v-darwin-arm64.tar.gz")
 done
 # Compare archive API digest in release.json to shasum, as recorded in provenance.json.
-CARGO_TARGET_DIR=/tmp/iroh-85-prod-target cargo build --locked --bin iroh-tunnel
-CARGO_TARGET_DIR=/tmp/iroh-85-prod-target \
-  cargo tree --locked --edges normal,build,features -i iroh
+(cd /tmp/issue85-runtime &&
+  git rev-parse HEAD && shasum -a 256 Cargo.lock &&
+  CARGO_TARGET_DIR=/tmp/iroh-85-prod-target cargo build --locked --bin iroh-tunnel &&
+  CARGO_TARGET_DIR=/tmp/iroh-85-prod-target \
+    cargo tree --locked --edges normal,build,features -i iroh)
+cd "$HARNESS_DIR"
 # STOP if graph includes test-utils. Record rebuilt digest; hashes may vary by compiler/path.
 shasum -a 256 /tmp/iroh-85-prod-target/debug/iroh-tunnel
 ```
 
-Exact successful runner environment (current captured digest, **not** automatically
-trusted digest of arbitrary input):
+Historical artifact pins below identify original capture, **not** automatically
+trusted digests for rebuilt input. Independently verify and record rebuilt
+production digest/features before replacing `IROH_INTEROP_CURRENT_SHA256`.
+Record `RUNTIME_REF` and `HARNESS_REF` alongside new results. New script records
+its own SHA256. New output paths below avoid overwriting historical evidence:
 
 ```sh
 export IROH_INTEROP_CURRENT_BIN=/tmp/iroh-85-prod-target/debug/iroh-tunnel
@@ -137,36 +163,54 @@ export IROH_INTEROP_CURRENT_SHA256=7368f6cfa4f722d704d97c2f8c38d56f9fd4456eff2c8
 export IROH_INTEROP_RELAY=https://use1-1.relay.n0.iroh.link/
 export IROH_INTEROP_OLD_BIN=/tmp/issue85-artifacts/v0.4.0/iroh-tunnel
 export IROH_INTEROP_OLD_SHA256=431d9f4d14effd398617b3d62adcf182a86533395d3cfac4426a31361d51c9f5
-export IROH_INTEROP_OUTPUT="$PWD/tests/evidence/issue-85/runs/v0.4.0-final"
+export IROH_INTEROP_OUTPUT="$PWD/tests/evidence/issue-85/runs/v0.4.0-expanded-new"
 CARGO_TARGET_DIR=/tmp/iroh-85-test-target \
   cargo test --locked --test interop_0_4 -- --ignored --nocapture
 
 export IROH_INTEROP_OLD_BIN=/tmp/issue85-artifacts/v0.4.2/iroh-tunnel
 export IROH_INTEROP_OLD_SHA256=df09e20c808331f4f387dcf4233aa4eb7a2af94204042c991e0f7a5f226b836c
-export IROH_INTEROP_OUTPUT="$PWD/tests/evidence/issue-85/runs/v0.4.2-public"
-python3 tests/evidence/issue-85/tcp_compat.py
+export IROH_INTEROP_OUTPUT="$PWD/tests/evidence/issue-85/runs/v0.4.2-expanded-new"
+uv run --no-project --offline python tests/evidence/issue-85/tcp_compat.py
 ```
 
-Use **new** output paths on rerun. Python direct invocation and Rust wrapper
+Use **new** output paths on rerun. uv invocation and Rust wrapper
 execute identical script. Rust test ignored by default: downloading/running
 external artifacts and public network must be explicit. `results.json` records
 actual per-process argv and environment. Target/client code, payload literals,
 timeouts and generated config templates are in script. Exit 0 requires all
 variants PASS; any startup/config/artifact problem is not compatibility PASS.
 
-## Validation, red evidence and review limits
+Isolated harness validation (no external artifacts or network):
+
+```sh
+uv run --no-project --offline python -m unittest discover \
+  -s tests/evidence/issue-85 -p 'test_tcp_compat.py' -v
+```
+
+Runner now requires two channel-tagged requests (1050 bytes each) and distinct
+responses (1049 bytes each), each checked twice per channel. Both upstream TCP
+sockets stay open across first round; second closes before first completes.
+One Access and one Serve connection-established event required for shared
+variants; old Access false requires two. Status peer rows are not proof of
+connection sharing. Missing/changed observability fails closed. Cleanup must
+SIGINT and wait for exit 0 on every still-live role; forced kill or premature
+exit fails even after byte exchange. These checks are **not yet run against
+#83-integrated runtime**. Isolated tests cannot substitute for that real run.
+
+## Historical validation, red evidence and review limits
 
 Evidence-only TDD adaptation: no runtime fix to force green. Invalid-artifact
 run returned 1 with `BLOCKED`/FileNotFoundError; historical first local fixture
 run failed as above; then actual production both-direction matrices passed.
-`runs/invalid-artifact-final/` repeats final harness negative path. Historical
-pre-final captures are labelled; final v0.4.0 run uses final harness source.
+`runs/invalid-artifact-final/` repeats original harness negative path. Historical
+pre-final captures are labelled; `v0.4.0-final` used original candidate harness
+at `44f8d08`, not reworked two-channel harness.
 No production behavior changed during any run.
 
 Locked fmt/Clippy/full tests and final opt-in test logs in `validation/`.
 Captured log text normalizes line endings and strips trailing whitespace/blank
 EOF lines for Git hygiene; content, timestamps and outcomes otherwise unchanged.
-`SHA256SUMS.json` hashes committed evidence files; provenance pins harness sources.
+`SHA256SUMS.json` hashes committed evidence files; provenance separates historical and reworked harness sources.
 Full suite: **134 passed, 5 ignored** (four legacy public-relay tests safely
 ignored, plus this explicit-artifact test). Compiler **1.99.1** on macOS 15.7.3
 arm64, uid **501**, non-root; this does not establish Rust 1.91 MSRV or native

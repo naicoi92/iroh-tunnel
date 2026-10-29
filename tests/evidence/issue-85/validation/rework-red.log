@@ -1,0 +1,79 @@
+test_cleanup_failure_makes_runner_exit_nonzero (test_tcp_compat.TcpCompatTests.test_cleanup_failure_makes_runner_exit_nonzero) ... FAIL
+test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) ...
+  test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='nonzero') ... ERROR
+  test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='forced') ... ERROR
+  test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='signal') ... ERROR
+  test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='premature') ... ERROR
+test_shared_connection_observation_rejects_multiple_dials (test_tcp_compat.TcpCompatTests.test_shared_connection_observation_rejects_multiple_dials) ... ERROR
+test_two_overlapping_channels_preserve_distinct_bytes (test_tcp_compat.TcpCompatTests.test_two_overlapping_channels_preserve_distinct_bytes) ... ERROR
+
+======================================================================
+ERROR: test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='nonzero')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/iroh-tunnel-issue-85-current/tests/evidence/issue-85/test_tcp_compat.py", line 65, in test_cleanup_failure_never_keeps_pass
+    compat.cleanup_children([child], record)
+    ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'tcp_compat' has no attribute 'cleanup_children'
+
+======================================================================
+ERROR: test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='forced')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/iroh-tunnel-issue-85-current/tests/evidence/issue-85/test_tcp_compat.py", line 65, in test_cleanup_failure_never_keeps_pass
+    compat.cleanup_children([child], record)
+    ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'tcp_compat' has no attribute 'cleanup_children'
+
+======================================================================
+ERROR: test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='signal')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/iroh-tunnel-issue-85-current/tests/evidence/issue-85/test_tcp_compat.py", line 65, in test_cleanup_failure_never_keeps_pass
+    compat.cleanup_children([child], record)
+    ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'tcp_compat' has no attribute 'cleanup_children'
+
+======================================================================
+ERROR: test_cleanup_failure_never_keeps_pass (test_tcp_compat.TcpCompatTests.test_cleanup_failure_never_keeps_pass) (failure='premature')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/iroh-tunnel-issue-85-current/tests/evidence/issue-85/test_tcp_compat.py", line 65, in test_cleanup_failure_never_keeps_pass
+    compat.cleanup_children([child], record)
+    ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'tcp_compat' has no attribute 'cleanup_children'
+
+======================================================================
+ERROR: test_shared_connection_observation_rejects_multiple_dials (test_tcp_compat.TcpCompatTests.test_shared_connection_observation_rejects_multiple_dials)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/iroh-tunnel-issue-85-current/tests/evidence/issue-85/test_tcp_compat.py", line 49, in test_shared_connection_observation_rejects_multiple_dials
+    compat.observe_connections(access, serve, True)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'tcp_compat' has no attribute 'observe_connections'
+
+======================================================================
+ERROR: test_two_overlapping_channels_preserve_distinct_bytes (test_tcp_compat.TcpCompatTests.test_two_overlapping_channels_preserve_distinct_bytes)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/iroh-tunnel-issue-85-current/tests/evidence/issue-85/test_tcp_compat.py", line 23, in test_two_overlapping_channels_preserve_distinct_bytes
+    server = threading.Thread(target=compat.target_channels,
+                                     ^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'tcp_compat' has no attribute 'target_channels'
+
+======================================================================
+FAIL: test_cleanup_failure_makes_runner_exit_nonzero (test_tcp_compat.TcpCompatTests.test_cleanup_failure_makes_runner_exit_nonzero)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/iroh-tunnel-issue-85-current/tests/evidence/issue-85/test_tcp_compat.py", line 89, in test_cleanup_failure_makes_runner_exit_nonzero
+    self.assertEqual(json.loads((output / "results.json").read_text())["outcome"], "FAIL")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'BLOCKED' != 'FAIL'
+- BLOCKED
++ FAIL
+
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.018s
+
+FAILED (failures=1, errors=6)

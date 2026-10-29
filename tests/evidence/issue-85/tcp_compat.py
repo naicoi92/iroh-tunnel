@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
 """Actual executable TCP-COMPAT-01 runner; invoked by tests/interop_0_4.rs."""
 
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -67,6 +67,116 @@ def status(path):
         return None
 
 
+def channel_records():
+    return [{"channel": index,
+             "request_hex": (bytes([index]) + REQUEST).hex(),
+             "response_hex": (bytes([index]) + RESPONSE).hex()}
+            for index in range(2)]
+
+
+def target_channels(listener, record, workers):
+    """Keep both upstream sockets open until clients complete round two."""
+    record.setdefault("channels", channel_records())
+
+    def handle(stream):
+        channel = None
+        try:
+            with stream:
+                stream.settimeout(30)
+                data = receive(stream, len(REQUEST) + 1)
+                if data[0] not in (0, 1):
+                    raise RuntimeError("unknown channel marker")
+                channel = record["channels"][data[0]]
+                channel["target_received_hex"] = data.hex()
+                if data.hex() != channel["request_hex"]:
+                    raise RuntimeError("target request bytes differ")
+                stream.sendall(bytes.fromhex(channel["response_hex"]))
+                data = receive(stream, len(REQUEST) + 1)
+                channel["target_round2_hex"] = data.hex()
+                if data.hex() != channel["request_hex"]:
+                    raise RuntimeError("target round two bytes differ")
+                stream.sendall(bytes.fromhex(channel["response_hex"]))
+        except Exception as error:
+            (channel if channel is not None else record)["error"] = f"{type(error).__name__}: {error}"
+
+    try:
+        for _ in range(2):
+            stream = listener.accept()[0]
+            worker = threading.Thread(target=handle, args=(stream,))
+            workers.append(worker)
+            worker.start()
+    except Exception as error:
+        record["error"] = f"{type(error).__name__}: {error}"
+
+
+def exchange_channels(address, record, observe):
+    record.setdefault("channels", channel_records())
+    with ExitStack() as stack:
+        clients = []
+        # First channel stays open while second transfers distinct bytes.
+        for channel in record["channels"]:
+            client = stack.enter_context(socket.create_connection(address, timeout=30))
+            clients.append(client)
+            client.settimeout(30)
+            client.sendall(bytes.fromhex(channel["request_hex"]))
+            data = receive(client, len(RESPONSE) + 1)
+            channel["client_received_hex"] = data.hex()
+            if data.hex() != channel["response_hex"]:
+                raise RuntimeError("client response bytes differ")
+        observe()  # Both channels live; connection count must not mean peer count.
+        # Second channel closes first; first must still work independently.
+        for client, channel in reversed(list(zip(clients, record["channels"]))):
+            client.sendall(bytes.fromhex(channel["request_hex"]))
+            data = receive(client, len(RESPONSE) + 1)
+            channel["client_round2_hex"] = data.hex()
+            if data.hex() != channel["response_hex"]:
+                raise RuntimeError("client round two response bytes differ")
+            client.close()
+
+
+def observe_connections(access_log, serve_log, shared):
+    access_count = access_log.read_text().count("connected to serve peer (")
+    serve_count = serve_log.read_text().count("peer connected via ")
+    expected = 1 if shared else 2
+    if access_count != expected or serve_count != expected:
+        raise RuntimeError(f"connection count: access={access_count}, serve={serve_count}, expected={expected}")
+    return {"shared_required": shared, "access_connections": access_count,
+            "serve_connections": serve_count,
+            "basis": "connection-established log events with two overlapping TCP channels"}
+
+
+def cleanup_children(children, record):
+    errors = record.setdefault("cleanup_errors", [])
+    for child in reversed(children):
+        forced = False
+        premature = child.poll() is not None
+        try:
+            if premature:
+                errors.append(f"role {child.pid} exited before controlled shutdown")
+            else:
+                child.send_signal(signal.SIGINT)
+            try:
+                child.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                forced = True
+                child.kill()
+                child.wait(timeout=5)
+            if forced or child.returncode != 0:
+                errors.append(f"role {child.pid}: exit={child.returncode}, forced_kill={forced}")
+        except Exception as error:
+            errors.append(f"role {child.pid}: {type(error).__name__}: {error}")
+            try:
+                forced = True
+                child.kill()
+                child.wait(timeout=5)
+            except Exception as kill_error:
+                errors.append(f"role {child.pid} kill/wait: {kill_error}")
+        record["cleanup"].append({"pid": child.pid, "exit": child.returncode,
+                                  "forced_kill": forced, "premature_exit": premature})
+    if errors:
+        record["outcome"] = "FAIL"
+
+
 def case(output, old, current, relay, serve_kind, access_kind, multiplex):
     name = f"{access_kind}-access_to_{serve_kind}-serve"
     if access_kind == "old":
@@ -74,10 +184,11 @@ def case(output, old, current, relay, serve_kind, access_kind, multiplex):
     record = {"case": "TCP-COMPAT-01", "variant": name, "started_at": now(),
               "serve_kind": serve_kind, "access_kind": access_kind,
               "old_access_multiplex": multiplex if access_kind == "old" else None,
-              "commands": [], "target": {}, "client": {}, "cleanup": []}
+              "commands": [], "channels": channel_records(), "cleanup": []}
     children = []
     logs = []
     worker = None
+    target_workers = []
     phase = "serve-startup"
     private = tempfile.TemporaryDirectory(prefix="iroh-85-")
     listener = socket.socket()
@@ -86,19 +197,6 @@ def case(output, old, current, relay, serve_kind, access_kind, multiplex):
     listener.settimeout(35)
     target_port = listener.getsockname()[1]
     record["target_address"] = f"127.0.0.1:{target_port}"
-
-    def target():
-        try:
-            with listener.accept()[0] as stream:
-                stream.settimeout(25)
-                data = receive(stream, len(REQUEST))
-                record["target"]["received_hex"] = data.hex()
-                if data != REQUEST:
-                    raise RuntimeError("target request bytes differ")
-                stream.sendall(RESPONSE)
-                record["target"]["sent_hex"] = RESPONSE.hex()
-        except Exception as error:
-            record["target"]["error"] = f"{type(error).__name__}: {error}"
 
     try:
         root = Path(private.name)
@@ -134,7 +232,7 @@ def case(output, old, current, relay, serve_kind, access_kind, multiplex):
         else:
             args = ["--name", "compat", "--target", f"127.0.0.1:{target_port}",
                     "--relay-url", relay]
-        serve, serve_state, _ = spawn(serve_kind, "serve", args)
+        serve, serve_state, serve_log = spawn(serve_kind, "serve", args)
         serve_status = wait_ready(serve, lambda: status(serve_state / "serve-status.json"),
                                   "Serve status")
         node = serve_status["node_id"]
@@ -161,19 +259,22 @@ def case(output, old, current, relay, serve_kind, access_kind, multiplex):
             "listening for local clients" in line and f"127.0.0.1:{access_port}" in line
             for line in log.read_text().splitlines()), "Access listener")
         phase = "tcp-exchange"
-        worker = threading.Thread(target=target, name=name)
+        worker = threading.Thread(target=target_channels,
+                                  args=(listener, record, target_workers), name=name)
         worker.start()
-        with socket.create_connection(("127.0.0.1", access_port), timeout=30) as client:
-            client.settimeout(30)
-            client.sendall(REQUEST)
-            record["client"]["sent_hex"] = REQUEST.hex()
-            received = receive(client, len(RESPONSE))
-            record["client"]["received_hex"] = received.hex()
-            if received != RESPONSE:
-                raise RuntimeError("client response bytes differ")
-        worker.join(timeout=30)
-        if worker.is_alive() or "error" in record["target"]:
-            raise RuntimeError(f"target did not finish successfully: {record['target']}")
+
+        def observe():
+            record["connection_observation"] = observe_connections(
+                log, serve_log, access_kind != "old" or multiplex)
+
+        exchange_channels(("127.0.0.1", access_port), record, observe)
+        worker.join(timeout=36)
+        for target_worker in target_workers:
+            target_worker.join(timeout=36)
+        if worker.is_alive() or any(item.is_alive() for item in target_workers):
+            raise RuntimeError("target threads did not finish")
+        if "error" in record or any("error" in item for item in record["channels"]):
+            raise RuntimeError("target channel failed; inspect channel transcripts")
         record["access_status"] = status(access_state / "access-status.json")
         record["serve_status"] = status(serve_state / "serve-status.json")
         record["outcome"] = "PASS"
@@ -182,28 +283,23 @@ def case(output, old, current, relay, serve_kind, access_kind, multiplex):
         record["phase"] = phase
         record["error"] = f"{type(error).__name__}: {error}"
     finally:
-        # SIGINT requests normal role shutdown; hard kill only after bounded grace.
-        for child in reversed(children):
-            forced = False
-            if child.poll() is None:
-                child.send_signal(signal.SIGINT)
-            try:
-                child.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=5)
-                forced = True
-            record["cleanup"].append({"pid": child.pid, "exit": child.returncode,
-                                      "forced_kill": forced})
+        # PASS requires graceful exit 0 for every owned role, never forced kill.
+        cleanup_children(children, record)
         listener.close()
         if worker is not None:
             worker.join(timeout=36)
-            if worker.is_alive():
+            for target_worker in target_workers:
+                target_worker.join(timeout=36)
+            if worker.is_alive() or any(item.is_alive() for item in target_workers):
                 record["outcome"] = "FAIL"
                 record["error"] = "target thread did not terminate"
         for log in logs:
             log.close()
-        private.cleanup()
+        try:
+            private.cleanup()
+        except Exception as error:
+            record["outcome"] = "FAIL"
+            record.setdefault("cleanup_errors", []).append(f"temporary directory cleanup: {error}")
     record["finished_at"] = now()
     print(f"{name}: {record['outcome']} {record.get('error', '')}", flush=True)
     return record
@@ -213,7 +309,8 @@ def main():
     output = Path(os.environ["IROH_INTEROP_OUTPUT"]).resolve()
     output.mkdir(parents=True, exist_ok=False)
     report = {"case": "TCP-COMPAT-01", "started_at": now(), "platform": platform.platform(),
-              "machine": platform.machine(), "user_id": os.getuid(), "variants": []}
+              "machine": platform.machine(), "user_id": os.getuid(),
+              "harness_sha256": digest(Path(__file__).read_bytes()), "variants": []}
     try:
         relay = os.environ["IROH_INTEROP_RELAY"]
         url = urlsplit(relay)

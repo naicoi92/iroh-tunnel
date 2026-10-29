@@ -24,8 +24,13 @@ async fn released_0_4_and_current_exchange_tcp_bytes_in_both_directions() -> Res
         .join("tests/evidence/issue-85/tcp_compat.py");
     // Python bounds each operation and owns role cleanup. Wait off Tokio workers;
     // do not kill the runner ahead of its children.
-    let outcome =
-        tokio::task::spawn_blocking(move || Command::new("python3").arg(script).status()).await;
+    let outcome = tokio::task::spawn_blocking(move || {
+        Command::new("uv")
+            .args(["run", "--no-project", "--offline", "python"])
+            .arg(script)
+            .status()
+    })
+    .await;
     anyhow::ensure!(
         outcome.context("join compatibility runner")??.success(),
         "TCP compatibility runner failed; inspect evidence output"
