@@ -1,7 +1,8 @@
 # OpenCodeReview — AI PR review with Alibaba's open-source OCR CLI + Zai GLM-5.2.
 #
-# Replaces CodeRabbit for this repo. Uses the composite action published by
-# alibaba/open-code-review, configured against the Z.AI GLM Coding Plan endpoint
+# Temporarily disabled in repository settings; see .github/open-code-review.md.
+# When enabled, uses the composite action published by alibaba/open-code-review,
+# configured against the Z.AI GLM Coding Plan endpoint
 # (https://api.z.ai/api/coding/paas/v4) running the glm-5.2 model.
 #
 # Triggers:
