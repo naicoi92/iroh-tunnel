@@ -7,7 +7,7 @@
 //!
 //! Logs are captured through a `tracing_subscriber` writer that appends
 //! every formatted line into a shared buffer, installed BEFORE the roles
-//! spawn. The test drives one multiplexed and one per-channel service
+//! spawn. The test drives two multiplexed services (including legacy false)
 //! through the tunnel and asserts each connection-established line carries
 //! the service name, the serve node's full id in `peer=`, and a rendered
 //! active transport (`relay=` — via the in-process relay the relay path is
@@ -154,9 +154,9 @@ port = {port}
     let mux_listener = TcpListener::bind("127.0.0.1:0").await?;
     let mux_addr = mux_listener.local_addr()?;
     drop(mux_listener);
-    let per_channel_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let per_channel_addr = per_channel_listener.local_addr()?;
-    drop(per_channel_listener);
+    let legacy_false_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let legacy_false_addr = legacy_false_listener.local_addr()?;
+    drop(legacy_false_listener);
 
     let access_cfg = cfg_tmp.path().join("access.toml");
     std::fs::write(
@@ -180,12 +180,12 @@ name = "echo2"
 node_id = "{serve_node_id}"
 protocol = "tcp"
 host = "127.0.0.1"
-port = {per_channel_port}
+port = {legacy_false_port}
 multiplex = false
 "#,
             access_key = encode_secret_key(&access_key),
             mux_port = mux_addr.port(),
-            per_channel_port = per_channel_addr.port(),
+            legacy_false_port = legacy_false_addr.port(),
         ),
     )?;
 
@@ -225,16 +225,16 @@ multiplex = false
     .await?;
     roundtrip(&mut mux_client).await?;
 
-    // Per-channel service: the dial (and its log line) happens per client.
-    let mut per_channel_client = retry_connect(
-        per_channel_addr,
+    // Legacy false service: still uses the shared connection path.
+    let mut legacy_false_client = retry_connect(
+        legacy_false_addr,
         Duration::from_secs(30),
         &serve_role,
         &access_role,
         &sink,
     )
     .await?;
-    roundtrip(&mut per_channel_client).await?;
+    roundtrip(&mut legacy_false_client).await?;
 
     // The lines are already in the buffer by now; wait_for_line only scans.
     let peer_field = format!("peer={serve_node_id}");
@@ -252,15 +252,15 @@ multiplex = false
     .context("multiplexed established line")?;
     println!("multiplexed established: {mux_line}");
 
-    let per_channel_line = wait_for_line(&sink, |line| {
-        line.contains("connected to serve peer (per-channel")
+    let legacy_false_line = wait_for_line(&sink, |line| {
+        line.contains("connected to serve peer (multiplexed")
             && line.ends_with("svc_name=echo2")
             && line.contains(&peer_field)
             && (line.contains("relay=") || line.contains("direct="))
     })
     .await
-    .context("per-channel established line")?;
-    println!("per-channel established: {per_channel_line}");
+    .context("legacy-false multiplexed established line")?;
+    println!("legacy-false multiplexed established: {legacy_false_line}");
 
     // The serve role's accept side logs the same connect with the peer's
     // active transports (`peer connected via …`) — symmetric with the
@@ -298,7 +298,7 @@ multiplex = false
         "poller must stay silent while nothing changes"
     );
     drop(mux_client);
-    drop(per_channel_client);
+    drop(legacy_false_client);
     let _ = access_tx.send(());
     finish_role(&access_role, "access").await?;
     let _ = serve_tx.send(());
