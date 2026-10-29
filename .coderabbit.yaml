@@ -1,5 +1,5 @@
 language: en-US
 reviews:
   auto_review:
-    enabled: true
+    enabled: false
     drafts: true
