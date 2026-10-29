@@ -37,12 +37,11 @@ cargo test --all-features
 
 The integration tests in `tests/serve_access_tunnel.rs` are marked
 `#[ignore]` because they dial the real n0 relay network over the Internet.
-`cargo test` alone runs the offline unit tests. Run the online suite
-explicitly when touching serve/access behavior:
-
-```sh
-cargo test --all-features -- --ignored         # one test takes ~70 s
-```
+Prefer isolated local-relay fixtures for process-level end-to-end verification.
+The integration test feature `test-utils` disables relay TLS verification;
+do not run that test binary against public relays. Public-relay coverage is
+blocked until a harness can verify relay TLS certificates. Report this gap
+when it is relevant to a change.
 
 ## Code quality gates
 
