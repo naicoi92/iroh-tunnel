@@ -290,8 +290,8 @@ with a throwaway demo key so the compose demo runs as-is.
 
 ## Multiplexing (0.2.0)
 
-With `multiplex = true` (default, per service on the access side), each
-service keeps **one long-lived Iroh connection** between access and serve,
+Multiplexing is always enabled. Each TCP service keeps **one long-lived Iroh
+connection** between access and serve,
 and every local TCP connection rides its own QUIC bidirectional stream on
 that connection. The relay session and QUIC/TLS handshake are paid once, not
 once per channel.
@@ -304,21 +304,20 @@ node_id = "…"
 protocol = "tcp"
 host = "127.0.0.1"
 port = 5433
-multiplex = true   # default; false = one connection per channel (pre-0.2.0)
 ```
 
-**Rollout: upgrade serve before access.** There is deliberately no protocol
-negotiation — the ALPN is unchanged. A 0.2.0+ serve is fully
-backward-compatible with every access version, so upgrading serve nodes
-first has no caveat. The reverse is not supported: a multiplexing access
-against a pre-0.2.0 serve would hang its second stream (the old serve
-accepts exactly one stream per connection) — if you must run a new access
-against an old serve, set `multiplex = false` on that service.
+Legacy `multiplex` values are silently ignored, including `false`, and removed
+by application-managed config saves (`config add`, `remove`, `keygen`, and
+identity persistence). Loading alone does not rewrite an existing file.
+`config edit` delegates writes to the external editor; its output is not
+rewritten by the app. No setting disables reuse.
+
+There is no new protocol negotiation; the ALPN is unchanged. Pre-0.2.0 Serve
+peers accept only one stream per connection and cannot support this contract;
+upgrade those peers. Current 0.4 interoperability evidence is owned by #85.
 
 **When it helps:** many parallel channels to one serve node (a DB pool, many
-HTTP clients, SSH sessions). **When to turn it off:** if you want hard
-isolation between channels (with `false`, a channel's failure domain is its
-own connection), or while a serve peer is not yet upgraded.
+HTTP clients, SSH sessions).
 
 **Operational notes:**
 
@@ -345,13 +344,18 @@ own connection), or while a serve peer is not yet upgraded.
 
 ## Version compatibility
 
-**0.4.2 upgrades iroh 1.0.0 → 1.1.0.** The tunnel's own protocol is
-unchanged — same ALPNs, same QUIC stream semantics — so a 0.4.2 node talks
-to any older iroh-tunnel peer:
+**Historical 0.4.2 release:** iroh was upgraded from 1.0.0 to 1.1.0
+without changing the tunnel ALPN. The following describes that release, not
+proof of compatibility for this redesign. Mixed 0.4.2 ↔ 0.4.1 was verified
+in both role pairings over the n0 relay farm.
 
-| Peers | Compatible? |
+The current Access role always reuses a connection, so a pre-0.2.0 Serve
+peer cannot support multiple channels; upgrade Serve first. Compatibility
+with 0.4 peers is tracked separately in #85.
+
+| Peers | Historical 0.4.2 release evidence |
 |---|---|
-| 0.4.2 ↔ 0.1.0–0.4.1, either role | ✅ — mixed 0.4.2 ↔ 0.4.1 verified in **both role pairings** over the n0 relay farm; older versions share the same wire protocol. No new rollout order; only the pre-existing [0.2.0 multiplexing rule](#multiplexing-020) applies (upgrade serve before an access enables `multiplex = true`) |
+| 0.4.2 ↔ 0.4.1, either role | ✅ — verified in both role pairings over the n0 relay farm |
 | 0.4.2 ↔ self-hosted iroh-relay 1.0.x | ✅ — relay protocol unchanged; a 1.1.0 client simply gets no rate-limit notifications from a 1.0.x relay |
 | 0.4.2 ↔ self-hosted iroh-relay 1.1.x | ✅ — recommended: invalid-message hardening (1.0.2+), live per-client rate limits (1.0.2+), rate-limit notifications (1.1.0) |
 | 0.4.2 ↔ n0 public relay farm | ✅ — n0 keeps the farm current |
@@ -614,9 +618,7 @@ closes.
   config, so it is present before the first connection.
 - `transports` — the live paths of the service's shared multiplexed
   connection, queried fresh at each 5 s flush (same relay/direct semantics
-  as the serve file). Empty while the service has no live connection — and
-  always empty for `multiplex = false` services, whose per-channel
-  connections are too short-lived to report.
+  as the serve file). Empty while the service has no live connection.
 - `local_bound_addrs` — the access endpoint's local UDP socket *candidates*
   (endpoint-wide, same caveat as the serve file).
 
@@ -682,8 +684,7 @@ and the peer's active transports rendered compactly: `relay=<url>` /
 | Event | Sample line | Meaning |
 |-------|-------------|---------|
 | Connected (multiplexed) | `INFO … svc_name=echo peer=<serve id> connected to serve peer (multiplexed, 1aa27080…) via relay=https://use1-1.relay.iroh.network/` | First successful dial of the service's shared long-lived connection (see [Multiplexing](#multiplexing-020)); re-logged on every redial after a disconnect. |
-| Connected (per channel) | `INFO … svc_name=echo peer=<serve id> connected to serve peer (per-channel, 1aa27080…) via direct=192.168.1.10:52618` | `multiplex = false`: one connection per local client, logged at each dial. |
-| Path changed | `INFO … svc_name=echo peer=<serve id> path changed relay→direct (now active: direct=203.0.113.7:41641)` | The multiplexed connection migrated between paths — a hole punch succeeded (`relay→direct`) or the direct path died and traffic fell back (`direct→relay`). Checked every 5 s; silent while nothing changes. Not emitted for per-channel connections (they are too short-lived). |
+| Path changed | `INFO … svc_name=echo peer=<serve id> path changed relay→direct (now active: direct=203.0.113.7:41641)` | The multiplexed connection migrated between paths — a hole punch succeeded (`relay→direct`) or the direct path died and traffic fell back (`direct→relay`). Checked every 5 s; silent while nothing changes. |
 | Disconnected | `INFO … peer=<serve id> disconnected from serve peer (service echo, multiplexed)` | The connection closed (error or shutdown); a multiplexed service redials on its next channel. |
 | Peer connected (serve) | `INFO … service=echo peer=<access id> peer connected via relay=https://use1-1.relay.iroh.network/` | Serve side of a connect: the access peer dialed in (multiplexed or per-channel — serve cannot tell), carrying that peer's active transports. `via paths pending` right after the handshake resolves on the next status flush (see `connections` in [Monitoring](#monitoring)). |
 
@@ -716,9 +717,9 @@ The `.apk` is musl, the `.deb` is glibc — they are not interchangeable.
 Pick the one matching the host libc.
 
 **A second connection just hangs against an old serve node.**
-You are running a 0.2.0+ access with `multiplex = true` against a pre-0.2.0
-serve. Upgrade the serve node first, or set `multiplex = false` on that
-service. See [Multiplexing](#multiplexing-020).
+Pre-0.2.0 Serve peers accept only one stream per connection. Upgrade Serve;
+`multiplex = false` is ignored and cannot restore the retired Access behavior.
+See [Multiplexing](#multiplexing-020).
 
 **Is UDP supported?**
 Not yet. The framing codec (`[len][payload]`) and UDP pipe are in the

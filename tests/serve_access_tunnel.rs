@@ -14,20 +14,14 @@
 //!    two concurrent local clients are carried as two bidirectional streams
 //!    on ONE iroh connection (asserted via a counting mini-serve); closing
 //!    one stream does not affect the other.
-//! 3. `multiplex_false_matches_legacy_behavior` — access `multiplex = false`:
-//!    two sequential channels, two separate connections — the pre-0.2.0
-//!    behavior verbatim.
+//! 3. `multiplex_false_still_reuses_connection` — access `multiplex = false`:
+//!    two sequential channels still share one connection.
 //! 4. `multiplex_survives_idle_beyond_timeout` — keep-alive: after 60 s with
 //!    no traffic (noq's default idle timeout is 30 s), a new channel still
 //!    rides the SAME connection and both channels keep echoing.
 //!
-//! ## Rollout contract (no negotiation)
-//!
-//! Multiplexing requires a 0.2.0+ serve peer; the ALPN carries no version
-//! information. The unsupported combination (new access with multiplex
-//! enabled vs an old one-stream-per-connection serve) is therefore not
-//! tested here — it is avoided by upgrading serve first, or by setting
-//! `multiplex = false`.
+//! Multiplex is always enabled; legacy `multiplex` values are ignored. The
+//! ALPN is unchanged. Release interoperability is verified separately in #85.
 //!
 //! ## Why `#[ignore]`
 //!
@@ -113,9 +107,8 @@ port = {port}
     let access_addr = access_listener.local_addr()?;
     drop(access_listener);
 
-    // 4. A pre-0.2.0-style access config: no `multiplex` field would also
-    //    default to true, so pin `false` explicitly — this suite pins the
-    //    single-channel (legacy) behavior of the whole stack.
+    // 4. A legacy access config remains readable; false is ignored.
+    //    This suite pins a single-channel byte exchange, not a legacy dial mode.
     let access_cfg_path = tmp.path().join("access.toml");
     std::fs::write(
         &access_cfg_path,
@@ -397,11 +390,10 @@ async fn multiplex_two_streams_share_one_connection() -> Result<()> {
     Ok(())
 }
 
-/// Suite 3 — access `multiplex = false`: the pre-0.2.0 behavior, unchanged
-/// (two sequential channels each get their own connection).
+/// Suite 3 — legacy `multiplex = false` cannot disable connection reuse.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Internet + n0 relay network; run with --ignored"]
-async fn multiplex_false_matches_legacy_behavior() -> Result<()> {
+async fn multiplex_false_still_reuses_connection() -> Result<()> {
     init_tracing();
     let tmp = tempfile::tempdir().context("tempdir")?;
 
@@ -415,11 +407,10 @@ async fn multiplex_false_matches_legacy_behavior() -> Result<()> {
 
     let mut c2 = retry_connect(access_addr, Duration::from_secs(30)).await?;
     echo_once(&mut c2).await?;
-    // One connection per channel: two sequential channels, two connections in
-    // total (the live count never peaks at 2 — c1 closes before c2).
+    // Legacy false cannot select the retired one-connection-per-channel path.
     wait_until(
-        || serve.total_conns.load(Ordering::SeqCst) == 2,
-        "two per-channel connections in total",
+        || serve.total_conns.load(Ordering::SeqCst) == 1,
+        "one shared connection despite legacy false",
     )
     .await?;
     Ok(())

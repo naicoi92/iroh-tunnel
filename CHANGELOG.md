@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **TCP multiplexing**: Access always reuses a service connection for
+  concurrent streams. Legacy `multiplex` configuration values are silently
+  ignored and removed by app-owned config saves; `config edit` leaves external
+  editor output unchanged.
+
 ### Added
 
 - **Ephemeral quick TCP commands**: `serve -n NAME -t IP:PORT` and

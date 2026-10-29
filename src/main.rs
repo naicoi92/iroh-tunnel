@@ -116,7 +116,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     protocol: iroh_tunnel::config::Protocol::Tcp,
                     host: listen.ip().to_string(),
                     port: listen.port(),
-                    multiplex: true,
                     relay_urls: vec![],
                 }],
             };
