@@ -1,0 +1,15 @@
+    Blocking waiting for file lock on package cache
+   Compiling iroh-tunnel v0.4.2 (/private/tmp/iroh-tunnel-issue-85-current)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.53s
+     Running tests/interop_0_4.rs (/tmp/iroh-85-test-target/debug/deps/interop_0_4-7ba56938c63a6101)
+
+running 1 test
+old-access_to_old-serve_multiplex-true: PASS
+current-access_to_current-serve: PASS
+old-access_to_current-serve_multiplex-true: PASS
+current-access_to_old-serve: PASS
+old-access_to_current-serve_multiplex-false: PASS
+old-access_to_old-serve_multiplex-false: PASS
+test released_0_4_and_current_exchange_tcp_bytes_in_both_directions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 58.28s

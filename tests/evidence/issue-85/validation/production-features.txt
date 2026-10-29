@@ -1,0 +1,12 @@
+iroh v1.1.0
+├── iroh feature "default"
+│   └── iroh-tunnel v0.4.2 (/private/tmp/iroh-tunnel-issue-85-current)
+│       └── iroh-tunnel feature "default" (command-line)
+├── iroh feature "fast-apple-datapath"
+│   └── iroh feature "default" (*)
+├── iroh feature "metrics"
+│   └── iroh feature "default" (*)
+├── iroh feature "portmapper"
+│   └── iroh feature "default" (*)
+└── iroh feature "tls-ring"
+    └── iroh feature "default" (*)

@@ -1,0 +1,10 @@
+[2m2026-10-29T12:48:42.863134Z[0m [33m WARN[0m secret_key empty, generated new key, saving to config
+NodeId: 9457281a308f753470b03d9dfc56ab660ade991f8f086759cfcabee108ade26e
+Serving: compat tcp://127.0.0.1:49521
+[2m2026-10-29T12:48:42.883256Z[0m [32m INFO[0m endpoint ready
+[2m2026-10-29T12:48:42.914691Z[0m [32m INFO[0m wrote status file [3mpath[0m[2m=[0m/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-bpe7y_lq/serve/state/serve-status.json
+[2m2026-10-29T12:48:42.914715Z[0m [32m INFO[0m serve endpoint ready, accepting connections
+[2m2026-10-29T12:48:50.092322Z[0m [32m INFO[0m peer connected [3mpeer[0m[2m=[0mf61c8a4728a7983a081f693d23080c4e689e94966f7b3e6d72593e6dd806a7ac [3mservice[0m[2m=[0mcompat
+[2m2026-10-29T12:48:50.470544Z[0m [32m INFO[0m peer disconnected (service compat) [3mpeer[0m[2m=[0mf61c8a4728a7983a081f693d23080c4e689e94966f7b3e6d72593e6dd806a7ac
+[2m2026-10-29T12:48:51.286636Z[0m [32m INFO[0m received SIGINT (Ctrl+C)
+[2m2026-10-29T12:48:51.608203Z[0m [32m INFO[0m draining connections (timeout 5s)...

@@ -1,0 +1,291 @@
+{
+  "case": "TCP-COMPAT-01",
+  "started_at": "2026-10-29T12:41:11.249289+00:00",
+  "platform": "macOS-15.7.3-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "user_id": 501,
+  "variants": [
+    {
+      "case": "TCP-COMPAT-01",
+      "variant": "old-access_to_old-serve_multiplex-true",
+      "started_at": "2026-10-29T12:41:11.343188+00:00",
+      "serve_kind": "old",
+      "access_kind": "old",
+      "old_access_multiplex": true,
+      "commands": [
+        {
+          "argv": [
+            "/private/tmp/issue85-artifacts/v0.4.0/iroh-tunnel",
+            "--color",
+            "never",
+            "serve",
+            "run",
+            "--config",
+            "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-10lwehgd/serve.toml"
+          ],
+          "env": {
+            "HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-10lwehgd/serve",
+            "XDG_CONFIG_HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-10lwehgd/serve",
+            "IROH_TUNNEL_TEST_CONFIG_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-10lwehgd/serve/config",
+            "IROH_TUNNEL_STATE_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-10lwehgd/serve/state",
+            "RUST_LOG": "iroh_tunnel=info"
+          },
+          "pid": 17221,
+          "log": "old-access_to_old-serve_multiplex-true.serve.log"
+        }
+      ],
+      "target": {},
+      "client": {},
+      "cleanup": [
+        {
+          "pid": 17221,
+          "exit": 1,
+          "forced_kill": false
+        }
+      ],
+      "target_address": "127.0.0.1:63594",
+      "outcome": "FAIL",
+      "error": "RuntimeError: Serve status: process exited 1",
+      "finished_at": "2026-10-29T12:41:11.453450+00:00"
+    },
+    {
+      "case": "TCP-COMPAT-01",
+      "variant": "current-access_to_current-serve",
+      "started_at": "2026-10-29T12:41:11.453534+00:00",
+      "serve_kind": "current",
+      "access_kind": "current",
+      "old_access_multiplex": null,
+      "commands": [
+        {
+          "argv": [
+            "/private/tmp/iroh-85-prod-target/debug/iroh-tunnel",
+            "--color",
+            "never",
+            "serve",
+            "--name",
+            "compat",
+            "--target",
+            "127.0.0.1:63595",
+            "--relay-url",
+            "http://127.0.0.1:63591/"
+          ],
+          "env": {
+            "HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-rfd6879_/serve",
+            "XDG_CONFIG_HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-rfd6879_/serve",
+            "IROH_TUNNEL_TEST_CONFIG_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-rfd6879_/serve/config",
+            "IROH_TUNNEL_STATE_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-rfd6879_/serve/state",
+            "RUST_LOG": "iroh_tunnel=info"
+          },
+          "pid": 17223,
+          "log": "current-access_to_current-serve.serve.log"
+        }
+      ],
+      "target": {},
+      "client": {},
+      "cleanup": [
+        {
+          "pid": 17223,
+          "exit": 2,
+          "forced_kill": false
+        }
+      ],
+      "target_address": "127.0.0.1:63595",
+      "outcome": "FAIL",
+      "error": "RuntimeError: Serve status: process exited 2",
+      "finished_at": "2026-10-29T12:41:11.563625+00:00"
+    },
+    {
+      "case": "TCP-COMPAT-01",
+      "variant": "old-access_to_current-serve_multiplex-true",
+      "started_at": "2026-10-29T12:41:11.563699+00:00",
+      "serve_kind": "current",
+      "access_kind": "old",
+      "old_access_multiplex": true,
+      "commands": [
+        {
+          "argv": [
+            "/private/tmp/iroh-85-prod-target/debug/iroh-tunnel",
+            "--color",
+            "never",
+            "serve",
+            "--name",
+            "compat",
+            "--target",
+            "127.0.0.1:63596",
+            "--relay-url",
+            "http://127.0.0.1:63591/"
+          ],
+          "env": {
+            "HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_hjjy0c9/serve",
+            "XDG_CONFIG_HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_hjjy0c9/serve",
+            "IROH_TUNNEL_TEST_CONFIG_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_hjjy0c9/serve/config",
+            "IROH_TUNNEL_STATE_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_hjjy0c9/serve/state",
+            "RUST_LOG": "iroh_tunnel=info"
+          },
+          "pid": 17224,
+          "log": "old-access_to_current-serve_multiplex-true.serve.log"
+        }
+      ],
+      "target": {},
+      "client": {},
+      "cleanup": [
+        {
+          "pid": 17224,
+          "exit": 2,
+          "forced_kill": false
+        }
+      ],
+      "target_address": "127.0.0.1:63596",
+      "outcome": "FAIL",
+      "error": "RuntimeError: Serve status: process exited 2",
+      "finished_at": "2026-10-29T12:41:11.669665+00:00"
+    },
+    {
+      "case": "TCP-COMPAT-01",
+      "variant": "current-access_to_old-serve",
+      "started_at": "2026-10-29T12:41:11.669740+00:00",
+      "serve_kind": "old",
+      "access_kind": "current",
+      "old_access_multiplex": null,
+      "commands": [
+        {
+          "argv": [
+            "/private/tmp/issue85-artifacts/v0.4.0/iroh-tunnel",
+            "--color",
+            "never",
+            "serve",
+            "run",
+            "--config",
+            "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-6f406xii/serve.toml"
+          ],
+          "env": {
+            "HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-6f406xii/serve",
+            "XDG_CONFIG_HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-6f406xii/serve",
+            "IROH_TUNNEL_TEST_CONFIG_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-6f406xii/serve/config",
+            "IROH_TUNNEL_STATE_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-6f406xii/serve/state",
+            "RUST_LOG": "iroh_tunnel=info"
+          },
+          "pid": 17228,
+          "log": "current-access_to_old-serve.serve.log"
+        }
+      ],
+      "target": {},
+      "client": {},
+      "cleanup": [
+        {
+          "pid": 17228,
+          "exit": 1,
+          "forced_kill": false
+        }
+      ],
+      "target_address": "127.0.0.1:63597",
+      "outcome": "FAIL",
+      "error": "RuntimeError: Serve status: process exited 1",
+      "finished_at": "2026-10-29T12:41:11.775515+00:00"
+    },
+    {
+      "case": "TCP-COMPAT-01",
+      "variant": "old-access_to_current-serve_multiplex-false",
+      "started_at": "2026-10-29T12:41:11.775597+00:00",
+      "serve_kind": "current",
+      "access_kind": "old",
+      "old_access_multiplex": false,
+      "commands": [
+        {
+          "argv": [
+            "/private/tmp/iroh-85-prod-target/debug/iroh-tunnel",
+            "--color",
+            "never",
+            "serve",
+            "--name",
+            "compat",
+            "--target",
+            "127.0.0.1:63598",
+            "--relay-url",
+            "http://127.0.0.1:63591/"
+          ],
+          "env": {
+            "HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-wzhw_d8o/serve",
+            "XDG_CONFIG_HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-wzhw_d8o/serve",
+            "IROH_TUNNEL_TEST_CONFIG_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-wzhw_d8o/serve/config",
+            "IROH_TUNNEL_STATE_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-wzhw_d8o/serve/state",
+            "RUST_LOG": "iroh_tunnel=info"
+          },
+          "pid": 17231,
+          "log": "old-access_to_current-serve_multiplex-false.serve.log"
+        }
+      ],
+      "target": {},
+      "client": {},
+      "cleanup": [
+        {
+          "pid": 17231,
+          "exit": 2,
+          "forced_kill": false
+        }
+      ],
+      "target_address": "127.0.0.1:63598",
+      "outcome": "FAIL",
+      "error": "RuntimeError: Serve status: process exited 2",
+      "finished_at": "2026-10-29T12:41:11.885484+00:00"
+    },
+    {
+      "case": "TCP-COMPAT-01",
+      "variant": "old-access_to_old-serve_multiplex-false",
+      "started_at": "2026-10-29T12:41:11.885562+00:00",
+      "serve_kind": "old",
+      "access_kind": "old",
+      "old_access_multiplex": false,
+      "commands": [
+        {
+          "argv": [
+            "/private/tmp/issue85-artifacts/v0.4.0/iroh-tunnel",
+            "--color",
+            "never",
+            "serve",
+            "run",
+            "--config",
+            "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_sahooro/serve.toml"
+          ],
+          "env": {
+            "HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_sahooro/serve",
+            "XDG_CONFIG_HOME": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_sahooro/serve",
+            "IROH_TUNNEL_TEST_CONFIG_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_sahooro/serve/config",
+            "IROH_TUNNEL_STATE_DIR": "/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-_sahooro/serve/state",
+            "RUST_LOG": "iroh_tunnel=info"
+          },
+          "pid": 17232,
+          "log": "old-access_to_old-serve_multiplex-false.serve.log"
+        }
+      ],
+      "target": {},
+      "client": {},
+      "cleanup": [
+        {
+          "pid": 17232,
+          "exit": 1,
+          "forced_kill": false
+        }
+      ],
+      "target_address": "127.0.0.1:63599",
+      "outcome": "FAIL",
+      "error": "RuntimeError: Serve status: process exited 1",
+      "finished_at": "2026-10-29T12:41:11.994400+00:00"
+    }
+  ],
+  "old": {
+    "path": "/private/tmp/issue85-artifacts/v0.4.0/iroh-tunnel",
+    "sha256": "431d9f4d14effd398617b3d62adcf182a86533395d3cfac4426a31361d51c9f5",
+    "version": "iroh-tunnel 0.4.0"
+  },
+  "current": {
+    "path": "/private/tmp/iroh-85-prod-target/debug/iroh-tunnel",
+    "sha256": "7368f6cfa4f722d704d97c2f8c38d56f9fd4456eff2c86b5ee84ef7d45115a4a",
+    "version": "iroh-tunnel 0.4.2-dev"
+  },
+  "relay": "http://127.0.0.1:63591/",
+  "request_hex": "5443502d434f4d5041542d303120726571756573740080ff0a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+  "response_hex": "66697865642074617267657420726573706f6e736500ff0afffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0cfcecdcccbcac9c8c7c6c5c4c3c2c1c0bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a09f9e9d9c9b9a999897969594939291908f8e8d8c8b8a898887868584838281807f7e7d7c7b7a797877767574737271706f6e6d6c6b6a696867666564636261605f5e5d5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d3c3b3a393837363534333231302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0cfcecdcccbcac9c8c7c6c5c4c3c2c1c0bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a09f9e9d9c9b9a999897969594939291908f8e8d8c8b8a898887868584838281807f7e7d7c7b7a797877767574737271706f6e6d6c6b6a696867666564636261605f5e5d5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d3c3b3a393837363534333231302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0cfcecdcccbcac9c8c7c6c5c4c3c2c1c0bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a09f9e9d9c9b9a999897969594939291908f8e8d8c8b8a898887868584838281807f7e7d7c7b7a797877767574737271706f6e6d6c6b6a696867666564636261605f5e5d5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d3c3b3a393837363534333231302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0cfcecdcccbcac9c8c7c6c5c4c3c2c1c0bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a09f9e9d9c9b9a999897969594939291908f8e8d8c8b8a898887868584838281807f7e7d7c7b7a797877767574737271706f6e6d6c6b6a696867666564636261605f5e5d5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d3c3b3a393837363534333231302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
+  "outcome": "FAIL",
+  "finished_at": "2026-10-29T12:41:11.994481+00:00"
+}

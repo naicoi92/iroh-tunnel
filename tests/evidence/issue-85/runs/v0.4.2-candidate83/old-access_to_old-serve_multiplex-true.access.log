@@ -1,0 +1,11 @@
+2026-10-29T13:42:07.735635Z  WARN secret_key empty, generated new key, saving to config
+NodeId: 827aee3e983429bfc47e040aa1b19910cde8bdd7cea53bf2903235639dc4e9b8
+Exposed: compat 127.0.0.1:61130 -> peer 81f1b8da6eefc57ebb8ca13bfcfbedc15b1ef706ae9621d2546a42397fc31140 (tcp://127.0.0.1:61130)
+2026-10-29T13:42:07.743168Z  INFO endpoint ready
+2026-10-29T13:42:07.748394Z  INFO wrote status file path=/TMP/iroh-85-fqnngrnx/access/state/access-status.json
+2026-10-29T13:42:07.748411Z  INFO access endpoint ready, listening for local clients
+2026-10-29T13:42:07.748446Z  INFO listening for local clients listen_addr=127.0.0.1:61130
+2026-10-29T13:42:14.560108Z  INFO connected to serve peer (multiplexed, 81f1b8da…) via relay=https://use1-1.relay.n0.iroh.link/ peer=81f1b8da6eefc57ebb8ca13bfcfbedc15b1ef706ae9621d2546a42397fc31140 svc_name=compat
+2026-10-29T13:42:15.236508Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:42:15.236627Z  INFO disconnected from serve peer (service compat, multiplexed) peer=81f1b8da6eefc57ebb8ca13bfcfbedc15b1ef706ae9621d2546a42397fc31140
+2026-10-29T13:42:15.583483Z  INFO draining connections (timeout 5s)...

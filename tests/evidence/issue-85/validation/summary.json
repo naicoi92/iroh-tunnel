@@ -1,0 +1,19 @@
+{
+  "checked_at": "2026-10-29T12:53:12.323219+00:00",
+  "source_sha": "5ad24007401d33fd6977fbb2d2b52894e7133333",
+  "observations": [
+    "18 of 18 real executable exchanges PASS across three matrices (one repeated v0.4.0 final harness).",
+    "1049 request bytes and 1048 response bytes checked exactly at client and fixed target for each variant.",
+    "All role children exit 0, no forced kill; Access connection logs observe public relay at establishment.",
+    "No secret-key/token assignments in captured logs.",
+    "Final locked full suite: 134 passed, 0 failed, 5 ignored.",
+    "Final fmt and locked all-target/all-feature Clippy PASS.",
+    "Local HTTP fixture attempt BLOCKED before networking; not wire incompatibility.",
+    "Independent Standards/Spec reviews pending; no delegated review, PR, push or merge."
+  ],
+  "limits": [
+    "macOS arm64 Rust 1.99.1 only; no Rust 1.91 MSRV proof.",
+    "No final redesigned release artifact, Linux/Windows runtime, v0.4.1, direct/forced path, separate hosts, concurrency or long-lived acceptance.",
+    "Unsigned old releases identified by published checksum plus API digest; public relay software version unknown."
+  ]
+}

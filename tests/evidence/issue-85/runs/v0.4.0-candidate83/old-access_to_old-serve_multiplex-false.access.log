@@ -1,0 +1,13 @@
+2026-10-29T13:41:58.328483Z  WARN secret_key empty, generated new key, saving to config
+NodeId: 538cf5ee1045359fde001d9090ea9b2cc01b4186e9b5d0c140cc4df137d3ac98
+Exposed: compat 127.0.0.1:61084 -> peer 39bb1b56e3b6a85d5d25f8c57ae13e5a1a8adf5695e5f14b0d5cf1a2165ee69f (tcp://127.0.0.1:61084)
+2026-10-29T13:41:58.339676Z  INFO endpoint ready
+2026-10-29T13:41:58.344250Z  INFO wrote status file path=/TMP/iroh-85-9tuu8a_n/access/state/access-status.json
+2026-10-29T13:41:58.344263Z  INFO access endpoint ready, listening for local clients
+2026-10-29T13:41:58.344294Z  INFO listening for local clients listen_addr=127.0.0.1:61084
+2026-10-29T13:42:05.103268Z  INFO connected to serve peer (per-channel, 39bb1b56…) via relay=https://use1-1.relay.n0.iroh.link/ peer=39bb1b56e3b6a85d5d25f8c57ae13e5a1a8adf5695e5f14b0d5cf1a2165ee69f svc_name=compat
+2026-10-29T13:42:05.762597Z  INFO connected to serve peer (per-channel, 39bb1b56…) via relay=https://use1-1.relay.n0.iroh.link/, direct=172.16.0.163:61950 peer=39bb1b56e3b6a85d5d25f8c57ae13e5a1a8adf5695e5f14b0d5cf1a2165ee69f svc_name=compat
+2026-10-29T13:42:05.765804Z  INFO disconnected from serve peer (service compat) peer=39bb1b56e3b6a85d5d25f8c57ae13e5a1a8adf5695e5f14b0d5cf1a2165ee69f
+2026-10-29T13:42:05.766325Z  INFO disconnected from serve peer (service compat) peer=39bb1b56e3b6a85d5d25f8c57ae13e5a1a8adf5695e5f14b0d5cf1a2165ee69f
+2026-10-29T13:42:05.766554Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:42:06.102742Z  INFO draining connections (timeout 5s)...

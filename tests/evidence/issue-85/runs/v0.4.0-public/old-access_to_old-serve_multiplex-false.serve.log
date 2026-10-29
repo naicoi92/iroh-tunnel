@@ -1,0 +1,11 @@
+[2m2026-10-29T12:44:39.386522Z[0m [33m WARN[0m secret_key empty, generated new key, saving to config
+NodeId: 1383f1b5b41c7a99a1250f4a801b65ca1ff3386767d6518c3976dc7f8d8e6444
+Serving: compat tcp://127.0.0.1:64652
+[2m2026-10-29T12:44:39.398593Z[0m [32m INFO[0m endpoint ready
+[2m2026-10-29T12:44:39.407790Z[0m [32m INFO[0m wrote status file [3mpath[0m[2m=[0m/var/folders/kx/1fk4553s26d5ygj1wrzbv5200000gn/T/iroh-85-l7i7l7mo/serve/state/serve-status.json
+[2m2026-10-29T12:44:39.407809Z[0m [32m INFO[0m serve endpoint ready, accepting connections
+[2m2026-10-29T12:44:46.600640Z[0m [32m INFO[0m peer connected [3mpeer[0m[2m=[0m2cd02e3cf05d42a55c4ecc0f39744479d4938273c3d31429d257aea38b492361 [3mservice[0m[2m=[0mcompat
+[2m2026-10-29T12:44:47.033682Z[0m [32m INFO[0m peer disconnected (service compat) [3mpeer[0m[2m=[0m2cd02e3cf05d42a55c4ecc0f39744479d4938273c3d31429d257aea38b492361
+[2m2026-10-29T12:44:47.033725Z[0m [33m WARN[0m stream error: connection lost
+[2m2026-10-29T12:44:47.965820Z[0m [32m INFO[0m received SIGINT (Ctrl+C)
+[2m2026-10-29T12:44:48.342088Z[0m [32m INFO[0m draining connections (timeout 5s)...
