@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": { "title": "iroh-tunnel · target runtime", "quality_profile": "showcase" },
+  "components": [
+    { "id": "client", "type": "external", "label": "Client application", "sublabel": "TCP / UDP", "pos": [40, 260], "size": [170, 76] },
+    { "id": "access", "type": "backend", "label": "Access", "sublabel": "ita / it access", "pos": [280, 260], "size": [180, 76] },
+    { "id": "serve", "type": "backend", "label": "Serve", "sublabel": "its / it serve", "pos": [550, 260], "size": [180, 76] },
+    { "id": "target", "type": "external", "label": "Target service", "sublabel": "fixed host / port", "pos": [810, 260], "size": [190, 76] },
+    { "id": "relay", "type": "cloud", "label": "Iroh relay", "sublabel": "relay fallback", "pos": [415, 80], "size": [180, 76] },
+    { "id": "state", "type": "database", "label": "Config / state", "sublabel": "per-user storage", "pos": [280, 440], "size": [180, 76] },
+    { "id": "release", "type": "external", "label": "Signed releases", "sublabel": "binary / package / image", "pos": [810, 440], "size": [190, 76] }
+  ],
+  "connections": [
+    { "from": "client", "to": "access", "label": "local TCP / UDP", "labelDy": -32, "variant": "emphasis" },
+    { "from": "access", "to": "serve", "label": "Iroh / QUIC", "variant": "emphasis" },
+    { "from": "serve", "to": "target", "label": "forward" },
+    { "from": "access", "to": "relay", "label": "relay fallback", "fromSide": "top", "toSide": "bottom", "variant": "dashed" },
+    { "from": "access", "to": "state", "label": "read / write", "labelDy": 24 },
+    { "from": "release", "to": "serve", "label": "distribution", "variant": "dashed" }
+  ]
+}
