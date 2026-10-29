@@ -57,6 +57,8 @@ pub enum RoleCmd {
         /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        service: bool,
     },
     /// Config management (keygen/add/remove/list/show/edit/path).
     Config {
