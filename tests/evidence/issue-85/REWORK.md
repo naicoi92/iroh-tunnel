@@ -46,7 +46,10 @@ Historical `runs/` and original `validation/` captures remain unchanged.
 original harness/README available verbatim at baseline commit. Updated root
 manifest describes current files, not historical harness execution.
 
-## Remaining acceptance gap
+## Historical rework acceptance gap
+
+Subsequent candidate run recorded in README and provenance; following text describes
+the gap at rework time, not current candidate results.
 
 **No new runtime compatibility PASS claimed.** Fresh, separately built,
 verified-TLS production executable from #83-integrated runtime must run expanded

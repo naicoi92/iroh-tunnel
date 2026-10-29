@@ -2,13 +2,24 @@
 
 ## Current review status
 
-**Historical evidence only; expanded acceptance pending.** Reworked harness now
-requires two overlapping independent channels, exact bytes in two rounds,
-connection-established counts (shared where applicable), and graceful role
-cleanup. Only isolated/unit safety checks run at this stage. Fresh production
-executable built from **#83-integrated runtime** must run expanded real matrix
-before final #85 acceptance. Existing `runs/` do not establish that result.
-See [REWORK.md](REWORK.md) for criterion/test mapping and validation boundary.
+**Candidate evidence, not final acceptance.** Expanded real matrices passed 6/6
+against each authentic v0.4.0 and v0.4.2 macOS arm64 release, using unmerged
+#83 candidate runtime `a7a03be91716494eed29b8c20b350596589231f3` and harness
+source commit `598887723bc46329a5a79a8fbdbf9a01c9808ed1` (script SHA256
+`686e506805b4dda7b0b96282e827cc79685d999af4a7da17f15796bfef085886`).
+Production binary SHA256 `eec3efa0cabacb420e203148025e5555304fbb93282c456ac1c5397a58a5883e`;
+build and normal/build feature graph in `validation/candidate83-production-build.log`.
+Runs: `runs/v0.4.0-candidate83/` and `runs/v0.4.2-candidate83/`. Each
+variant recorded two overlapping channels, exact bytes in both rounds, expected
+connection counts and two clean exits. Temporary OS directory prefixes replaced
+with `/TMP/` and ANSI escapes removed; other captured content retained. Build
+checkout path replaced with `<runtime-checkout>`. Public IDs are disposable.
+First observer run failed because legacy Serve connection events were not
+recognized; this was instrumentation error, not evidence of incompatibility.
+Original failed run remains outside repository at
+`/tmp/issue85-candidate83-0.4.0-a7a03be`. #83 remains unmerged; rerun against
+final integrated runtime and independent Standards/Spec review remain required.
+See [REWORK.md](REWORK.md) for original criterion mapping and validation boundary.
 
 ## Historical result and boundary
 
@@ -194,8 +205,8 @@ One Access and one Serve connection-established event required for shared
 variants; old Access false requires two. Status peer rows are not proof of
 connection sharing. Missing/changed observability fails closed. Cleanup must
 SIGINT and wait for exit 0 on every still-live role; forced kill or premature
-exit fails even after byte exchange. These checks are **not yet run against
-#83-integrated runtime**. Isolated tests cannot substitute for that real run.
+exit fails even after byte exchange. These checks passed against the unmerged #83 candidate, not a final integrated runtime.
+Isolated tests cannot substitute for that real run.
 
 ## Historical validation, red evidence and review limits
 

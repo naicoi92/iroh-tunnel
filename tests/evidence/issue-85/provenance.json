@@ -72,10 +72,22 @@
     "tests/evidence/issue-85/tcp_compat.py": "f27b978feeca5c95fca9bcbf20cb19a842a66b0a8b07a5ace15edcb13fc30785"
   },
   "historical_capture_commit": "44f8d082b8fc7a9aad6cad8c6c807dbfc465fba3",
-  "rework_status": "Isolated/unit safety checks only. Fresh #83-integrated production executable and expanded real matrix pending; runs/ remain historical single-channel captures.",
+  "rework_status": "Expanded real matrices run against unmerged #83 candidate; final main-integrated runtime acceptance remains pending.",
   "reworked_harness_files": {
     "tests/interop_0_4.rs": "728e1a7cd5d35224e2c038ca7d1ebcea97a2215c4f051d89bbcfb5218661aeb1",
     "tests/evidence/issue-85/tcp_compat.py": "e84234fbbba219699af0b76269c5eb2dedc8916c918da71e593ca7a3cf894b32",
     "tests/evidence/issue-85/test_tcp_compat.py": "e7a7dd587922396102d6e8041cade7a5fc9b4f377ece34bc393e2a56b70533ba"
+  },
+  "candidate83_capture": {
+    "runtime_source_sha": "a7a03be91716494eed29b8c20b350596589231f3",
+    "harness_source_commit": "598887723bc46329a5a79a8fbdbf9a01c9808ed1",
+    "harness_sha256": "686e506805b4dda7b0b96282e827cc79685d999af4a7da17f15796bfef085886",
+    "production_binary_sha256": "eec3efa0cabacb420e203148025e5555304fbb93282c456ac1c5397a58a5883e",
+    "build_evidence": "validation/candidate83-production-build.log",
+    "runs": [
+      "runs/v0.4.0-candidate83",
+      "runs/v0.4.2-candidate83"
+    ],
+    "note": "Candidate #83 not merged; not final or main runtime. First observer run failed due to legacy Serve connection-event instrumentation; retained outside repository."
   }
 }

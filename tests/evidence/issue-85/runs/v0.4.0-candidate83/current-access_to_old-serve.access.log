@@ -1,0 +1,10 @@
+NodeId: 3613bcf4b37215358d7c67c1d1d9a64139326929e57dd28af7841775f55a7a11
+Exposed: compat 127.0.0.1:61003 -> peer 6c776cefbaa76f70e2a5d13a7b3b832b6591d08dffd5e25f4ffc83f1eeba29f5 (tcp://127.0.0.1:61003)
+2026-10-29T13:41:39.201905Z  INFO endpoint ready
+2026-10-29T13:41:39.207708Z  INFO wrote status file path=/TMP/iroh-85-2nxiqpox/access/state/access-status.json
+2026-10-29T13:41:39.207728Z  INFO access endpoint ready, listening for local clients
+2026-10-29T13:41:39.207805Z  INFO listening for local clients listen_addr=127.0.0.1:61003
+2026-10-29T13:41:46.012952Z  INFO connected to serve peer (multiplexed, 6c776cef…) via relay=https://use1-1.relay.n0.iroh.link/ peer=6c776cefbaa76f70e2a5d13a7b3b832b6591d08dffd5e25f4ffc83f1eeba29f5 svc_name=compat
+2026-10-29T13:41:46.684651Z  INFO received SIGINT (Ctrl+C)
+2026-10-29T13:41:46.684796Z  INFO disconnected from serve peer (service compat, multiplexed) peer=6c776cefbaa76f70e2a5d13a7b3b832b6591d08dffd5e25f4ffc83f1eeba29f5
+2026-10-29T13:41:47.010400Z  INFO draining connections (timeout 5s)...
