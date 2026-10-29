@@ -1,6 +1,10 @@
 # OpenCodeReview setup
 
-This repo uses [Alibaba's open-source `open-code-review` CLI](https://github.com/alibaba/open-code-review) (OCR) for AI-powered PR reviews. OCR is the self-hosted, OSS alternative to CodeRabbit — it reads the diff, calls a configurable LLM, and posts structured inline + summary review comments.
+**Temporarily disabled:** On 2026-10-29, the repository owner suspended both OpenCodeReview (OCR) and CodeRabbit external reviews; the owner will add external review later. OCR was disabled manually after provider HTTP 429 failures. CodeRabbit automatic review is disabled in `.coderabbit.yaml`; manual review remains available.
+
+Each redesign task targets `main` in its own pull request and retains independent Standards and Spec review and Linux/Windows CI gates. Cancelled or skipped bot checks are not passing reviews; external bot review is temporarily waived by the owner. To restore OCR after the temporary suspension, run `gh workflow enable open-code-review.yml --repo naicoi92/iroh-tunnel` and verify its configuration and provider access before relying on it. To restore CodeRabbit automatic reviews, set `reviews.auto_review.enabled: true` in `.coderabbit.yaml` and verify an automatic review completes on the intended PR head.
+
+[Alibaba's open-source `open-code-review` CLI](https://github.com/alibaba/open-code-review) reads diffs, calls a configurable LLM, and posts structured inline and summary review comments when enabled.
 
 The workflow is defined in [`.github/workflows/open-code-review.yml`](../.github/workflows/open-code-review.yml).
 
@@ -40,14 +44,14 @@ One repo secret is needed (Settings → Secrets and variables → Actions → Ne
 |------|-------|
 | `OCR_LLM_AUTH_TOKEN` | Your Z.AI API key (from <https://z.ai/model-api>, GLM Coding Plan dashboard) |
 
-The endpoint URL and model name are pinned in the workflow file — they're not secrets, just config.
+The endpoint URL and model name are pinned in the workflow file — they're not secrets, just config. The workflow must also be enabled before it can run.
 
 ## Setting up the secret (maintainer)
 
 1. Get a Z.AI API key from <https://z.ai/model-api> (sign up for the GLM Coding Plan if you haven't).
 2. Go to **Settings → Secrets and variables → Actions → New repository secret** on GitHub.
 3. Name: `OCR_LLM_AUTH_TOKEN`. Value: the API key.
-4. Save. The next PR push will trigger OCR automatically.
+4. Save. Enable the workflow as described above before expecting the next PR push to trigger OCR.
 
 To re-review an existing PR without pushing, comment on the PR:
 
