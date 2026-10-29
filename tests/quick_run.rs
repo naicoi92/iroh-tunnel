@@ -85,12 +85,27 @@ async fn access_ready(
     node: &str,
     relay: &str,
 ) -> Result<(Process, std::net::SocketAddr)> {
-    access_ready_with_collision_probe(home, state, short, ipv6, node, relay, None, None).await
+    access_ready_with_collision_probe(
+        home,
+        state,
+        short,
+        ipv6,
+        node,
+        relay,
+        AccessOptions::default(),
+    )
+    .await
 }
 
 struct CollisionProbe {
     first_address: std::net::SocketAddr,
     reaped: ReapedChildren,
+}
+
+#[derive(Default)]
+struct AccessOptions<'a> {
+    probe: Option<&'a mut CollisionProbe>,
+    binary: Option<&'a std::path::Path>,
 }
 
 async fn access_ready_with_collision_probe(
@@ -100,9 +115,9 @@ async fn access_ready_with_collision_probe(
     ipv6: bool,
     node: &str,
     relay: &str,
-    probe: Option<&mut CollisionProbe>,
-    binary: Option<&std::path::Path>,
+    options: AccessOptions<'_>,
 ) -> Result<(Process, std::net::SocketAddr)> {
+    let AccessOptions { probe, binary } = options;
     for attempt in 0..8 {
         let injected = probe.as_ref().filter(|_| attempt == 0);
         let listen = if let Some(probe) = injected {
@@ -210,8 +225,10 @@ async fn access_ready_retries_occupied_port_and_reaps_first_child() -> Result<()
         false,
         "0000000000000000000000000000000000000000000000000000000000000000",
         &relay.to_string(),
-        Some(&mut probe),
-        None,
+        AccessOptions {
+            probe: Some(&mut probe),
+            binary: None,
+        },
     )
     .await?;
     assert_ne!(listen, probe.first_address);
@@ -345,8 +362,10 @@ async fn standalone_access_forwards_tcp_without_other_binaries_installed() -> Re
             false,
             node,
             &relay,
-            None,
-            Some(&standalone),
+            AccessOptions {
+                probe: None,
+                binary: Some(&standalone),
+            },
         )
         .await?;
         let mut client = TcpStream::connect(listen).await?;
