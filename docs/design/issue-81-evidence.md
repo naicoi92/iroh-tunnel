@@ -150,6 +150,18 @@ labels NodeId â€œpublic identity, not authorization; protect the target serviceâ
 Process documentation assertion passed alongside successful byte sessions. No
 ACL/authentication behavior invented or claimed.
 
+## Parent integration verification
+
+Integration fast-forwarded to the reviewed candidate `c5b3ecbba54a6f4aa30002b360ca323d0b34f6d4`. Independent Standards and Spec reviews found no remaining issues; neither claimed cross-platform or production-TLS acceptance. Parent reran on this exact source in the integration worktree on macOS arm64:
+
+- `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --locked --all-features`: 131 passed, four pre-existing Internet-dependent tests ignored.
+- `cargo test --locked --test quick_run -- --nocapture`: 11 passed, including separate IPv6 target and listener cases.
+- `cargo build --locked --release --no-default-features`: passed; normal/build feature graph excludes `test-utils`.
+- Lockfile SHA-256 `61d2ad363c1f01415d18b96c49d9d70bbc85a2899aef1711a5511fae8f119699`; combined verification log SHA-256 `acdf117ce9ec2946d0449179a0d83473a4576e1c4be864a966960964c75babe6`; feature graph log SHA-256 `cd2d3e96d6764a4e9fee41c44be45b7d4f4a0bc396f4d0aa7e0df3106a4cd6bf`.
+
+A prior parent test invocation accidentally ran in the original checkout; its results are excluded from #81 evidence. Slice acceptance applies only to the tested macOS environment and test-feature process path. Final-artifact, production TLS and Linux/Windows evidence remain open under #97; this does not mark the full catalog as passed.
+
 ## Limits and reviewer disposition
 
 - Independent parent review still required; shared acceptance catalog remains
