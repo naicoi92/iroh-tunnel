@@ -117,7 +117,7 @@ These scenarios do not change the confirmed rules above. Proposed outcomes requi
 
 ## Cross-capability release gates
 
-1. Approve per-capability specifications, outstanding security rules and data-model cardinalities before implementation.
+1. Resolve and approve the per-capability specifications, security rules and data-model cardinalities needed by each dependent implementation. Unrelated open decisions do not block independent slices; unresolved release requirements remain release gates.
 2. E2E verification across TCP, UDP, config migration, service lifecycle, installers and updates, including actual Windows runners; tests must trace to acceptance criteria.
 3. Benchmark UDP and establish memory, payload, timeout and loss behavior; document protocol compatibility and upgrade guidance.
 4. Verify secret protection and the privileged service/config trust boundary; define crash cleanup, rollback and signing trust rotation.
