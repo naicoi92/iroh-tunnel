@@ -118,3 +118,28 @@ Unit tests alone do not establish end-to-end behavior. If a platform or network 
 - [UDP transport research](../research/udp-transport.md) and [wayfinding map](https://github.com/naicoi92/iroh-tunnel/issues/69).
 
 Diagrams depict target design unless explicitly labelled current. Automated geometry and accessibility checks do not establish business correctness. Full perceptual visual review of final diagrams has not been completed.
+
+## Issue #81 quick TCP CLI slice
+
+The all-in-one binary accepts `serve -n NAME -t IP:PORT` and
+`access -n NAME -l IP:PORT -N NODE_ID`. Long forms are `--name`,
+`--target`, `--listen`, and `--node-id`; `-p` / `--protocol` accepts `tcp`
+(default), and `--relay-url` selects a relay shared by both roles. Socket
+addresses are numeric IPv4 or IPv6 addresses with ports. Quick roles generate
+a fresh ephemeral identity and do not write configuration or keys. Configured
+`run` remains separate. UDP quick forwarding is not implemented here.
+
+Issue #81 / TC-01 and stories 6, 10, 14, 15 and 18 map to
+`tests/quick_run.rs` real-process TCP round trips: one uses long options and
+omits protocol, another uses all role-relevant short options and explicit TCP.
+Story 12 maps to independent Serve and Access restarts and config absence;
+invalid-input acceptance maps to rejection by each role without config/key
+writes. Tests use a local relay and actual TCP client and target. The existing
+`test-utils` feature disables TLS verification for the entire test binary:
+use it only with isolated local fixtures, no secrets or public relays, and do
+not distribute that binary. Production builds must omit `test-utils`.
+
+Issue #82 remains responsible for consistent short arguments and help/defaults
+across all three independently runnable binaries. This slice does not establish
+0.4 interoperability, which remains issue #85, or TCP lifecycle and multiplex
+acceptance, which remain issue #86.

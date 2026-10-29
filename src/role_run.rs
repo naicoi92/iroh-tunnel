@@ -172,6 +172,15 @@ where
     let mut cfg = S::Config::load(config_path)?;
     cfg.resolve_and_save_key(config_path)?;
 
+    run_config::<S, _, _>(cfg, run_loop).await
+}
+
+pub(crate) async fn run_config<S, F, Fut>(cfg: S::Config, run_loop: F) -> Result<()>
+where
+    S: RoleStrategy,
+    F: FnOnce(iroh::Endpoint, S::Config) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
     // Build the role-specific endpoint (serve registers ALPNs, access is
     // outbound-only).
     let ep = S::build_endpoint(&cfg).await?;
