@@ -203,3 +203,30 @@ and rerun. `cargo build --locked --no-default-features` passed; with an absolute
 `HOME/Library/Application Support/iroh-tunnel/serve.toml`, not the override.
 No native Linux/Windows, Rust 1.91, or verified-TLS production forwarding run.
 Collision retry branch not forced in this run. Independent reviews still required.
+
+### Forced collision follow-up
+
+Acceptance mapping (RS-08, RS-09, RS-13–16): a real isolated Access process
+first binds an occupied IPv4 loopback port; its address-in-use log triggers
+retry, the failed child is killed and its `wait` result observed, and the next
+Access process reports its post-bind listener and accepts a TCP connection on a
+different port. The reservation remains held throughout. Each attempt retains
+the existing 30-second deadline and eight-attempt bound; process drop handles
+cleanup even on error. This tests the actual retry and cleanup path, not a mock.
+
+macOS arm64, Rust 1.99.1: `cargo fmt --all -- --check`,
+`cargo clippy --all-targets --all-features --locked -- -D warnings`, and
+`cargo test --locked --test quick_run -- --nocapture` passed (14 tests).
+Representative log: occupied `127.0.0.1:53537`, OS error 48; retry
+`127.0.0.1:53556`; first child PID 58500 wait status 9, successfully reaped.
+Full test log `/tmp/issue81-quick-run.log` SHA-256
+`d44a089c7b6da2b3f75a823f907097fd5896af4d11e789db164607c9432ea4c5`.
+An initial Clippy run found unnecessary unwrap and a guard across await; both
+were corrected before the passing run.
+
+Non-collision bind failure coverage remains blocked: no portable deterministic
+way was established to cause a real TCP bind to fail for a reason other than
+address-in-use without assuming host interface, privileges, socket policy, or
+platform-specific error behavior. No simulated error is claimed as process
+coverage. Native Linux/Windows, Rust 1.91 and full-suite gates remain unverified
+in this follow-up; no production TLS or release acceptance is implied.

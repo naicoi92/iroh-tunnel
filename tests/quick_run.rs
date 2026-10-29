@@ -12,11 +12,20 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-struct Process(Child);
+type ReapedChildren =
+    std::sync::Arc<std::sync::Mutex<Vec<(u32, std::io::Result<std::process::ExitStatus>)>>>;
+
+struct Process(Child, Option<ReapedChildren>);
 impl Drop for Process {
     fn drop(&mut self) {
         let _ = self.0.kill();
-        let _ = self.0.wait();
+        let result = self.0.wait();
+        if let Some(reaped) = &self.1 {
+            reaped
+                .lock()
+                .expect("reap observer poisoned")
+                .push((self.0.id(), result));
+        }
     }
 }
 
@@ -62,6 +71,7 @@ fn role(home: &std::path::Path, state: &std::path::Path, args: &[&str]) -> Resul
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,
+        None,
     ))
 }
 
@@ -75,10 +85,34 @@ async fn access_ready(
     node: &str,
     relay: &str,
 ) -> Result<(Process, std::net::SocketAddr)> {
+    access_ready_with_collision_probe(home, state, short, ipv6, node, relay, None).await
+}
+
+struct CollisionProbe {
+    first_address: std::net::SocketAddr,
+    reaped: ReapedChildren,
+}
+
+async fn access_ready_with_collision_probe(
+    home: &std::path::Path,
+    state: &std::path::Path,
+    short: bool,
+    ipv6: bool,
+    node: &str,
+    relay: &str,
+    probe: Option<&mut CollisionProbe>,
+) -> Result<(Process, std::net::SocketAddr)> {
     for attempt in 0..8 {
-        let reservation = TcpListener::bind(if ipv6 { "[::1]:0" } else { "127.0.0.1:0" }).await?;
-        let listen = reservation.local_addr()?;
-        drop(reservation);
+        let injected = probe.as_ref().filter(|_| attempt == 0);
+        let listen = if let Some(probe) = injected {
+            probe.first_address
+        } else {
+            let reservation =
+                TcpListener::bind(if ipv6 { "[::1]:0" } else { "127.0.0.1:0" }).await?;
+            let listen = reservation.local_addr()?;
+            drop(reservation);
+            listen
+        };
         let address = listen.to_string();
         let log_path = state.join(format!("access-listener-{attempt}.log"));
         let log = std::fs::File::create(&log_path)?;
@@ -115,7 +149,10 @@ async fn access_ready(
                 relay,
             ]);
         }
-        let mut process = Process(command.spawn()?);
+        let mut process = Process(
+            command.spawn()?,
+            probe.as_ref().map(|probe| probe.reaped.clone()),
+        );
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let log = std::fs::read_to_string(&log_path)?;
@@ -147,6 +184,44 @@ async fn access_ready(
         drop(process);
     }
     anyhow::bail!("access listener address in use after 8 attempts")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_ready_retries_occupied_port_and_reaps_first_child() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let occupied = TcpListener::bind("127.0.0.1:0").await?;
+    let mut probe = CollisionProbe {
+        first_address: occupied.local_addr()?,
+        reaped: Default::default(),
+    };
+    let (_access, listen) = access_ready_with_collision_probe(
+        temp.path(),
+        temp.path(),
+        false,
+        false,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        &relay.to_string(),
+        Some(&mut probe),
+    )
+    .await?;
+    assert_ne!(listen, probe.first_address);
+    {
+        let reaped = probe.reaped.lock().expect("reap observer poisoned");
+        assert_eq!(reaped.len(), 1, "expected one failed child");
+        assert!(
+            reaped[0].1.is_ok(),
+            "failed to wait for first child: {reaped:?}"
+        );
+        let first_log = std::fs::read_to_string(temp.path().join("access-listener-0.log"))?;
+        assert!(first_log.contains("failed to bind"), "{first_log}");
+        eprintln!(
+            "occupied={} retry={listen} reaped={:?}; first log: {first_log}",
+            probe.first_address, *reaped
+        );
+    }
+    TcpStream::connect(listen).await?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
