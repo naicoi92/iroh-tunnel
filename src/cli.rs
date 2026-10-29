@@ -1,7 +1,7 @@
 //! CLI definition: clap structs for `iroh-tunnel <ROLE> <COMMAND>`.
 //!
 //! Based on Page 06 v5 §8 (clap struct). Only defines the parse surface;
-//! dispatch lives in `main.rs`, tracing init in [`init_tracing`].
+//! dispatch lives in [`crate::dispatch`], tracing init in [`init_tracing`].
 
 use std::path::PathBuf;
 
@@ -32,6 +32,39 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub role: Role,
+}
+
+/// Standalone Serve command line, sharing the all-in-one role arguments.
+#[derive(Parser, Debug)]
+#[command(name = "iroh-tunnel-serve", version = APP_VERSION, about = "Publish local services via Iroh", args_conflicts_with_subcommands = true)]
+pub struct ServeCli {
+    /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    /// Quiet mode (only errors).
+    #[arg(short, long)]
+    pub quiet: bool,
+    /// Color output: auto | always | never.
+    #[arg(long, default_value = "auto")]
+    pub color: String,
+    #[command(flatten)]
+    pub quick: ServeQuickArgs,
+    #[command(subcommand)]
+    pub cmd: Option<RoleCmd>,
+}
+
+impl From<ServeCli> for Cli {
+    fn from(cli: ServeCli) -> Self {
+        Self {
+            verbose: cli.verbose,
+            quiet: cli.quiet,
+            color: cli.color,
+            role: Role::Serve {
+                quick: cli.quick,
+                cmd: cli.cmd,
+            },
+        }
+    }
 }
 
 /// Top-level role: serve or access.

@@ -15,6 +15,7 @@ pub mod cli;
 pub mod config;
 pub mod config_cmd;
 pub mod conn_path;
+pub mod dispatch;
 pub mod endpoint;
 pub mod error;
 pub mod pipe;

@@ -229,6 +229,68 @@ async fn quick_tcp_forwards_bytes_to_fixed_target() -> Result<()> {
     tcp_roundtrip(false, false, false).await
 }
 
+// #82 AC-CLI-02: an independently installed Serve executable forwards real
+// TCP bytes. Expected request/response are fixed literals, not derived from code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standalone_serve_forwards_tcp_without_other_binaries_installed() -> Result<()> {
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let target_addr = target.local_addr()?.to_string();
+    let fixture = async {
+        let (mut stream, _) = target.accept().await?;
+        let mut request = [0; 7];
+        stream.read_exact(&mut request).await?;
+        assert_eq!(&request, b"request");
+        stream.write_all(b"response").await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::try_join!(fixture, tcp_session_with_standalone_serve(&target_addr))?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+async fn tcp_session_with_standalone_serve(target_addr: &str) -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let bin_dir = tempfile::tempdir()?;
+    let all_in_one = std::path::Path::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    let binary_name = format!("iroh-tunnel-serve{}", std::env::consts::EXE_SUFFIX);
+    let standalone = bin_dir.path().join(&binary_name);
+    std::fs::copy(all_in_one.with_file_name(&binary_name), &standalone)
+        .context("standalone Serve binary must be built")?;
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let relay = relay.to_string();
+    let mut command = Command::new(&standalone);
+    isolated(&mut command, home.path());
+    let mut serve = Process(
+        command
+            .args([
+                "--name",
+                "echo",
+                "--target",
+                target_addr,
+                "--relay-url",
+                &relay,
+            ])
+            .env("IROH_TUNNEL_STATE_DIR", home.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+        None,
+    );
+    let serve_status = status(&home.path().join("serve-status.json"), &mut serve).await?;
+    let node = serve_status["node_id"].as_str().context("serve node id")?;
+    let (_access, listen) =
+        access_ready(home.path(), home.path(), false, false, node, &relay).await?;
+    let mut client = TcpStream::connect(listen).await?;
+    client.write_all(b"request").await?;
+    let mut response = [0; 8];
+    tokio::time::timeout(Duration::from_secs(30), client.read_exact(&mut response)).await??;
+    assert_eq!(&response, b"response");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quick_short_flags_forward_bytes_to_fixed_target() -> Result<()> {
     tcp_roundtrip(true, false, false).await
