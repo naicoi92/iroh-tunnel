@@ -39,7 +39,7 @@ pub fn keygen(role: &str, config: Option<&Path>) -> Result<()> {
     let mut doc = load_or_empty(&path)?;
     ensure_node_table(&mut doc, &path)?;
     doc["node"]["secret_key"] = toml_edit::value(key_str);
-    write_doc(&path, &doc)?;
+    write_doc(&path, &mut doc)?;
 
     println!("Generated new secret_key.");
     println!("New NodeId: {}", key.public());
@@ -90,7 +90,7 @@ pub fn add(role: &str, args: &AddServiceArgs) -> Result<()> {
 
     // Validate the whole document via the schema before persisting.
     validate_role_doc(role, &doc.to_string(), &path)?;
-    write_doc(&path, &doc)?;
+    write_doc(&path, &mut doc)?;
     println!("Added service '{}' to {}.", args.name, path.display());
     Ok(())
 }
@@ -119,7 +119,7 @@ pub fn remove(role: &str, config: Option<&Path>, name: &str) -> Result<()> {
         .context("internal: [services] is not an array-of-tables")?
         .remove(idx);
 
-    write_doc(&path, &doc)?;
+    write_doc(&path, &mut doc)?;
     println!("Removed service '{name}' from {}.", path.display());
     Ok(())
 }
@@ -277,7 +277,23 @@ fn validate_role_doc(role: &str, content: &str, path: &Path) -> Result<()> {
         .map_err(|e| CliError::Config(format!("invalid config at {}: {e}", path.display())).into())
 }
 
-fn write_doc(path: &Path, doc: &DocumentMut) -> Result<()> {
+fn write_doc(path: &Path, doc: &mut DocumentMut) -> Result<()> {
+    // Config commands preserve comments/formatting instead of serializing the
+    // schema, so discard the retired field here too (CFG-03).
+    if let Some(services) = doc.get_mut("services") {
+        if let Some(tables) = services.as_array_of_tables_mut() {
+            for service in tables.iter_mut() {
+                service.remove("multiplex");
+            }
+        } else if let Some(array) = services.as_array_mut() {
+            for service in array
+                .iter_mut()
+                .filter_map(|value| value.as_inline_table_mut())
+            {
+                service.remove("multiplex");
+            }
+        }
+    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)

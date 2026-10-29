@@ -147,8 +147,7 @@ pub struct AccessServiceStatus {
     pub peer: String,
     /// Live transports of the service's shared multiplexed connection,
     /// queried fresh at each flush. Empty while the service has no live
-    /// connection — and always empty for `multiplex = false` services,
-    /// whose per-channel connections are too short-lived to report.
+    /// connection.
     pub transports: Vec<crate::conn_path::TransportStatus>,
     /// This endpoint's local UDP socket *candidates* (endpoint-wide, not a
     /// per-transport local address — same semantics as the serve file).

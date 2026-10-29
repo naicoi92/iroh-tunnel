@@ -5,25 +5,13 @@
 //! access opens a bidirectional QUIC stream to the remote serve peer and
 //! pipes the client stream through it.
 //!
-//! ## Multiplexing (0.2.0)
+//! ## Multiplexing
 //!
-//! Each service has a `multiplex` config flag (default `true`):
-//!
-//! - **`true`**: the service keeps ONE long-lived iroh connection to the
-//!   serve peer (dialed via the usual retry/backoff loop) and opens one
-//!   bidirectional stream per local TCP connection. Handshakes are paid
-//!   once. A dead connection surfaces as EOF on its channels (correct
-//!   port-forward semantics) and the next channel dials a fresh one.
-//! - **`false`**: one iroh connection per local TCP connection — the
-//!   pre-0.2.0 behavior verbatim.
-//!
-//! There is deliberately NO protocol negotiation: the ALPN is unchanged
-//! (`iroh-tunnel/{name}`, see [`crate::proto`]). The rollout contract is
-//! serve-first — multiplexing requires a 0.2.0+ serve peer, because a
-//! pre-0.2.0 serve accepts exactly one stream per connection (a second
-//! stream would hang until the connection closes). Upgrade serve nodes
-//! before enabling multiplexing; if an access node must talk to an older
-//! serve, set `multiplex = false` on that service.
+//! Every TCP service keeps one long-lived Iroh connection to the Serve peer
+//! and opens one bidirectional stream per local TCP connection. Legacy
+//! `multiplex` config values are ignored. A dead connection closes its channels;
+//! the next local client dials a fresh connection. The ALPN is unchanged
+//! (`iroh-tunnel/{name}`, see [`crate::proto`]); no negotiation is added.
 //!
 //! ## Concurrency model
 //!
@@ -42,9 +30,7 @@
 //! service's multiplexed connection, and the endpoint's local UDP
 //! candidates. Transports are queried fresh from the cached connection at
 //! each flush (never snapshotted in the cache), and are empty while the
-//! service has no live connection — `multiplex = false` services therefore
-//! always show an empty list (their connections are per-channel and
-//! short-lived).
+//! service has no live connection.
 //!
 //! Based on Page 04 v2 §1.2 (access dial sequence) and Page 06 v5 §1.2 (access
 //! run CLI behavior). Note: iroh 1.0's connect/ALPN API differs from the
@@ -486,8 +472,7 @@ async fn save_access_status(
 
 /// Per-service dialing state shared by all local-client tasks.
 ///
-/// Owns the multiplexed-connection cache. The `multiplex = false` path is
-/// stateless here — every channel dials its own connection.
+/// Owns the shared connection cache used by every local client.
 struct ServiceDialer {
     ep: iroh::Endpoint,
     addr: iroh::EndpointAddr,
@@ -495,7 +480,6 @@ struct ServiceDialer {
     alpn: Vec<u8>,
     svc_name: String,
     listen_addr: String,
-    multiplex: bool,
     /// The shared multiplexed connection and its poller, behind ONE lock:
     /// the one-connection-and-one-poller-per-service rule is structural —
     /// a redial replaces both atomically under the same guard, with no
@@ -528,7 +512,6 @@ impl ServiceDialer {
             alpn: proto::alpn_for(&svc.name),
             svc_name: svc.name.clone(),
             listen_addr,
-            multiplex: svc.multiplex,
             state: Mutex::new(ConnState {
                 conn: None,
                 poller: None,
@@ -575,7 +558,7 @@ impl ServiceDialer {
         drop(guard);
 
         // Emit after publish (no guard needed — the snapshot is in hand).
-        log_connection_established(remote_id, &self.svc_name, "multiplexed", report.as_ref());
+        log_connection_established(remote_id, &self.svc_name, report.as_ref());
         crate::role_run::spawn_disconnect_watcher(
             &conn,
             remote_id.to_string(),
@@ -648,14 +631,9 @@ async fn listen_loop(dialer: Arc<ServiceDialer>) {
     }
 }
 
-/// Tunnel one local client according to the service's `multiplex` flag.
-///
-/// See the module docs for the rollout contract. Errors close only this
-/// local client's channel.
+/// Tunnel one local client over a stream on the shared service connection.
+/// Errors close only this local client's channel.
 async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Result<()> {
-    if !dialer.multiplex {
-        return dialer.pipe_per_channel(local).await;
-    }
     // Multiplexed: one stream on the shared connection per channel. If
     // `open_bi` fails with a connection-level error, the cache is dropped and
     // exactly one redial + retry is attempted before giving up — a dead
@@ -679,37 +657,6 @@ async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Re
                 .context("open bidirectional stream failed after redial")?;
             crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await
         }
-    }
-}
-
-impl ServiceDialer {
-    /// `multiplex = false`: exactly the pre-0.2.0 behavior — one iroh
-    /// connection per local client, retried with backoff until it connects.
-    async fn pipe_per_channel(&self, local: TcpStream) -> Result<()> {
-        // iroh 1.0's Endpoint::connect does NOT reuse an existing connection
-        // — every call is a fresh QUIC connection (relay session + TLS
-        // handshake). That is precisely the cost multiplexing removes; this
-        // path keeps the pre-0.2.0 one-connection-per-channel semantics.
-        let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
-
-        let remote_id = conn.remote_id();
-        // No poller here: a per-channel connection lives for exactly one
-        // channel (see module docs), so its established line is all the
-        // path context it will ever get.
-        let report = crate::conn_path::peer_path_report(&self.ep, remote_id).await;
-        log_connection_established(remote_id, &self.svc_name, "per-channel", report.as_ref());
-        crate::role_run::spawn_disconnect_watcher(
-            &conn,
-            remote_id.to_string(),
-            format!("disconnected from serve peer (service {})", self.svc_name),
-        );
-
-        let (send, recv) = conn
-            .open_bi()
-            .await
-            .context("open bidirectional stream failed")?;
-        crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await?;
-        Ok(())
     }
 }
 
@@ -755,24 +702,21 @@ fn render_established_paths(report: Option<&crate::conn_path::PeerPathReport>) -
     crate::conn_path::render_established_paths(report)
 }
 
-/// Emit the connection-established line shared by both dial paths: full
+/// Emit the connection-established line: full
 /// peer id in the `peer=` field, short id plus the active transports
 /// (`relay=<url>` / `direct=<addr>`, comma-separated) in the message.
-/// `mode` is `"multiplexed"` or `"per-channel"`.
 ///
 /// Pure — no endpoint query; callers hand in the snapshot they already
 /// own (the multiplexed path shares one query with the poller baseline).
 fn log_connection_established(
     remote_id: iroh::EndpointId,
     svc_name: &str,
-    mode: &str,
     report: Option<&crate::conn_path::PeerPathReport>,
 ) {
     tracing::info!(
         peer = %remote_id,
         svc_name = %svc_name,
-        "connected to serve peer ({}, {}) via {}",
-        mode,
+        "connected to serve peer (multiplexed, {}) via {}",
         short_peer_id(&remote_id),
         render_established_paths(report),
     );
@@ -789,8 +733,7 @@ fn log_connection_established(
 ///
 /// Semantics: it watches the PEER-level remote map, which iroh shares
 /// across every connection to the same peer — a logged transition can be
-/// driven by a *different* connection's traffic (e.g. the per-channel
-/// service to the same serve peer completing a hole punch), not only by
+/// driven by a *different* service connection completing a hole punch, not only by
 /// this connection. N multiplexed services dialing the same peer therefore
 /// each log their own line per transition (differing only in `svc_name`)
 /// and run N remote_info queries per interval; operators deduplicate by
