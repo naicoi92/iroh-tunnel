@@ -2,6 +2,10 @@
 
 Each implementation issue owns one branch, worktree and pull request targeting `main`. Refresh the issue, comments and native blockers before pickup. Start from a `main` commit containing the relevant tracked specification and acceptance records; unresolved decisions block only work that depends on them.
 
+## Skill sources
+
+The workflow follows Matt Pocock's [implement](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/implement/SKILL.md), [TDD](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/tdd/SKILL.md), [code review](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/code-review/SKILL.md), and [PR](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/pr/SKILL.md) skills. Read their `SKILL.md` files and referenced guidance before the corresponding stage; install or load the skill package in the agent harness as appropriate. The steps and template below remain available to contributors without that harness.
+
 ## Implement and review
 
 1. Read [the specification](redesign-spec.md), [traceability](redesign-traceability.md), [acceptance procedures](redesign-acceptance.md), the issue and relevant decisions. Record the acceptance criteria and agreed real-process or platform test seam.
