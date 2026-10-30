@@ -3,9 +3,8 @@
 //! acceptance cases CFG-PATH-01, CFG-MIGRATE-01, CFG-ERROR-01).
 //!
 //! Every test runs the real binary with an isolated `HOME`. XDG variables are
-//! pointed elsewhere to prove they are ignored. Windows LocalAppData is not
-//! exercised here: this file is Unix-only and the Windows branch of
-//! `paths` has no behavioral test yet.
+//! pointed elsewhere to prove they are ignored. Windows LocalAppData is covered
+//! by `config_paths_windows.rs`; this file is Unix-only.
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
