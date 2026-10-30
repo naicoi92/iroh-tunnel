@@ -9,11 +9,9 @@
 //!
 //! ## Path resolution
 //!
-//! `--config` wins; otherwise the OS-specific config dir
-//! (`dirs::config_dir()/iroh-tunnel/{role}.toml`) — the same logic `main.rs`
-//! uses for `run`, kept consistent across the CLI. (The spec sample used
-//! `~/.config/...`, which is Linux-only; `dirs::config_dir()` is the
-//! cross-platform equivalent already standardised by T-01's dispatch.)
+//! `--config` wins; otherwise [`crate::paths::default_config_path`]
+//! (`~/.config/iroh-tunnel/{role}.toml`, LocalAppData on Windows, with macOS
+//! legacy migration) — the same logic `main.rs` uses for `run`.
 //!
 //! Based on Page 06 v5 §1.2 (config subcommand) and §1.5 (config actions).
 
@@ -197,7 +195,7 @@ pub fn path(role: &str, config: Option<&Path>) -> Result<()> {
 /// replace the platform root; a relative override is rejected.
 ///
 /// Returns an error when the platform root is unavailable or the test root is
-/// not absolute. Production builds resolve defaults with `dirs::config_dir()`.
+/// not absolute. Production builds resolve defaults with [`crate::paths`].
 pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<std::path::PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.to_path_buf());
@@ -208,8 +206,7 @@ pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<s
         anyhow::ensure!(dir.is_absolute(), "test config directory must be absolute");
         return Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")));
     }
-    let dir = dirs::config_dir().context("could not determine config directory")?;
-    Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")))
+    crate::paths::default_config_path(role)
 }
 
 /// Load the file as a `toml_edit` document, or return an empty document if the

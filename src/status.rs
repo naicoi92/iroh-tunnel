@@ -11,11 +11,9 @@
 //!
 //! ## Path
 //!
-//! `<state_dir>/iroh-tunnel/<role>-status.json`, where `state_dir` is
-//! [`dirs::state_dir`] (`~/.local/state` on Linux, `~/Library/Application
-//! Support` on macOS; falls back to [`dirs::data_dir`] on platforms where
-//! `state_dir` is `None`). The spec sample hard-coded `~/.local/state`, which
-//! is Linux/XDG-only; `dirs::state_dir` is the cross-platform equivalent.
+//! `<state dir>/<role>-status.json`, where the state dir is
+//! [`crate::paths::default_state_dir`] (`~/.local/state/iroh-tunnel` on
+//! macOS/Linux, ignoring XDG; `LocalAppData/iroh-tunnel/state` on Windows).
 //! The file names are role-scoped (`serve-status.json`, renamed from
 //! `status.json` in 0.4.0; `access-status.json` since the #59 work) so both
 //! files live beside each other in one directory without ambiguity.
@@ -274,12 +272,7 @@ impl StatusWriter {
             })?;
             return Ok(dir.join(self.file_name()));
         }
-        // state_dir() is None on Windows; fall back to data_dir() so the
-        // file still lands somewhere sensible rather than erroring.
-        let base = dirs::state_dir()
-            .or_else(dirs::data_dir)
-            .context("could not determine state directory")?;
-        Ok(base.join("iroh-tunnel").join(self.file_name()))
+        Ok(crate::paths::default_state_dir()?.join(self.file_name()))
     }
 
     /// Write `value` under the env-aware default path for this role.
@@ -791,10 +784,8 @@ mod tests {
         assert_eq!(empty, unset);
         assert_eq!(
             unset,
-            dirs::state_dir()
-                .or_else(dirs::data_dir)
+            crate::paths::default_state_dir()
                 .unwrap()
-                .join("iroh-tunnel")
                 .join("serve-status.json")
         );
     }
