@@ -80,6 +80,18 @@ fn conflict(msg: String) -> anyhow::Error {
     CliError::Conflict(msg).into()
 }
 
+/// Test builds on Windows scope the user tier by `HOME` like Unix does, so
+/// parallel real-process tests that isolate `HOME` do not share one lock
+/// under the real `LocalAppData`.
+#[cfg(all(windows, feature = "test-utils"))]
+fn user_dir() -> Result<PathBuf> {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if home.is_absolute() => Ok(home.join(".local/state/iroh-tunnel")),
+        _ => crate::paths::default_state_dir(),
+    }
+}
+
+#[cfg(not(all(windows, feature = "test-utils")))]
 fn user_dir() -> Result<PathBuf> {
     crate::paths::default_state_dir()
 }
@@ -124,13 +136,15 @@ fn other_role(role: StatusRole) -> StatusRole {
 /// Open options shared by every lock open: never follow a symlink planted at
 /// the lock path (RS-11).
 fn base_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
         options.custom_flags(libc::O_NOFOLLOW);
+        options
     }
-    options
+    #[cfg(not(unix))]
+    OpenOptions::new()
 }
 
 fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
