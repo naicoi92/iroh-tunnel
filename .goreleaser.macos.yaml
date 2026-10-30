@@ -71,23 +71,21 @@ homebrew_casks:
     description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
     hooks:
       post:
-        install: |
-          if OS.mac?
+        # Declarative install steps (GoReleaser 2.19+); not arbitrary Ruby.
+        install_steps: |
+          on_macos do
             # Remove the quarantine attribute so macOS Gatekeeper does not
             # block the unsigned (cosign is deferred) command-line binary.
-            system_command "/usr/bin/xattr",
-              args: ["-dr", "com.apple.quarantine", "#{staged_path}/iroh-tunnel"]
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/iroh-tunnel"]
 
-            # Install the `it` convenience alias: symlink it -> iroh-tunnel in
-            # Homebrew's bin dir. `postflight` runs AFTER the cask's `binary`
-            # stanza has linked iroh-tunnel into #{HOMEBREW_PREFIX}/bin, so the
-            # target already exists and a relative symlink resolves on PATH.
-            # (Creating the link inside staged_path does NOT work — cask only
-            # links artifacts declared in a `binary` stanza, so an in-staged
-            # symlink would be silently dropped.) `-sf` so `brew upgrade`
-            # recreates the link cleanly.
-            system_command "/bin/ln",
-              args: ["-sf", "iroh-tunnel", "#{HOMEBREW_PREFIX}/bin/it"]
+            # Install the `it` convenience alias: a relative symlink
+            # it -> iroh-tunnel in Homebrew's bin dir, replaced on upgrade and
+            # removed on uninstall. The postflight step runs AFTER the cask's
+            # `binary` stanza has linked iroh-tunnel into that dir, so the
+            # target exists and the link resolves on PATH. (Creating the link
+            # inside the staged path does NOT work: cask only links artifacts
+            # declared in a `binary` stanza.)
+            symlink "iroh-tunnel", "bin/it", source_base: :relative, target_base: :homebrew_prefix, overwrite: true, remove_on_uninstall: true
           end
 
 release:
