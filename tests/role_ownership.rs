@@ -163,8 +163,7 @@ fn wait_running(status_file: &Path, process: &mut Process) -> Result<()> {
 }
 
 /// Wait for a refused process to exit; returns code and stderr.
-fn wait_refused(process: Process) -> Result<(Option<i32>, String)> {
-    let mut process = process;
+fn wait_refused(mut process: Process) -> Result<(Option<i32>, String)> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = process.0.try_wait()? {
@@ -339,7 +338,7 @@ async fn graceful_stop_removes_the_owner_record_but_keeps_the_lock_file() -> Res
     let world = World::new()?;
     let (key, _) = write_key(world.root.path(), "k.key")?;
     let state = world.state("main");
-    let process = start_serve(&world, ALL_IN_ONE, Some("serve"), &relay, &key, &state)?;
+    let mut process = start_serve(&world, ALL_IN_ONE, Some("serve"), &relay, &key, &state)?;
     let dir = world.home().join(".local/state/iroh-tunnel");
     assert!(dir.join("serve.owner.json").exists());
     // SIGINT = Ctrl+C, the documented foreground stop.
@@ -348,7 +347,6 @@ async fn graceful_stop_removes_the_owner_record_but_keeps_the_lock_file() -> Res
         .args(["-INT", &pid])
         .status()?
         .success());
-    let mut process = process;
     let deadline = Instant::now() + Duration::from_secs(30);
     while process.0.try_wait()?.is_none() {
         anyhow::ensure!(Instant::now() < deadline, "role did not stop on SIGINT");

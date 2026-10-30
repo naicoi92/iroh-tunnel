@@ -127,6 +127,11 @@ fn warn_unless_live(role: StatusRole, liveness: &Liveness, pid: u32, started_at:
             role.name(),
             owner.pid
         ),
+        Liveness::Running { owner: None, .. } => eprintln!(
+            "warning: {} is running but its owner record is missing, so this snapshot (pid {pid}) \
+             cannot be verified as current; showing the last snapshot from epoch {started_at}",
+            role.name()
+        ),
         Liveness::Running { .. } => {}
     }
 }
