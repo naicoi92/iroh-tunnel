@@ -140,7 +140,72 @@ relative links verified; config diff only dist; reverse Iroh feature graph
 Transcript `/tmp/iroh82-ci-f449c3b-production.log`; graph
 `/tmp/iroh82-ci-f449c3b-production-features.log`. This is real local production
 snapshot evidence at stated checkpoint, not Linux or hosted-runner acceptance.
-Later workflow-only source-path/logging changes require final-head checks.
+Final-code checkpoint below supersedes local f449c3b result.
+
+## Real local final-code producer + forwarding evidence
+
+Code checkpoint: `2dc24a6e1edbdd8ace57b75928a38657e5b71d40`. Both runs used
+separate detached clones of exact commit, clean tracked source, initially absent
+default target; no Cargo cache copied. Same tools/host as above. Subsequent
+commit changes this evidence document only; source hashes remain identified
+rather than attributing these captures to documentation commit.
+
+```sh
+export RUSTUP_TOOLCHAIN=1.91
+export PATH=/tmp/iroh82-ci-tools/zig-macos-aarch64-0.13.0:$PATH
+unset GITHUB_TOKEN GH_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
+# Production source has no fixture binaries, target initially absent.
+cd /tmp/iroh82-ci-final-production-source
+CARGO_TARGET_DIR=/tmp/iroh82-ci-stale-target python3 tests/release_aliases.py \
+  --production --config .goreleaser.macos.yaml --output /tmp/iroh82-ci-final-production
+# Different clean checkout, same SHA; target initially absent.
+cd /tmp/iroh82-ci-final-fixture-source
+python3 tests/release_aliases.py --config .goreleaser.macos.yaml \
+  --output /tmp/iroh82-ci-final-fixture
+```
+
+Both passed. Production full snapshot in 4m14s: original hooks, three zigbuilds
+without features, tar, checksum and generated cask; no publication. Fixture
+snapshot built all three with explicit `--features=test-utils`, then selected
+only macOS arm64 archive for actual TCP forwarding. Logs include producer
+commands/cwd, exact SHA, feature graph and resolved digests:
+`/tmp/iroh82-ci-final-{production,fixture}.log` (exit files both `0`).
+
+| Artifact | SHA-256 |
+|---|---|
+| Production archive | `da0099d0c67019a6ec4634c01943bcd9246837af438476bcd47188526d3b0e4a` |
+| Fixture archive (never distribute) | `b914581cb943167c70721e4e03ef041807f72aaf4fe65bb07b0c50efb2b9df80` |
+| Production it / binary | `df774d40e4a45d42442ced9def5d9c81f4ad16d6bc559e5625112c634ce6dabe` |
+| Production its / binary | `d2d28df98841c38aa4345d41028965efdbcb21e0f192689db5985f02258b9bb4` |
+| Production ita / binary | `80e952d58e83092a60315831888fd0ad5754aa5eecc7773f709292592a719097` |
+| Fixture it / binary | `bfd6735bbd80d53315b86d64ca41644f6921185b3a498c50fb4c4f54a22f51a8` |
+| Fixture its / binary | `a188c6d815827dd991dd1d5f97937b1780456765f3aec9a3969143f0e4fbc792` |
+| Fixture ita / binary | `c1ad8e33caf5c8bd76d4deb91e11bb0924f7ecf818ad297d44664f177a2e8ecd` |
+
+All three default-target built binaries hash-identical to their actual extracted
+archive members, per mode. Cargo Iroh release fingerprint: production
+`[default, fast-apple-datapath, metrics, portmapper, tls-ring]`; fixture same plus
+`test-utils`. Reverse normal/build feature graphs confirm split. Supplied stale
+ambient target held literal `stale test-feature sentinel` at expected binary
+path; SHA-256 `b00e85bde3d85b8ccf4b51285ef1d372d932d3d169665f7a09cc905a4d12e0b5`
+unchanged and unequal every produced binary. Ambient target ignored, never
+copied. This specifically checks observed GoReleaser mismatch failure mode.
+
+Real fixture passed `produced_archive_aliases_forward_tcp_independently`: `it
+serve` PID 83829 / `it access` PID 83831; `its` PID 83851 / `ita` PID 83852.
+Both pairings transferred exact `matrix request` to target `127.0.0.1:58114`
+and exact `matrix response` to client over isolated local relay. Only alias and
+intended binary in each process PATH/directory. Test 1 passed, 0 ignored; final
+line `alias forwarding PASS: 1 host-compatible archive(s)`. Never public relay.
+Production deliberately reports forwarding NOT RUN.
+
+Actual workflow guard script exercised locally against clean sibling disposable
+clones: wrong SHA rejected, mismatched runner label rejected, preexisting target
+sentinel rejected; matching SHA/native host shape passed. Not hosted-runner
+execution. Exact-code Python regressions rerun: 7 passed, transcript
+`/tmp/iroh82-ci-exact-python.log`. actionlint/shellcheck, both GoReleaser checks,
+fmt and diff checks passed. Full Rust suite/clippy not rerun: no Rust edits;
+existing required CI unchanged and real selected Rust producer test did run.
 
 Linux full production snapshot, complete GNU/musl/riscv64 structural matrix,
 Docker/packages and native GNU forwarding remain **BLOCKED / NOT RUN** until
