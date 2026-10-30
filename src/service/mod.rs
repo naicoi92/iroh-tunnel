@@ -11,10 +11,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::error::CliError;
+
 #[cfg(target_os = "linux")]
 mod busybox;
 #[cfg(target_os = "macos")]
 mod launchd;
+pub mod scope;
 #[cfg(target_os = "linux")]
 mod systemd;
 
@@ -70,22 +73,26 @@ pub enum ServiceScope {
 // ---------------------------------------------------------------------------
 
 /// `service install`: write the unit/plist/init-script, enable, and start.
-pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
+///
+/// `config` and `state` must be absolute: they are pinned into the
+/// registration so the service never depends on its own working directory or
+/// home (SM-02).
+pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::install(role, scope, config)
+            systemd::install(role, scope, config, state)
         } else {
-            busybox::install(role, scope, config)
+            busybox::install(role, scope, config, state)
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::install(role, scope, config)
+        launchd::install(role, scope, config, state)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (role, scope, config);
+        let _ = (role, scope, config, state);
         unsupported()
     }
 }
@@ -193,6 +200,49 @@ pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
         let _ = (role, scope);
         unsupported()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Registration helpers shared by the backends.
+// ---------------------------------------------------------------------------
+
+/// Name suffix that keeps a test registration apart from any real service.
+/// Empty in production builds; `test-utils` reads it from the environment.
+#[allow(dead_code)] // unused on targets without a service backend
+fn instance_suffix() -> String {
+    #[cfg(feature = "test-utils")]
+    if let Some(suffix) = std::env::var_os("IROH_TUNNEL_TEST_SERVICE_SUFFIX") {
+        return suffix.to_string_lossy().into_owned();
+    }
+    String::new()
+}
+
+/// Write a unit/plist/script, creating its directory.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] when the OS denies access. The scope and account
+/// are left as requested and the message says how to proceed, because
+/// retrying under another scope or account would silently broaden access.
+#[allow(dead_code)] // unused on targets without a service backend
+pub(super) fn write_registration(path: &Path, contents: &str) -> Result<()> {
+    let denied = |e: std::io::Error, what: &str, target: &Path| -> anyhow::Error {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            CliError::Permission(format!(
+                "permission denied {what} {}: {e}. The service scope and account were not \
+                 changed and nothing was registered. Fix the permissions of that location and \
+                 re-run; use --system (as root) only if you intend a system service",
+                target.display()
+            ))
+            .into()
+        } else {
+            anyhow::Error::new(e).context(format!("failed {what} {}", target.display()))
+        }
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| denied(e, "creating", parent))?;
+    }
+    std::fs::write(path, contents).map_err(|e| denied(e, "writing", path))
 }
 
 // ---------------------------------------------------------------------------

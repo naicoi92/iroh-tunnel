@@ -188,7 +188,7 @@ pub enum RoleCmd {
         #[arg(long)]
         json: bool,
     },
-    /// System service management (systemd/launchd).
+    /// Service management: install, start, stop, restart, status, uninstall.
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -220,47 +220,58 @@ pub enum ConfigAction {
     Path,
 }
 
-/// Service sub-actions.
+/// Scope selection shared by every service verb.
 ///
-/// Scope defaults to per-user (LaunchAgent / `systemctl --user`), which needs
-/// no privileges and matches how iroh-tunnel is typically used on a desktop.
-/// Pass `--system` to install as a system-wide daemon (LaunchDaemon /
-/// `/etc/systemd/system`), which requires root and is intended for
-/// server/headless hosts.
+/// With neither flag, `install` offers the choice to a non-elevated
+/// interactive user and defaults to system for root/Administrator; the other
+/// verbs act on the user service unless elevated. A system scope without
+/// privilege is refused with rerun guidance, never elevated or replaced by a
+/// user service.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct ScopeArgs {
+    /// Per-user service (LaunchAgent / `systemctl --user`); needs no privileges.
+    #[arg(long, conflicts_with = "system")]
+    pub user: bool,
+    /// System-wide service (LaunchDaemon / /etc/systemd/system); needs root.
+    #[arg(long)]
+    pub system: bool,
+}
+
+/// Service sub-actions.
 #[derive(Subcommand, Debug)]
 pub enum ServiceAction {
-    /// Install system service (systemd/launchd).
+    /// Install, enable and start the service.
     Install {
+        /// Config file to pin into the service (absolute path is stored).
         #[arg(short, long)]
         config: Option<PathBuf>,
-        /// System-wide daemon (LaunchDaemon / /etc/systemd/system). Requires root.
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Uninstall system service.
+    /// Stop and remove the service.
     Uninstall {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Start system service.
+    /// Start the service.
     Start {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Stop system service.
+    /// Stop the service.
     Stop {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Restart system service.
+    /// Restart the service.
     Restart {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Print system service status.
+    /// Print the service status.
     Status {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
 }
 

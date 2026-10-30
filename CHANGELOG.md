@@ -4,6 +4,15 @@
 
 ### Added
 
+- **User service management (#90)**: `service install|start|stop|restart|status|uninstall`
+  take `--user` or `--system`. `install` without a flag asks a non-elevated
+  interactive user to choose, and defaults to system for root. A system scope
+  without privilege exits `3` with a `sudo ...` command that repeats the
+  intended arguments and absolute config path; nothing is elevated, changed or
+  silently replaced by a user service. The service pins the absolute config
+  path and `IROH_TUNNEL_STATE_DIR`, so it no longer depends on its own working
+  directory or home. A denied registration exits `3` with guidance, an invalid
+  or missing config fails at install (`2`). Systemd paths with spaces are quoted.
 - **Role ownership (#87)**: a role (`serve` or `access`) runs as one process
   at a time, whichever binary, config or state override started it. A later
   start, and `service start`, is refused with a reason and exit code `6`;

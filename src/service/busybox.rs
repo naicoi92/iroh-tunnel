@@ -20,7 +20,7 @@
 //! both System and User scopes install to `/etc/init.d` — User scope prints a
 //! note rather than failing. Requires root.
 
-use super::{resolve_binary, ServiceScope};
+use super::{resolve_binary, write_registration, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -44,9 +44,10 @@ fn script_path(role: &str) -> PathBuf {
 /// Pure function (no I/O) so the template can be unit-tested without touching
 /// the filesystem. Paths are embedded verbatim inside double quotes; system
 /// paths never need shell escaping in practice.
-fn format_script(role: &str, binary: &Path, config: &Path) -> String {
+fn format_script(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
     let binary = binary.to_string_lossy();
     let config = config.to_string_lossy();
+    let state = state.to_string_lossy();
     let pidfile = format!("/var/run/iroh-tunnel-{role}.pid");
     let logfile = format!("/var/log/iroh-tunnel-{role}.log");
     format!(
@@ -57,6 +58,7 @@ fn format_script(role: &str, binary: &Path, config: &Path) -> String {
 DAEMON="{binary}"
 ROLE="{role}"
 CONFIG="{config}"
+export IROH_TUNNEL_STATE_DIR="{state}"
 PIDFILE="{pidfile}"
 LOG="{logfile}"
 
@@ -155,7 +157,7 @@ fn run_script(role: &str, verb: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
+pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
     require_root()?;
     if scope == ServiceScope::User {
         eprintln!(
@@ -165,14 +167,9 @@ pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
         );
     }
     let binary = resolve_binary()?;
-    let script = format_script(role, &binary, config);
+    let script = format_script(role, &binary, config, state);
     let path = script_path(role);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&path, &script)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_registration(&path, &script)?;
     set_executable(&path)?;
     // Start now. A start failure is surfaced, but the script is installed, so
     // the service will come up on the next boot regardless.
@@ -249,10 +246,15 @@ mod tests {
             "serve",
             Path::new("/usr/local/bin/iroh-tunnel"),
             Path::new("/etc/iroh-tunnel/serve.toml"),
+            Path::new("/var/lib/iroh-tunnel"),
         );
         assert!(s.starts_with("#!/bin/sh"), "must start with sh shebang");
         assert!(s.contains("DAEMON=\"/usr/local/bin/iroh-tunnel\""), "{s}");
         assert!(s.contains("CONFIG=\"/etc/iroh-tunnel/serve.toml\""), "{s}");
+        assert!(
+            s.contains("export IROH_TUNNEL_STATE_DIR=\"/var/lib/iroh-tunnel\""),
+            "{s}"
+        );
         assert!(
             s.contains("PIDFILE=\"/var/run/iroh-tunnel-serve.pid\""),
             "{s}"

@@ -16,7 +16,7 @@
 //! `launchctl start <label>` searched the *caller's* domain, found nothing, and
 //! returned 3 — even though the job was loaded in the system domain.
 
-use super::{resolve_binary, RestartPolicy, ServiceScope};
+use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -32,9 +32,10 @@ fn uid() -> u32 {
     unsafe { getuid() }
 }
 
-/// Reverse-DNS job label: `dev.iroh-tunnel.{role}`.
+/// Reverse-DNS job label: `dev.iroh-tunnel.{role}` (plus the test-only
+/// instance suffix, empty in production).
 fn label(role: &str) -> String {
-    format!("dev.iroh-tunnel.{role}")
+    format!("dev.iroh-tunnel.{role}{}", instance_suffix())
 }
 
 fn plist_file(role: &str) -> String {
@@ -69,24 +70,6 @@ fn service_target(role: &str, scope: ServiceScope) -> String {
     format!("{}/{}", domain_target(scope), label(role))
 }
 
-/// Bail clearly if an action targets the system domain but the caller is
-/// not root. `launchctl` would otherwise emit an opaque error. Only used
-/// for `install`/`uninstall`: the daily verbs (`start`/`stop`/`restart`)
-/// are usable for the default User scope without privileges, and a
-/// System-scope call simply surfaces launchctl's own error if it lacks
-/// permission.
-fn require_root_for_system(scope: ServiceScope) -> Result<()> {
-    if scope == ServiceScope::System && uid() != 0 {
-        bail!(
-            "System-scope (`--system`) install/uninstall requires root. \
-             Re-run with `sudo` (LaunchDaemon under /Library/LaunchDaemons), \
-             or drop `--system` to use the default per-user LaunchAgent \
-             (no privileges needed)."
-        );
-    }
-    Ok(())
-}
-
 /// Escape `&`, `<`, `>` for safe inclusion in a plist `<string>` element.
 /// (Paths/labels won't normally contain these, but a user `--config` path
 /// could, and an unescaped value would produce invalid XML.)
@@ -100,15 +83,22 @@ fn xml_escape(s: &str) -> String {
 ///
 /// The KeepAlive block comes from the shared [`RestartPolicy`] so the
 /// "restart on crash" behavior stays in sync with the systemd unit template.
-fn format_plist(role: &str, binary: &Path, config: &Path) -> String {
-    format_plist_with(role, binary, config, &RestartPolicy::DEFAULT)
+fn format_plist(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
+    format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT)
 }
 
-fn format_plist_with(role: &str, binary: &Path, config: &Path, policy: &RestartPolicy) -> String {
+fn format_plist_with(
+    role: &str,
+    binary: &Path,
+    config: &Path,
+    state: &Path,
+    policy: &RestartPolicy,
+) -> String {
     let label = xml_escape(&label(role));
     let binary = xml_escape(&binary.to_string_lossy());
     let role = xml_escape(role);
     let config = xml_escape(&config.to_string_lossy());
+    let state = xml_escape(&state.to_string_lossy());
     // launchd spells restart-on-failure as KeepAlive{SuccessfulExit=false}:
     // "respawn unless the last exit was clean". When on_failure is disabled,
     // drop the KeepAlive block entirely (no respawn). delay_secs is not
@@ -138,6 +128,11 @@ fn format_plist_with(role: &str, binary: &Path, config: &Path, policy: &RestartP
          \t\t<string>--config</string>\n\
          \t\t<string>{config}</string>\n\
          \t</array>\n\
+         \t<key>EnvironmentVariables</key>\n\
+         \t<dict>\n\
+         \t\t<key>IROH_TUNNEL_STATE_DIR</key>\n\
+         \t\t<string>{state}</string>\n\
+         \t</dict>\n\
          \t<key>RunAtLoad</key>\n\
          \t<true/>\n\
          {keep_alive}\
@@ -157,17 +152,11 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
-    require_root_for_system(scope)?;
+pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
     let binary = resolve_binary()?;
-    let plist = format_plist(role, &binary, config);
+    let plist = format_plist(role, &binary, config, state);
     let path = plist_path(role, scope)?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&path, &plist).with_context(|| format!("failed to write {}", path.display()))?;
+    write_registration(&path, &plist)?;
 
     let target = service_target(role, scope);
     let domain = domain_target(scope);
@@ -204,7 +193,6 @@ pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
 }
 
 pub fn uninstall(role: &str, scope: ServiceScope) -> Result<()> {
-    require_root_for_system(scope)?;
     let path = plist_path(role, scope)?;
     // Best-effort bootout: the job may not be loaded.
     let _ = run_launchctl(&["bootout", &service_target(role, scope)]);
@@ -320,6 +308,7 @@ mod tests {
             "serve",
             Path::new("/usr/local/bin/iroh-tunnel"),
             Path::new("/etc/iroh-tunnel/serve.toml"),
+            Path::new("/var/state"),
         );
         assert!(
             body.contains("<string>dev.iroh-tunnel.serve</string>"),
@@ -333,6 +322,21 @@ mod tests {
         assert!(
             body.contains("/etc/iroh-tunnel/serve.toml"),
             "config path missing"
+        );
+    }
+
+    #[test]
+    fn plist_pins_config_argument_and_state_dir_environment() {
+        let body = format_plist(
+            "serve",
+            Path::new("/bin/it"),
+            Path::new("/cfg/serve.toml"),
+            Path::new("/st&ate"),
+        );
+        assert!(body.contains("<string>/cfg/serve.toml</string>"), "{body}");
+        assert!(
+            body.contains("<key>IROH_TUNNEL_STATE_DIR</key>\n\t\t<string>/st&amp;ate</string>"),
+            "{body}"
         );
     }
 
@@ -351,6 +355,7 @@ mod tests {
             "serve",
             Path::new("/opt/a&b"),
             Path::new("/home/u<x>/serve.toml"),
+            Path::new("/var/state"),
         );
         assert!(
             body.contains("/opt/a&amp;b") && !body.contains("/opt/a&b<"),
@@ -396,6 +401,7 @@ mod tests {
             "serve",
             Path::new("/usr/local/bin/iroh-tunnel"),
             Path::new("/etc/cfg"),
+            Path::new("/var/state"),
         );
         assert!(
             body.contains("<key>KeepAlive</key>"),
@@ -413,7 +419,13 @@ mod tests {
             on_failure: false,
             delay_secs: 0,
         };
-        let body = format_plist_with("serve", Path::new("/x"), Path::new("/y"), &policy);
+        let body = format_plist_with(
+            "serve",
+            Path::new("/x"),
+            Path::new("/y"),
+            Path::new("/z"),
+            &policy,
+        );
         assert!(
             !body.contains("<key>KeepAlive</key>"),
             "KeepAlive should be absent when policy disables restart: {body}"

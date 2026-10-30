@@ -1,0 +1,26 @@
+# Issue #90 — install and manage a user service
+
+Baseline `89ee63a` (origin/main). Branch `redesign/issue-90-user-service`.
+Blockers #84, #87 closed at pickup. #79/#92 (Windows) remain out of scope.
+
+## Acceptance map
+
+| Criterion | Test (`tests/service_user.rs` unless noted) |
+|---|---|
+| 90.AC1 lifecycle with pinned absolute paths (SM-USER-01) | `user_service_lifecycle_uses_the_pinned_absolute_paths` (real launchd/systemd --user, opt-in `IROH_TUNNEL_E2E_SERVICE=1`) |
+| 90.AC2 missing permission, no silent change (SM-PERMISSION-01) | `denied_registration_fails_with_guidance_and_keeps_scope`, `system_scope_operations_without_privilege_are_refused_with_guidance` |
+| 90.CL1 interactive user/system, unprivileged system refused (SM-SCOPE-01) | `interactive_install_offers_user_or_system_and_system_is_refused_unprivileged`, `system_install_without_privilege_stops_with_rerun_guidance`; unit tests in `src/service/scope.rs` |
+| Ownership rule (#77) | Covered by #87 (`tests/role_ownership.rs`); `service start` refusal unchanged |
+
+## Evidence
+
+- Red: all five non-lifecycle tests failed on the baseline (no `--user`, exit 1, no guidance).
+- Green: `cargo test` full suite, `cargo clippy --all-targets -D warnings`, `cargo fmt` on macOS (Darwin 24.6, launchd `gui/501`).
+- Lifecycle ran against the real macOS user launchd with a unique test suffix (`test-utils`), CWD `/`, config path containing a space; install, status, stop (status file removed), start, restart (same node id), uninstall (plist removed).
+
+## Limits
+
+- Linux systemd `--user` and BusyBox backends compile and have template unit tests only; not run on a real host here (no systemd available).
+- Windows: no service backend (gated by #79/#92).
+- Real root/system install not exercised (no privilege); privilege gating is exercised unprivileged only.
+- Retarget confirmation of another user's service (SM-02 second half) and unknown-user selection belong to #91.
