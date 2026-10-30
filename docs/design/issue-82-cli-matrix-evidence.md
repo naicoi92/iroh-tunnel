@@ -35,3 +35,30 @@ Not established: persistent-key contract, installed aliases, all role/flag
 forwarding combinations, verified-TLS production artifact, Linux/Windows runtime,
 full MSRV CI gates, or full #82/#97 acceptance. Tests exercise four binary role
 forms, not release installation. No public relay used.
+
+## Bounded forwarding matrix follow-up
+
+Base `85bfe0878758481a8809c9a21fd15480f6ca1414`. #82 CL2 requires
+actual equivalent long and short quick options for each role form, including
+TCP default and explicit TCP. Before coding, recorded AC-FWD and matrix in
+`/tmp/issue82-forward-matrix.md`: four forms × two spellings × two protocol
+choices, observed at actual process and real TCP client/target seam. Relay has
+only a long option. Key, aliases and lifecycle excluded by task.
+
+| Criterion | Test | Matrix and expected source | Result |
+|---|---|---|---|
+| #82 CL2 / AC-FWD | `role_forms_long_and_short_options_forward_default_and_explicit_tcp` | All-in-one Serve/Access and standalone Serve/Access, each long/short × default/explicit TCP; eight sessions, each with both roles. Independent literal `matrix request` at same fixed target and `matrix response` at client. | All 16 role cells passed. |
+
+Each process runs a copied binary in a separate binary directory with isolated
+PATH and home; target remains bound throughout, relay is isolated local test
+fixture. Children are killed and reaped by existing process guard. First test
+run passed; no product RED or implementation change claimed. Test-utils
+verification override used only against local relay, not public relay.
+
+macOS arm64: `cargo fmt --all -- --check`, `cargo +1.91.1 clippy
+--all-targets --all-features --locked -- -D warnings`, and `cargo +1.91.1
+test --locked --test quick_run -- --nocapture` passed (17 tests). Initial
+focused test on default toolchain passed. Relevant standards RS-01, RS-05,
+RS-08, RS-13–16. Remaining gaps: persistent keys, installed aliases, verified
+TLS production artifact, other platforms, independent Standards and Spec
+reviews, and full #82 acceptance.

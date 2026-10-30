@@ -106,6 +106,9 @@ struct CollisionProbe {
 struct AccessOptions<'a> {
     probe: Option<&'a mut CollisionProbe>,
     binary: Option<&'a std::path::Path>,
+    protocol: Option<&'a str>,
+    default_tcp: bool,
+    all_in_one: bool,
 }
 
 async fn access_ready_with_collision_probe(
@@ -117,7 +120,13 @@ async fn access_ready_with_collision_probe(
     relay: &str,
     options: AccessOptions<'_>,
 ) -> Result<(Process, std::net::SocketAddr)> {
-    let AccessOptions { probe, binary } = options;
+    let AccessOptions {
+        probe,
+        binary,
+        protocol,
+        default_tcp,
+        all_in_one,
+    } = options;
     for attempt in 0..8 {
         let injected = probe.as_ref().filter(|_| attempt == 0);
         let listen = if let Some(probe) = injected {
@@ -144,7 +153,7 @@ async fn access_ready_with_collision_probe(
             .env("IROH_TUNNEL_STATE_DIR", state)
             .stdout(log)
             .stderr(Stdio::null());
-        if binary.is_none() {
+        if binary.is_none() || all_in_one {
             command.arg("access");
         }
         if short {
@@ -155,8 +164,6 @@ async fn access_ready_with_collision_probe(
                 &address,
                 "-N",
                 node,
-                "-p",
-                "tcp",
                 "--relay-url",
                 relay,
             ]);
@@ -171,6 +178,11 @@ async fn access_ready_with_collision_probe(
                 "--relay-url",
                 relay,
             ]);
+        }
+        if let Some(flag) = protocol {
+            command.args([flag, "tcp"]);
+        } else if short && !default_tcp {
+            command.args(["-p", "tcp"]);
         }
         let mut process = Process(
             command.spawn()?,
@@ -228,6 +240,9 @@ async fn access_ready_retries_occupied_port_and_reaps_first_child() -> Result<()
         AccessOptions {
             probe: Some(&mut probe),
             binary: None,
+            protocol: None,
+            default_tcp: false,
+            all_in_one: false,
         },
     )
     .await?;
@@ -365,6 +380,9 @@ async fn standalone_access_forwards_tcp_without_other_binaries_installed() -> Re
             AccessOptions {
                 probe: None,
                 binary: Some(&standalone),
+                protocol: None,
+                default_tcp: false,
+                all_in_one: false,
             },
         )
         .await?;
@@ -867,5 +885,123 @@ fn quick_operator_contract_explains_target_protection() -> Result<()> {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("public identity, not authorization"));
+    Ok(())
+}
+
+// #82 CL2: all four role forms, both spellings, default and explicit TCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn role_forms_long_and_short_options_forward_default_and_explicit_tcp() -> Result<()> {
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let target_addr = target.local_addr()?.to_string();
+    let fixture = async {
+        for _ in 0..8 {
+            let (mut stream, _) = target.accept().await?;
+            let mut request = [0; 14];
+            stream.read_exact(&mut request).await?;
+            assert_eq!(&request, b"matrix request");
+            stream.write_all(b"matrix response").await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let sessions = async {
+        let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+        let relay = relay.to_string();
+        for standalone in [false, true] {
+            for short in [false, true] {
+                for explicit in [false, true] {
+                    eprintln!("matrix standalone={standalone} short={short} explicit={explicit}");
+                    matrix_session(&target_addr, &relay, standalone, short, explicit).await?;
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(240), async {
+        tokio::try_join!(fixture, sessions)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+async fn matrix_session(
+    target: &str,
+    relay: &str,
+    standalone: bool,
+    short: bool,
+    explicit: bool,
+) -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let serve_dir = tempfile::tempdir()?;
+    let access_dir = tempfile::tempdir()?;
+    let all = std::path::Path::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    let serve_name = if standalone {
+        "iroh-tunnel-serve"
+    } else {
+        "iroh-tunnel"
+    };
+    let access_name = if standalone {
+        "iroh-tunnel-access"
+    } else {
+        "iroh-tunnel"
+    };
+    let serve_binary = serve_dir
+        .path()
+        .join(format!("{serve_name}{}", std::env::consts::EXE_SUFFIX));
+    let access_binary = access_dir
+        .path()
+        .join(format!("{access_name}{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(
+        all.with_file_name(serve_binary.file_name().context("serve filename")?),
+        &serve_binary,
+    )?;
+    std::fs::copy(
+        all.with_file_name(access_binary.file_name().context("access filename")?),
+        &access_binary,
+    )?;
+    let mut command = Command::new(&serve_binary);
+    isolated(&mut command, home.path());
+    command
+        .current_dir(serve_dir.path())
+        .env("PATH", serve_dir.path())
+        .env("IROH_TUNNEL_STATE_DIR", home.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if !standalone {
+        command.arg("serve");
+    }
+    let (name, target_flag, protocol) = if short {
+        ("-n", "-t", "-p")
+    } else {
+        ("--name", "--target", "--protocol")
+    };
+    command.args([name, "echo", target_flag, target, "--relay-url", relay]);
+    if explicit {
+        command.args([protocol, "tcp"]);
+    }
+    let mut serve = Process(command.spawn()?, None);
+    let snapshot = status(&home.path().join("serve-status.json"), &mut serve).await?;
+    let node = snapshot["node_id"].as_str().context("serve node id")?;
+    let (_access, listen) = access_ready_with_collision_probe(
+        home.path(),
+        home.path(),
+        short,
+        false,
+        node,
+        relay,
+        AccessOptions {
+            probe: None,
+            binary: Some(&access_binary),
+            protocol: explicit.then_some(if short { "-p" } else { "--protocol" }),
+            default_tcp: !explicit,
+            all_in_one: !standalone,
+        },
+    )
+    .await?;
+    let mut client = TcpStream::connect(listen).await?;
+    client.write_all(b"matrix request").await?;
+    let mut response = [0; 15];
+    tokio::time::timeout(Duration::from_secs(30), client.read_exact(&mut response)).await??;
+    assert_eq!(&response, b"matrix response");
     Ok(())
 }
