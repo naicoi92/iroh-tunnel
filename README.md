@@ -192,8 +192,9 @@ installation for the standalone binaries is not yet supported (issue #90).
 
 Every executable is also published as its own Linux package, archive and
 container image, so you can install only the role you need. Each package owns
-just its binary and its alias link; the packages share no files and can be
-installed, upgraded and removed independently. The role packages are
+its binary and its alias link; the packages share no files and can be
+installed and removed independently. The `iroh-tunnel` package also
+ships the default systemd unit and `/etc/iroh-tunnel`; the role packages are
 binary-only (no service unit).
 
 | Executable | Debian/Ubuntu, Alpine | Container image |

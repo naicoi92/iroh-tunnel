@@ -203,6 +203,7 @@ changelog:
 # binaries is tracked by #79/#90/#91, so no unit file is shipped for them.
 nfpms:
   - id: iroh-tunnel
+    bindir: /usr/bin
     package_name: iroh-tunnel
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
@@ -230,6 +231,7 @@ nfpms:
       postinstall: packaging/postinstall.sh
 
   - id: iroh-tunnel-musl
+    bindir: /usr/bin
     package_name: iroh-tunnel
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
@@ -257,6 +259,7 @@ nfpms:
       postinstall: packaging/postinstall.sh
 
   - id: iroh-tunnel-serve
+    bindir: /usr/bin
     package_name: iroh-tunnel-serve
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
@@ -275,6 +278,7 @@ nfpms:
         type: symlink
 
   - id: iroh-tunnel-serve-musl
+    bindir: /usr/bin
     package_name: iroh-tunnel-serve
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
@@ -293,6 +297,7 @@ nfpms:
         type: symlink
 
   - id: iroh-tunnel-access
+    bindir: /usr/bin
     package_name: iroh-tunnel-access
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
@@ -311,6 +316,7 @@ nfpms:
         type: symlink
 
   - id: iroh-tunnel-access-musl
+    bindir: /usr/bin
     package_name: iroh-tunnel-access
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
