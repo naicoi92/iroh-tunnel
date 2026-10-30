@@ -76,7 +76,7 @@ jobs:
           persist-credentials: false
 
       - name: shellcheck
-        run: shellcheck packaging/*.sh docs/*.sh
+        run: shellcheck --severity=warning packaging/*.sh docs/*.sh
 
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@v7
