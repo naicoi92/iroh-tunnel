@@ -334,6 +334,32 @@ async fn refused_config_run_neither_persists_a_key_nor_touches_the_owner() -> Re
 }
 
 #[tokio::test]
+async fn graceful_stop_removes_the_owner_record_but_keeps_the_lock_file() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let state = world.state("main");
+    let process = start_serve(&world, ALL_IN_ONE, Some("serve"), &relay, &key, &state)?;
+    let dir = world.home().join(".local/state/iroh-tunnel");
+    assert!(dir.join("serve.owner.json").exists());
+    // SIGINT = Ctrl+C, the documented foreground stop.
+    let pid = process.0.id().to_string();
+    assert!(Command::new("kill")
+        .args(["-INT", &pid])
+        .status()?
+        .success());
+    let mut process = process;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while process.0.try_wait()?.is_none() {
+        anyhow::ensure!(Instant::now() < deadline, "role did not stop on SIGINT");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!dir.join("serve.owner.json").exists(), "owner record left");
+    assert!(dir.join("serve.lock").exists(), "lock file must stay");
+    Ok(())
+}
+
+#[tokio::test]
 async fn kill_nine_leftover_neither_blocks_restart_nor_reads_as_live() -> Result<()> {
     let (relay, _server) = relay().await?;
     let world = World::new()?;

@@ -405,6 +405,22 @@ fn claim_machine(role: StatusRole, dir: &Path) -> Result<MachineClaim> {
     }
 }
 
+impl Drop for RoleClaim {
+    /// Remove this process's owner records on a graceful stop. The lock files
+    /// stay (unlinking a lock inode would allow split ownership), and a
+    /// record is removed only while it still names this process.
+    fn drop(&mut self) {
+        let dirs = std::iter::once(&self.user_dir).chain(self.machine_dir.as_ref());
+        for dir in dirs {
+            if read_owner(dir, self.role).is_some_and(|o| o.pid == std::process::id()) {
+                if let Err(e) = std::fs::remove_file(dir.join(owner_name(self.role))) {
+                    tracing::debug!("could not remove owner record in {}: {e}", dir.display());
+                }
+            }
+        }
+    }
+}
+
 impl RoleClaim {
     /// Publish this process as the owner with its public `node_id` and reject
     /// the same public identity already running in the other role (RO-02).
@@ -421,10 +437,13 @@ impl RoleClaim {
             write_owner(dir, self.role, Some(node_id));
         }
         let other = other_role(self.role);
-        if let Liveness::Running {
-            owner: Some(owner), ..
-        } = probe(other)?
-        {
+        for liveness in probe_tiers(other)? {
+            let Liveness::Running {
+                owner: Some(owner), ..
+            } = liveness
+            else {
+                continue;
+            };
             if owner.node_id.as_deref() == Some(node_id) {
                 return Err(conflict(format!(
                     "the {} role already runs with the same public identity ({}); \
@@ -446,9 +465,18 @@ impl RoleClaim {
 ///
 /// I/O errors other than "no such lock" when opening or testing a lock.
 pub(crate) fn probe(role: StatusRole) -> Result<Liveness> {
+    Ok(probe_tiers(role)?
+        .into_iter()
+        .next()
+        .unwrap_or(Liveness::NotRunning))
+}
+
+/// Every tier at which `role` is running (user first), empty when none.
+fn probe_tiers(role: StatusRole) -> Result<Vec<Liveness>> {
+    let mut running = Vec::new();
     let user_dir = user_dir()?;
     if lock_is_held(&user_dir.join(lock_name(role)), false)? {
-        return Ok(Liveness::Running {
+        running.push(Liveness::Running {
             tier: Tier::User,
             owner: read_owner(&user_dir, role),
         });
@@ -457,13 +485,13 @@ pub(crate) fn probe(role: StatusRole) -> Result<Liveness> {
         // A prober that can open the machine lock for writing tests it
         // exclusively, or it would miss shared (non-elevated) holders.
         if lock_is_held(&dir.join(lock_name(role)), true)? {
-            return Ok(Liveness::Running {
+            running.push(Liveness::Running {
                 tier: Tier::Machine,
                 owner: read_owner(&dir, role),
             });
         }
     }
-    Ok(Liveness::NotRunning)
+    Ok(running)
 }
 
 /// Whether another process holds the lock at `path`; a missing lock is not
