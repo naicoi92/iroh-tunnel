@@ -92,6 +92,37 @@ def require_runtime_coverage(count):
         raise RuntimeError("no host-compatible archive executed alias forwarding; runtime coverage blocked")
 
 
+
+def isolated_cargo_environment(checkout, environment):
+    """Force Cargo and GoReleaser to the same initially empty checkout target."""
+    checkout = checkout.resolve()
+    target = checkout / "target"
+    if target.exists() or target.is_symlink():
+        raise ValueError(f"target already exists: {target}")
+    env = dict(environment)
+    env.pop("CARGO_BUILD_TARGET_DIR", None)
+    env["CARGO_TARGET_DIR"] = str(target)
+    return env
+
+
+def verify_built_binaries(archive, extracted, checkout):
+    triples = {
+        "linux-amd64": "x86_64-unknown-linux-gnu",
+        "linux-arm64": "aarch64-unknown-linux-gnu",
+        "linux-amd64-musl": "x86_64-unknown-linux-musl",
+        "linux-arm64-musl": "aarch64-unknown-linux-musl",
+        "linux-riscv64-musl": "riscv64gc-unknown-linux-musl",
+        "darwin-arm64": "aarch64-apple-darwin",
+    }
+    matches = [triple for suffix, triple in triples.items()
+               if archive.name.endswith(f"-{suffix}.tar.gz")]
+    if len(matches) != 1:
+        raise ValueError(f"unknown archive target: {archive.name}")
+    for binary in ALIASES.values():
+        built = checkout / "target" / matches[0] / "release" / binary
+        if not built.is_file() or digest(built) != digest(extracted / binary):
+            raise ValueError(f"archive binary differs from checkout build: {archive.name}: {binary}")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
@@ -99,6 +130,8 @@ def main():
     parser.add_argument("--production", action="store_true",
                         help="full unmodified producer except dist; inspect and --version only")
     args = parser.parse_args()
+    checkout = Path.cwd().resolve()
+    env = isolated_cargo_environment(checkout, os.environ)
     output = args.output.resolve()
     # Refuse reuse: no stale artifact can satisfy this test.
     output.mkdir(parents=True, exist_ok=False)
@@ -109,10 +142,6 @@ def main():
             build.setdefault("flags", ["--release"]).append("--features=test-utils")
     snapshot_config = output / "snapshot.yaml"
     snapshot_config.write_text(yaml.safe_dump(config, sort_keys=False))
-    env = dict(os.environ)
-    # Rust builder copies from <build.dir>/target, not CARGO_TARGET_DIR. A
-    # separate clean checkout per mode owns this default target directory.
-    env.pop("CARGO_TARGET_DIR", None)
     command = ["goreleaser", "release", "--snapshot", "--clean", "--config", str(snapshot_config),
                "--parallelism=1", "--timeout=1h"]
     if not args.production:
@@ -140,6 +169,7 @@ def main():
                 assert members[alias].linkname == binary, f"{alias}: wrong relative target"
                 assert members[binary].isfile(), f"{binary}: missing regular executable"
             tar.extractall(extracted, filter="data")
+        verify_built_binaries(archive, extracted, checkout)
         fixture = output / f"isolated-{index}"
         for alias, binary in ALIASES.items():
             installed = fixture / alias

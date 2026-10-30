@@ -6,75 +6,52 @@ Live #82 body/comments and native blockers refreshed before implementation;
 publication or full #82 acceptance. Windows aliases and supplied-key behavior
 remain open. Existing CI, snapshot and release workflows remain unchanged.
 
-## Acceptance plan (before implementation)
+## Acceptance plan for PR-trigger rework
 
-Approved seam: actual production GoReleaser snapshots, then actual producer
-archives built with `test-utils` solely for the existing local-relay real-process
-alias forwarding fixture. Structural regression tests supplement, not replace,
-producer execution.
-
-| Criterion | Observable test / evidence |
+| Criterion | Test seam |
 |---|---|
-| Exact source and intended runner | Manual-only workflow checks immutable event SHA against caller-supplied 40-character expected SHA, checked-out HEAD, clean tracked source, OS and architecture before executing repository code. |
-| Least privilege, bounded cost, fork safety | Only `workflow_dispatch`; `contents: read`, checkout credentials not persisted, no supplied secrets, no registry login or publishing steps. Explicit platform selection, concurrency cancellation, job/producer timeout and limited producer parallelism. |
-| Actual production producer | Original Linux/macOS config with only `dist` changed; full `goreleaser release --snapshot --clean`, no skipped build/package/Docker/cask/before stages, no test feature. Rust 1.91 and Zig 0.13.0 match release workflow. Any missing credential or stage failure fails run; never substitute archive-only production PASS. |
-| Complete archive structure | Production and fixture both require Linux GNU amd64/arm64 plus musl amd64/arm64/riscv64, or macOS arm64. Verify producer checksums, three regular binaries and relative aliases `it`, `its`, `ita`, extracted targets and resolved binary digests. |
-| CLI-ALIAS-01 / #82 CL1, bounded runtime | Fixture invokes existing `produced_archive_aliases_forward_tcp_independently` over isolated local relay and actual TCP client/target, through `it serve`/`it access` and `its`/`ita`, each without other binaries installed. At least one host-compatible archive must run. Foreign/unknown OS/architecture/libc is NOT RUN, never runtime PASS. |
-| No production/fixture contamination | Two workflow-owned clean checkouts at same SHA, each default Cargo target initially absent; distinct output dirs. Ambient CARGO_TARGET_DIR removed because GoReleaser Rust builder copies default target path. Never upload/distribute fixture executables. Production runtime limited to `--version`, not insecure relay forwarding. |
+| PR synthetic merge SHA; manual exact SHA guard; PR selects both hosts | Workflow regression checks trigger, matrix, SHA wiring, both checkout refs and guard; hosted PR run required. |
+| Fork safety | Read-only contents, no persisted credentials, secrets, PR-target trigger or publication; workflow static test and actionlint. |
+| Isolated producer and fixture | Separate clean checkouts and output; Cargo target override takes precedence over config and ambient settings. Actual offline Cargo build checks config and environment; stale archive digest rejected. |
+| Real archive provenance | Every extracted binary SHA-256 must equal corresponding checkout target triple build; producer checksum and full matrix still required. Real hosted producer run required. |
+| Relay safety | Production without test-utils; fixture only isolated local relay, no fixture binary upload. Existing process fixture remains runtime seam. |
 
 ## Workflow and runnable commands
 
-`producer-validation.yml` uses manual dispatch only, not every PR (15 Linux
-release builds twice plus Docker/packages are expensive). No `pull_request_target`,
-arbitrary checkout input, registry login, external secret or write permission.
-Dispatch requires access to selected repository; fork PR code is never run with
-upstream secrets. Fork-local dispatch, if enabled, has only that fork's read-only
-context. Existing PR checks/protection and main snapshot/release remain untouched.
-GitHub must already know the workflow on default branch before dispatch can work;
-this task does not push, create PRs, merge or dispatch it.
+Pull requests run both Linux and macOS against GitHub's synthetic merge
+`github.sha`; both clean checkouts use exactly that SHA. PRs from forks use
+read-only contents permission and no persisted credentials, secrets, publishing
+or `pull_request_target`. Concurrency is scoped by event and PR number or ref.
+Manual dispatch retains required lowercase 40-character expected SHA matching
+both event SHA and checkouts; platform selects linux, macos, or all.
 
-Authorized follow-up after workflow is available (do not run release.yml):
+Follow-up: trigger a draft PR; hosted Linux and macOS are **NOT RUN** until
+then. Manual dispatch requires workflow availability on default branch. No push,
+PR, merge or dispatch performed in this task.
 
-```sh
-SHA=$(git rev-parse HEAD)
-BRANCH=$(git branch --show-current)
-gh workflow run producer-validation.yml --repo naicoi92/iroh-tunnel \
-  --ref "$BRANCH" -f expected_sha="$SHA" -f platform=all
-```
-
-Exact SHA must be 40 lowercase hex characters and equal dispatch event SHA AND
-checked-out HEAD. Runner checks require Linux x86_64 or macOS arm64 before any
-repository script runs. `platform=linux` defaults to single Linux job; `macos`
-limits to macOS; `all` runs both. Cancellation replaces older same-ref/platform
-runs. Job timeout 150m; each producer timeout 1h and parallelism 1. Production
-checkout's Cargo target deleted only after successful inspection to bound disk
-use before fixture build in second clean checkout. No shared Cargo cache. Logs only retained seven days; no fixture
-executables uploaded. cargo-zigbuild and GoReleaser installation follow release's
-current `--locked`/`latest` policy; logs record resolved versions rather than
-claiming those unpinned tools are reproducible.
-
-Equivalent local producer commands (fresh output required), from exact clean
-checkout on matching host with Rust `1.91`, Zig `0.13.0`, cargo-zigbuild,
-GoReleaser, Python 3.12+/PyYAML and Linux Docker/buildx/QEMU installed:
+Use separate clean same-SHA checkouts, initially absent target, and separate
+fresh output directories. With producer tools installed, commands are:
 
 ```sh
 export RUSTUP_TOOLCHAIN=1.91
-# Put Zig 0.13.0 on PATH, not system Zig of another version.
 CONFIG=.goreleaser.yaml # .goreleaser.macos.yaml on macOS arm64
-python3 tests/release_aliases.py --production --config "$CONFIG" --output /tmp/iroh82-production-exact
-python3 tests/release_aliases.py --config "$CONFIG" --output /tmp/iroh82-fixture-exact
+uv run --no-project --python 3.12 --with PyYAML==6.0.3 python tests/release_aliases.py --production --config "$CONFIG" --output /tmp/iroh82-production-exact
+uv run --no-project --python 3.12 --with PyYAML==6.0.3 python tests/release_aliases.py --config "$CONFIG" --output /tmp/iroh82-fixture-exact
 ```
 
-Run each command from its own clean checkout of identical committed SHA with
-initially absent target/. First includes every production stage, changes only
-dist. Second enables test-utils and skips before/homebrew/Docker/nFPM only for
-fixture. GoReleaser 2.18.1 Rust builder honors CARGO_TARGET_DIR for compilation
-but copies binaries from `<build.dir>/target/<triple>/release`; harness removes
-ambient CARGO_TARGET_DIR and workflow's separate checkouts isolate default
-producer/fixture target paths. Both validate complete archive matrix/checksums/aliases and
-host-compatible alias versions. Only fixture forwards over local relay; zero
-compatible runtime forwarding fails. Production final line explicitly says
-`forwarding NOT RUN`. No fallback flags on production failure.
+Cargo receives checkout-local absolute `CARGO_TARGET_DIR` and no ambient
+`CARGO_BUILD_TARGET_DIR`; environment override defeats `.cargo/config*`
+`build.target-dir`. Initially existing or symlinked target fails. Each archive
+binary is compared against the corresponding built target triple; checksums,
+aliases and complete matrix remain mandatory. Fixture alone uses test-utils
+and local-relay forwarding. Production executes all snapshot stages and never
+runs test-feature forwarding. Logs only retained seven days.
+
+## Historical execution (earlier code checkpoints)
+
+Commands below record what actually ran at earlier checkpoints; their bare
+Python invocations are historical, not current instructions. They do not
+establish success for this rework or hosted runners.
 
 ## Execution status and validation
 

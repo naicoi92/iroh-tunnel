@@ -49,6 +49,9 @@ class ReleaseAliasesTest(unittest.TestCase):
                 with tarfile.open(archive, 'w:gz') as tar:
                     for alias, binary in fixture.ALIASES.items():
                         data = b'binary'
+                        built = root / 'target/aarch64-apple-darwin/release' / binary
+                        built.parent.mkdir(parents=True, exist_ok=True)
+                        built.write_bytes(data)
                         member = tarfile.TarInfo(binary)
                         member.size = len(data)
                         tar.addfile(member, io.BytesIO(data))
@@ -59,7 +62,8 @@ class ReleaseAliasesTest(unittest.TestCase):
                 sha = hashlib.sha256(archive.read_bytes()).hexdigest()
                 (dist / 'checksums.txt').write_text(f'{sha}  {archive.name}\n')
 
-            with patch.object(sys, 'argv', ['release_aliases.py', '--config', str(config),
+            with patch.object(fixture.Path, 'cwd', return_value=root), \
+                 patch.object(sys, 'argv', ['release_aliases.py', '--config', str(config),
                                            '--output', str(output)]), \
                  patch.object(fixture.subprocess, 'run', side_effect=produce) as run, \
                  patch.object(fixture.platform, 'system', return_value='Linux'), \
