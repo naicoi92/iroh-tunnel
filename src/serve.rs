@@ -671,24 +671,22 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
             // hold up accepting other streams on this connection. A failed
             // or timed-out connect closes only this channel (dropping the
             // stream halves resets it).
-            let local = match tokio::time::timeout(
-                LOCAL_CONNECT_TIMEOUT,
-                TcpStream::connect(&local_addr),
-            )
-            .await
-            {
-                Ok(Ok(local)) => local,
-                Ok(Err(error)) => {
-                    tracing::warn!(%local_addr, stream = stream_no,
+            let local =
+                match tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, TcpStream::connect(&local_addr))
+                    .await
+                {
+                    Ok(Ok(local)) => local,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%local_addr, stream = stream_no,
                         "failed to connect local service, resetting stream: {error}");
-                    return;
-                }
-                Err(_) => {
-                    tracing::warn!(%local_addr, stream = stream_no,
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!(%local_addr, stream = stream_no,
                         "timed out connecting local service, resetting stream");
-                    return;
-                }
-            };
+                        return;
+                    }
+                };
             // AsyncWrite::shutdown only queues QUIC FIN. Keep channel owned
             // until final bytes are acknowledged, or last-pipe completion
             // could close the endpoint and discard its queued response.

@@ -78,28 +78,46 @@ pub(crate) async fn join(tasks: &mut JoinSet<()>) {
 ///
 /// Both signals trigger the same graceful shutdown path. The function logs
 /// which signal was received so operators can tell Ctrl-C apart from a
-/// service manager stop. Later signals do not reset or shorten drain: Tokio's
-/// installed process handlers remain active after this future returns.
+/// service manager stop. A later signal does not reset or shorten the drain
+/// grace, but it does force an immediate exit (status 130): Tokio keeps
+/// consuming the signal after this future returns, so without this a stuck
+/// shutdown could not be interrupted short of SIGKILL.
 pub async fn wait_for_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
     #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+    let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+
+    let first = async {
+        let ctrl_c = async {
+            signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
+        #[cfg(unix)]
+        let term = terminate.recv();
+        #[cfg(not(unix))]
+        let term = std::future::pending::<Option<()>>();
+        tokio::select! {
+            _ = ctrl_c => "SIGINT (Ctrl+C)",
+            _ = term => "SIGTERM",
+        }
     };
+    let which = first.await;
+    tracing::info!("received {which}");
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => tracing::info!("received SIGINT (Ctrl+C)"),
-        _ = terminate => tracing::info!("received SIGTERM"),
-    }
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            let _ = signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let term = terminate.recv();
+        #[cfg(not(unix))]
+        let term = std::future::pending::<Option<()>>();
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = term => {}
+        }
+        tracing::warn!("second shutdown signal, exiting immediately");
+        std::process::exit(130);
+    });
 }

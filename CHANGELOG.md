@@ -11,8 +11,9 @@
   bounded by that deadline. Healthy established channels have no added
   lifetime timeout; peer loss closes affected channels without replay.
   Shutdown stops admission and gives active channels one shared 3-second
-  drain grace, then closes remaining channels. Repeated stop does not reset
-  grace; endpoint transport teardown can add time afterward. These are
+  drain grace, then closes remaining channels. A second stop signal
+  exits immediately (status 130) instead of resetting grace; endpoint
+  transport teardown can add time afterward. These are
   implementation defaults, not configurable settings or delivery guarantees.
 
 - **TCP multiplexing**: Access always reuses a service connection for
