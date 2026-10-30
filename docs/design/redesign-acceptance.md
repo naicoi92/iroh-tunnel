@@ -337,7 +337,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Race timing/process outcomes, paths, user/scope and simultaneous byte exchanges. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #87 blocker #77 remains open for ownership implementation/security feasibility; user-service combination also needs applicable service adapter.
+**Execution:** Ready after #77 closes (final rule recorded); user-service combination also needs the applicable service adapter.
 
 <a id="own-identity-01"></a>
 ### Case OWN-IDENTITY-01
@@ -354,7 +354,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Public IDs only, role/scope/process results, redaction scan and real OS permission evidence. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #77 cross-user coordination, lock permissions and platform security feasibility unresolved.
+**Execution:** Ready after #77 closes; no cross-user coordination is required beyond the system service.
 
 <a id="own-status-01"></a>
 ### Case OWN-STATUS-01
@@ -371,7 +371,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Status output, process/user identity and state path correlation. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #87 blocker #77 ownership policy/implementation still open.
+**Execution:** Ready after #77 closes (final rule recorded).
 
 <a id="own-recovery-01"></a>
 ### Case OWN-RECOVERY-01
@@ -380,15 +380,15 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Source AC:** [87.AC2](#87-ac2); [87.CL3](#87-cl3). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #77 stale/crash/PID-reuse/cleanup and cross-user policy, real processes and hostile ownership fixtures.
+**Prerequisites:** Real processes that can be killed and restarted; the #77 final rule.
 
-**Action:** Crash/restart, leave stale snapshots, simulate PID reuse and unauthorized ownership artifact manipulation; compare live owner state.
+**Action:** Kill a running role abruptly and restart it (a leftover file must not block the start); leave stale snapshots and simulate PID reuse; compare live owner state.
 
 **Expected observable outcome:** Observed stale/recovery/cleanup/security outcomes match approved #77 policy; no deletion of unrelated live owner state. Exact liveness tokens or cleanup algorithm not selected here.
 
 **Evidence/platform:** Approved policy link, process/event trace, state ownership and permission diffs. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #77 stale-state, cleanup and cross-user security decisions; expected detailed outcomes cannot yet be fixed.
+**Execution:** Ready after #77 closes; the mechanism is decided in #87.
 
 <a id="udp-data-01"></a>
 ### Case UDP-DATA-01
@@ -1143,7 +1143,7 @@ Every row cites the corresponding issue body and `docs/design/redesign-spec.md` 
 
 ### #87 — role and identity ownership/status; blockers #77, #82
 **AC C** (#87; #77; RO-01–02, spec 32–38): competing all-in-one/role binaries admit at most one process per role among the system service and same-user modes, different roles coexist with distinct identities; foreground/user service same role/user exclude each other independent of path overrides, and `run`/`service start` are refused while the system service runs; duplicate local public identity rejected even across roles/scopes; no raw key in artifacts; status identifies actual role/owner. Crash, stale status and cleanup follow approved policy.
-**Evidence:** barrier-race real `it serve` vs `its`, and Access equivalents, assert exactly one proceeds; vary config/state overrides and service vs foreground. Different roles with distinct keys coexist; same key across roles and across user/system scope rejects later process with actionable guidance. Capture actual status owner before/after stop, abrupt kill/restart, stale snapshots, PID reuse and ensure cleanup never deletes other live owner's state; examine locks/status/logs for raw secret; test cross-user access/hostile lock creation only under approved security model. **Gap:** #77 stale semantics, scope/permissions and cross-user lock feasibility unresolved; user-level locks do not prove machine-wide or cross-host safety. Different roles coexist only when identity ownership also satisfied.
+**Evidence:** barrier-race real `it serve` vs `its`, and Access equivalents, assert exactly one proceeds; vary config/state overrides and service vs foreground. Different roles with distinct keys coexist; same key across roles rejects the later process with actionable guidance. Capture actual status owner before/after stop, abrupt kill/restart, stale snapshots, PID reuse and ensure cleanup never deletes other live owner's state; examine locks/status/logs for raw secret; start `run` and `service start` while the system service runs and assert refusal with nothing stopped. **Gap:** a non-elevated user's ability to detect the system service is verified in #87; no cross-host or cross-user check is implied. Different roles coexist only when identity ownership also satisfied.
 
 ### #88 — UDP data path; blockers #78, #81
 **AC C** (#88; #71, UDP-01–03, spec 46–52): multiple clients to fixed target; correctly associated interleaved responses, unchanged opaque payload and datagram boundaries; dedicated Serve upstream socket per active flow; shared Iroh connection allowed; document best-effort delivery, source endpoint effects.
