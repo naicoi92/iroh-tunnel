@@ -5,7 +5,9 @@ Requires Python 3.12+, PyYAML, GoReleaser and producer's Rust/zig toolchain.
 Default fixture enables test-utils for local relay only. Never distribute it.
 --production preserves every producer stage and never enables test-utils or
 runs forwarding. Both modes use --snapshot: no publication, no secrets needed.
-Output (including snapshot config, Cargo target and digests) stays in --output.
+Output (snapshot config, extracted archives and digests) stays in --output.
+Run modes in separate clean source checkouts with initially empty target/:
+GoReleaser's Rust builder copies from that default target path.
 """
 
 import argparse
@@ -107,7 +109,10 @@ def main():
             build.setdefault("flags", ["--release"]).append("--features=test-utils")
     snapshot_config = output / "snapshot.yaml"
     snapshot_config.write_text(yaml.safe_dump(config, sort_keys=False))
-    env = dict(os.environ, CARGO_TARGET_DIR=str(output / "target"))
+    env = dict(os.environ)
+    # Rust builder copies from <build.dir>/target, not CARGO_TARGET_DIR. A
+    # separate clean checkout per mode owns this default target directory.
+    env.pop("CARGO_TARGET_DIR", None)
     command = ["goreleaser", "release", "--snapshot", "--clean", "--config", str(snapshot_config),
                "--parallelism=1", "--timeout=1h"]
     if not args.production:

@@ -1,6 +1,7 @@
 """Nonpublishing production mode at GoReleaser/CLI boundary, not runtime proof."""
 
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -33,7 +34,7 @@ class ProducerValidationTest(unittest.TestCase):
                 self.assertFalse(any(arg.startswith('--skip') for arg in command))
                 generated = yaml.safe_load((output / 'snapshot.yaml').read_text())
                 self.assertEqual(generated, dict(original, dist=str(output / 'dist')))
-                self.assertEqual(kwargs['env']['CARGO_TARGET_DIR'], str(output / 'target'))
+                self.assertNotIn('CARGO_TARGET_DIR', kwargs['env'])
                 dist = output / 'dist'
                 dist.mkdir()
                 archive = dist / 'iroh-tunnel-1-darwin-arm64.tar.gz'
@@ -54,6 +55,7 @@ class ProducerValidationTest(unittest.TestCase):
 
             with patch.object(sys, 'argv', ['release_aliases.py', '--production',
                                            '--config', str(config), '--output', str(output)]), \
+                 patch.dict(os.environ, CARGO_TARGET_DIR=str(Path(tmp) / 'stale-target')), \
                  patch.object(fixture.subprocess, 'run', side_effect=produce), \
                  patch.object(fixture.platform, 'system', return_value='Darwin'), \
                  patch.object(fixture.platform, 'machine', return_value='arm64'):

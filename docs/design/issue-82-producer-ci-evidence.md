@@ -20,7 +20,7 @@ producer execution.
 | Actual production producer | Original Linux/macOS config with only `dist` changed; full `goreleaser release --snapshot --clean`, no skipped build/package/Docker/cask/before stages, no test feature. Rust 1.91 and Zig 0.13.0 match release workflow. Any missing credential or stage failure fails run; never substitute archive-only production PASS. |
 | Complete archive structure | Production and fixture both require Linux GNU amd64/arm64 plus musl amd64/arm64/riscv64, or macOS arm64. Verify producer checksums, three regular binaries and relative aliases `it`, `its`, `ita`, extracted targets and resolved binary digests. |
 | CLI-ALIAS-01 / #82 CL1, bounded runtime | Fixture invokes existing `produced_archive_aliases_forward_tcp_independently` over isolated local relay and actual TCP client/target, through `it serve`/`it access` and `its`/`ita`, each without other binaries installed. At least one host-compatible archive must run. Foreign/unknown OS/architecture/libc is NOT RUN, never runtime PASS. |
-| No production/fixture contamination | Distinct production and fixture output and Cargo target directories. Never upload/distribute fixture executables. Production runtime limited to `--version`, not insecure relay forwarding. |
+| No production/fixture contamination | Two workflow-owned clean checkouts at same SHA, each default Cargo target initially absent; distinct output dirs. Ambient CARGO_TARGET_DIR removed because GoReleaser Rust builder copies default target path. Never upload/distribute fixture executables. Production runtime limited to `--version`, not insecure relay forwarding. |
 
 ## Workflow and runnable commands
 
@@ -47,8 +47,8 @@ checked-out HEAD. Runner checks require Linux x86_64 or macOS arm64 before any
 repository script runs. `platform=linux` defaults to single Linux job; `macos`
 limits to macOS; `all` runs both. Cancellation replaces older same-ref/platform
 runs. Job timeout 150m; each producer timeout 1h and parallelism 1. Production
-Cargo target deleted only after successful inspection to bound disk use before
-fixture build. No shared Cargo cache. Logs only retained seven days; no fixture
+checkout's Cargo target deleted only after successful inspection to bound disk
+use before fixture build in second clean checkout. No shared Cargo cache. Logs only retained seven days; no fixture
 executables uploaded. cargo-zigbuild and GoReleaser installation follow release's
 current `--locked`/`latest` policy; logs record resolved versions rather than
 claiming those unpinned tools are reproducible.
@@ -65,9 +65,13 @@ python3 tests/release_aliases.py --production --config "$CONFIG" --output /tmp/i
 python3 tests/release_aliases.py --config "$CONFIG" --output /tmp/iroh82-fixture-exact
 ```
 
-First command includes every production stage, changes only dist and uses its
-own Cargo target. Second enables test-utils and skips before/homebrew/Docker/nFPM
-only for fixture. Both validate complete archive matrix/checksums/aliases and
+Run each command from its own clean checkout of identical committed SHA with
+initially absent target/. First includes every production stage, changes only
+dist. Second enables test-utils and skips before/homebrew/Docker/nFPM only for
+fixture. GoReleaser 2.18.1 Rust builder honors CARGO_TARGET_DIR for compilation
+but copies binaries from `<build.dir>/target/<triple>/release`; harness removes
+ambient CARGO_TARGET_DIR and workflow's separate checkouts isolate default
+producer/fixture target paths. Both validate complete archive matrix/checksums/aliases and
 host-compatible alias versions. Only fixture forwards over local relay; zero
 compatible runtime forwarding fails. Production final line explicitly says
 `forwarding NOT RUN`. No fallback flags on production failure.
@@ -86,14 +90,26 @@ runs on main. New production regression failed before implementation with
 - `goreleaser check --config .goreleaser.yaml` and macOS config: passed.
 - `python3 -m unittest discover -s tests -p test_producer_validation.py`: 2 passed;
   synthetic GoReleaser boundary fixtures establish full production config except
-  dist, no skipped stages, private target, no forwarding and producer failure
-  propagation. Not real snapshot evidence.
+  dist, no skipped stages, ambient target override removed, no forwarding and
+  producer failure propagation. Not real snapshot evidence.
 - `python3 -m unittest discover -s tests -p test_release_aliases.py`: 5 passed;
   complete matrices, rejection of missing/extra archives, libc/architecture
   selection and foreign-only run fails. Not real platform execution.
 - `cargo +1.91 fmt --all -- --check` and `git diff --check`: passed. No Rust edit.
 - Existing ci/snapshot/release workflows and production configs byte-unchanged
   versus baseline (`git diff --exit-code BASE -- <five paths>`).
+
+## Target-path mismatch checkpoint
+
+Implementation checkpoint `bca60ed50148f05093e3a2c5b1509778d5e0b52c` attempted
+macOS production with CARGO_TARGET_DIR under output. Source inspection during
+run found GoReleaser 2.18.1's Rust copy path ignores this override. That capture
+(`/tmp/iroh82-ci-bca60ed-production.log`) was aborted; artifacts may have copied
+preexisting default-target binaries and are **INVALID as exact-source/feature
+proof**. No PASS claimed. This invalidates that attempt, not prior captures
+that never used target override. Approved fix: workflow-owned separate clean
+checkouts, no harness-created worktrees; clear ambient target override. Real
+validation below must use clean disposable checkout of committed source.
 
 Linux full production snapshot, complete GNU/musl/riscv64 structural matrix,
 Docker/packages and native GNU forwarding remain **BLOCKED / NOT RUN** until

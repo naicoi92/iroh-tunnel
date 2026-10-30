@@ -52,13 +52,26 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: fixture-source
+
       - name: Verify immutable source and native runner before repository code
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$EXPECTED_SHA" = "$EVENT_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          test -z "$(git status --porcelain)"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          test "$(git -C fixture-source rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git -C fixture-source status --porcelain)"
+          # GoReleaser copies default target/, ignoring CARGO_TARGET_DIR.
+          # Neither producer may reuse any preexisting compiled artifact.
+          test ! -e target
+          test ! -e fixture-source/target
           case "$RUNNER_LABEL:$(uname -s):$(uname -m)" in
             ubuntu-latest:Linux:x86_64|macos-14:Darwin:arm64) ;;
             *) echo 'BLOCKED: unexpected runner OS/architecture'; exit 1 ;;
@@ -130,16 +143,18 @@ jobs:
           python tests/release_aliases.py --production --config "$PRODUCER_CONFIG" \
             --output "$VALIDATION_ROOT/production" 2>&1 | tee "$VALIDATION_ROOT/production.log"
           git diff --exit-code
-          # Production inspected already. Drop only this run's Cargo objects
+          # Production inspected already. Drop only this checkout's objects
           # before fixture compilation to limit hosted-runner disk use.
-          rm -rf -- "$VALIDATION_ROOT/production/target"
+          rm -rf -- target
           df -h "$VALIDATION_ROOT"
 
       - name: Isolated test-feature producer and local-relay alias forwarding
         # Separate Cargo target/dist; no public relay and no uploaded binaries.
         # All archives inspected; only host-compatible OS/arch/libc executed.
+        working-directory: fixture-source
         run: |
           set -euo pipefail
+          test ! -e target
           python tests/release_aliases.py --config "$PRODUCER_CONFIG" \
             --output "$VALIDATION_ROOT/fixture" 2>&1 | tee "$VALIDATION_ROOT/fixture.log"
           git diff --exit-code
