@@ -64,7 +64,7 @@ The target generally sees the Serve-side endpoint, potentially modified by NAT, 
 
 - macOS/Linux defaults: `~/.config/iroh-tunnel/` and `~/.local/state/iroh-tunnel/`, ignoring XDG directory variables; application-specific overrides remain. Windows uses the resolved `LocalAppData/iroh-tunnel/config` and `state` directories.
 - On macOS use new config when present. Otherwise safely copy legacy config without overwriting, preserve the original and secret permissions, and never generate a substitute identity after copy failure. Verify actual legacy paths.
-- At most one instance of the same role in the same scope may run, regardless of executable name; Serve and Access are distinct roles. Foreground and user service for the same role/user share scope regardless of path overrides. Independent local endpoints must not use the same identity concurrently across roles or scopes; reject the later process. No cross-host intervention is planned. Scope identity, lock permissions, stale state and crash cleanup remain decision gates.
+- At most one instance of the same role in the same scope may run, regardless of executable name; Serve and Access are distinct roles. Foreground and user service for the same role/user share scope regardless of path overrides. Independent local endpoints must not use the same identity concurrently across roles or scopes; reject the later process. No cross-host intervention is planned. Per RO-03 (#77) the minimum is refusing a later start while an instance runs, keeping the 0.4.2 stop behavior; lock mechanics and crash cleanup are implementation details of #87.
 - NodeId is public identity, not authorization. Services protect themselves. Secret permissions and disclosure policy require review.
 
 ## Background service and distribution

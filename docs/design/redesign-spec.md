@@ -33,9 +33,11 @@
 
 **Actors / input:** either binary for a role starts foreground or as service, with resolved user/scope and state path. **Invariant RO-01 (Confirmed):** at most one running instance of a role in the same scope, independent of binary name (`it serve` and `its` must not bypass each other); Serve and Access are separate roles.
 
-**RO-02 (Confirmed):** foreground and user service of the same user/role share scope regardless of config or state overrides. Independent endpoints on the same host cannot concurrently use the same public identity, even across roles and scopes; reject the later process. Do not implement cross-host intervention; a local lock cannot guarantee cross-host detection. Do not store raw secrets in ownership artifacts. Cross-user permissions and lock mechanics remain open.
+**RO-02 (Confirmed):** foreground and user service of the same user/role share scope regardless of config or state overrides. Independent endpoints on the same host cannot concurrently use the same public identity, even across roles and scopes; reject the later process. Do not implement cross-host intervention; a local lock cannot guarantee cross-host detection. Do not store raw secrets in ownership artifacts.
 
-**Path (Proposed):** resolve role/scope → acquire ownership → start role → publish status snapshot → stop and clean owned state. **Failure:** conflict refuses second instance; unusable state path or permissions fails with guidance. **Deferred:** scope key/lock implementation, stale PID detection, crash cleanup, permissions and shutdown consistency. **Output:** runtime state and per-role status; do not delete another process's status. **Acceptance:** AC-RO-01 competing binary/role pair cannot both own the same scope; AC-RO-02 different roles may run; AC-RO-03 status identifies role and owner and does not silently report an unrelated instance. Exact stale-status semantics remain open.
+**RO-03 (Confirmed, #77):** keep the 0.4.2 lifecycle: a foreground run stops with Ctrl+C and a service stops with its service stop command; add no stop command and no permission model. The only new behavior is that a start is refused, with a reason, while another instance is running. A leftover file after a crash must not block the next start; the mechanism is an implementation detail of #87. Role/scope design beyond RO-01 and RO-02 (separate lock domains, scope identity, cross-user permissions, a platform spike) is not required by #77.
+
+**Path (Proposed):** resolve role/scope → acquire ownership → start role → publish status snapshot → stop and clean owned state. **Failure:** conflict refuses second instance; unusable state path or permissions fails with guidance. **Deferred to #87 (implementation detail):** lock implementation, stale PID detection and crash cleanup under RO-03. **Output:** runtime state and per-role status; do not delete another process's status. **Acceptance:** AC-RO-01 competing binary/role pair cannot both own the same scope; AC-RO-02 different roles may run when they use different public identities (same identity across roles is rejected, RO-02); AC-RO-03 status identifies role and owner and does not silently report an unrelated instance. Stale-status display follows AC-RO-05 and AC-RO-06; the mechanism is decided in #87.
 
 ## `tcp-forwarding` — multiplexed TCP
 
@@ -84,7 +86,7 @@ These scenarios do not change the confirmed rules above. Proposed outcomes requi
 | Scenario | Proposed outcome | Acceptance candidate |
 |---|---|---|
 | `it serve` and `its` start in the same scope | Use one shared role/scope ownership namespace; second process fails, independent of executable name. | AC-RO-04: concurrent starts admit at most one owner. |
-| Process crashes and leaves status | Treat the snapshot as potentially stale; do not silently claim live. Recovery and display format remain open. | AC-RO-05: crash snapshot is never presented as verified live without a successful ownership/liveness check. |
+| Process crashes and leaves status | Treat the snapshot as potentially stale; do not silently claim live. A leftover file must not block the next start (RO-03). | AC-RO-05: crash snapshot is never presented as verified live without a successful ownership/liveness check. |
 | OS reuses PID | PID alone is insufficient proof; include a process incarnation/ownership token or equivalent mechanism. | AC-RO-06: reused PID cannot authorize deletion or ownership takeover of another process's state. |
 
 ### Forwarding failures and concurrency
