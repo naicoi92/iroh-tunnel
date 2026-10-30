@@ -4,6 +4,10 @@
 
 ### Changed
 
+- **Homebrew cask `it` alias**: the cask declares the `it` symlink with
+  Homebrew's install steps, so `brew upgrade` replaces it and `brew uninstall`
+  removes it (it was previously left dangling). The release config moves off
+  the GoReleaser-deprecated `homebrew_casks.hooks.post.install`.
 - **Config and state locations**: macOS and Linux now always use
   `~/.config/iroh-tunnel` and `~/.local/state/iroh-tunnel` (XDG variables are
   ignored); Windows uses `%LOCALAPPDATA%\iroh-tunnel\config` and `\state`.
