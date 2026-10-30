@@ -1,0 +1,15 @@
+# Role-only image for `iroh-tunnel-access` (issue #94), used by GoReleaser's
+# `dockers_v2`. Same layout as `Dockerfile.goreleaser` (read its header for
+# how the prebuilt binary is staged), but it ships ONLY the standalone
+# `iroh-tunnel-access` executable, so the image runs without any other binary.
+
+# syntax=docker/dockerfile:1
+FROM gcr.io/distroless/cc-debian12
+
+ARG TARGETPLATFORM
+
+ENV HOME=/tmp
+
+COPY $TARGETPLATFORM/iroh-tunnel-access /usr/local/bin/iroh-tunnel-access
+
+ENTRYPOINT ["iroh-tunnel-access"]

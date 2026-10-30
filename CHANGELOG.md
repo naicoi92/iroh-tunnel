@@ -4,6 +4,9 @@
 
 ### Changed
 
+- **`it` alias is package-owned**: the `.deb`/`.apk` now ship `/usr/bin/it`
+  as a symlink tracked by the package manager instead of creating it in the
+  postinstall script, so removing the package removes the alias.
 - **Homebrew cask `it` alias**: the cask declares the `it` symlink with
   Homebrew's install steps, so `brew upgrade` replaces it and `brew uninstall`
   removes it (it was previously left dangling). The release config moves off
@@ -54,6 +57,14 @@
   subcommands reject mixed quick flags; invalid quick settings use the
   existing config-error exit class with role-specific diagnostics. NodeId
   is public identity, not target authorization; protect exposed services.
+
+- **Separate Linux packages, archives and images per executable**: the
+  all-in-one `iroh-tunnel`, `iroh-tunnel-serve` and `iroh-tunnel-access` each
+  ship as their own `.deb`/`.apk` package, `tar.gz` archive and
+  `ghcr.io/naicoi92/<executable>` image. Each package owns only its binary and
+  its alias link (`it`, `its`, `ita`); role packages ship no service unit. The
+  macOS Homebrew cask still installs only `iroh-tunnel`, and there are no
+  Windows artifacts yet.
 
 - **Windows in CI**: the `lint` and `test` jobs now run on `windows-latest`
   alongside `ubuntu-latest`. `cargo fmt --check` stays Linux-only.

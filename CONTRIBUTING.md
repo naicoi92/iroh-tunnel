@@ -79,7 +79,7 @@ explaining why.
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
 | `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)   |
-| `packaging/`               | systemd unit + deb postinstall used by nFPM            |
+| `packaging/`               | systemd unit, deb postinstall, `verify-dist.sh` checks |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Pull requests

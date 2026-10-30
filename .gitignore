@@ -29,3 +29,6 @@ logs/security/
 
 # ZCode (agent) runtime state
 .zcode/
+
+# GoReleaser snapshot output
+/dist/
