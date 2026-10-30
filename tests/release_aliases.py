@@ -117,6 +117,7 @@ def main():
                "--parallelism=1", "--timeout=1h"]
     if not args.production:
         command.append("--skip=before,homebrew,docker,nfpm,publish")
+    print(f"producer cwd={Path.cwd()} command={command}", flush=True)
     subprocess.run(command, env=env, check=True)
     archives = sorted((output / "dist").glob("*.tar.gz"))
     validate_archive_set(args.config, archives)

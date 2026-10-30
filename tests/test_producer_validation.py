@@ -21,6 +21,10 @@ class ProducerValidationTest(unittest.TestCase):
             output = Path(tmp).resolve() / 'production'
             config = Path('.goreleaser.macos.yaml')
             original = yaml.safe_load(config.read_text())
+            stale_target = Path(tmp) / 'stale-target'
+            stale_target.mkdir()
+            sentinel = stale_target / 'iroh-tunnel'
+            sentinel.write_bytes(b'stale test-feature binary must never be copied')
             real_run = subprocess.run
             producer_commands = []
 
@@ -55,12 +59,15 @@ class ProducerValidationTest(unittest.TestCase):
 
             with patch.object(sys, 'argv', ['release_aliases.py', '--production',
                                            '--config', str(config), '--output', str(output)]), \
-                 patch.dict(os.environ, CARGO_TARGET_DIR=str(Path(tmp) / 'stale-target')), \
+                 patch.dict(os.environ, CARGO_TARGET_DIR=str(stale_target)), \
                  patch.object(fixture.subprocess, 'run', side_effect=produce), \
                  patch.object(fixture.platform, 'system', return_value='Darwin'), \
                  patch.object(fixture.platform, 'machine', return_value='arm64'):
                 fixture.main()
             self.assertEqual(len(producer_commands), 1)
+            self.assertEqual(sentinel.read_bytes(), b'stale test-feature binary must never be copied')
+            self.assertNotEqual(fixture.digest(output / 'isolated-0/it/iroh-tunnel'),
+                                fixture.digest(sentinel))
 
     def test_production_stage_failure_cannot_be_reported_as_archive_only_success(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -45,12 +45,14 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: production-source
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+          path: production-source
 
       - uses: actions/checkout@v7
         with:
@@ -65,13 +67,13 @@ jobs:
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$EXPECTED_SHA" = "$EVENT_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          test -z "$(git status --porcelain --untracked-files=no)"
-          test "$(git -C fixture-source rev-parse HEAD)" = "$EXPECTED_SHA"
-          test -z "$(git -C fixture-source status --porcelain)"
+          test -z "$(git status --porcelain)"
+          test "$(git -C ../fixture-source rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git -C ../fixture-source status --porcelain)"
           # GoReleaser copies default target/, ignoring CARGO_TARGET_DIR.
           # Neither producer may reuse any preexisting compiled artifact.
           test ! -e target
-          test ! -e fixture-source/target
+          test ! -e ../fixture-source/target
           case "$RUNNER_LABEL:$(uname -s):$(uname -m)" in
             ubuntu-latest:Linux:x86_64|macos-14:Darwin:arm64) ;;
             *) echo 'BLOCKED: unexpected runner OS/architecture'; exit 1 ;;
@@ -131,6 +133,10 @@ jobs:
           [[ "$(rustc --version)" == 'rustc 1.91.'* ]]
           test "$(zig version)" = '0.13.0'
           goreleaser check --config "$PRODUCER_CONFIG"
+          cargo tree --locked -e normal,build,features -i iroh > "$VALIDATION_ROOT/production-features.log"
+          if grep -F 'feature "test-utils"' "$VALIDATION_ROOT/production-features.log"; then
+            echo 'BLOCKED: test-utils in production feature graph'; exit 1
+          fi
           python -m unittest discover -s tests -p 'test_*release_aliases.py'
           python -m unittest discover -s tests -p test_producer_validation.py
 
@@ -155,6 +161,8 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e target
+          cargo tree --locked -e normal,build,features --features test-utils -i iroh > "$VALIDATION_ROOT/fixture-features.log"
+          grep -F 'iroh feature "test-utils"' "$VALIDATION_ROOT/fixture-features.log"
           python tests/release_aliases.py --config "$PRODUCER_CONFIG" \
             --output "$VALIDATION_ROOT/fixture" 2>&1 | tee "$VALIDATION_ROOT/fixture.log"
           git diff --exit-code

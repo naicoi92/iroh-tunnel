@@ -91,7 +91,9 @@ runs on main. New production regression failed before implementation with
 - `python3 -m unittest discover -s tests -p test_producer_validation.py`: 2 passed;
   synthetic GoReleaser boundary fixtures establish full production config except
   dist, no skipped stages, ambient target override removed, no forwarding and
-  producer failure propagation. Not real snapshot evidence.
+  producer failure propagation. Synthetic stale-target sentinel cannot affect
+  producer environment or extracted digest; sentinel remains unchanged. Not
+  real snapshot evidence.
 - `python3 -m unittest discover -s tests -p test_release_aliases.py`: 5 passed;
   complete matrices, rejection of missing/extra archives, libc/architecture
   selection and foreign-only run fails. Not real platform execution.
@@ -110,6 +112,35 @@ proof**. No PASS claimed. This invalidates that attempt, not prior captures
 that never used target override. Approved fix: workflow-owned separate clean
 checkouts, no harness-created worktrees; clear ambient target override. Real
 validation below must use clean disposable checkout of committed source.
+
+## Real local production checkpoint
+
+Fresh detached clone of `f449c3b57d9ead724395017d0d7a55b47d31fb96`, default
+target initially absent; no tracked source changes. macOS 15.7.3 arm64 (not
+GitHub macos-14), Rust 1.91.1, verified Zig 0.13.0, cargo-zigbuild 0.24.0,
+GoReleaser 2.18.1, Python 3.14.3 / PyYAML 6.0.3. Credentials explicitly unset.
+
+```sh
+cd /tmp/iroh82-ci-f449c3b-production-source
+RUSTUP_TOOLCHAIN=1.91 PATH=/tmp/iroh82-ci-tools/zig-macos-aarch64-0.13.0:$PATH \
+  python3 tests/release_aliases.py --production --config .goreleaser.macos.yaml \
+  --output /tmp/iroh82-ci-f449c3b-production
+```
+
+Passed full before hooks, all three production zigbuilds, tar/checksums and
+generated Homebrew cask in 2m52s; no supplied token needed. Archive SHA-256
+`2415c1ff1e8cbbf7e48496540e0d9f4b8ce0d4ab25b60b4e8d1fd9222f0e35ef`.
+Resolved alias binary SHA-256: it
+`8e2767913188c4bdc0e3d01fc58fbbf149093d0b69dc476d36ec3c9c37a48a20`,
+its `2567af193450dd0e1d736988f4b84ee6fb2b896d025f3828f989973af0226164`,
+ita `04f6ce5dd9bde3e6ff01c180046b8a1358bace3268a12f8abd76950d54842bb4`.
+All aliases return intended binary name / `0.4.2-dev`. Tar members and extracted
+relative links verified; config diff only dist; reverse Iroh feature graph
+(`cargo +1.91 tree --locked -e normal,build,features -i iroh`) has no test-utils.
+Transcript `/tmp/iroh82-ci-f449c3b-production.log`; graph
+`/tmp/iroh82-ci-f449c3b-production-features.log`. This is real local production
+snapshot evidence at stated checkpoint, not Linux or hosted-runner acceptance.
+Later workflow-only source-path/logging changes require final-head checks.
 
 Linux full production snapshot, complete GNU/musl/riscv64 structural matrix,
 Docker/packages and native GNU forwarding remain **BLOCKED / NOT RUN** until
