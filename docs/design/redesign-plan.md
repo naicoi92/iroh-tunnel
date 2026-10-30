@@ -7,7 +7,7 @@ summary: Target architecture, confirmed decisions, open gates, phased implementa
 
 The [canonical tracker spec](https://github.com/naicoi92/iroh-tunnel/issues/68) records the product scope and open decision gates. This plan brings the approved redesign direction into one implementation roadmap. It is for maintainers preparing design decisions, implementation and release. Read the [capability specifications](redesign-spec.md) for detailed rules, scenarios and acceptance criteria, and the [decision record](project-redesign.md) for interview decisions.
 
-**Status: planning and review.** The capability map and selected decisions are approved; proposed details are not blanket implementation approval. This document does not imply a working UDP implementation, completed migration, production readiness or a committed release schedule. No implementation or dependency upgrade was made during this design effort.
+**Status: planning and review.** The capability map and selected decisions are approved; proposed details are not blanket implementation approval. This document does not imply a working UDP implementation, completed migration, production readiness or a committed release schedule. No implementation was made during this design effort; the Iroh dependency upgrade is recorded in the [#101 evidence](issue-101-evidence.md).
 
 **Non-goals:** application-protocol inspection or modification; source-IP transparency without an explicit feasible design; treating NodeId as authorization; converting the modular monolith into networked microservices; assuming a database; promising reliable UDP delivery.
 
