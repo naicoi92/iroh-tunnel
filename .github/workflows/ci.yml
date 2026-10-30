@@ -79,10 +79,15 @@ jobs:
       - name: shellcheck
         run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
 
+      # Pinned to the version the configs are verified against. From v2.19,
+      # `check` fails on the deprecated `homebrew_casks.hooks.post.install` in
+      # .goreleaser.macos.yaml; migrating it to `install_steps` needs a macOS
+      # release run to verify, so it is tracked separately. Bump this pin
+      # together with that migration.
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
-          version: latest
+          version: v2.18.1
           install-only: true
 
       - name: goreleaser check (Linux)
