@@ -2,8 +2,10 @@
 """CLI-ALIAS-01: build actual Unix producer snapshot, inspect, extract, run.
 
 Requires Python 3.12+, PyYAML, GoReleaser and producer's Rust/zig toolchain.
-Fixture enables test-utils for isolated local relay only. Never distribute it.
-Output (including modified snapshot config and digests) stays in --output.
+Default fixture enables test-utils for local relay only. Never distribute it.
+--production preserves every producer stage and never enables test-utils or
+runs forwarding. Both modes use --snapshot: no publication, no secrets needed.
+Output (including snapshot config, Cargo target and digests) stays in --output.
 """
 
 import argparse
@@ -92,21 +94,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--production", action="store_true",
+                        help="full unmodified producer except dist; inspect and --version only")
     args = parser.parse_args()
     output = args.output.resolve()
     # Refuse reuse: no stale artifact can satisfy this test.
     output.mkdir(parents=True, exist_ok=False)
     config = yaml.safe_load(args.config.read_text())
     config["dist"] = str(output / "dist")
-    for build in config["builds"]:
-        build.setdefault("flags", ["--release"]).append("--features=test-utils")
+    if not args.production:
+        for build in config["builds"]:
+            build.setdefault("flags", ["--release"]).append("--features=test-utils")
     snapshot_config = output / "snapshot.yaml"
     snapshot_config.write_text(yaml.safe_dump(config, sort_keys=False))
-    subprocess.run(
-        ["goreleaser", "release", "--snapshot", "--clean", "--config", str(snapshot_config),
-         "--skip=before,homebrew,docker,nfpm,publish"],
-        check=True,
-    )
+    env = dict(os.environ, CARGO_TARGET_DIR=str(output / "target"))
+    command = ["goreleaser", "release", "--snapshot", "--clean", "--config", str(snapshot_config),
+               "--parallelism=1", "--timeout=1h"]
+    if not args.production:
+        command.append("--skip=before,homebrew,docker,nfpm,publish")
+    subprocess.run(command, env=env, check=True)
     archives = sorted((output / "dist").glob("*.tar.gz"))
     validate_archive_set(args.config, archives)
     runtime_count = 0
@@ -154,15 +160,21 @@ def main():
             )
             assert version.startswith(f"{binary} "), f"{alias}: wrong binary version output"
             print(f"{alias} --version: {version.strip()}", flush=True)
-        env = dict(os.environ, IROH_TUNNEL_ALIAS_FIXTURE=str(fixture))
+        if args.production:
+            continue
+        fixture_env = dict(env, IROH_TUNNEL_ALIAS_FIXTURE=str(fixture))
         subprocess.run(
             ["cargo", "test", "--locked", "--test", "quick_run",
              "produced_archive_aliases_forward_tcp_independently", "--",
              "--ignored", "--exact", "--nocapture"],
-            env=env, check=True,
+            env=fixture_env, check=True,
         )
         runtime_count += 1
-    require_runtime_coverage(runtime_count)
+    if not args.production:
+        require_runtime_coverage(runtime_count)
+        print(f"alias forwarding PASS: {runtime_count} host-compatible archive(s)", flush=True)
+    else:
+        print("production snapshot and archive structure PASS; forwarding NOT RUN", flush=True)
 
 
 if __name__ == "__main__":

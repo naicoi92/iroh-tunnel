@@ -1,0 +1,167 @@
+# Opt-in, nonpublishing #82 producer gate. No PR-target execution, secrets,
+# registry login, repository writes or changes to existing required checks.
+# Dispatch on branch/tag containing this file; expected_sha must match that ref.
+name: producer-validation
+run-name: producer validation (${{ inputs.platform }}, ${{ inputs.expected_sha }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact 40-character commit SHA of dispatch ref (not arbitrary checkout)
+        required: true
+        type: string
+      platform:
+        description: Full producer matrix to validate (expensive; opt in)
+        type: choice
+        options: [linux, macos, all]
+        default: linux
+
+permissions:
+  contents: read
+
+concurrency:
+  group: producer-validation-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: true
+
+jobs:
+  producer:
+    name: producer (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: true
+      max-parallel: 2
+      matrix:
+        runner: ${{ fromJSON(inputs.platform == 'linux' && '["ubuntu-latest"]' || inputs.platform == 'macos' && '["macos-14"]' || '["ubuntu-latest","macos-14"]') }}
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      EVENT_SHA: ${{ github.sha }}
+      RUNNER_LABEL: ${{ matrix.runner }}
+      PRODUCER_CONFIG: ${{ matrix.runner == 'macos-14' && '.goreleaser.macos.yaml' || '.goreleaser.yaml' }}
+      RUSTUP_TOOLCHAIN: '1.91'
+      # No sccache: macOS zigcc wrapper is incompatible (see release.yml).
+      SCCACHE_GHA_ENABLED: 'false'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source and native runner before repository code
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SHA" = "$EVENT_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
+          case "$RUNNER_LABEL:$(uname -s):$(uname -m)" in
+            ubuntu-latest:Linux:x86_64|macos-14:Darwin:arm64) ;;
+            *) echo 'BLOCKED: unexpected runner OS/architecture'; exit 1 ;;
+          esac
+          VALIDATION_ROOT="$RUNNER_TEMP/producer-validation"
+          echo "VALIDATION_ROOT=$VALIDATION_ROOT" >> "$GITHUB_ENV"
+          mkdir -p "$VALIDATION_ROOT"
+          {
+            printf 'source=%s\nrunner=%s\n' "$EXPECTED_SHA" "$RUNNER_LABEL"
+            uname -a
+          } | tee "$VALIDATION_ROOT/source.log"
+
+      - name: Install release Rust toolchain
+        run: rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install fixture YAML dependency
+        run: python -m pip install 'PyYAML==6.0.3'
+
+      - name: Install release Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+          use-cache: false
+
+      - name: Install cargo-zigbuild as release does
+        run: cargo +1.91 install cargo-zigbuild --locked
+
+      - name: Install GoReleaser without running release
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: latest
+          install-only: true
+
+      - name: Set up QEMU for full Linux snapshot
+        if: matrix.runner == 'ubuntu-latest'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx for full Linux snapshot
+        if: matrix.runner == 'ubuntu-latest'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Record and check actual tool versions
+        run: |
+          set -euo pipefail
+          {
+            rustc --version
+            cargo --version
+            zig version
+            goreleaser --version
+            cargo install --list
+            python --version
+          } | tee "$VALIDATION_ROOT/tools.log"
+          [[ "$(rustc --version)" == 'rustc 1.91.'* ]]
+          test "$(zig version)" = '0.13.0'
+          goreleaser check --config "$PRODUCER_CONFIG"
+          python -m unittest discover -s tests -p 'test_*release_aliases.py'
+          python -m unittest discover -s tests -p test_producer_validation.py
+
+      - name: Full production snapshot and complete archive structure (no test feature)
+        # No --skip: includes before hooks, packages, Docker or generated cask.
+        # Snapshot itself disables publication. No credentials passed. Any
+        # credential/stage failure blocks validation; never retry by skipping it.
+        run: |
+          set -euo pipefail
+          python tests/release_aliases.py --production --config "$PRODUCER_CONFIG" \
+            --output "$VALIDATION_ROOT/production" 2>&1 | tee "$VALIDATION_ROOT/production.log"
+          git diff --exit-code
+          # Production inspected already. Drop only this run's Cargo objects
+          # before fixture compilation to limit hosted-runner disk use.
+          rm -rf -- "$VALIDATION_ROOT/production/target"
+          df -h "$VALIDATION_ROOT"
+
+      - name: Isolated test-feature producer and local-relay alias forwarding
+        # Separate Cargo target/dist; no public relay and no uploaded binaries.
+        # All archives inspected; only host-compatible OS/arch/libc executed.
+        run: |
+          set -euo pipefail
+          python tests/release_aliases.py --config "$PRODUCER_CONFIG" \
+            --output "$VALIDATION_ROOT/fixture" 2>&1 | tee "$VALIDATION_ROOT/fixture.log"
+          git diff --exit-code
+
+      - name: Retain logs only (never test-feature executables)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: producer-validation-${{ matrix.runner }}-${{ github.sha }}
+          path: ${{ runner.temp }}/producer-validation/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Summarize exact-source result
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            printf '### Producer validation: %s\n\n' "$JOB_STATUS"
+            # shellcheck disable=SC2016 # Markdown backticks, not shell expansion.
+            printf 'Expected `%s`; event `%s`; runner `%s`.\n\n' "$EXPECTED_SHA" "$EVENT_SHA" "$RUNNER_LABEL"
+            printf 'Success requires full production snapshot + full fixture matrix + host-compatible alias TCP forwarding.\n\n'
+            printf 'Foreign runtimes NOT RUN. No publication. Windows aliases/key acceptance still open.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
