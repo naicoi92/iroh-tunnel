@@ -39,6 +39,10 @@ builds:
   #
   # glibc builds — feed the .deb packages and the Docker images. Targets any
   # standard glibc distro (Debian/Ubuntu/Fedora/...).
+  #
+  # Every build statically links PCRE2 for the `regex` crate
+  # (PCRE2_SYS_STATIC=1) so binaries are portable across distros without a
+  # libpcre2(-8) shared library at runtime.
   - id: iroh-tunnel
     builder: rust
     binary: iroh-tunnel
@@ -193,7 +197,8 @@ changelog:
 # Two flavours per package because .deb and .apk need different libc builds:
 #   - .deb from the glibc build  → Debian/Ubuntu/Fedora/...
 #   - .apk from the musl build   → Alpine (LXC, bare-metal)
-# Architectures are inferred from each build's targets (amd64, arm64).
+# Architectures are inferred from each build's targets (amd64, arm64; the
+# riscv64gc build yields .apk only). The `-musl` ids feed the .apk packages.
 # The role packages are binary-only: service registration for the standalone
 # binaries is tracked by #79/#90/#91, so no unit file is shipped for them.
 nfpms:

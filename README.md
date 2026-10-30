@@ -190,20 +190,22 @@ The options are the same everywhere: `-n/--name`, `-t/--target` (Serve),
 word: use `its run --config PATH`. Run `--help` for the full list. Service
 installation for the standalone binaries is not yet supported (issue #90).
 
-Every executable is also published as its own package and image, so you can
-install only the role you need. Each package owns just its binary and its
-alias link; the packages share no files and can be installed, upgraded and
-removed independently. The role packages are binary-only (no service unit).
+Every executable is also published as its own Linux package, archive and
+container image, so you can install only the role you need. Each package owns
+just its binary and its alias link; the packages share no files and can be
+installed, upgraded and removed independently. The role packages are
+binary-only (no service unit).
 
-| Executable | Debian/Ubuntu, Alpine | Homebrew cask | Container image |
-|---|---|---|---|
-| `iroh-tunnel` | `iroh-tunnel_<ver>_<arch>.deb` / `.apk` | `iroh-tunnel` | `ghcr.io/naicoi92/iroh-tunnel` |
-| `iroh-tunnel-serve` | `iroh-tunnel-serve_<ver>_<arch>.deb` / `.apk` | `iroh-tunnel-serve` | `ghcr.io/naicoi92/iroh-tunnel-serve` |
-| `iroh-tunnel-access` | `iroh-tunnel-access_<ver>_<arch>.deb` / `.apk` | `iroh-tunnel-access` | `ghcr.io/naicoi92/iroh-tunnel-access` |
+| Executable | Debian/Ubuntu, Alpine | Container image |
+|---|---|---|
+| `iroh-tunnel` | `iroh-tunnel_<ver>_<arch>.deb` / `.apk` | `ghcr.io/naicoi92/iroh-tunnel` |
+| `iroh-tunnel-serve` | `iroh-tunnel-serve_<ver>_<arch>.deb` / `.apk` | `ghcr.io/naicoi92/iroh-tunnel-serve` |
+| `iroh-tunnel-access` | `iroh-tunnel-access_<ver>_<arch>.deb` / `.apk` | `ghcr.io/naicoi92/iroh-tunnel-access` |
 
-Each release archive likewise contains a single executable. The role images
-use the role executable as their entrypoint, e.g.
-`docker run --rm ghcr.io/naicoi92/iroh-tunnel-serve:<ver> --help`. Windows
+Each release archive contains a single executable (plus README and license).
+The role images use the role executable as their entrypoint, e.g.
+`docker run --rm ghcr.io/naicoi92/iroh-tunnel-serve:<ver> --help`. The macOS
+Homebrew cask still installs only the all-in-one `iroh-tunnel`, and Windows
 release artifacts are not published yet.
 
 **NodeId is public identity, not target authorization.** Knowing NodeId and

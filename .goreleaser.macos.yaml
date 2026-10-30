@@ -1,11 +1,10 @@
 # GoReleaser config — macOS pipeline (ADR-0002).
 #
 # Run on a macos-14 runner (Apple Silicon). Produces:
-#   - Release binaries for darwin/arm64 (all-in-one, Serve and Access), built
-#     natively — cross-compiling macOS from Linux is not possible because iroh
-#     depends on macOS frameworks SystemConfiguration/CoreFoundation via
-#     hickory-dns/system-configuration.
-#   - One Homebrew cask per executable published to naicoi92/homebrew-tap.
+#   - Release binary for darwin/arm64 (built natively — cross-compiling macOS
+#     from Linux is not possible because iroh depends on macOS frameworks
+#     SystemConfiguration/CoreFoundation via hickory-dns/system-configuration).
+#   - Homebrew cask published to naicoi92/homebrew-tap.
 #
 # This config APPENDS its artifacts to the GitHub Release created by the Linux
 # job (`.goreleaser.yaml`), so the Linux job must run first on tag pushes.
@@ -31,47 +30,10 @@ builds:
     flags:
       - --release
 
-  - id: iroh-tunnel-serve-macos
-    builder: rust
-    binary: iroh-tunnel-serve
-    # Native build on a macos-14 runner; no zigbuild cross-compile needed.
-    targets:
-      - aarch64-apple-darwin
-    flags:
-      - --release
-
-  - id: iroh-tunnel-access-macos
-    builder: rust
-    binary: iroh-tunnel-access
-    # Native build on a macos-14 runner; no zigbuild cross-compile needed.
-    targets:
-      - aarch64-apple-darwin
-    flags:
-      - --release
-
-# One archive per executable (issue #94); all-in-one keeps its historical name.
 archives:
-  - id: iroh-tunnel-macos
-    ids:
-      - iroh-tunnel-macos
+  - id: macos
     formats: [tar.gz]
-    name_template: "iroh-tunnel-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-    files:
-      - README.md
-      - LICENSE*
-  - id: iroh-tunnel-serve-macos
-    ids:
-      - iroh-tunnel-serve-macos
-    formats: [tar.gz]
-    name_template: "iroh-tunnel-serve-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-    files:
-      - README.md
-      - LICENSE*
-  - id: iroh-tunnel-access-macos
-    ids:
-      - iroh-tunnel-access-macos
-    formats: [tar.gz]
-    name_template: "iroh-tunnel-access-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - README.md
       - LICENSE*
@@ -92,16 +54,11 @@ changelog:
       - "Merge pull request"
       - "Merge branch"
 
-# ---- Homebrew: one cask per executable -> naicoi92/homebrew-tap ----
-# Separate casks (issue #94) so each executable is installed, upgraded and
-# removed on its own: `iroh-tunnel` (alias `it`), `iroh-tunnel-serve` (`its`)
-# and `iroh-tunnel-access` (`ita`). A cask owns only its binary and alias link.
+# ---- Homebrew: cask -> naicoi92/homebrew-tap ----
 # `brews` is deprecated since GoReleaser v2.10; `homebrew_casks` is the
 # replacement and is also valid for CLI tools (installed into bin).
 homebrew_casks:
   - name: iroh-tunnel
-    ids:
-      - iroh-tunnel-macos
     binaries:
       - iroh-tunnel
     repository:
@@ -121,78 +78,16 @@ homebrew_casks:
             system_command "/usr/bin/xattr",
               args: ["-dr", "com.apple.quarantine", "#{staged_path}/iroh-tunnel"]
 
-            # Install the `it` alias: symlink it -> iroh-tunnel in Homebrew's bin
-            # dir. `postflight` runs AFTER the cask's `binary` stanza has linked
-            # iroh-tunnel into #{HOMEBREW_PREFIX}/bin, so the target already exists and
-            # a relative symlink resolves on PATH. (Creating the link inside
-            # staged_path does NOT work — cask only links artifacts declared in
-            # a `binary` stanza.) `-sf` so `brew upgrade` recreates it cleanly.
+            # Install the `it` convenience alias: symlink it -> iroh-tunnel in
+            # Homebrew's bin dir. `postflight` runs AFTER the cask's `binary`
+            # stanza has linked iroh-tunnel into #{HOMEBREW_PREFIX}/bin, so the
+            # target already exists and a relative symlink resolves on PATH.
+            # (Creating the link inside staged_path does NOT work — cask only
+            # links artifacts declared in a `binary` stanza, so an in-staged
+            # symlink would be silently dropped.) `-sf` so `brew upgrade`
+            # recreates the link cleanly.
             system_command "/bin/ln",
               args: ["-sf", "iroh-tunnel", "#{HOMEBREW_PREFIX}/bin/it"]
-          end
-
-  - name: iroh-tunnel-serve
-    ids:
-      - iroh-tunnel-serve-macos
-    binaries:
-      - iroh-tunnel-serve
-    repository:
-      owner: naicoi92
-      name: homebrew-tap
-      branch: main
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Casks
-    homepage: https://github.com/naicoi92/iroh-tunnel
-    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            # Remove the quarantine attribute so macOS Gatekeeper does not
-            # block the unsigned (cosign is deferred) command-line binary.
-            system_command "/usr/bin/xattr",
-              args: ["-dr", "com.apple.quarantine", "#{staged_path}/iroh-tunnel-serve"]
-
-            # Install the `its` alias: symlink its -> iroh-tunnel-serve in Homebrew's bin
-            # dir. `postflight` runs AFTER the cask's `binary` stanza has linked
-            # iroh-tunnel-serve into #{HOMEBREW_PREFIX}/bin, so the target already exists and
-            # a relative symlink resolves on PATH. (Creating the link inside
-            # staged_path does NOT work — cask only links artifacts declared in
-            # a `binary` stanza.) `-sf` so `brew upgrade` recreates it cleanly.
-            system_command "/bin/ln",
-              args: ["-sf", "iroh-tunnel-serve", "#{HOMEBREW_PREFIX}/bin/its"]
-          end
-
-  - name: iroh-tunnel-access
-    ids:
-      - iroh-tunnel-access-macos
-    binaries:
-      - iroh-tunnel-access
-    repository:
-      owner: naicoi92
-      name: homebrew-tap
-      branch: main
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Casks
-    homepage: https://github.com/naicoi92/iroh-tunnel
-    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            # Remove the quarantine attribute so macOS Gatekeeper does not
-            # block the unsigned (cosign is deferred) command-line binary.
-            system_command "/usr/bin/xattr",
-              args: ["-dr", "com.apple.quarantine", "#{staged_path}/iroh-tunnel-access"]
-
-            # Install the `ita` alias: symlink ita -> iroh-tunnel-access in Homebrew's bin
-            # dir. `postflight` runs AFTER the cask's `binary` stanza has linked
-            # iroh-tunnel-access into #{HOMEBREW_PREFIX}/bin, so the target already exists and
-            # a relative symlink resolves on PATH. (Creating the link inside
-            # staged_path does NOT work — cask only links artifacts declared in
-            # a `binary` stanza.) `-sf` so `brew upgrade` recreates it cleanly.
-            system_command "/bin/ln",
-              args: ["-sf", "iroh-tunnel-access", "#{HOMEBREW_PREFIX}/bin/ita"]
           end
 
 release:
