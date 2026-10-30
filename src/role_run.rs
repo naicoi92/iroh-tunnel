@@ -60,11 +60,11 @@ pub(crate) fn disconnect_watcher(
 
 /// Initial backoff (ms) for the access dial retry loop.
 const INITIAL_BACKOFF_MS: u64 = 1_000;
-/// Per-attempt dial bound. Generous on purpose: a slow-but-working relay or
-/// hole-punch dial must be able to finish inside the caller's total budget;
-/// the caller's deadline, not this, is the real bound. It only keeps one
-/// truly stalled attempt from consuming the whole budget with no retry.
-const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
+/// First per-attempt dial bound; later attempts get more room (see
+/// [`attempt_timeout`]).
+const DIAL_ATTEMPT_STEP: Duration = Duration::from_secs(5);
+/// Ceiling of the per-attempt dial bound.
+const DIAL_ATTEMPT_MAX: Duration = Duration::from_secs(20);
 /// Maximum backoff (ms) — the schedule caps here and stays flat.
 const MAX_BACKOFF_MS: u64 = 30_000;
 
@@ -76,6 +76,18 @@ const MAX_BACKOFF_MS: u64 = 30_000;
 /// piece — it bounds worst-case reconnect latency and matches Page 04 v2 §1.3.
 pub(crate) fn next_backoff_ms(prev_ms: u64) -> u64 {
     (prev_ms.saturating_mul(2)).min(MAX_BACKOFF_MS)
+}
+
+/// Per-attempt dial bound: `5s → 10s → 15s → 20s (cap)`.
+///
+/// A stalled first attempt still leaves room for backoff and a retry inside
+/// the caller's total budget, while a slow-but-working relay or hole-punch
+/// dial gets progressively longer to finish. The caller's deadline, not this,
+/// is the real bound.
+pub(crate) fn attempt_timeout(attempt: u32) -> Duration {
+    DIAL_ATTEMPT_STEP
+        .saturating_mul(attempt)
+        .min(DIAL_ATTEMPT_MAX)
 }
 
 /// Dial a peer with exponential backoff until success or caller cancellation.
@@ -95,7 +107,8 @@ pub(crate) async fn connect_with_retry(
     let mut attempt = 1u32;
     loop {
         // Dropping a timed-out attempt cancels that dial future.
-        let dial = tokio::time::timeout(DIAL_ATTEMPT_TIMEOUT, ep.connect(addr.clone(), alpn)).await;
+        let dial =
+            tokio::time::timeout(attempt_timeout(attempt), ep.connect(addr.clone(), alpn)).await;
         match dial {
             Ok(Ok(conn)) => {
                 if attempt > 1 {
@@ -236,6 +249,12 @@ mod tests {
         // displayed form round-trips through config.
         assert_eq!(protocol_str(Protocol::Tcp), "tcp");
         assert_eq!(protocol_str(Protocol::Udp), "udp");
+    }
+
+    #[test]
+    fn attempt_timeout_grows_then_caps() {
+        let secs: Vec<u64> = (1..=6).map(|n| attempt_timeout(n).as_secs()).collect();
+        assert_eq!(secs, [5, 10, 15, 20, 20, 20]);
     }
 
     #[test]
