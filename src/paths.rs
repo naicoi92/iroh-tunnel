@@ -46,7 +46,12 @@ fn local_app_data() -> Result<PathBuf> {
 }
 
 /// Default directory holding `<role>.toml`.
-pub fn default_config_dir() -> Result<PathBuf> {
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the home directory (or LocalAppData on Windows)
+/// is missing or not absolute.
+fn default_config_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     return Ok(local_app_data()?.join("config"));
     #[cfg(not(windows))]
@@ -54,6 +59,11 @@ pub fn default_config_dir() -> Result<PathBuf> {
 }
 
 /// Default directory holding the `<role>-status.json` files.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the home directory (or LocalAppData on Windows)
+/// is missing or not absolute.
 pub fn default_state_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     return Ok(local_app_data()?.join("state"));
@@ -62,7 +72,13 @@ pub fn default_state_dir() -> Result<PathBuf> {
 }
 
 /// Default config file for `role`. On macOS a legacy configuration is first
-/// copied into place when the new one does not exist yet.
+/// copied into place when the new one does not exist yet; that performs
+/// filesystem I/O and prints a notice to stderr.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the home directory is unusable, or when the
+/// macOS migration fails (no replacement identity is created).
 pub fn default_config_path(role: &str) -> Result<PathBuf> {
     let path = default_config_dir()?.join(format!("{role}.toml"));
     #[cfg(target_os = "macos")]
@@ -79,9 +95,12 @@ pub fn default_config_path(role: &str) -> Result<PathBuf> {
 
 /// Copy `legacy` to `dest` unless `dest` exists. Never overwrites `dest`
 /// (even when racing another process), never touches `legacy`, and creates
-/// `dest` owner-only. On failure nothing is created at `dest`.
+/// `dest` owner-only. On failure nothing is created at `dest` (its parent
+/// directory may have been created, owner-only).
+// Only called from the macOS branch of `default_config_path`; other targets
+// keep it compiled (for the shared code path) without a caller.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn migrate_legacy(legacy: &Path, dest: &Path) -> Result<()> {
+fn migrate_legacy(legacy: &Path, dest: &Path) -> Result<()> {
     // New configuration wins without consulting the legacy location.
     match std::fs::symlink_metadata(dest) {
         Ok(_) => return Ok(()),
@@ -139,6 +158,8 @@ fn copy_no_overwrite(legacy: &Path, dest: &Path) -> std::io::Result<()> {
             other => other,
         }
     })();
+    // Best-effort: the temp name is unique per process and `dest` already holds
+    // the result (or the error is returned), so a failed cleanup is harmless.
     let _ = std::fs::remove_file(&tmp);
     result
 }

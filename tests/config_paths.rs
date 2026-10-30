@@ -4,7 +4,8 @@
 //!
 //! Every test runs the real binary with an isolated `HOME`. XDG variables are
 //! pointed elsewhere to prove they are ignored. Windows LocalAppData is not
-//! exercised here (no Windows runner); see `paths` unit tests.
+//! exercised here: this file is Unix-only and the Windows branch of
+//! `paths` has no behavioral test yet.
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -152,6 +153,22 @@ fn unreadable_config_reports_path() {
         std::fs::read_to_string(&path).unwrap(),
         "[node]\nsecret_key = \"\"\n"
     );
+}
+
+#[test]
+fn invalid_config_reports_path_with_config_error_exit() {
+    let (_tmp, home) = home();
+    let path = new_config(&home, "serve");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "not = [valid toml").unwrap();
+    let out = tunnel(&home, &["serve", "config", "list"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&path.display().to_string()),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [valid toml");
 }
 
 #[cfg(target_os = "macos")]

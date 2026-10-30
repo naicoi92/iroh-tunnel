@@ -4,6 +4,17 @@
 
 ### Changed
 
+- **Config and state locations**: macOS and Linux now always use
+  `~/.config/iroh-tunnel` and `~/.local/state/iroh-tunnel` (XDG variables are
+  ignored); Windows uses `%LOCALAPPDATA%\iroh-tunnel\config` and `\state`.
+  `--config` and `IROH_TUNNEL_STATE_DIR` still override. On macOS the status
+  file therefore moves out of `~/Library/Application Support`.
+- **macOS config migration**: if `~/.config/iroh-tunnel/<role>.toml` is
+  missing and the legacy `~/Library/Application Support/iroh-tunnel/<role>.toml`
+  exists, it is copied (never overwriting, original kept, owner-only
+  permissions) and a notice is printed to stderr. A failed copy is a config
+  error (exit 2) and never creates a new identity.
+
 - **TCP multiplexing**: Access always reuses a service connection for
   concurrent streams. Legacy `multiplex` configuration values are silently
   ignored and removed by app-owned config saves; `config edit` leaves external

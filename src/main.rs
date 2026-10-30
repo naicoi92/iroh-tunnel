@@ -143,7 +143,7 @@ async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Res
 }
 
 /// Resolve the config path: explicit `--config` wins, otherwise the
-/// default from [`config_cmd::resolve_config_path`] (`~/.config/iroh-tunnel`).
+/// platform default from [`config_cmd::resolve_config_path`].
 fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     config_cmd::resolve_config_path(role, config.as_deref())
 }
