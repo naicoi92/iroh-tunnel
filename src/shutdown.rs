@@ -74,13 +74,20 @@ pub(crate) async fn join(tasks: &mut JoinSet<()>) {
     }
 }
 
+/// Extra time past [`DRAIN_GRACE`] (endpoint close, status cleanup) before a
+/// stuck shutdown is abandoned by the watchdog in [`wait_for_signal`].
+const EXIT_WATCHDOG: Duration = Duration::from_secs(10);
+
 /// Wait for a shutdown signal (SIGINT or SIGTERM), then return.
 ///
 /// Both signals trigger the same graceful shutdown path. The function logs
 /// which signal was received so operators can tell Ctrl-C apart from a
-/// service manager stop. A later signal does not reset or shorten the drain
-/// grace, but it does force an immediate exit (status 130): Tokio keeps
-/// consuming the signal after this future returns, so without this a stuck
+/// service manager stop. Later signals never reset or shorten the drain
+/// grace, and one arriving inside the grace is ignored (an immediate repeat
+/// is usually a double-sent stop). Once the grace has elapsed, another
+/// signal forces an immediate exit (status 130), and a watchdog bounds the
+/// whole shutdown at grace + [`EXIT_WATCHDOG`] (status 1): Tokio keeps
+/// consuming signals after this future returns, so without these a stuck
 /// shutdown could not be interrupted short of SIGKILL.
 pub async fn wait_for_signal() {
     #[cfg(unix)]
@@ -105,19 +112,30 @@ pub async fn wait_for_signal() {
     let which = first.await;
     tracing::info!("received {which}");
 
+    let started = Instant::now();
     tokio::spawn(async move {
-        let ctrl_c = async {
-            let _ = signal::ctrl_c().await;
-        };
-        #[cfg(unix)]
-        let term = terminate.recv();
-        #[cfg(not(unix))]
-        let term = std::future::pending::<Option<()>>();
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = term => {}
+        let watchdog = tokio::time::sleep(DRAIN_GRACE + EXIT_WATCHDOG);
+        tokio::pin!(watchdog);
+        loop {
+            let ctrl_c = async {
+                let _ = signal::ctrl_c().await;
+            };
+            #[cfg(unix)]
+            let term = terminate.recv();
+            #[cfg(not(unix))]
+            let term = std::future::pending::<Option<()>>();
+            tokio::select! {
+                _ = &mut watchdog => {
+                    tracing::error!("shutdown did not finish in time, exiting");
+                    std::process::exit(1);
+                }
+                _ = ctrl_c => {}
+                _ = term => {}
+            }
+            if started.elapsed() >= DRAIN_GRACE {
+                tracing::warn!("repeated stop signal after drain grace, exiting immediately");
+                std::process::exit(130);
+            }
         }
-        tracing::warn!("second shutdown signal, exiting immediately");
-        std::process::exit(130);
     });
 }
