@@ -24,3 +24,12 @@ Blockers #84, #87 closed at pickup. #79/#92 (Windows) remain out of scope.
 - Windows: no service backend (gated by #79/#92).
 - Real root/system install not exercised (no privilege); privilege gating is exercised unprivileged only.
 - Retarget confirmation of another user's service (SM-02 second half) and unknown-user selection belong to #91.
+
+## Review disposition (head reviewed: `d15469e`)
+
+Independent Standards and Spec reviews: no P0; one P1, fixed.
+
+- P1 BusyBox refusal exited 1 and implied `--system`: now `CliError::Permission` (exit 3), no silent scope change. Compiled only by reading (no Linux cross toolchain locally); needs Linux CI.
+- P2 fixed: reuse `scope::is_elevated`/`libc::getuid`, stale launchd docs and hint.
+- P2 noted, not changed: `restart`/`install` do not call the ownership check (0.4.2 lifecycle, spec says only start is refused); registration write is not atomic; role still passed as string in `check_installable_config`; stdin prompt is a one-shot blocking read.
+- Permission test covers a denied home directory only, not inaccessible config/state or ACL before/after evidence.

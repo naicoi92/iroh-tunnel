@@ -1,11 +1,9 @@
 //! launchd (macOS) service backend.
 //!
-//! Default scope is per-user: `~/Library/LaunchAgents` under the user's own GUI
-//! login domain (`gui/<uid>`). This needs no privileges and matches how
-//! iroh-tunnel is normally used on a desktop — the same identity that owns the
-//! config under `$HOME` runs the service. Pass `--system` on the CLI to install
-//! a system-wide LaunchDaemon under `/Library/LaunchDaemons` instead (for
-//! servers / headless hosts; requires root).
+//! User scope (`--user`) uses `~/Library/LaunchAgents` under the user's own GUI
+//! login domain (`gui/<uid>`) and needs no privileges. System scope
+//! (`--system`) uses a LaunchDaemon under `/Library/LaunchDaemons` and requires
+//! root; the CLI refuses it without privilege before reaching this module.
 //!
 //! Uses the modern launchctl vocabulary (`bootstrap`/`bootout`/`kickstart`/
 //! `kill`/`print`) with explicit domain targets, instead of the legacy
@@ -20,16 +18,10 @@ use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-// No `libc`/`nix` dependency: declare the FFI directly. `getuid(2)` never
-// fails, so the `unsafe` is purely the Rust FFI formality.
-extern "C" {
-    fn getuid() -> u32;
-}
-
 /// Effective user id of the calling process.
 fn uid() -> u32 {
     // SAFETY: getuid(2) has no failure mode and no preconditions.
-    unsafe { getuid() }
+    unsafe { libc::getuid() }
 }
 
 /// Reverse-DNS job label: `dev.iroh-tunnel.{role}` (plus the test-only
@@ -276,7 +268,7 @@ fn not_loaded_hint(role: &str, scope: ServiceScope) -> String {
         // Default is User, so the more common mismatch is "installed as
         // system, tried without --system".
         ServiceScope::User => ("user (LaunchAgent)", "--system"),
-        ServiceScope::System => ("system (LaunchDaemon)", "(default, drop --system)"),
+        ServiceScope::System => ("system (LaunchDaemon)", "--user"),
     };
     format!(
         "no service '{0}' is loaded in the {this_scope} domain. \

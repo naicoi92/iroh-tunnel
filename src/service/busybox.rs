@@ -17,10 +17,11 @@
 //! targets exist before iroh-tunnel binds/dials.
 //!
 //! Scope: BusyBox init is system-wide only (no per-user domain exists), so
-//! both System and User scopes install to `/etc/init.d` — User scope prints a
+//! both scopes manage the one `/etc/init.d` script — User scope prints a
 //! note rather than failing. Requires root.
 
 use super::{resolve_binary, write_registration, ServiceScope};
+use crate::error::CliError;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -123,21 +124,22 @@ fn set_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Bail unless running as root (uid 0). The init script lives under
-/// `/etc/init.d` and writes a PID file under `/var/run`, so root is required.
-/// Uses `id -u` to avoid a libc dependency just for getuid(2).
-#[cfg(unix)]
+/// Refuse unless running as root. The init script lives under `/etc/init.d`
+/// and writes a PID file under `/var/run`, so root is required. BusyBox has no
+/// per-user services, so a user-scope request is refused too: it is never
+/// silently turned into a system install.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] with rerun guidance.
 fn require_root() -> Result<()> {
-    let out = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .context("failed to run `id -u` to check privileges")?;
-    let is_root = String::from_utf8_lossy(&out.stdout).trim() == "0";
-    if !is_root {
-        bail!(
-            "installing a system service on this host requires root. \
-             Re-run with sudo — BusyBox init installs under /etc/init.d."
-        );
+    if !super::scope::is_elevated() {
+        return Err(CliError::Permission(
+            "this host runs BusyBox init, which has no per-user services; managing the \
+             /etc/init.d service requires root. Nothing was changed. Re-run with sudo."
+                .into(),
+        )
+        .into());
     }
     Ok(())
 }
@@ -161,9 +163,8 @@ pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> 
     require_root()?;
     if scope == ServiceScope::User {
         eprintln!(
-            "note: this host runs BusyBox init (no systemd); installing a \
-             system-wide /etc/init.d script. BusyBox has no per-user services, \
-             so --system is implied."
+            "note: this host runs BusyBox init (no systemd); the service is a \
+             system-wide /etc/init.d script owned by root."
         );
     }
     let binary = resolve_binary()?;
