@@ -686,8 +686,10 @@ async fn handle_local_connection(
     // request bytes reached Serve. Keep this task owned until acknowledged.
     let delivered = streams.0.stopped();
     crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
-    delivered.await.context("client stream delivery failed")?;
-    Ok(())
+    match delivered.await.context("client stream delivery failed")? {
+        None => Ok(()),
+        Some(code) => anyhow::bail!("peer stopped client stream: {code}"),
+    }
 }
 
 async fn open_client_stream(

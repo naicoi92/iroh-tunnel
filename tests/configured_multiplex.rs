@@ -979,3 +979,61 @@ async fn roles_deliver_last_channel_response_before_early_shutdown_exit() -> Res
     outcome??;
     Ok(())
 }
+
+// RW-1 / RS-05: a real peer stop is not successful request delivery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_reports_peer_stop_as_tunnel_error() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let key = iroh::SecretKey::generate();
+    let node = iroh_tunnel::config::NodeConfig {
+        secret_key: encode_secret_key(&key),
+        relay_urls: vec![relay.to_string()],
+        ..Default::default()
+    };
+    let peer = iroh_tunnel::endpoint::create_serve_endpoint(
+        &node,
+        &[iroh_tunnel::proto::alpn_for("echo")],
+    )
+    .await?;
+    let reservation = TcpListener::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    let config = home.join("access.toml");
+    std::fs::write(&config, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), key.public().to_string(), listen.port()))?;
+    let mut access = start("access", home, &config, 0)?;
+    let outcome = tokio::time::timeout(Duration::from_secs(40), async {
+        wait_log(&mut access, &format!("listen_addr={listen}")).await?;
+        let mut client = TcpStream::connect(listen).await?;
+        client.write_all(b"unfinished-request-prefix").await?;
+        let connection = peer.accept().await.context("peer accept ended")?.await?;
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        let mut prefix = [0; 25];
+        recv.read_exact(&mut prefix).await?;
+        anyhow::ensure!(
+            &prefix == b"unfinished-request-prefix",
+            "wrong request prefix"
+        );
+        recv.stop(iroh::endpoint::VarInt::from_u32(42))?;
+        send.finish()?;
+        // Wait for peer FIN before local EOF, so no subsequent write can
+        // turn STOP into a copy error and hide the final-delivery check.
+        let mut byte = [0; 1];
+        anyhow::ensure!(client.read(&mut byte).await? == 0, "expected peer FIN");
+        client.shutdown().await?;
+        let log = wait_log(&mut access, "tunnel error: peer stopped client stream: 42").await?;
+        anyhow::ensure!(
+            !log.contains("tunnel closed"),
+            "peer stop logged as success: {log}"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("peer STOP scenario timeout");
+    drop(access);
+    peer.close().await;
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome??;
+    Ok(())
+}
