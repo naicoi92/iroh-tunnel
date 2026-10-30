@@ -1,5 +1,7 @@
 # TCP lifecycle and local identity ownership — evidence and candidates
 
+> **Superseded in part by the #77 final decision** ([comment](https://github.com/naicoi92/iroh-tunnel/issues/77#issuecomment-6520850254)): ownership is one detected process per role; separate lock domains, scope identity and cross-user coordination below are historical proposals, not requirements.
+
 Status: research and proposed implementation candidates for [TCP lifecycle #76](https://github.com/naicoi92/iroh-tunnel/issues/76) and [ownership #77](https://github.com/naicoi92/iroh-tunnel/issues/77). Numeric settings and implementation mechanisms below are not approved. This note does not establish cross-user or cross-platform lock safety.
 
 ## Confirmed operator contract
