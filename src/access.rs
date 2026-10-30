@@ -713,11 +713,24 @@ async fn handle_local_connection(
     // request bytes reached Serve. Keep this task owned until acknowledged.
     let delivered = streams.0.stopped();
     crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
-    match delivered.await.context("client stream delivery failed")? {
-        None => Ok(()),
-        Some(code) => anyhow::bail!("peer stopped client stream: {code}"),
+    // Bounded: a peer that never acknowledges must not pin this task (and
+    // its status/drain accounting) forever. The pipe already completed, so
+    // a missing acknowledgement is not reported as a failed exchange; only
+    // an explicit peer STOP (it did not read all our bytes) is.
+    match tokio::time::timeout(DELIVERY_ACK_GRACE, delivered).await {
+        Ok(result) => match result.context("client stream delivery failed")? {
+            None => Ok(()),
+            Some(code) => anyhow::bail!("peer stopped client stream: {code}"),
+        },
+        Err(_) => {
+            tracing::debug!(svc = %dialer.svc_name, "no delivery acknowledgement within grace");
+            Ok(())
+        }
     }
 }
+
+/// How long a completed pipe waits for the peer to acknowledge final bytes.
+const DELIVERY_ACK_GRACE: Duration = Duration::from_secs(5);
 
 async fn open_client_stream(
     dialer: &ServiceDialer,

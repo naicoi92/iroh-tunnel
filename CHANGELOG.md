@@ -6,7 +6,7 @@
 
 - **TCP connection lifecycle**: each new Access client has a 30-second
   establishment deadline including shared-connection wait, retries, backoff
-  and stream opening, with at most 5 seconds per dial. Failed dials use
+  and stream opening, with at most 20 seconds per dial attempt. Failed dials use
   exponential backoff (1, 2, 4, 8, 16, then 30 seconds capped; no jitter),
   bounded by that deadline. Healthy established channels have no added
   lifetime timeout; peer loss closes affected channels without replay.

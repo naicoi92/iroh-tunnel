@@ -60,6 +60,11 @@ pub(crate) fn disconnect_watcher(
 
 /// Initial backoff (ms) for the access dial retry loop.
 const INITIAL_BACKOFF_MS: u64 = 1_000;
+/// Per-attempt dial bound. Generous on purpose: a slow-but-working relay or
+/// hole-punch dial must be able to finish inside the caller's total budget;
+/// the caller's deadline, not this, is the real bound. It only keeps one
+/// truly stalled attempt from consuming the whole budget with no retry.
+const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Maximum backoff (ms) — the schedule caps here and stays flat.
 const MAX_BACKOFF_MS: u64 = 30_000;
 
@@ -89,10 +94,8 @@ pub(crate) async fn connect_with_retry(
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut attempt = 1u32;
     loop {
-        // A stalled dial must leave room for backoff and another attempt in
-        // the caller's total budget; dropping it cancels that dial future.
-        let dial =
-            tokio::time::timeout(Duration::from_secs(5), ep.connect(addr.clone(), alpn)).await;
+        // Dropping a timed-out attempt cancels that dial future.
+        let dial = tokio::time::timeout(DIAL_ATTEMPT_TIMEOUT, ep.connect(addr.clone(), alpn)).await;
         match dial {
             Ok(Ok(conn)) => {
                 if attempt > 1 {
