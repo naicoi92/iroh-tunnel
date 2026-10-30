@@ -11,6 +11,7 @@
 //! by integration tests and by future downstream consumers.
 
 pub mod access;
+pub mod app;
 pub mod cli;
 pub mod config;
 pub mod config_cmd;
