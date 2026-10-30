@@ -203,8 +203,7 @@ async fn dispatch_role_cmd(
 }
 
 /// Resolve the config path: explicit `--config` wins, otherwise the
-/// OS-specific default (`~/.config/iroh-tunnel/{role}.toml` on Linux,
-/// `~/Library/Application Support/iroh-tunnel/{role}.toml` on macOS).
+/// platform default from [`config_cmd::resolve_config_path`].
 fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     config_cmd::resolve_config_path(role, config.as_deref())
 }
