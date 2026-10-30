@@ -73,6 +73,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Issue #94: each executable ships as its own package, archive and image.
+      - name: Verify separate packages, archives and images
+        run: |
+          packaging/verify-dist.sh static dist
+          packaging/verify-dist.sh runtime dist
+          packaging/verify-dist.sh images dist
+
   # ---------------------------------------------------------------------------
   # macOS snapshot: darwin/arm64 binary + Homebrew cask config.
   # ---------------------------------------------------------------------------

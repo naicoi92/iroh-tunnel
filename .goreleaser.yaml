@@ -1,12 +1,15 @@
 # GoReleaser config — LINUX pipeline (ADR-0002).
 #
 # Run on an ubuntu runner. Produces:
-#   - Release binaries for linux/amd64 + linux/arm64 (via cargo-zigbuild)
+#   - Release binaries for linux/amd64 + linux/arm64 (via cargo-zigbuild), one
+#     archive each for the all-in-one, Serve and Access executables
 #   - Checksums file
-#   - .deb (glibc) + .apk (musl) Linux packages (via nFPM). The .apk targets
-#     Alpine/musl hosts (LXC, bare-metal), so it is built from a separate
-#     *-unknown-linux-musl target; the .deb + Docker image stay on glibc.
-#   - Multi-arch Docker image on ghcr.io (via dockers_v2 + buildx)
+#   - .deb (glibc) + .apk (musl) Linux packages (via nFPM), one separate
+#     package per executable. The .apk targets Alpine/musl hosts (LXC,
+#     bare-metal), so it is built from a separate *-unknown-linux-musl target;
+#     the .deb + Docker images stay on glibc.
+#   - Multi-arch Docker images on ghcr.io (via dockers_v2 + buildx), one per
+#     executable
 #   - The GitHub Release itself (this job owns the release; the macOS job appends).
 #
 # The macOS (darwin/arm64) binary + Homebrew cask are built by a separate config
@@ -30,14 +33,16 @@ before:
     - cargo fmt -- --check
 
 builds:
-  # glibc build — feeds the .deb package and the Docker image. Targets any
+  # Each executable is its own build so every package, archive and image can
+  # ship exactly one binary (issue #94). All three come from the same cargo
+  # package, so the builds share one compilation.
+  #
+  # glibc builds — feed the .deb packages and the Docker images. Targets any
   # standard glibc distro (Debian/Ubuntu/Fedora/...).
   - id: iroh-tunnel
     builder: rust
     binary: iroh-tunnel
     env:
-      # Statically link PCRE2 for the `regex` crate so binaries are portable
-      # across distros without a libpcre2(-8) shared library at runtime.
       - PCRE2_SYS_STATIC=1
     targets:
       - x86_64-unknown-linux-gnu
@@ -45,11 +50,36 @@ builds:
     flags:
       - --release
 
-  # musl build — feeds the .apk package only. Required for Alpine hosts
+  - id: iroh-tunnel-serve
+    builder: rust
+    binary: iroh-tunnel-serve
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    flags:
+      - --release
+
+  - id: iroh-tunnel-access
+    builder: rust
+    binary: iroh-tunnel-access
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    flags:
+      - --release
+
+  # musl builds — feed the .apk packages only. Required for Alpine hosts
   # (LXC, bare-metal), which use musl libc and cannot run a glibc binary
   # (missing /lib/ld-linux-*.so.* dynamic linker). cargo-zigbuild ships a
   # musl sysroot via zig, so no extra musl-tools install is needed on the CI
-  # runner (ADR-0002 §2: zig 0.13.0 already set up by release.yml).
+  # runner (ADR-0002 §2: zig 0.13.0 already set up by release.yml). The
+  # riscv64gc target (NanoKVM / embedded buildroot) was verified by the v0.1.4
+  # spike (ring 0.17.14 compiles with zig 0.13 + cargo-zigbuild); the CI
+  # snapshot run rehearses it before any tag goes out.
   - id: iroh-tunnel-musl
     builder: rust
     binary: iroh-tunnel
@@ -58,31 +88,84 @@ builds:
     targets:
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl
-      # NanoKVM / embedded riscv64 (buildroot, musl). Build path verified by
-      # the v0.1.4 spike (ring 0.17.14 compiles for riscv64 with zig 0.13 +
-      # cargo-zigbuild); the CI snapshot run rehearses the target before any
-      # tag goes out.
       - riscv64gc-unknown-linux-musl
     flags:
       - --release
 
-# Two archive blocks because we now ship two linux libc flavours (glibc + musl);
-# without filtering by build `ids` both would emit `...-linux-<arch>.tar.gz` and
-# collide. The musl tarball is tagged `-musl` so Alpine users can pick it.
+  - id: iroh-tunnel-serve-musl
+    builder: rust
+    binary: iroh-tunnel-serve
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - riscv64gc-unknown-linux-musl
+    flags:
+      - --release
+
+  - id: iroh-tunnel-access-musl
+    builder: rust
+    binary: iroh-tunnel-access
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - riscv64gc-unknown-linux-musl
+    flags:
+      - --release
+
+# One archive per executable and libc flavour. The all-in-one archive keeps the
+# historical `iroh-tunnel-<version>-<os>-<arch>` name; role archives are named
+# after their executable. The musl archives are tagged `-musl` so Alpine users
+# can pick them.
 archives:
-  - id: glibc
+  - id: iroh-tunnel
     ids:
       - iroh-tunnel
     formats: [tar.gz]
-    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    name_template: "iroh-tunnel-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - README.md
       - LICENSE*
-  - id: musl
+  - id: iroh-tunnel-musl
     ids:
       - iroh-tunnel-musl
     formats: [tar.gz]
-    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}-musl"
+    name_template: "iroh-tunnel-{{ .Version }}-{{ .Os }}-{{ .Arch }}-musl"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-serve
+    ids:
+      - iroh-tunnel-serve
+    formats: [tar.gz]
+    name_template: "iroh-tunnel-serve-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-serve-musl
+    ids:
+      - iroh-tunnel-serve-musl
+    formats: [tar.gz]
+    name_template: "iroh-tunnel-serve-{{ .Version }}-{{ .Os }}-{{ .Arch }}-musl"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-access
+    ids:
+      - iroh-tunnel-access
+    formats: [tar.gz]
+    name_template: "iroh-tunnel-access-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-access-musl
+    ids:
+      - iroh-tunnel-access-musl
+    formats: [tar.gz]
+    name_template: "iroh-tunnel-access-{{ .Version }}-{{ .Os }}-{{ .Arch }}-musl"
     files:
       - README.md
       - LICENSE*
@@ -103,27 +186,34 @@ changelog:
       - "Merge branch"
 
 # ---- Linux packages via nFPM ----
-# Two blocks because the .deb and .apk need different libc flavours:
-#   - .deb from the glibc build (iroh-tunnel)  → Debian/Ubuntu/Fedora/...
-#   - .apk from the musl build (iroh-tunnel-musl) → Alpine (LXC, bare-metal)
-# Both share the same package_name, contents (systemd unit + config dir) and
-# postinstall script. Architectures are inferred from each build's targets
-# (amd64, arm64).
+# One package per executable (issue #94): `iroh-tunnel` (all-in-one, alias
+# `it`), `iroh-tunnel-serve` (alias `its`) and `iroh-tunnel-access` (alias
+# `ita`). Each owns only its binary and its alias link, so the packages never
+# share a file and can be installed, upgraded and removed independently.
+# Two flavours per package because .deb and .apk need different libc builds:
+#   - .deb from the glibc build  → Debian/Ubuntu/Fedora/...
+#   - .apk from the musl build   → Alpine (LXC, bare-metal)
+# Architectures are inferred from each build's targets (amd64, arm64).
+# The role packages are binary-only: service registration for the standalone
+# binaries is tracked by #79/#90/#91, so no unit file is shipped for them.
 nfpms:
-  # glibc → .deb
   - id: iroh-tunnel
     package_name: iroh-tunnel
-    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
     homepage: https://github.com/naicoi92/iroh-tunnel
     maintainer: naicoi92 <naicoi@lttech.vn>
-    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh (all-in-one: Serve and Access)."
     license: "MIT OR Apache-2.0"
     formats:
       - deb
     ids:
       - iroh-tunnel
     contents:
+      # Package-owned alias: the package manager tracks and removes the link.
+      - src: iroh-tunnel
+        dst: /usr/bin/it
+        type: symlink
       # systemd unit for the `serve` role, installed by the package.
       - src: packaging/iroh-tunnel.service
         dst: /usr/lib/systemd/system/iroh-tunnel.service
@@ -134,39 +224,118 @@ nfpms:
     scripts:
       postinstall: packaging/postinstall.sh
 
-  # musl → .apk (Alpine)
   - id: iroh-tunnel-musl
     package_name: iroh-tunnel
-    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: naicoi92
     homepage: https://github.com/naicoi92/iroh-tunnel
     maintainer: naicoi92 <naicoi@lttech.vn>
-    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh (all-in-one: Serve and Access)."
     license: "MIT OR Apache-2.0"
     formats:
       - apk
     ids:
       - iroh-tunnel-musl
     contents:
+      # Package-owned alias: the package manager tracks and removes the link.
+      - src: iroh-tunnel
+        dst: /usr/bin/it
+        type: symlink
+      # systemd unit for the `serve` role, installed by the package.
       - src: packaging/iroh-tunnel.service
         dst: /usr/lib/systemd/system/iroh-tunnel.service
         type: config|noreplace
+      # Default config directory; the binary reads /etc/iroh-tunnel/serve.toml.
       - dst: /etc/iroh-tunnel
         type: dir
     scripts:
       postinstall: packaging/postinstall.sh
 
+  - id: iroh-tunnel-serve
+    package_name: iroh-tunnel-serve
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: naicoi92
+    homepage: https://github.com/naicoi92/iroh-tunnel
+    maintainer: naicoi92 <naicoi@lttech.vn>
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh (Serve role only)."
+    license: "MIT OR Apache-2.0"
+    formats:
+      - deb
+    ids:
+      - iroh-tunnel-serve
+    contents:
+      # Package-owned alias: the package manager tracks and removes the link.
+      - src: iroh-tunnel-serve
+        dst: /usr/bin/its
+        type: symlink
+
+  - id: iroh-tunnel-serve-musl
+    package_name: iroh-tunnel-serve
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: naicoi92
+    homepage: https://github.com/naicoi92/iroh-tunnel
+    maintainer: naicoi92 <naicoi@lttech.vn>
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh (Serve role only)."
+    license: "MIT OR Apache-2.0"
+    formats:
+      - apk
+    ids:
+      - iroh-tunnel-serve-musl
+    contents:
+      # Package-owned alias: the package manager tracks and removes the link.
+      - src: iroh-tunnel-serve
+        dst: /usr/bin/its
+        type: symlink
+
+  - id: iroh-tunnel-access
+    package_name: iroh-tunnel-access
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: naicoi92
+    homepage: https://github.com/naicoi92/iroh-tunnel
+    maintainer: naicoi92 <naicoi@lttech.vn>
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh (Access role only)."
+    license: "MIT OR Apache-2.0"
+    formats:
+      - deb
+    ids:
+      - iroh-tunnel-access
+    contents:
+      # Package-owned alias: the package manager tracks and removes the link.
+      - src: iroh-tunnel-access
+        dst: /usr/bin/ita
+        type: symlink
+
+  - id: iroh-tunnel-access-musl
+    package_name: iroh-tunnel-access
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: naicoi92
+    homepage: https://github.com/naicoi92/iroh-tunnel
+    maintainer: naicoi92 <naicoi@lttech.vn>
+    description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh (Access role only)."
+    license: "MIT OR Apache-2.0"
+    formats:
+      - apk
+    ids:
+      - iroh-tunnel-access-musl
+    contents:
+      # Package-owned alias: the package manager tracks and removes the link.
+      - src: iroh-tunnel-access
+        dst: /usr/bin/ita
+        type: symlink
+
 # ---- Docker: multi-arch -> ghcr.io via buildx (no QEMU) ----
-# buildx is the default; no `use:` field. The Dockerfile copies the prebuilt
-# binaries GoReleaser stages at $TARGETPLATFORM/<binary>.
+# One image per executable (issue #94): the all-in-one `iroh-tunnel` image and
+# the role-only `iroh-tunnel-serve` / `iroh-tunnel-access` images. buildx is
+# the default; no `use:` field. Each Dockerfile copies the prebuilt binary
+# GoReleaser stages at $TARGETPLATFORM/<binary>, so an image holds exactly one
+# executable. `ids` pin the glibc build: the musl build also produces a binary
+# at linux/amd64/<binary>, which would make the staged context ambiguous, and
+# the distroless base image is glibc.
 dockers_v2:
   - id: iroh-tunnel-ghcr
     images:
       - ghcr.io/naicoi92/iroh-tunnel
     dockerfile: Dockerfile.goreleaser
-    # Pin to the glibc build only: the musl build (iroh-tunnel-musl) also
-    # produces a binary at linux/amd64/iroh-tunnel, so without this the staged
-    # build context would be ambiguous. The distroless base image is glibc.
     ids:
       - iroh-tunnel
     platforms:
@@ -179,7 +348,55 @@ dockers_v2:
       - "{{ .Version }}"
       - latest
     labels:
-      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.title: "iroh-tunnel"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.licenses: "MIT OR Apache-2.0"
+    # Trivy/SBOM scanning is deferred beyond v0.1.0.
+    sbom: false
+
+  - id: iroh-tunnel-serve-ghcr
+    images:
+      - ghcr.io/naicoi92/iroh-tunnel-serve
+    dockerfile: Dockerfile.goreleaser.serve
+    ids:
+      - iroh-tunnel-serve
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Tag }}"
+      - "v{{ .Major }}.{{ .Minor }}"
+      - "v{{ .Major }}"
+      - "{{ .Version }}"
+      - latest
+    labels:
+      org.opencontainers.image.title: "iroh-tunnel-serve"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.licenses: "MIT OR Apache-2.0"
+    # Trivy/SBOM scanning is deferred beyond v0.1.0.
+    sbom: false
+
+  - id: iroh-tunnel-access-ghcr
+    images:
+      - ghcr.io/naicoi92/iroh-tunnel-access
+    dockerfile: Dockerfile.goreleaser.access
+    ids:
+      - iroh-tunnel-access
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Tag }}"
+      - "v{{ .Major }}.{{ .Minor }}"
+      - "v{{ .Major }}"
+      - "{{ .Version }}"
+      - latest
+    labels:
+      org.opencontainers.image.title: "iroh-tunnel-access"
       org.opencontainers.image.source: "{{ .GitURL }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
       org.opencontainers.image.version: "{{ .Version }}"
