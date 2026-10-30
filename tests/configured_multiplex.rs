@@ -34,6 +34,16 @@ fn command(home: &Path) -> Command {
 }
 
 fn start(role: &str, home: &Path, config: &Path, round: usize) -> Result<RoleProcess> {
+    start_with_env(role, home, config, round, &[])
+}
+
+fn start_with_env(
+    role: &str,
+    home: &Path,
+    config: &Path,
+    round: usize,
+    envs: &[(&str, &str)],
+) -> Result<RoleProcess> {
     let log = home.join(format!("{role}-{round}.log"));
     eprintln!(
         "spawn {} {role} run --config {}; log={}",
@@ -42,6 +52,7 @@ fn start(role: &str, home: &Path, config: &Path, round: usize) -> Result<RolePro
         log.display()
     );
     let child = command(home)
+        .envs(envs.iter().copied())
         .args([role, "run", "--config"])
         .arg(config)
         .stdout(std::fs::File::create(&log)?)
@@ -56,11 +67,20 @@ async fn start_access(
     config: &Path,
     round: usize,
 ) -> Result<(RoleProcess, std::net::SocketAddr)> {
+    start_access_with_env(home, config, round, &[]).await
+}
+
+async fn start_access_with_env(
+    home: &Path,
+    config: &Path,
+    round: usize,
+    envs: &[(&str, &str)],
+) -> Result<(RoleProcess, std::net::SocketAddr)> {
     for attempt in 0..8 {
         let cfg = AccessConfig::load(config)?;
         anyhow::ensure!(cfg.services.len() == 1, "fixture expects one service");
         let listen = format!("{}:{}", cfg.services[0].host, cfg.services[0].port).parse()?;
-        let mut access = start("access", home, config, round * 8 + attempt)?;
+        let mut access = start_with_env("access", home, config, round * 8 + attempt, envs)?;
         let ready = format!("listening for local clients listen_addr={listen}");
         match wait_log(&mut access, &ready).await {
             Ok(_) => return Ok((access, listen)),
@@ -1133,6 +1153,229 @@ async fn configured_listener_retries_confirmed_bind_collision() -> Result<()> {
         Ok::<_, anyhow::Error>(())
     }
     .await;
+    drop(serve);
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome
+}
+
+#[cfg(unix)]
+fn signal_process(process: &RoleProcess, signal: &str) -> Result<()> {
+    let status = Command::new("kill")
+        .args([signal, &process.child.id().to_string()])
+        .status()?;
+    anyhow::ensure!(status.success(), "{signal} failed");
+    Ok(())
+}
+
+/// Access stops while a held channel and a frozen (SIGSTOP) Serve peer keep
+/// shutdown from finishing: pipes are force-closed at the 3 s grace, then the
+/// endpoint close cannot be acknowledged by the frozen peer. Returns the
+/// access exit status and when it happened after the first stop.
+#[cfg(unix)]
+async fn stuck_shutdown_scenario(
+    envs: &[(&str, &str)],
+    second_signal_after_grace: bool,
+) -> Result<(std::process::ExitStatus, Duration, PathBuf)> {
+    let temp = tempfile::tempdir()?;
+    let serve_home = temp.path().join("serve");
+    let access_home = temp.path().join("access");
+    std::fs::create_dir_all(&serve_home)?;
+    std::fs::create_dir_all(&access_home)?;
+    let serve_key = iroh::SecretKey::generate();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let reservation = TcpListener::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    let serve_path = serve_home.join("serve.toml");
+    let access_path = access_home.join("access.toml");
+    std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
+    std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
+    let mut serve = start("serve", &serve_home, &serve_path, 0)?;
+    let (mut access, listen) = start_access_with_env(&access_home, &access_path, 0, envs).await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(40), async {
+        wait_log(&mut serve, "endpoint ready").await?;
+        wait_log(&mut access, &format!("listen_addr={listen}")).await?;
+        let mut held = TcpStream::connect(listen).await?;
+        held.write_all(b"held-open!").await?;
+        let (mut held_target, _) = target.accept().await?;
+        let mut marker = [0; 10];
+        held_target.read_exact(&mut marker).await?;
+        held_target.write_all(b"ready").await?;
+        let mut reply = [0; 5];
+        held.read_exact(&mut reply).await?;
+        let status_file = access_home.join("state/access-status.json");
+        anyhow::ensure!(status_file.exists(), "status file missing before stop");
+        signal_process(&serve, "-STOP")?;
+        let started = Instant::now();
+        terminate(&access)?;
+        if second_signal_after_grace {
+            // Inside the 3 s grace a repeated signal is ignored.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            terminate(&access)?;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            anyhow::ensure!(
+                access.child.try_wait()?.is_none(),
+                "signal inside grace exited the process"
+            );
+            // Wait out the grace, then repeat: must force an immediate exit.
+            tokio::time::sleep_until(
+                tokio::time::Instant::from_std(started) + Duration::from_millis(3300),
+            )
+            .await;
+            anyhow::ensure!(
+                access.child.try_wait()?.is_none(),
+                "shutdown finished too fast to test the forced exit"
+            );
+            terminate(&access)?;
+        }
+        let exit = reap(&mut access, Duration::from_secs(15)).await?;
+        Ok::<_, anyhow::Error>((exit, started.elapsed(), status_file))
+    })
+    .await
+    .context("stuck shutdown scenario timeout")
+    .and_then(|r| r);
+    let _ = signal_process(&serve, "-CONT");
+    for process in [&mut access, &mut serve] {
+        if process.child.try_wait()?.is_none() {
+            process.child.kill()?;
+        }
+        reap(process, Duration::from_secs(5)).await?;
+        if outcome.is_err() {
+            eprintln!(
+                "stuck shutdown log: {}",
+                std::fs::read_to_string(&process.log)?
+            );
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome
+}
+
+// AC-S3 / #86: a repeated stop after the grace forces exit 130 (a repeat inside
+// the grace is ignored); own status is still cleaned up.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_stop_after_grace_exits_130_and_cleans_status() -> Result<()> {
+    use std::os::unix::process::ExitStatusExt;
+    let (exit, elapsed, status_file) = stuck_shutdown_scenario(&[], true).await?;
+    anyhow::ensure!(
+        exit.code() == Some(130),
+        "expected exit 130, got {exit} (signal {:?})",
+        exit.signal()
+    );
+    anyhow::ensure!(
+        elapsed >= Duration::from_millis(3300) && elapsed < Duration::from_secs(8),
+        "forced exit timing: {elapsed:?}"
+    );
+    anyhow::ensure!(
+        !status_file.exists(),
+        "own status left behind by forced exit"
+    );
+    Ok(())
+}
+
+// AC-S3 / #86: a stuck shutdown is abandoned by the watchdog (exit 1). The
+// watchdog extra time is shortened through the test-utils-only env seam.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stuck_shutdown_is_abandoned_by_watchdog_with_exit_1() -> Result<()> {
+    let (exit, elapsed, status_file) =
+        stuck_shutdown_scenario(&[("IROH_TUNNEL_TEST_EXIT_WATCHDOG_MS", "300")], false).await?;
+    anyhow::ensure!(exit.code() == Some(1), "expected exit 1, got {exit}");
+    anyhow::ensure!(
+        elapsed >= Duration::from_millis(3300) && elapsed < Duration::from_secs(8),
+        "watchdog timing: {elapsed:?}"
+    );
+    anyhow::ensure!(
+        !status_file.exists(),
+        "own status left behind by watchdog exit"
+    );
+    Ok(())
+}
+
+// TCP-01 / AC-TCP-04 / RS-15: a refused local target closes only that channel;
+// the shared connection and an established sibling channel keep working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refused_local_target_closes_only_that_channel() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let serve_home = temp.path().join("serve");
+    let access_home = temp.path().join("access");
+    std::fs::create_dir_all(&serve_home)?;
+    std::fs::create_dir_all(&access_home)?;
+    let serve_key = iroh::SecretKey::generate();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let reservation = TcpListener::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    let serve_path = serve_home.join("serve.toml");
+    let access_path = access_home.join("access.toml");
+    std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
+    std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
+    let mut serve = start("serve", &serve_home, &serve_path, 0)?;
+    let (mut access, listen) = start_access(&access_home, &access_path, 0).await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(40), async {
+        wait_log(&mut serve, "endpoint ready").await?;
+        wait_log(&mut access, &format!("listen_addr={listen}")).await?;
+        let mut sibling = TcpStream::connect(listen).await?;
+        sibling.write_all(b"sibling-one").await?;
+        let (mut sibling_target, _) = target.accept().await?;
+        let mut first = [0; 11];
+        sibling_target.read_exact(&mut first).await?;
+        anyhow::ensure!(&first == b"sibling-one", "sibling marker mismatch");
+        // Nothing listens on the target port any more; the accepted socket lives on.
+        drop(target);
+        let mut refused = TcpStream::connect(listen).await?;
+        refused.write_all(b"nobody home").await?;
+        let mut byte = [0; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(10), refused.read(&mut byte))
+            .await
+            .context("refused channel stayed open")?;
+        anyhow::ensure!(
+            matches!(closed, Ok(0) | Err(_)),
+            "refused channel got data: {closed:?}"
+        );
+        wait_log(
+            &mut serve,
+            "failed to connect local service, resetting stream",
+        )
+        .await?;
+        // Sibling channel is unaffected, in both directions.
+        sibling.write_all(b"-two").await?;
+        let mut second = [0; 4];
+        sibling_target.read_exact(&mut second).await?;
+        anyhow::ensure!(&second == b"-two", "sibling lost after refused channel");
+        sibling_target.write_all(b"alive").await?;
+        let mut reply = [0; 5];
+        sibling.read_exact(&mut reply).await?;
+        anyhow::ensure!(&reply == b"alive", "sibling reply mismatch");
+        let log = std::fs::read_to_string(&serve.log)?;
+        anyhow::ensure!(
+            log.matches("peer connected via").count() == 1,
+            "shared connection was replaced: {log}"
+        );
+        anyhow::ensure!(
+            access.child.try_wait()?.is_none() && serve.child.try_wait()?.is_none(),
+            "a role exited"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("refused-target scenario timeout")
+    .and_then(|r| r);
+    for process in [&mut access, &mut serve] {
+        if process.child.try_wait()?.is_none() {
+            process.child.kill()?;
+        }
+        if outcome.is_err() {
+            eprintln!(
+                "refused-target log: {}",
+                std::fs::read_to_string(&process.log)?
+            );
+        }
+    }
+    drop(access);
     drop(serve);
     tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
     outcome
