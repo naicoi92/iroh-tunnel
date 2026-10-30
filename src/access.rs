@@ -498,9 +498,10 @@ struct ServiceDialer {
     listen_addr: String,
     /// The shared multiplexed connection and its poller, behind ONE lock:
     /// the one-connection-and-one-poller-per-service rule is structural —
-    /// a redial replaces both atomically under the same guard, with no
-    /// cross-lock ordering to reason about. Concurrent channels serialize
-    /// the (re)dial here instead of racing N dials.
+    /// a redial replaces both atomically under the same guard. Lock order is
+    /// `dial` -> `state`, and `state` is never held across a dial, backoff
+    /// or endpoint query. Concurrent channels serialize the (re)dial on
+    /// `dial` instead of racing N dials.
     state: Mutex<ConnState>,
     /// Serializes dialing without holding `state`; see `get_or_dial`.
     dial: Mutex<()>,
@@ -511,6 +512,15 @@ struct ServiceDialer {
 struct ConnState {
     conn: Option<iroh::endpoint::Connection>,
     tasks: JoinSet<()>,
+}
+
+impl ConnState {
+    /// Whether `conn` is the cached connection (not a replaced or evicted one).
+    fn is_current(&self, conn: &iroh::endpoint::Connection) -> bool {
+        self.conn
+            .as_ref()
+            .is_some_and(|cached| cached.stable_id() == conn.stable_id())
+    }
 }
 
 impl ServiceDialer {
@@ -544,15 +554,21 @@ impl ServiceDialer {
     /// only ever held briefly (never across the dial or backoff), so status
     /// rendering and shutdown are not blocked by a slow dial.
     ///
+    /// `deadline` bounds the dial and backoff; the caller bounds the lock wait.
+    ///
     /// The connection is stored in the same synchronous step that follows a
     /// successful dial, so a caller deadline cannot cancel the future in
     /// between and discard a dial that already succeeded.
-    async fn get_or_dial(&self) -> Result<iroh::endpoint::Connection> {
+    async fn get_or_dial(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<iroh::endpoint::Connection> {
         let _dialing = self.dial.lock().await;
         if let Some(conn) = self.state.lock().await.conn.as_ref() {
             return Ok(conn.clone());
         }
-        let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
+        let conn =
+            crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn, deadline).await?;
         let remote_id = conn.remote_id();
         {
             let mut state = self.state.lock().await;
@@ -588,11 +604,7 @@ impl ServiceDialer {
             // A concurrent invalidate/redial may have replaced this
             // connection while the report was pending; its poller belongs
             // to the replacement, not to us.
-            if state
-                .conn
-                .as_ref()
-                .is_some_and(|c| c.stable_id() == conn.stable_id())
-            {
+            if state.is_current(&conn) {
                 let ConnState { tasks, .. } = &mut *state;
                 spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), baseline, tasks);
             }
@@ -615,11 +627,7 @@ impl ServiceDialer {
     /// not evict a healthy one another channel has since redialed.
     async fn invalidate(&self, failed: &iroh::endpoint::Connection) {
         let mut state = self.state.lock().await;
-        if state
-            .conn
-            .as_ref()
-            .is_some_and(|c| c.stable_id() == failed.stable_id())
-        {
+        if state.is_current(failed) {
             state.conn = None;
         }
     }
@@ -705,42 +713,49 @@ async fn handle_local_connection(
     let streams = tokio::select! {
         biased;
         _ = shutdown::stopped(&mut stop) => anyhow::bail!("client connection cancelled on shutdown"),
-        result = tokio::time::timeout_at(deadline, open_client_stream(dialer)) => {
-            result.context("client connection deadline expired")??
+        result = tokio::time::timeout_at(deadline, open_client_stream(dialer, deadline)) => match result {
+            Ok(Ok(streams)) => streams,
+            // The dial loop stops at the same deadline; report one message.
+            Ok(Err(_)) if tokio::time::Instant::now() >= deadline => {
+                anyhow::bail!("client connection deadline expired")
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => anyhow::bail!("client connection deadline expired"),
         }
     };
     // QUIC shutdown queues FIN; pipe completion alone does not prove final
     // request bytes reached Serve. Keep this task owned until acknowledged.
     let delivered = streams.0.stopped();
     crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
-    // Bounded: a peer that never acknowledges must not pin this task (and
-    // its status/drain accounting) forever. The pipe already completed, so
-    // a missing acknowledgement is not reported as a failed exchange; only
-    // an explicit peer STOP (it did not read all our bytes) is.
-    match tokio::time::timeout(DELIVERY_ACK_GRACE, delivered).await {
-        Ok(result) => match result.context("client stream delivery failed")? {
-            None => Ok(()),
-            Some(code) => anyhow::bail!("peer stopped client stream: {code}"),
-        },
-        Err(_) => {
-            tracing::debug!(svc = %dialer.svc_name, "no delivery acknowledgement within grace");
-            Ok(())
+    // Bounded: a peer that never acknowledges must not pin this task (and its
+    // status/drain accounting) forever. A missing acknowledgement is NOT
+    // success: it may hide a lost delivery, so it is reported as peer loss
+    // (AC-TCP-06). Nothing is replayed.
+    match crate::pipe::await_delivery(delivered, crate::pipe::DELIVERY_ACK_GRACE).await {
+        crate::pipe::Delivery::Acknowledged => Ok(()),
+        crate::pipe::Delivery::PeerStopped(code) => {
+            anyhow::bail!("peer stopped client stream: {code}")
+        }
+        crate::pipe::Delivery::Unconfirmed => {
+            tracing::warn!(svc = %dialer.svc_name, "peer lost: no delivery acknowledgement within grace");
+            anyhow::bail!("peer lost: delivery unconfirmed (no acknowledgement within grace)")
+        }
+        crate::pipe::Delivery::Lost(error) => {
+            Err(anyhow::Error::new(error).context("client stream delivery failed"))
         }
     }
 }
 
-/// How long a completed pipe waits for the peer to acknowledge final bytes.
-const DELIVERY_ACK_GRACE: Duration = Duration::from_secs(5);
-
 async fn open_client_stream(
     dialer: &ServiceDialer,
+    deadline: tokio::time::Instant,
 ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     // Multiplexed: one stream on the shared connection per channel. If
     // `open_bi` fails with a connection-level error, the cache is dropped and
     // exactly one redial + retry is attempted before giving up — a dead
     // connection surfaces as EOF-style errors on the active channels and the
     // next channel gets a fresh one.
-    let conn = dialer.get_or_dial().await?;
+    let conn = dialer.get_or_dial(deadline).await?;
     match conn.open_bi().await {
         // open_bi returns (SendStream, RecvStream) — send first. Our pipe
         // wants the remote pair as (read, write) = (recv, send), so swap.
@@ -751,7 +766,7 @@ async fn open_client_stream(
                 "multiplexed open_bi failed: {e}, redialing once"
             );
             dialer.invalidate(&conn).await;
-            let conn = dialer.get_or_dial().await?;
+            let conn = dialer.get_or_dial(deadline).await?;
             conn.open_bi()
                 .await
                 .context("open bidirectional stream failed after redial")
@@ -974,6 +989,10 @@ mod tests {
         );
     }
 
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(30)
+    }
+
     /// A local serve-like endpoint (no relay) and a dialer pointed at it.
     async fn local_dialer() -> (iroh::Endpoint, ServiceDialer) {
         use iroh::endpoint::presets::Minimal;
@@ -1028,14 +1047,14 @@ mod tests {
     #[tokio::test]
     async fn invalidate_only_evicts_the_failed_connection() {
         let (_server, dialer) = local_dialer().await;
-        let stale = dialer.get_or_dial().await.unwrap();
+        let stale = dialer.get_or_dial(far_deadline()).await.unwrap();
         dialer.invalidate(&stale).await;
-        let fresh = dialer.get_or_dial().await.unwrap();
+        let fresh = dialer.get_or_dial(far_deadline()).await.unwrap();
         assert_ne!(stale.stable_id(), fresh.stable_id());
 
         // A second channel still reporting the stale failure.
         dialer.invalidate(&stale).await;
-        let again = dialer.get_or_dial().await.unwrap();
+        let again = dialer.get_or_dial(far_deadline()).await.unwrap();
         assert_eq!(
             again.stable_id(),
             fresh.stable_id(),

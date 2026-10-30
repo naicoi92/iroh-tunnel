@@ -641,6 +641,35 @@ async fn accept_loop(
 /// Bound on one stream's local target connect; see `handle_connection`.
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Connect one stream's local target within `limit`.
+///
+/// A failure or timeout is logged and yields `None`: the caller drops the
+/// stream halves, which resets only this channel; the shared connection and
+/// sibling streams are untouched.
+async fn connect_local<F, T>(
+    connect: F,
+    limit: Duration,
+    local_addr: &str,
+    stream_no: u64,
+) -> Option<T>
+where
+    F: Future<Output = std::io::Result<T>>,
+{
+    match tokio::time::timeout(limit, connect).await {
+        Ok(Ok(local)) => Some(local),
+        Ok(Err(error)) => {
+            tracing::warn!(%local_addr, stream = stream_no,
+                "failed to connect local service, resetting stream: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(%local_addr, stream = stream_no,
+                "timed out connecting local service, resetting stream");
+            None
+        }
+    }
+}
+
 /// Own stream admission and pipe tasks for one multiplexed connection.
 async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
     let mut streams = JoinSet::new();
@@ -671,32 +700,42 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
             // hold up accepting other streams on this connection. A failed
             // or timed-out connect closes only this channel (dropping the
             // stream halves resets it).
-            let local =
-                match tokio::time::timeout(LOCAL_CONNECT_TIMEOUT, TcpStream::connect(&local_addr))
-                    .await
-                {
-                    Ok(Ok(local)) => local,
-                    Ok(Err(error)) => {
-                        tracing::warn!(%local_addr, stream = stream_no,
-                        "failed to connect local service, resetting stream: {error}");
-                        return;
-                    }
-                    Err(_) => {
-                        tracing::warn!(%local_addr, stream = stream_no,
-                        "timed out connecting local service, resetting stream");
-                        return;
-                    }
-                };
+            let Some(local) = connect_local(
+                TcpStream::connect(&local_addr),
+                LOCAL_CONNECT_TIMEOUT,
+                &local_addr,
+                stream_no,
+            )
+            .await
+            else {
+                return;
+            };
             // AsyncWrite::shutdown only queues QUIC FIN. Keep channel owned
             // until final bytes are acknowledged, or last-pipe completion
-            // could close the endpoint and discard its queued response.
+            // could close the endpoint and discard its queued response. The
+            // wait is bounded: a vanished peer must not pin this task and
+            // the active_streams counter.
             let delivered = send.stopped();
             match crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await {
-                Ok(()) => match delivered.await {
-                    Ok(None) => tracing::debug!("stream closed normally"),
-                    Ok(Some(code)) => tracing::debug!(%code, "peer stopped completed stream"),
-                    Err(error) => tracing::warn!("stream delivery error: {error}"),
-                },
+                Ok(()) => {
+                    match crate::pipe::await_delivery(delivered, crate::pipe::DELIVERY_ACK_GRACE)
+                        .await
+                    {
+                        crate::pipe::Delivery::Acknowledged => {
+                            tracing::debug!("stream closed normally")
+                        }
+                        crate::pipe::Delivery::PeerStopped(code) => {
+                            tracing::debug!(%code, "peer stopped completed stream")
+                        }
+                        crate::pipe::Delivery::Unconfirmed => tracing::warn!(
+                            stream = stream_no,
+                            "peer lost: no delivery acknowledgement within grace"
+                        ),
+                        crate::pipe::Delivery::Lost(error) => {
+                            tracing::warn!("stream delivery error: {error}")
+                        }
+                    }
+                }
                 Err(error) => tracing::warn!("stream error: {error}"),
             }
         });
@@ -729,6 +768,35 @@ impl Drop for ActiveStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn connect_local_timeout_resets_only_that_channel() {
+        let mut channels = JoinSet::new();
+        channels.spawn(async {
+            let hung = std::future::pending::<std::io::Result<u8>>();
+            connect_local(hung, Duration::from_millis(50), "t:1", 1).await
+        });
+        channels.spawn(async {
+            connect_local(
+                std::future::ready(Ok(7u8)),
+                Duration::from_millis(50),
+                "t:1",
+                2,
+            )
+            .await
+        });
+        channels.spawn(async {
+            let refused =
+                std::future::ready(Err::<u8, _>(std::io::ErrorKind::ConnectionRefused.into()));
+            connect_local(refused, Duration::from_millis(50), "t:1", 3).await
+        });
+        let mut results = Vec::new();
+        while let Some(result) = channels.join_next().await {
+            results.push(result.unwrap());
+        }
+        results.sort();
+        assert_eq!(results, vec![None, None, Some(7)]);
+    }
 
     fn peer() -> iroh::EndpointId {
         iroh::SecretKey::generate().public()

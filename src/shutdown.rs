@@ -10,7 +10,7 @@ use tokio::time::Instant;
 // One budget from stop receipt across every service/connection, not one grace
 // per nested owner. Short exchanges can finish; held tunnels cannot block stop.
 // Technical default, not a previously approved #76 numeric policy.
-const DRAIN_GRACE: Duration = Duration::from_secs(3);
+pub(crate) const DRAIN_GRACE: Duration = Duration::from_secs(3);
 
 pub(crate) type Stop = watch::Receiver<Option<Instant>>;
 

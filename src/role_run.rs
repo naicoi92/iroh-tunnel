@@ -90,25 +90,34 @@ pub(crate) fn attempt_timeout(attempt: u32) -> Duration {
         .min(DIAL_ATTEMPT_MAX)
 }
 
-/// Dial a peer with exponential backoff until success or caller cancellation.
+/// Dial a peer with exponential backoff until success or `deadline`.
 ///
 /// Retries [`iroh::Endpoint::connect`] on failure with the schedule
 /// [`INITIAL_BACKOFF_MS`] → [`next_backoff_ms`] → … → [`MAX_BACKOFF_MS`]:
 /// `1s → 2s → 4s → 8s → 16s → 30s (cap)`. On the first success after one or
 /// more failures, logs `reconnected after N attempts`. Per-service
-/// independent: an unreachable peer never affects another service. The caller
-/// must bound and cancel this future, including time spent waiting for its lock.
+/// independent: an unreachable peer never affects another service.
+///
+/// # Errors
+///
+/// Returns an error once `deadline` passes: attempts and backoff sleeps are
+/// both truncated at it, so the loop can never run unbounded (RS-09). Callers
+/// may additionally cancel the future (for shutdown); dropping it cancels the
+/// in-flight dial.
 pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
     addr: &iroh::EndpointAddr,
     alpn: &[u8],
+    deadline: tokio::time::Instant,
 ) -> Result<Connection> {
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut attempt = 1u32;
     loop {
+        let now = tokio::time::Instant::now();
+        anyhow::ensure!(now < deadline, "dial deadline expired");
         // Dropping a timed-out attempt cancels that dial future.
-        let dial =
-            tokio::time::timeout(attempt_timeout(attempt), ep.connect(addr.clone(), alpn)).await;
+        let limit = (now + attempt_timeout(attempt)).min(deadline);
+        let dial = tokio::time::timeout_at(limit, ep.connect(addr.clone(), alpn)).await;
         match dial {
             Ok(Ok(conn)) => {
                 if attempt > 1 {
@@ -121,11 +130,15 @@ pub(crate) async fn connect_with_retry(
                     "connect attempt {attempt} failed: {error}, retrying in {backoff_ms}ms"
                 );
             }
+            Err(_) if limit == deadline => anyhow::bail!("dial deadline expired"),
             Err(_) => {
                 tracing::warn!("connect attempt {attempt} timed out, retrying in {backoff_ms}ms");
             }
         }
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(backoff_ms)).min(deadline),
+        )
+        .await;
         backoff_ms = next_backoff_ms(backoff_ms);
         attempt += 1;
     }
@@ -297,5 +310,30 @@ mod tests {
         let prev = u64::MAX;
         let next = next_backoff_ms(prev);
         assert_eq!(next, MAX_BACKOFF_MS, "huge input must cap, not overflow");
+    }
+
+    /// The retry loop is bounded by the caller's deadline by construction:
+    /// an unreachable peer yields an error at the deadline, not a hang.
+    #[tokio::test]
+    async fn connect_with_retry_stops_at_the_deadline() {
+        use iroh::endpoint::presets::Minimal;
+        let ep = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        // Nobody listens on this id: every attempt fails or stalls.
+        let addr = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+            .with_ip_addr((std::net::Ipv4Addr::LOCALHOST, 9).into());
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_with_retry(&ep, &addr, b"t", deadline),
+        )
+        .await
+        .expect("connect_with_retry must return by itself at the deadline");
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(4));
     }
 }
