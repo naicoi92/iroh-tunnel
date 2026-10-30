@@ -22,7 +22,7 @@ The [canonical tracker spec](https://github.com/naicoi92/iroh-tunnel/issues/68) 
 | Operations | Role/scope exclusivity, service privilege behavior, pinned paths and independent updates. | Locking/stale state, privileged config trust, Windows user background, rollback and trust rotation. |
 | Product scope | Windows plus currently released platforms, installers, separate packages, three images and verified updates. | Detailed platform matrix, exact CLI/exit codes and release recovery policy. |
 
-**Dependency version:** target Iroh stable `1.4.1` was selected during design; the repository lockfile currently records `1.1.0`. Recheck stable version and compatibility at implementation time. No benchmark has established UDP transport performance.
+**Dependency version:** target Iroh stable `1.4.1` was selected during design and adopted by [#101](issue-101-evidence.md); recheck the latest stable before final release evidence. No benchmark has established UDP transport performance.
 
 ## Capability boundaries
 
