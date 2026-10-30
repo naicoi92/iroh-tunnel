@@ -6,6 +6,8 @@
 //! Quick flags: -n/--name, -t/--target, -l/--listen, -N/--node-id,
 //! -p/--protocol (TCP default), and --relay-url.
 
+mod common;
+
 use anyhow::{Context, Result};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -401,7 +403,8 @@ async fn quick_roles_do_not_create_config_or_keys_in_empty_home() -> Result<()> 
     let temp = tempfile::tempdir()?;
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     ephemeral_restarts(temp.path(), &relay.to_string()).await?;
-    assert_eq!(std::fs::read_dir(temp.path())?.count(), 0);
+    // Only role-ownership runtime state may appear; no config, no keys.
+    assert_eq!(file_snapshot(temp.path())?, Default::default());
     Ok(())
 }
 
@@ -492,7 +495,7 @@ fn file_snapshot(
             let path = entry?.path();
             if path.is_dir() {
                 collect(root, &path, files)?;
-            } else {
+            } else if !common::is_ownership_artifact(&path) {
                 files.insert(path.strip_prefix(root)?.to_owned(), std::fs::read(path)?);
             }
         }

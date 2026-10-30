@@ -6,6 +6,7 @@
 //! - 3 = permission     → [`CliError::Permission`]
 //! - 4 = iroh endpoint  → [`CliError::Iroh`]
 //! - 5 = service        → [`CliError::Service`]
+//! - 6 = conflict       → [`CliError::Conflict`] (role or identity already running)
 
 #[derive(Debug, thiserror::Error)]
 #[allow(dead_code)] // variants are constructed in later tasks (T-02..T-12)
@@ -21,4 +22,9 @@ pub enum CliError {
 
     #[error("service error: {0}")]
     Service(String),
+
+    /// A start was refused because the role, or its public identity, is
+    /// already running (RO-01..RO-03).
+    #[error("start refused: {0}")]
+    Conflict(String),
 }

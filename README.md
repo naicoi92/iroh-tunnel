@@ -593,6 +593,7 @@ Flags:    -v / -vv   increase logging (debug/trace)  ·  -q quiet (errors only) 
 | `3`  | permission |
 | `4`  | iroh       |
 | `5`  | service    |
+| `6`  | conflict: the role (or its public identity) is already running |
 
 ### Logging
 

@@ -2,7 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Role ownership (#87)**: a role (`serve` or `access`) runs as one process
+  at a time, whichever binary, config or state override started it. A later
+  start, and `service start`, is refused with a reason and exit code `6`;
+  nothing is stopped automatically. A non-elevated user detects a running
+  system service through a machine lock (`/run/iroh-tunnel` on Linux,
+  `/var/run/iroh-tunnel` on macOS); the same public identity in the other role
+  is rejected. Locks are kernel advisory locks, so a crash or `kill -9`
+  leftover never blocks the next start. `<role> status` now judges liveness by
+  these locks instead of the recorded pid, and reports a live owner whose
+  snapshot is in another state directory. Systemd units do not restart a
+  refused start (`RestartPreventExitStatus=6`).
+
 ### Changed
+
 
 - **`it` alias is package-owned**: the `.deb`/`.apk` now ship `/usr/bin/it`
   as a symlink tracked by the package manager instead of creating it in the

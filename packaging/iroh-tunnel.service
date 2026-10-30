@@ -16,6 +16,8 @@ Type=simple
 ExecStart=/usr/local/bin/iroh-tunnel serve run --config /etc/iroh-tunnel/serve.toml
 Restart=on-failure
 RestartSec=5
+# Exit 6 = role already running elsewhere: do not restart-loop.
+RestartPreventExitStatus=6
 # Hardening: run as an unprivileged dynamic user with its own namespacing.
 # `iroh-tunnel` only needs network access (relay dial) + read access to its
 # config; writes go to a runtime tmpfs. Keep these conservative so the package
@@ -29,6 +31,10 @@ NoNewPrivileges=true
 # make it readable inside the sandbox.
 ReadWritePaths=/var/lib/iroh-tunnel
 StateDirectory=iroh-tunnel
+# Machine-wide role lock, readable by every user so a non-elevated `run`
+# detects this service (src/ownership.rs). The sandbox would otherwise hide it.
+RuntimeDirectory=iroh-tunnel
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=default.target

@@ -87,6 +87,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
                 Some(CliError::Permission(_)) => 3,
                 Some(CliError::Iroh(_)) => 4,
                 Some(CliError::Service(_)) => 5,
+                Some(CliError::Conflict(_)) => 6,
                 None => 1,
             };
             std::process::exit(code);
@@ -258,7 +259,17 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
             service::install(role, scope_of(system), &path)
         }
         ServiceAction::Uninstall { system } => service::uninstall(role, scope_of(system)),
-        ServiceAction::Start { system } => service::start(role, scope_of(system)),
+        ServiceAction::Start { system } => {
+            // Refuse here too: the unit would otherwise start and exit
+            // after systemd/launchd already reported success (RO-03).
+            let status_role = match role {
+                "serve" => StatusRole::Serve,
+                "access" => StatusRole::Access,
+                other => anyhow::bail!("unknown role {other:?}"),
+            };
+            crate::ownership::ensure_not_running(status_role)?;
+            service::start(role, scope_of(system))
+        }
         ServiceAction::Stop { system } => service::stop(role, scope_of(system)),
         ServiceAction::Restart { system } => service::restart(role, scope_of(system)),
         ServiceAction::Status { system } => service::status(role, scope_of(system)),

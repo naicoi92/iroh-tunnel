@@ -46,9 +46,9 @@ data-encoding = "2.11"
 regex = "1.13"
 
 [target.'cfg(unix)'.dependencies]
-# Unix pid-liveness probe (`kill(pid, 0)`) for the `<role> status` command.
-# Section split mirrors the cfg(unix) call site in src/status_cmd.rs —
-# non-unix builds never compile that code and never link libc. Already in
+# `O_NOFOLLOW` for the role-ownership lock files (src/ownership.rs).
+# Section split mirrors the cfg(unix) call site — non-unix builds never
+# compile that code and never link libc. Already in
 # the dependency tree via iroh/tokio on every platform, so this adds no new
 # code to the build — it only lets us call it directly.
 libc = "0.2"
