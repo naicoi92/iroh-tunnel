@@ -47,7 +47,7 @@ within lifecycle test establish that single ordered lifecycle contract.
 |---|---|
 | AC-S1: TCP-02, #86 shutdown handoff: role stop seals admission, permits established completion, then forces remainder closed within bounded grace, followed by resource cleanup | `access_shutdown_drains_established_channels_before_forcing_remainder`, `serve_shutdown_drains_established_channels_before_forcing_remainder`: two live literal-marker streams; stop; Access bind refused or Serve new stream on existing shared connection never reaches target; after 250 ms exact final response and orderly EOF completes first; second remains usable during grace then EOF/error; process success and own status removed; listener rebind/target closure; one shared connection before stop. Test tolerance bounds 2–4 s for held close, not tracker-approved numbers. SIGTERM repeated at 250 ms and 1.5 s; latter would expose grace reset. Serve also attempts fresh peer connection; target accept remains monitored through held closure. |
 | AC-S2: user task / #86 technical cancellation: stop interrupts pending establishment without consuming grace; repeated stop remains bounded without resetting deadline | `access_shutdown_cancels_pending_retry_without_waiting_for_grace`: absent peer, two concurrent clients (dial + lock wait), timed-out attempt/backoff observed, SIGTERM twice, both EOF/error <1 s; successful exit <5 s including Iroh close retransmission (upstream documents up to about 3 s for failed connectivity). Additional dial-stop variant sends stop before first timeout. Initial <2 s process bound failed despite prompt client cancellation: measured separately rather than treating QUIC close retransmission as extra application grace. |
-| AC-S3: user task / #86 technical repeated stop: repeated signals must not interrupt graceful established completion or extend deadline | Same AC-S1 role scenarios send repeated SIGTERM during grace; tests remain mapped solely to AC-S1 ordered lifecycle (AC-S3 covered as input variation, not separate product rule). |
+| AC-S3: user task / #86 technical repeated stop: a repeat inside the grace is ignored and never extends the deadline; a repeat after the grace forces exit 130; a stuck shutdown is abandoned by a watchdog (exit 1) | Inside grace: same AC-S1 role scenarios send repeated SIGTERM during grace and still finish gracefully (success exit). After grace: `repeated_stop_after_grace_exits_130_and_cleans_status` (frozen Serve peer plus held channel keep shutdown unfinished; SIGTERM at 0.5 s ignored, process alive past 2 s, SIGTERM after 3.3 s exits 130, own status file removed). Watchdog: `stuck_shutdown_is_abandoned_by_watchdog_with_exit_1` (same stuck setup, watchdog extra time shortened to 300 ms through a `test-utils`-only environment seam, exit 1, status removed). Unit tests in `src/shutdown.rs` cover the same decisions with injected signals. The 130/1 decision is made at the CLI boundary (`src/main.rs` races the run future against `shutdown::forced_exit()`), which drops the run future and attempts status cleanup before exiting. |
 | AC-S4: RS-08/09 ownership: cancel handshakes/new streams; observe/join all child tasks without spawn/drain race; close endpoint/status/pollers/watchers only afterward | Code ownership review plus AC-S1 external no-new-target/closure/resource observations. Pending incoming-handshake state not reliably inducible through TCP process fixture; report coverage limit, do not claim direct handshake-state test. |
 | AC-S6: TCP-02 graceful drain includes last channel's final queued bytes before endpoint close | `roles_deliver_last_channel_response_before_early_shutdown_exit`: actual roles, one half-closed stream, stop, final 256 KiB literal-pattern response, target FIN, delayed client read; exact bytes/EOF and process success before full grace. No held sibling to hide premature endpoint close. |
 | AC-S5: #86 bounded-drain technical work / no placeholder sleep: when no channels need draining stop completes without consuming full grace | `idle_roles_exit_without_waiting_for_drain_grace`: both actual idle roles SIGTERM, successful exit <2 s, status removed, listener rebind, relay shutdown. |
@@ -197,3 +197,20 @@ not successful delivery. Independent review must check both paths.
   UDP, load/resource exhaustion or full release acceptance claimed. Five
   ignored tests remain unrun: authentic released-0.4 test and four public-relay
   tests. Test-feature binary never used against public relay.
+
+## Post-review rework (second review of 38ca52e..cc16455)
+
+- Forced exits moved out of the library: `forced_exit()` shares the single drain
+  deadline published by `begin()`; there is no detached watchdog task any more.
+  Status 130 (repeated stop after grace) and 1 (watchdog, 10 s after the grace)
+  are documented in the CHANGELOG. The 10 s extra is a technical default.
+- Delivery acknowledgement grace is 2 s, below the 3 s drain grace, so an
+  acknowledgement wait can complete inside the drain; a pipe completing in the
+  last second of a drain is still force-closed at the drain deadline. A missing
+  acknowledgement is reported as peer loss (warning, Access returns an error),
+  never as success, and never replayed. Serve bounds the same wait, so a
+  vanished peer cannot pin the stream task or `active_streams`.
+- Coverage limit: the missing-acknowledgement mapping is unit-tested with an
+  injected pending future (`pipe::tests`); a real peer that withholds QUIC
+  acknowledgements cannot be produced deterministically from a process test.
+- Tests are Unix-only (signals, SIGSTOP); no Windows runtime claim.

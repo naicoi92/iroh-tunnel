@@ -15,7 +15,7 @@ named seams directly. No delegation, public-relay test, PR/push/merge.
 | RW-1: P1 Standards finding / user task: peer STOP_SENDING is failure, not acknowledged delivery | `access_reports_peer_stop_as_tunnel_error`: actual Access child, real TCP client and Iroh peer on local relay; peer reads literal prefix, sends STOP_SENDING code 42 and FIN; client ends request without more bytes; Access must log tunnel error with peer-stop code, not normal closure. Exercises real transport, no mocked stopped result. |
 | RW-2: TCP-FAILURE-01 / P1 Spec finding: kill during marked transfer, bounded no replay on recovery | Strengthen `configured_peer_loss_closes_active_channels_without_replay`: target confirms unique prefix of unfinished logical request, remainder held by client until after Serve killed/reaped; client EOF/error; same identity restart; distinct new marker/reply, no old bytes or extra target accepts for 2 s. No exactly-once or arbitrary-future claim. |
 | RW-3: P2 Standards finding / user task: configured process fixture handles bind races only, reaps failed children, checks actual address | Shared bounded collision retry for Access starts in `tests/configured_multiplex.rs`; `configured_listener_retries_confirmed_bind_collision` holds first candidate port, checks collision log and reaped child then real TCP exchange on replacement listener. Retry only bind failure plus platform address-in-use code; unrelated failures propagate. |
-| RW-4: user task: publish retry and shutdown defaults | Unreleased changelog inspection: 30 s total client establishment, 5 s per dial, exponential backoff, 3 s shared shutdown grace; no healthy-channel timeout or replay; endpoint close may add transport teardown time. Documentation-only criterion. |
+| RW-4: user task: publish retry and shutdown defaults | Unreleased changelog inspection: 30 s total client establishment, per-dial bound 5/10/15/20 s by attempt (superseding the earlier flat 5 s; 20 s never reached inside 30 s), exponential backoff, 3 s shared shutdown grace, 2 s delivery acknowledgement grace, 10 s local target connect bound, repeated stop after grace exit 130 and 1 s watchdog exit 1; no healthy-channel timeout or replay; endpoint close may add transport teardown time. Documentation-only criterion. |
 
 Applicable Rust rules: RS-01 minimal cohesive seams; RS-05 actionable error;
 RS-08/09 owned cleanup and bounded retry/drain; RS-10 secret hygiene;
@@ -81,3 +81,13 @@ expectation, `configured_` filter passed 5/5 in 44.11 s,
 changelog now documents 30 s client budget, 5 s per dial, existing exponential
 backoff, 3 s shared drain and transport teardown caveat. Broader full gates
 and repeated targeted runs follow on committed candidate.
+
+## Post-review addendum
+
+Second review items: missing delivery acknowledgement is now a peer-loss outcome
+(warning plus Access error, no replay) instead of a logged success; Serve bounds
+the same wait; acknowledgement grace (2 s) is below the drain grace (3 s);
+`refused_local_target_closes_only_that_channel` and the unit test
+`connect_local_timeout_resets_only_that_channel` cover the local-connect failure
+and timeout branches. See `issue-86-shutdown-evidence.md` for the forced-exit
+tests. The earlier "5 s per dial" wording in this file's RW-4 row is superseded.

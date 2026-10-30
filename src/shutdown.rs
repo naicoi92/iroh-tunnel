@@ -156,8 +156,8 @@ static DRAIN_DEADLINE: LazyLock<watch::Sender<Option<Instant>>> =
 /// service manager stop. Repeated signals are handled by [`forced_exit`],
 /// which the CLI boundary races against the whole run.
 pub async fn wait_for_signal() {
-    let which = StopSignals::install().next().await;
-    tracing::info!("received {which}");
+    let signal_name = StopSignals::install().next().await;
+    tracing::info!("received {signal_name}");
 }
 
 /// Resolve when a stuck or repeatedly interrupted shutdown must be abandoned.

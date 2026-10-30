@@ -6,16 +6,25 @@
 
 - **TCP connection lifecycle**: each new Access client has a 30-second
   establishment deadline including shared-connection wait, retries, backoff
-  and stream opening, with at most 20 seconds per dial attempt. Failed dials use
-  exponential backoff (1, 2, 4, 8, 16, then 30 seconds capped; no jitter),
-  bounded by that deadline. Healthy established channels have no added
+  and stream opening. A dial attempt gets 5, 10, 15 and then at most 20
+  seconds (attempt number times 5 seconds, capped); the 30-second deadline
+  truncates the last attempt and backoff, so the 20-second cap is not reached
+  in practice. Failed dials use exponential backoff (1, 2, 4, 8, 16, then 30
+  seconds capped; no jitter). Healthy established channels have no added
   lifetime timeout; peer loss closes affected channels without replay.
+  After a channel finishes, Access and Serve wait at most 2 seconds for the
+  peer to acknowledge the final bytes; Access reports a missing
+  acknowledgement as a peer-loss error (never as a successful close) and
+  Serve logs a warning. Serve gives each channel 10 seconds to connect its
+  local target; a refused or timed-out connect closes only that channel.
   Shutdown stops admission and gives active channels one shared 3-second
-  drain grace, then closes remaining channels. A repeated stop
-  signal never resets grace; after the grace it exits immediately (status
-  130), and a watchdog abandons a stuck shutdown 10 seconds after the grace.
-  Endpoint transport teardown can add time within that watchdog. These are
-  implementation defaults, not configurable settings or delivery guarantees.
+  drain grace, then closes remaining channels. Exit statuses of an abandoned
+  shutdown: a repeated stop signal after the grace exits immediately with
+  status 130 (a repeat inside the grace is ignored), and a watchdog exits
+  with status 1 when shutdown has not finished 10 seconds after the grace.
+  Both attempt own status-file cleanup first. Endpoint transport teardown
+  can add time within that watchdog. These are implementation defaults, not
+  configurable settings or delivery guarantees.
 
 - **TCP multiplexing**: Access always reuses a service connection for
   concurrent streams. Legacy `multiplex` configuration values are silently

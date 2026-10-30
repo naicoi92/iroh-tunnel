@@ -42,3 +42,21 @@ Sensitivity trials temporarily modified production files in this worktree only a
 On macOS arm64, Rust 1.91.1, isolated local relay: focused process suite passed 9/9; unavailable client closed at 30.0042 s with observed 6.0298 s spacing (`/tmp/86-review-process.log`). `cargo +1.91.1 fmt --all -- --check`, `cargo +1.91.1 clippy --all-targets --all-features --locked -- -D warnings`, and `cargo +1.91.1 test --all-features --locked` passed; full test count 150 passed, 5 ignored (`/tmp/86-review-full.log`). Independent review of rework remains required.
 
 Coverage limits: initial deadlines are measured from local connect, a close approximation to accepted time, not exact synchronized clocks. No forced relay-only route, real Internet or production TLS, Linux/Windows runtime, late recovery near deadline, cancellation during every state, precise retry timestamps under load, high contention or long-haul performance claim. Connection/open failure error classification and complete lifecycle policy are not resolved. Independent Standards and Spec reviews required; #86 and release remain open. Standards RS-01, RS-05, RS-08/09, RS-13/14/15/16 apply.
+
+## Post-review correction: per-attempt dial bound
+
+The "5 s maximum per dial" above describes the first implementation. Current
+technical defaults (not approved policy): attempt N is bounded by
+`min(5 s * N, 20 s)`, i.e. 5, 10, 15, then 20 s, and every attempt and backoff
+sleep is also truncated at the caller's deadline (`connect_with_retry` now
+takes the deadline explicitly). With the 30 s client deadline and the
+1, 2 s backoffs, attempt 3 starts at 18 s (5+1+10+2) and is truncated at the
+30 s deadline, so attempt 4 and the 20 s cap are never reached. The cap only
+bounds the schedule.
+
+Timed-out dials still produce the `connect attempt N timed out` lines, so the
+spacing assertion of the unavailable-peer test now sees roughly 6 s (attempt 1
+plus backoff) between the first two. After the client deadline the established
+stream path has the additional bound `DELIVERY_ACK_GRACE` (2 s) for final-byte
+acknowledgement, and Serve bounds its local target connect with a 10 s
+`LOCAL_CONNECT_TIMEOUT`. These are implementation defaults, not configuration.
