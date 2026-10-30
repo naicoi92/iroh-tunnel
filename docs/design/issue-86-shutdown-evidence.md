@@ -213,4 +213,4 @@ not successful delivery. Independent review must check both paths.
 - Coverage limit: the missing-acknowledgement mapping is unit-tested with an
   injected pending future (`pipe::tests`); a real peer that withholds QUIC
   acknowledgements cannot be produced deterministically from a process test.
-- Tests are Unix-only (signals, SIGSTOP); no Windows runtime claim.
+- Tests are Unix-only (signals; the stuck shutdown is simulated by the test-utils-only `IROH_TUNNEL_TEST_HANG_SHUTDOWN` seam); no Windows runtime claim.

@@ -1158,24 +1158,19 @@ async fn configured_listener_retries_confirmed_bind_collision() -> Result<()> {
     outcome
 }
 
-#[cfg(unix)]
-fn signal_process(process: &RoleProcess, signal: &str) -> Result<()> {
-    let status = Command::new("kill")
-        .args([signal, &process.child.id().to_string()])
-        .status()?;
-    anyhow::ensure!(status.success(), "{signal} failed");
-    Ok(())
-}
-
-/// Access stops while a held channel and a frozen (SIGSTOP) Serve peer keep
-/// shutdown from finishing: pipes are force-closed at the 3 s grace, then the
-/// endpoint close cannot be acknowledged by the frozen peer. Returns the
-/// access exit status and when it happened after the first stop.
+/// Access stops with a held channel while the test-utils-only
+/// `IROH_TUNNEL_TEST_HANG_SHUTDOWN` seam makes its shutdown block after the
+/// drain, so only the forced-exit paths can end the process (deterministic on
+/// every OS, unlike a frozen peer). Returns the access exit status and when
+/// it happened after the first stop.
 #[cfg(unix)]
 async fn stuck_shutdown_scenario(
     envs: &[(&str, &str)],
     second_signal_after_grace: bool,
 ) -> Result<(std::process::ExitStatus, Duration, PathBuf)> {
+    let mut all_envs = vec![("IROH_TUNNEL_TEST_HANG_SHUTDOWN", "1")];
+    all_envs.extend_from_slice(envs);
+    let envs = all_envs.as_slice();
     let temp = tempfile::tempdir()?;
     let serve_home = temp.path().join("serve");
     let access_home = temp.path().join("access");
@@ -1206,7 +1201,6 @@ async fn stuck_shutdown_scenario(
         held.read_exact(&mut reply).await?;
         let status_file = access_home.join("state/access-status.json");
         anyhow::ensure!(status_file.exists(), "status file missing before stop");
-        signal_process(&serve, "-STOP")?;
         let started = Instant::now();
         terminate(&access)?;
         if second_signal_after_grace {
@@ -1235,7 +1229,6 @@ async fn stuck_shutdown_scenario(
     .await
     .context("stuck shutdown scenario timeout")
     .and_then(|r| r);
-    let _ = signal_process(&serve, "-CONT");
     for process in [&mut access, &mut serve] {
         if process.child.try_wait()?.is_none() {
             process.child.kill()?;

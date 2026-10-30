@@ -188,6 +188,21 @@ pub async fn forced_exit() -> ForcedExit {
     forced_exit_after(deadline, watchdog, async || signals.next().await).await
 }
 
+/// Test-only seam: with `IROH_TUNNEL_TEST_HANG_SHUTDOWN=1` the calling
+/// shutdown step never completes, so only the forced-exit paths can end the
+/// process. Compiled only under `test-utils`; production binaries never read
+/// the variable.
+#[cfg(feature = "test-utils")]
+pub async fn test_hang_point() {
+    if std::env::var("IROH_TUNNEL_TEST_HANG_SHUTDOWN").is_ok_and(|v| v == "1") {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Production build: no hang seam.
+#[cfg(not(feature = "test-utils"))]
+pub async fn test_hang_point() {}
+
 /// Pure core of [`forced_exit`] with injected signal source, for tests.
 async fn forced_exit_after<S>(
     deadline: Instant,

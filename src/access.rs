@@ -345,6 +345,8 @@ impl AccessStrategy {
                 false
             }
         };
+        // Test-utils seam: simulate a shutdown stuck in the endpoint close.
+        shutdown::test_hang_point().await;
         ep.close().await;
         // Remove the status file only after a clean join AND only if it
         // still belongs to THIS process (its `pid` field decides — two
