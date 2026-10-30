@@ -262,10 +262,12 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
         ServiceAction::Start { system } => {
             // Refuse here too: the unit would otherwise start and exit
             // after systemd/launchd already reported success (RO-03).
-            crate::ownership::ensure_not_running(match role {
+            let status_role = match role {
                 "serve" => StatusRole::Serve,
-                _ => StatusRole::Access,
-            })?;
+                "access" => StatusRole::Access,
+                other => anyhow::bail!("unknown role {other:?}"),
+            };
+            crate::ownership::ensure_not_running(status_role)?;
             service::start(role, scope_of(system))
         }
         ServiceAction::Stop { system } => service::stop(role, scope_of(system)),

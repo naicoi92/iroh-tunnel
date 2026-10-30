@@ -262,7 +262,7 @@ async fn roles_with_distinct_keys_coexist_but_a_shared_key_is_rejected() -> Resu
     )?;
     wait_running(&access_state.join("access-status.json"), &mut access)?;
 
-    // The same public identity in another role is rejected (RO-02).
+    // Same-role start in a shared HOME is refused by role ownership (RO-01).
     let shared = world.state("shared");
     let rejected = spawn(
         world.command(ACCESS, None, &shared),
@@ -392,6 +392,11 @@ async fn running_role_status_names_role_and_owner_pid() -> Result<()> {
 #[tokio::test]
 async fn system_tier_lock_refuses_user_start_and_blocks_a_system_start() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    // Root ignores file modes, so the non-elevated view cannot be simulated.
+    if running_as_root() {
+        eprintln!("skipped: running as root");
+        return Ok(());
+    }
     let (relay, _server) = relay().await?;
     let world = World::new()?;
     let (key, _) = write_key(world.root.path(), "k.key")?;
@@ -423,6 +428,8 @@ async fn system_tier_lock_refuses_user_start_and_blocks_a_system_start() -> Resu
         later.try_lock().is_err(),
         "a running user role must hold the machine lock shared"
     );
+    // Restore modes so the tempdir can be removed.
+    std::fs::set_permissions(world.machine(), std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -448,4 +455,13 @@ fn out(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn running_as_root() -> bool {
+    // `id -u` avoids an unsafe libc call in the test.
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
 }

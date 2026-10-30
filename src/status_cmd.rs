@@ -39,6 +39,17 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
         // misdiagnosing those as "stopped" would hide the actual problem.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Liveness::Running { tier, owner } = &liveness {
+                if json {
+                    // Keep `--json` machine-readable: report the live owner.
+                    let value = serde_json::json!({
+                        "role": role.name(),
+                        "running": true,
+                        "pid": owner.as_ref().map(|o| o.pid),
+                        "node_id": owner.as_ref().and_then(|o| o.node_id.clone()),
+                        "snapshot": null,
+                    });
+                    return print_line(&value.to_string());
+                }
                 return print_line(&describe_running(role, *tier, owner.as_ref(), &path));
             }
             return Err(anyhow!(

@@ -274,6 +274,12 @@ pub(crate) fn claim(role: StatusRole) -> Result<RoleClaim> {
             MachineClaim::Absent => {}
         }
     }
+    // Replace any record a crashed predecessor left, before anyone can read
+    // it as ours: its pid may equal the pid in a stale status snapshot.
+    write_owner(&user_dir, role, None);
+    if let Some(dir) = &held_machine {
+        write_owner(dir, role, None);
+    }
     Ok(RoleClaim {
         role,
         user_dir,
