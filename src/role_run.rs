@@ -17,6 +17,29 @@ use anyhow::Result;
 use iroh::endpoint::Connection;
 
 use crate::config::{Protocol, RoleDoc};
+use crate::ownership::RoleClaim;
+use crate::status::StatusRole;
+
+/// Whether a run enforces role ownership (RO-01..RO-03).
+///
+/// Production entry points enforce it; the library seams that tests drive
+/// in-process (`run_with_shutdown*`) do not, so several in-process roles of
+/// one kind can share a test binary. Real-process tests cover enforcement.
+#[derive(Clone, Copy)]
+pub(crate) enum Ownership {
+    Enforced(StatusRole),
+    Unenforced,
+}
+
+impl Ownership {
+    /// Take the role's locks, refusing while the role already runs.
+    pub(crate) fn claim(self) -> Result<Option<RoleClaim>> {
+        match self {
+            Self::Enforced(role) => crate::ownership::claim(role).map(Some),
+            Self::Unenforced => Ok(None),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Small display helpers (shared, no polymorphism)
@@ -202,29 +225,54 @@ pub(crate) trait RoleStrategy {
 /// inside the run-loop closure — that's where the role has access to both
 /// the loaded config and the live endpoint, and where the timing fits
 /// between "endpoint ready" and "shutdown received".
-pub(crate) async fn run_skeleton<S, F, Fut>(config_path: &Path, run_loop: F) -> Result<()>
+pub(crate) async fn run_skeleton<S, F, Fut>(
+    config_path: &Path,
+    ownership: Ownership,
+    run_loop: F,
+) -> Result<()>
 where
     S: RoleStrategy,
     F: FnOnce(iroh::Endpoint, S::Config) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    // Claim the role before touching the config: a refused start must not
+    // generate or persist a key.
+    let claim = ownership.claim()?;
     // Load and validate the config, then resolve+persist the secret key. Both
     // steps are shared across roles via the RoleDoc trait.
     let mut cfg = S::Config::load(config_path)?;
     cfg.resolve_and_save_key(config_path)?;
 
-    run_config::<S, _, _>(cfg, run_loop).await
+    run_config::<S, _, _>(cfg, claim, run_loop).await
 }
 
-pub(crate) async fn run_config<S, F, Fut>(cfg: S::Config, run_loop: F) -> Result<()>
+/// Build the endpoint and run the role while holding `claim`.
+///
+/// The public identity is checked against the other role before the endpoint
+/// binds, so a rejected duplicate never reaches the relay (RO-02). An
+/// ephemeral key only exists after the endpoint is built and cannot clash.
+pub(crate) async fn run_config<S, F, Fut>(
+    mut cfg: S::Config,
+    claim: Option<RoleClaim>,
+    run_loop: F,
+) -> Result<()>
 where
     S: RoleStrategy,
     F: FnOnce(iroh::Endpoint, S::Config) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    let secret_key = cfg.node_mut().secret_key.clone();
+    if let (Some(claim), false) = (&claim, secret_key.is_empty()) {
+        let (key, _) = crate::config::resolve_secret_key(&secret_key)?;
+        claim.publish_identity(&key.public().to_string())?;
+    }
+
     // Build the role-specific endpoint (serve registers ALPNs, access is
     // outbound-only).
     let ep = S::build_endpoint(&cfg).await?;
+    if let (Some(claim), true) = (&claim, secret_key.is_empty()) {
+        claim.publish_identity(&crate::endpoint::node_id_string(&ep))?;
+    }
 
     // Print the operator-facing NodeId line (identical across roles).
     println!("NodeId: {}", crate::endpoint::node_id_string(&ep));
@@ -239,17 +287,22 @@ where
 
     tracing::info!("endpoint ready");
     // The role owns admission, drain, task joins and endpoint/status cleanup.
-    run_loop(ep, cfg).await?;
-
-    Ok(())
+    let result = run_loop(ep, cfg).await;
+    // Held to here so the role stays owned until it has fully stopped.
+    drop(claim);
+    result
 }
 
 /// Drive a role end-to-end with its stock [`RoleStrategy::run_loop`].
 pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
     config_path: &Path,
+    ownership: Ownership,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    run_skeleton::<S, _, _>(config_path, |ep, cfg| S::run_loop(ep, cfg, shutdown)).await
+    run_skeleton::<S, _, _>(config_path, ownership, |ep, cfg| {
+        S::run_loop(ep, cfg, shutdown)
+    })
+    .await
 }
 
 #[cfg(test)]

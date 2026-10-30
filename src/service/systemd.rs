@@ -53,6 +53,7 @@ fn format_unit_with(role: &str, binary: &Path, config: &Path, policy: &RestartPo
          ExecStart={binary} {role} run --config {config}\n\
          Restart={restart}\n\
          RestartSec={restart_sec}\n\
+         RestartPreventExitStatus=6\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n"
@@ -158,6 +159,8 @@ mod tests {
         );
         assert!(body.contains("Restart=on-failure"), "body: {body}");
         assert!(body.contains("RestartSec=5"), "body: {body}");
+        // A refused start (exit 6, role already running) must not restart-loop.
+        assert!(body.contains("RestartPreventExitStatus=6"), "body: {body}");
         assert!(body.contains("ExecStart=/usr/bin/iroh-tunnel serve run --config /etc/cfg"));
     }
 

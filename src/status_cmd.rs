@@ -21,6 +21,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
 
 use crate::conn_path::TransportStatus;
+use crate::ownership::{self, Liveness, Owner, Tier};
 use crate::status::{AccessStatusFile, StatusFile, StatusPayload, StatusRole, StatusWriter};
 
 /// Entry point for `iroh-tunnel <role> status [--json]`.
@@ -28,6 +29,7 @@ use crate::status::{AccessStatusFile, StatusFile, StatusPayload, StatusRole, Sta
 pub fn run(role: StatusRole, json: bool) -> Result<()> {
     let writer = StatusWriter::new(role);
     let path = writer.path()?;
+    let liveness = ownership::probe(role)?;
     let body = match std::fs::read_to_string(&path) {
         Ok(body) => body,
         // A missing file is "not running", not a hard IO failure the
@@ -36,6 +38,9 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
         // the path, …) is a real failure and propagates with its cause:
         // misdiagnosing those as "stopped" would hide the actual problem.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Liveness::Running { tier, owner } = &liveness {
+                return print_line(&describe_running(role, *tier, owner.as_ref(), &path));
+            }
             return Err(anyhow!(
                 "{} is not running (no {} found at {})",
                 role.name(),
@@ -59,10 +64,10 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
         StatusPayload::Serve(file) => (file.pid, file.started_at),
         StatusPayload::Access(file) => (file.pid, file.started_at),
     };
-    // Cross-check the writer's pid: a graceful shutdown removes the file,
-    // but a crash or `kill -9` leaves it behind — stale, yet often still
-    // useful (last-known state). Warn on stderr, keep printing on stdout.
-    warn_if_writer_dead(role, pid, started_at);
+    // A graceful shutdown removes the file, but a crash or `kill -9` leaves
+    // it behind — stale, yet often still useful (last-known state). Warn on
+    // stderr, keep printing on stdout.
+    warn_unless_live(role, &liveness, pid, started_at);
     if json {
         // Verbatim file contents, not a re-serialization: anything piping
         // this command must get byte-identical JSON to reading the file.
@@ -90,52 +95,50 @@ fn print_line(line: &str) -> Result<()> {
     }
 }
 
-/// Warn when the process that wrote the snapshot is gone (unix only).
+/// Judge the snapshot against the role's ownership locks (AC-RO-03, AC-RO-05,
+/// AC-RO-06).
 ///
-/// Probes `kill(pid, 0)`: success or `EPERM` (exists, owned by another
-/// user) means alive; `ESRCH` means dead. Non-unix builds skip the check —
-/// there is no portable probe, so no warning is better than a wrong one.
-#[cfg(unix)]
-fn warn_if_writer_dead(role: StatusRole, pid: u32, started_at: u64) {
-    let Some(pid) = validate_pid(pid) else {
-        eprintln!(
-            "warning: {} status file carries an invalid pid ({pid}); showing last snapshot from epoch {started_at}",
+/// A pid is never proof of life: a crash leaves the file behind and the OS
+/// may hand the pid to an unrelated process. The kernel lock held by the
+/// running role is the only liveness signal, on every platform.
+fn warn_unless_live(role: StatusRole, liveness: &Liveness, pid: u32, started_at: u64) {
+    match liveness {
+        Liveness::NotRunning => eprintln!(
+            "warning: {} is not running; this snapshot (pid {pid}) is stale, showing the last \
+             snapshot from epoch {started_at}",
             role.name()
-        );
-        return;
-    };
-    // SAFETY: kill(2) with signal 0 performs existence and permission
-    // checks only — no signal is ever delivered. `pid` is a positive i32
-    // (validated above), so it addresses exactly one process, never a
-    // process group.
-    let ret = unsafe { libc::kill(pid, 0) };
-    // Read errno IMMEDIATELY after the call, off the bound `ret` — a
-    // chained expression could observe a different syscall's errno.
-    let alive =
-        ret == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied;
-    if !alive {
-        eprintln!(
-            "warning: {} appears stopped (pid {pid} not running); showing last snapshot from epoch {started_at}",
-            role.name()
-        );
+        ),
+        Liveness::Running {
+            owner: Some(owner), ..
+        } if owner.pid != pid => eprintln!(
+            "warning: {} is running as pid {}, but this snapshot was written by pid {pid} \
+             and is stale; showing the last snapshot from epoch {started_at}",
+            role.name(),
+            owner.pid
+        ),
+        Liveness::Running { .. } => {}
     }
 }
 
-/// Map a status-file `pid` onto a probe-able unix pid.
-///
-/// `0` (all processes) and anything that wraps negative as `pid_t`
-/// (process-group semantics under kill(2)) can never address one real
-/// writer process — both are reported as invalid rather than guessed
-/// "alive" by a stray probe.
-#[cfg(unix)]
-fn validate_pid(pid: u32) -> Option<libc::pid_t> {
-    libc::pid_t::try_from(pid).ok().filter(|pid| *pid > 0)
+/// One line naming the live owner when no snapshot is readable here.
+fn describe_running(role: StatusRole, tier: Tier, owner: Option<&Owner>, path: &Path) -> String {
+    let who = match owner {
+        Some(o) => match &o.node_id {
+            Some(id) => format!("pid {}, node_id {id}", o.pid),
+            None => format!("pid {}", o.pid),
+        },
+        None => "owner unknown".to_string(),
+    };
+    let scope = match tier {
+        Tier::User => "this user",
+        Tier::Machine => "the system service or another machine-wide process",
+    };
+    format!(
+        "{} is running for {scope} ({who}); no status snapshot at {} (it may use another state directory)",
+        role.name(),
+        path.display()
+    )
 }
-
-/// Non-unix twin of [`warn_if_writer_dead`]: no portable pid-liveness
-/// probe, so the check is skipped silently.
-#[cfg(not(unix))]
-fn warn_if_writer_dead(_role: StatusRole, _pid: u32, _started_at: u64) {}
 
 /// Parse a status file body as `T`, with the path in the error context.
 fn parse_status_file<T: DeserializeOwned>(body: &str, path: &Path) -> Result<T> {
@@ -467,22 +470,5 @@ services: none";
         assert_eq!(short_peer_id(SERVE_PEER), "1aa27080…");
         // Shorter ids are kept whole, with the ellipsis marking truncation.
         assert_eq!(short_peer_id("peer456"), "peer456…");
-    }
-
-    /// PR #62 run 4, acceptance C — pid boundaries must never reach
-    /// kill(2): pid 0 addresses every process, and a u32 above i32::MAX
-    /// wraps to a NEGATIVE pid_t (process-group semantics) in the syscall
-    /// ABI. Both are "invalid pid" warnings, not liveness guesses.
-    #[cfg(unix)]
-    #[test]
-    fn validate_pid_rejects_zero_and_i32_wraparound() {
-        assert_eq!(validate_pid(0), None, "pid 0 would address every process");
-        assert_eq!(
-            validate_pid(4_000_000_000),
-            None,
-            "above i32::MAX wraps negative as pid_t — process-group semantics"
-        );
-        assert_eq!(validate_pid(1), Some(1));
-        assert_eq!(validate_pid(i32::MAX as u32), Some(i32::MAX));
     }
 }

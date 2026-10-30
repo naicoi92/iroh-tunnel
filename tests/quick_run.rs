@@ -401,7 +401,8 @@ async fn quick_roles_do_not_create_config_or_keys_in_empty_home() -> Result<()> 
     let temp = tempfile::tempdir()?;
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     ephemeral_restarts(temp.path(), &relay.to_string()).await?;
-    assert_eq!(std::fs::read_dir(temp.path())?.count(), 0);
+    // Only role-ownership runtime state may appear; no config, no keys.
+    assert_eq!(file_snapshot(temp.path())?, Default::default());
     Ok(())
 }
 
@@ -480,6 +481,19 @@ fn assert_user_files_unchanged(files: &[(std::path::PathBuf, Vec<u8>)]) -> Resul
     Ok(())
 }
 
+/// Role-ownership runtime state (#87): lock and owner records beside the
+/// default state directory. They are neither configuration nor keys.
+fn is_ownership_artifact(path: &std::path::Path) -> bool {
+    let in_state_dir = path
+        .parent()
+        .is_some_and(|dir| dir.ends_with(".local/state/iroh-tunnel"));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    in_state_dir
+        && (name.ends_with(".lock")
+            || name.ends_with(".owner.json")
+            || name.contains(".owner.json."))
+}
+
 fn file_snapshot(
     root: &std::path::Path,
 ) -> Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>> {
@@ -492,7 +506,7 @@ fn file_snapshot(
             let path = entry?.path();
             if path.is_dir() {
                 collect(root, &path, files)?;
-            } else {
+            } else if !is_ownership_artifact(&path) {
                 files.insert(path.strip_prefix(root)?.to_owned(), std::fs::read(path)?);
             }
         }

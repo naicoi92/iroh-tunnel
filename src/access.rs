@@ -61,6 +61,7 @@ use crate::status::{AccessServiceStatus, AccessStatusFile, StatusPayload, Status
 pub async fn run(config_path: &Path) -> Result<()> {
     crate::role_run::run_with_shutdown::<AccessStrategy>(
         config_path,
+        crate::role_run::Ownership::Enforced(crate::status::StatusRole::Access),
         crate::shutdown::wait_for_signal(),
     )
     .await
@@ -70,7 +71,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
 pub async fn run_quick(cfg: AccessConfig) -> Result<()> {
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("access quick mode: {e}")))?;
-    crate::role_run::run_config::<AccessStrategy, _, _>(cfg, |ep, cfg| {
+    let claim = crate::role_run::Ownership::Enforced(crate::status::StatusRole::Access).claim()?;
+    crate::role_run::run_config::<AccessStrategy, _, _>(cfg, claim, |ep, cfg| {
         AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal())
     })
     .await
@@ -85,7 +87,12 @@ pub async fn run_with_shutdown(
     config_path: &Path,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    crate::role_run::run_with_shutdown::<AccessStrategy>(config_path, shutdown).await
+    crate::role_run::run_with_shutdown::<AccessStrategy>(
+        config_path,
+        crate::role_run::Ownership::Unenforced,
+        shutdown,
+    )
+    .await
 }
 
 /// Run the access role like [`run_with_shutdown`], but write its status
@@ -105,9 +112,11 @@ pub async fn run_with_shutdown_with_state_dir(
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
     let state_dir = Some(state_dir.to_path_buf());
-    crate::role_run::run_skeleton::<AccessStrategy, _, _>(config_path, |ep, cfg| {
-        AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir)
-    })
+    crate::role_run::run_skeleton::<AccessStrategy, _, _>(
+        config_path,
+        crate::role_run::Ownership::Unenforced,
+        |ep, cfg| AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir),
+    )
     .await
 }
 

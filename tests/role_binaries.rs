@@ -427,13 +427,33 @@ async fn supplied_key_keeps_public_identity_across_restarts_for_every_role_form(
             "{label} identity changed"
         );
         assert_eq!(std::fs::read(&key_path)?, key_bytes, "{label} rewrote key");
-        assert_eq!(
-            std::fs::read_dir(form.install.home())?.count(),
-            0,
-            "{label} wrote config"
-        );
+        let written = non_ownership_files(&form.install.home())?;
+        assert!(written.is_empty(), "{label} wrote config: {written:?}");
     }
     Ok(())
+}
+
+/// Files under `dir` other than role-ownership runtime state (#87: lock and
+/// owner records in the default state directory), which is neither config
+/// nor keys.
+fn non_ownership_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            found.extend(non_ownership_files(&path)?);
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let ownership = path
+            .parent()
+            .is_some_and(|p| p.ends_with(".local/state/iroh-tunnel"))
+            && (name.ends_with(".lock") || name.contains(".owner.json"));
+        if !ownership {
+            found.push(path);
+        }
+    }
+    Ok(found)
 }
 
 fn help(form: &RoleForm<'_>) -> Result<String> {

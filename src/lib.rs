@@ -18,6 +18,7 @@ pub mod config_cmd;
 pub mod conn_path;
 pub mod endpoint;
 pub mod error;
+pub(crate) mod ownership;
 pub mod paths;
 pub mod pipe;
 pub mod proto;
