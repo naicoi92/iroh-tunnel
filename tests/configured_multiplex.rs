@@ -413,10 +413,20 @@ async fn unavailable_peer_retries_then_closes_client_within_deadline() -> Result
     ))?;
     let mut access = start("access", &home, &config, 0)?;
     let outcome = async {
-        wait_log(&mut access, "listening for local clients").await?;
+        wait_log(&mut access, &format!("listen_addr={listen}")).await?;
         let started = Instant::now();
         let mut client = TcpStream::connect(listen).await?;
         client.write_all(b"pending").await?;
+        // Observe completed timed-out dials as they occur, not the planned
+        // delay in their log messages. Allow 500ms polling/scheduling slack.
+        wait_log(&mut access, "connect attempt 1 timed out").await?;
+        let first_attempt = Instant::now();
+        wait_log(&mut access, "connect attempt 2 timed out").await?;
+        let attempt_spacing = first_attempt.elapsed();
+        anyhow::ensure!(
+            attempt_spacing >= Duration::from_millis(5500),
+            "timed-out attempts too close together: {attempt_spacing:?}"
+        );
         let mut byte = [0; 1];
         let result = tokio::time::timeout(Duration::from_secs(40), client.read(&mut byte))
             .await
@@ -425,17 +435,15 @@ async fn unavailable_peer_retries_then_closes_client_within_deadline() -> Result
             matches!(result, Ok(0) | Err(_)),
             "unexpected client data: {result:?}"
         );
-        let log = std::fs::read_to_string(&access.log)?;
+        let elapsed = started.elapsed();
         anyhow::ensure!(
-            log.contains("connect attempt 1")
-                && log.contains("retrying in 1000ms")
-                && log.contains("connect attempt 2")
-                && log.contains("retrying in 2000ms"),
-            "repeated exponential backoff not observed: {log}"
+            (Duration::from_secs(28)..=Duration::from_secs(40)).contains(&elapsed),
+            "client closed outside deadline tolerance: {elapsed:?}"
         );
+        let log = wait_log(&mut access, "client connection deadline expired").await?;
+        anyhow::ensure!(access.child.try_wait()?.is_none(), "access exited: {log}");
         eprintln!(
-            "unavailable client closed after {:?}; retry log: {log}",
-            started.elapsed()
+            "unavailable client closed after {elapsed:?}; timed-out attempt spacing {attempt_spacing:?}; retry log: {log}"
         );
         Ok::<_, anyhow::Error>(())
     }
@@ -477,7 +485,7 @@ async fn retry_scenario(scenario: &str) -> Result<()> {
     let mut access = start("access", &access_home, &access_path, 0)?;
     let mut serve = None;
     let outcome = tokio::time::timeout(Duration::from_secs(65), async {
-        wait_log(&mut access, "listening for local clients").await?;
+        wait_log(&mut access, &format!("listen_addr={listen}")).await?;
         if scenario == "healthy" {
             let mut process = start("serve", &serve_home, &serve_path, 0)?;
             wait_log(&mut process, "endpoint ready").await?;
