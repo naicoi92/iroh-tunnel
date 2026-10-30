@@ -29,14 +29,41 @@ builds:
       - aarch64-apple-darwin
     flags:
       - --release
+      - --bin=iroh-tunnel
+
+  # Archive-only role builds; cask ownership remains unchanged.
+  - id: iroh-tunnel-serve-macos
+    builder: rust
+    binary: iroh-tunnel-serve
+    targets:
+      - aarch64-apple-darwin
+    flags:
+      - --release
+      - --bin=iroh-tunnel-serve
+
+  - id: iroh-tunnel-access-macos
+    builder: rust
+    binary: iroh-tunnel-access
+    targets:
+      - aarch64-apple-darwin
+    flags:
+      - --release
+      - --bin=iroh-tunnel-access
 
 archives:
   - id: macos
+    ids:
+      - iroh-tunnel-macos
+      - iroh-tunnel-serve-macos
+      - iroh-tunnel-access-macos
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - README.md
       - LICENSE*
+      # Preserve relative symlinks beside binaries; not package/cask install rules.
+      - src: packaging/archive-aliases/*
+        strip_parent: true
 
 # Append this build's checksum to the one already created by the Linux job.
 checksum:

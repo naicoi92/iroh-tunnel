@@ -910,7 +910,7 @@ async fn role_forms_long_and_short_options_forward_default_and_explicit_tcp() ->
             for short in [false, true] {
                 for explicit in [false, true] {
                     eprintln!("matrix standalone={standalone} short={short} explicit={explicit}");
-                    matrix_session(&target_addr, &relay, standalone, short, explicit).await?;
+                    matrix_session(&target_addr, &relay, standalone, short, explicit, None).await?;
                 }
             }
         }
@@ -930,6 +930,7 @@ async fn matrix_session(
     standalone: bool,
     short: bool,
     explicit: bool,
+    alias_fixture: Option<&std::path::Path>,
 ) -> Result<()> {
     let home = tempfile::tempdir()?;
     let serve_dir = tempfile::tempdir()?;
@@ -945,25 +946,39 @@ async fn matrix_session(
     } else {
         "iroh-tunnel"
     };
-    let serve_binary = serve_dir
-        .path()
-        .join(format!("{serve_name}{}", std::env::consts::EXE_SUFFIX));
-    let access_binary = access_dir
-        .path()
-        .join(format!("{access_name}{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(
-        all.with_file_name(serve_binary.file_name().context("serve filename")?),
-        &serve_binary,
-    )?;
-    std::fs::copy(
-        all.with_file_name(access_binary.file_name().context("access filename")?),
-        &access_binary,
-    )?;
+    let (serve_binary, access_binary) = if let Some(fixture) = alias_fixture {
+        let (serve_alias, access_alias) = if standalone {
+            ("its", "ita")
+        } else {
+            ("it", "it")
+        };
+        (
+            fixture.join(serve_alias).join(serve_alias),
+            fixture.join(access_alias).join(access_alias),
+        )
+    } else {
+        let serve_binary = serve_dir
+            .path()
+            .join(format!("{serve_name}{}", std::env::consts::EXE_SUFFIX));
+        let access_binary = access_dir
+            .path()
+            .join(format!("{access_name}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(
+            all.with_file_name(serve_binary.file_name().context("serve filename")?),
+            &serve_binary,
+        )?;
+        std::fs::copy(
+            all.with_file_name(access_binary.file_name().context("access filename")?),
+            &access_binary,
+        )?;
+        (serve_binary, access_binary)
+    };
+    let serve_directory = serve_binary.parent().context("Serve binary directory")?;
     let mut command = Command::new(&serve_binary);
     isolated(&mut command, home.path());
     command
-        .current_dir(serve_dir.path())
-        .env("PATH", serve_dir.path())
+        .current_dir(serve_directory)
+        .env("PATH", serve_directory)
         .env("IROH_TUNNEL_STATE_DIR", home.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -982,7 +997,7 @@ async fn matrix_session(
     let mut serve = Process(command.spawn()?, None);
     let snapshot = status(&home.path().join("serve-status.json"), &mut serve).await?;
     let node = snapshot["node_id"].as_str().context("serve node id")?;
-    let (_access, listen) = access_ready_with_collision_probe(
+    let (access, listen) = access_ready_with_collision_probe(
         home.path(),
         home.path(),
         short,
@@ -1003,5 +1018,54 @@ async fn matrix_session(
     let mut response = [0; 15];
     tokio::time::timeout(Duration::from_secs(30), client.read_exact(&mut response)).await??;
     assert_eq!(&response, b"matrix response");
+    eprintln!(
+        "Serve={} pid={} Access={} pid={} node={node} target={target} listen={listen}: exact matrix request / matrix response",
+        serve_binary.display(), serve.0.id(), access_binary.display(), access.0.id()
+    );
+    Ok(())
+}
+
+// CLI-ALIAS-01: fixture must come from tests/release_aliases.py, which builds
+// actual producer archives and preserves their extracted relative symlinks.
+// Never run these test-utils binaries with public relays (RS-13, RS-15).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires actual producer artifact; run tests/release_aliases.py"]
+async fn produced_archive_aliases_forward_tcp_independently() -> Result<()> {
+    let fixture = std::path::PathBuf::from(
+        std::env::var_os("IROH_TUNNEL_ALIAS_FIXTURE").context("producer alias fixture required")?,
+    );
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let target_addr = target.local_addr()?.to_string();
+    let server = async {
+        for _ in 0..2 {
+            let (mut stream, _) = target.accept().await?;
+            let mut request = [0; 14];
+            stream.read_exact(&mut request).await?;
+            assert_eq!(&request, b"matrix request");
+            stream.write_all(b"matrix response").await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let sessions = async {
+        let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+        for standalone in [false, true] {
+            matrix_session(
+                &target_addr,
+                &relay.to_string(),
+                standalone,
+                false,
+                false,
+                Some(&fixture),
+            )
+            .await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::try_join!(server, sessions)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
     Ok(())
 }

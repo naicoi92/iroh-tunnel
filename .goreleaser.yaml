@@ -44,6 +44,7 @@ builds:
       - aarch64-unknown-linux-gnu
     flags:
       - --release
+      - --bin=iroh-tunnel
 
   # musl build — feeds the .apk package only. Required for Alpine hosts
   # (LXC, bare-metal), which use musl libc and cannot run a glibc binary
@@ -65,6 +66,58 @@ builds:
       - riscv64gc-unknown-linux-musl
     flags:
       - --release
+      - --bin=iroh-tunnel
+
+  # Role builds feed only archives; package and Docker ownership stays unchanged.
+  - id: iroh-tunnel-serve
+    builder: rust
+    binary: iroh-tunnel-serve
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    flags:
+      - --release
+      - --bin=iroh-tunnel-serve
+
+  - id: iroh-tunnel-access
+    builder: rust
+    binary: iroh-tunnel-access
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    flags:
+      - --release
+      - --bin=iroh-tunnel-access
+
+  - id: iroh-tunnel-serve-musl
+    builder: rust
+    binary: iroh-tunnel-serve
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - riscv64gc-unknown-linux-musl
+    flags:
+      - --release
+      - --bin=iroh-tunnel-serve
+
+  - id: iroh-tunnel-access-musl
+    builder: rust
+    binary: iroh-tunnel-access
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - riscv64gc-unknown-linux-musl
+    flags:
+      - --release
+      - --bin=iroh-tunnel-access
 
 # Two archive blocks because we now ship two linux libc flavours (glibc + musl);
 # without filtering by build `ids` both would emit `...-linux-<arch>.tar.gz` and
@@ -73,19 +126,29 @@ archives:
   - id: glibc
     ids:
       - iroh-tunnel
+      - iroh-tunnel-serve
+      - iroh-tunnel-access
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - README.md
       - LICENSE*
+      # Preserve relative symlinks beside binaries; not package/cask install rules.
+      - src: packaging/archive-aliases/*
+        strip_parent: true
   - id: musl
     ids:
       - iroh-tunnel-musl
+      - iroh-tunnel-serve-musl
+      - iroh-tunnel-access-musl
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}-musl"
     files:
       - README.md
       - LICENSE*
+      # Preserve relative symlinks beside binaries; not package/cask install rules.
+      - src: packaging/archive-aliases/*
+        strip_parent: true
 
 checksum:
   name_template: "checksums.txt"
