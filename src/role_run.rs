@@ -70,14 +70,14 @@ pub(crate) fn next_backoff_ms(prev_ms: u64) -> u64 {
     (prev_ms.saturating_mul(2)).min(MAX_BACKOFF_MS)
 }
 
-/// Dial a peer with exponential backoff, retrying forever until success.
+/// Dial a peer with exponential backoff until success or caller cancellation.
 ///
 /// Retries [`iroh::Endpoint::connect`] on failure with the schedule
 /// [`INITIAL_BACKOFF_MS`] → [`next_backoff_ms`] → … → [`MAX_BACKOFF_MS`]:
 /// `1s → 2s → 4s → 8s → 16s → 30s (cap)`. On the first success after one or
 /// more failures, logs `reconnected after N attempts`. Per-service
-/// independent: each connection task runs its own retry, so one unreachable
-/// peer never affects another service (Page 04 v2 §1.3).
+/// independent: an unreachable peer never affects another service. The caller
+/// must bound and cancel this future, including time spent waiting for its lock.
 pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
     addr: &iroh::EndpointAddr,
@@ -86,20 +86,29 @@ pub(crate) async fn connect_with_retry(
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut attempt = 1u32;
     loop {
-        match ep.connect(addr.clone(), alpn).await {
-            Ok(conn) => {
+        // A stalled dial must leave room for backoff and another attempt in
+        // the caller's total budget; dropping it cancels that dial future.
+        let dial =
+            tokio::time::timeout(Duration::from_secs(5), ep.connect(addr.clone(), alpn)).await;
+        match dial {
+            Ok(Ok(conn)) => {
                 if attempt > 1 {
                     tracing::info!("reconnected after {attempt} attempts");
                 }
                 return Ok(conn);
             }
-            Err(e) => {
-                tracing::warn!("connect attempt {attempt} failed: {e}, retrying in {backoff_ms}ms");
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                backoff_ms = next_backoff_ms(backoff_ms);
-                attempt += 1;
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "connect attempt {attempt} failed: {error}, retrying in {backoff_ms}ms"
+                );
+            }
+            Err(_) => {
+                tracing::warn!("connect attempt {attempt} timed out, retrying in {backoff_ms}ms");
             }
         }
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        backoff_ms = next_backoff_ms(backoff_ms);
+        attempt += 1;
     }
 }
 

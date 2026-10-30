@@ -296,10 +296,12 @@ impl AccessStrategy {
             crate::status::STATUS_FLUSH_INTERVAL,
             save_access_status,
         ));
+        let (retry_stop, retry_stop_rx) = tokio::sync::watch::channel(false);
         for dialer in dialers {
-            handles.push(tokio::spawn(listen_loop(dialer)));
+            handles.push(tokio::spawn(listen_loop(dialer, retry_stop_rx.clone())));
         }
         shutdown.await;
+        let _ = retry_stop.send(true);
         // Abort each per-service listener so they stop accepting new local
         // clients before the endpoint close tears down the in-flight dials.
         for h in handles {
@@ -597,7 +599,7 @@ impl ServiceDialer {
 ///
 /// Returns only if the listener errors fatally (e.g. the bound socket closes).
 /// Per-client errors are logged, not propagated.
-async fn listen_loop(dialer: Arc<ServiceDialer>) {
+async fn listen_loop(dialer: Arc<ServiceDialer>, retry_stop: tokio::sync::watch::Receiver<bool>) {
     let listen_addr = dialer.listen_addr.clone();
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => l,
@@ -612,8 +614,11 @@ async fn listen_loop(dialer: Arc<ServiceDialer>) {
         match listener.accept().await {
             Ok((local_stream, peer_addr)) => {
                 let dialer = dialer.clone();
+                let retry_stop = retry_stop.clone();
+                let deadline = tokio::time::Instant::now() + CLIENT_CONNECT_DEADLINE;
                 tokio::spawn(async move {
-                    match handle_local_connection(&dialer, local_stream).await {
+                    match handle_local_connection(&dialer, local_stream, deadline, retry_stop).await
+                    {
                         Ok(()) => {
                             tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed")
                         }
@@ -631,9 +636,36 @@ async fn listen_loop(dialer: Arc<ServiceDialer>) {
     }
 }
 
+// A single budget includes mutex wait, dial, backoff and opening the stream.
+// Keep established streams outside this timeout. See issue-86-retry-evidence.md.
+const CLIENT_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Tunnel one local client over a stream on the shared service connection.
 /// Errors close only this local client's channel.
-async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Result<()> {
+async fn handle_local_connection(
+    dialer: &ServiceDialer,
+    local: TcpStream,
+    deadline: tokio::time::Instant,
+    mut retry_stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let streams = tokio::select! {
+        result = tokio::time::timeout_at(deadline, open_client_stream(dialer)) => {
+            result.context("client connection deadline expired")??
+        }
+        _ = async {
+            while !*retry_stop.borrow_and_update() {
+                if retry_stop.changed().await.is_err() {
+                    break;
+                }
+            }
+        } => anyhow::bail!("client connection cancelled on shutdown"),
+    };
+    crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await
+}
+
+async fn open_client_stream(
+    dialer: &ServiceDialer,
+) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     // Multiplexed: one stream on the shared connection per channel. If
     // `open_bi` fails with a connection-level error, the cache is dropped and
     // exactly one redial + retry is attempted before giving up — a dead
@@ -643,7 +675,7 @@ async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Re
     match conn.open_bi().await {
         // open_bi returns (SendStream, RecvStream) — send first. Our pipe
         // wants the remote pair as (read, write) = (recv, send), so swap.
-        Ok((send, recv)) => crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await,
+        Ok(streams) => Ok(streams),
         Err(e) => {
             tracing::warn!(
                 svc = %dialer.svc_name,
@@ -651,11 +683,9 @@ async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Re
             );
             dialer.invalidate().await;
             let conn = dialer.get_or_dial().await?;
-            let (send, recv) = conn
-                .open_bi()
+            conn.open_bi()
                 .await
-                .context("open bidirectional stream failed after redial")?;
-            crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await
+                .context("open bidirectional stream failed after redial")
         }
     }
 }

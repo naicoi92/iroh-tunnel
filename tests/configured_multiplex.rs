@@ -393,3 +393,228 @@ async fn configured_peer_loss_closes_active_channels_without_replay() -> Result<
     outcome??;
     Ok(())
 }
+
+// TCP-02 / #86: an unavailable peer cannot leave a new client waiting forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unavailable_peer_retries_then_closes_client_within_deadline() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("access");
+    std::fs::create_dir_all(&home)?;
+    let key = iroh::SecretKey::generate();
+    let peer = iroh::SecretKey::generate();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let reservation = TcpListener::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    let config = home.join("access.toml");
+    std::fs::write(&config, format!(
+        "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n",
+        encode_secret_key(&key), relay.to_string(), peer.public().to_string(), listen.port()
+    ))?;
+    let mut access = start("access", &home, &config, 0)?;
+    let outcome = async {
+        wait_log(&mut access, "listening for local clients").await?;
+        let started = Instant::now();
+        let mut client = TcpStream::connect(listen).await?;
+        client.write_all(b"pending").await?;
+        let mut byte = [0; 1];
+        let result = tokio::time::timeout(Duration::from_secs(40), client.read(&mut byte))
+            .await
+            .context("unavailable peer left client waiting beyond 40s")?;
+        anyhow::ensure!(
+            matches!(result, Ok(0) | Err(_)),
+            "unexpected client data: {result:?}"
+        );
+        let log = std::fs::read_to_string(&access.log)?;
+        anyhow::ensure!(
+            log.contains("connect attempt 1")
+                && log.contains("retrying in 1000ms")
+                && log.contains("connect attempt 2")
+                && log.contains("retrying in 2000ms"),
+            "repeated exponential backoff not observed: {log}"
+        );
+        eprintln!(
+            "unavailable client closed after {:?}; retry log: {log}",
+            started.elapsed()
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if access.child.try_wait()?.is_none() {
+        access.child.kill()?;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while access.child.try_wait()?.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("fixture reap timeout")??;
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .context("relay shutdown timeout")??;
+    outcome
+}
+
+async fn retry_scenario(scenario: &str) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let serve_home = temp.path().join("serve");
+    let access_home = temp.path().join("access");
+    std::fs::create_dir_all(&serve_home)?;
+    std::fs::create_dir_all(&access_home)?;
+    let serve_key = iroh::SecretKey::generate();
+    let access_key = iroh::SecretKey::generate();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let reservation = TcpListener::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    let serve_path = serve_home.join("serve.toml");
+    let access_path = access_home.join("access.toml");
+    std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
+    std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
+    let mut access = start("access", &access_home, &access_path, 0)?;
+    let mut serve = None;
+    let outcome = tokio::time::timeout(Duration::from_secs(65), async {
+        wait_log(&mut access, "listening for local clients").await?;
+        if scenario == "healthy" {
+            let mut process = start("serve", &serve_home, &serve_path, 0)?;
+            wait_log(&mut process, "endpoint ready").await?;
+            serve = Some(process);
+        }
+        let started = Instant::now();
+        let mut first = TcpStream::connect(listen).await?;
+        first.write_all(b"first").await?;
+        match scenario {
+            "concurrent" => {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let second_started = Instant::now();
+                let mut second = TcpStream::connect(listen).await?;
+                second.write_all(b"second").await?;
+                let mut byte = [0; 1];
+                let result = tokio::time::timeout(Duration::from_secs(25), first.read(&mut byte))
+                    .await
+                    .context("first client did not close")?;
+                anyhow::ensure!(
+                    matches!(result, Ok(0) | Err(_)),
+                    "first returned data: {result:?}"
+                );
+                let first_elapsed = started.elapsed();
+                let result = tokio::time::timeout(Duration::from_secs(15), second.read(&mut byte))
+                    .await
+                    .context("second client did not close")?;
+                anyhow::ensure!(
+                    matches!(result, Ok(0) | Err(_)),
+                    "second returned data: {result:?}"
+                );
+                let second_elapsed = second_started.elapsed();
+                anyhow::ensure!(
+                    first_elapsed < Duration::from_secs(35)
+                        && second_elapsed < Duration::from_secs(35),
+                    "budgets exceeded: {first_elapsed:?}, {second_elapsed:?}"
+                );
+                anyhow::ensure!(
+                    second_elapsed >= Duration::from_secs(25),
+                    "second expired prematurely: {second_elapsed:?}"
+                );
+                eprintln!("staggered client durations: {first_elapsed:?}, {second_elapsed:?}");
+            }
+            "recovery" | "healthy" => {
+                if scenario == "recovery" {
+                    wait_log(&mut access, "connect attempt 1").await?;
+                    let mut process = start("serve", &serve_home, &serve_path, 0)?;
+                    wait_log(&mut process, "endpoint ready").await?;
+                    serve = Some(process);
+                }
+                let (mut socket, _) =
+                    tokio::time::timeout(Duration::from_secs(25), target.accept())
+                        .await
+                        .context("target accept timeout")??;
+                let mut request = [0; 5];
+                socket.read_exact(&mut request).await?;
+                anyhow::ensure!(&request == b"first", "bad request");
+                socket.write_all(b"reply").await?;
+                let mut reply = [0; 5];
+                first.read_exact(&mut reply).await?;
+                anyhow::ensure!(&reply == b"reply", "bad reply");
+                eprintln!("{scenario} first exchange after {:?}", started.elapsed());
+                if scenario == "healthy" {
+                    tokio::time::sleep(Duration::from_secs(32)).await;
+                    first.write_all(b"later").await?;
+                    tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut request))
+                        .await??;
+                    anyhow::ensure!(&request == b"later", "bad later request");
+                    socket.write_all(b"again").await?;
+                    tokio::time::timeout(Duration::from_secs(5), first.read_exact(&mut reply))
+                        .await??;
+                    anyhow::ensure!(&reply == b"again", "bad later reply");
+                }
+            }
+            #[cfg(unix)]
+            "shutdown" => {
+                wait_log(&mut access, "connect attempt 1").await?;
+                let status = Command::new("kill")
+                    .args(["-TERM", &access.child.id().to_string()])
+                    .status()?;
+                anyhow::ensure!(status.success(), "SIGTERM failed");
+                let mut byte = [0; 1];
+                let result = tokio::time::timeout(Duration::from_secs(10), first.read(&mut byte))
+                    .await
+                    .context("shutdown did not close pending client")?;
+                anyhow::ensure!(
+                    matches!(result, Ok(0) | Err(_)),
+                    "shutdown returned data: {result:?}"
+                );
+                wait_log(&mut access, "client connection cancelled on shutdown").await?;
+                eprintln!(
+                    "pending client closed on shutdown after {:?}",
+                    started.elapsed()
+                );
+            }
+            _ => anyhow::bail!("unknown retry scenario"),
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("retry scenario timeout");
+    for process in std::iter::once(&mut access).chain(serve.iter_mut()) {
+        if process.child.try_wait()?.is_none() {
+            process.child.kill()?;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while process.child.try_wait()?.is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("fixture reap timeout")??;
+    }
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .context("relay shutdown timeout")??;
+    outcome??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn staggered_unavailable_clients_have_independent_deadlines() -> Result<()> {
+    retry_scenario("concurrent").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_recovery_connects_waiting_client_before_deadline() -> Result<()> {
+    retry_scenario("recovery").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn established_client_remains_usable_past_connect_deadline() -> Result<()> {
+    retry_scenario("healthy").await
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_cancels_pending_connection() -> Result<()> {
+    retry_scenario("shutdown").await
+}
