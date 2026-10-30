@@ -502,6 +502,8 @@ struct ServiceDialer {
     /// cross-lock ordering to reason about. Concurrent channels serialize
     /// the (re)dial here instead of racing N dials.
     state: Mutex<ConnState>,
+    /// Serializes dialing without holding `state`; see `get_or_dial`.
+    dial: Mutex<()>,
 }
 
 /// Cached connection and owned path-poller/disconnect-watcher tasks.
@@ -532,54 +534,69 @@ impl ServiceDialer {
                 conn: None,
                 tasks: JoinSet::new(),
             }),
+            dial: Mutex::new(()),
         }
     }
     /// Get the shared multiplexed connection, dialing it if there is none.
     ///
-    /// The lock is held across the retry loop on purpose: N concurrent
-    /// channels produce exactly one connection, not N.
+    /// `dial` is held across the retry loop on purpose: N concurrent
+    /// channels produce exactly one connection, not N. The `state` lock is
+    /// only ever held briefly (never across the dial or backoff), so status
+    /// rendering and shutdown are not blocked by a slow dial.
+    ///
+    /// The connection is stored in the same synchronous step that follows a
+    /// successful dial, so a caller deadline cannot cancel the future in
+    /// between and discard a dial that already succeeded.
     async fn get_or_dial(&self) -> Result<iroh::endpoint::Connection> {
-        let mut guard = self.state.lock().await;
-        if let Some(conn) = guard.conn.as_ref() {
+        let _dialing = self.dial.lock().await;
+        if let Some(conn) = self.state.lock().await.conn.as_ref() {
             return Ok(conn.clone());
         }
         let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
         let remote_id = conn.remote_id();
+        {
+            let mut state = self.state.lock().await;
+            // Aborted tasks of a replaced connection are only reaped here;
+            // the set stays owned by the state until `stop_auxiliary_tasks`.
+            state.tasks.abort_all();
+            while state.tasks.try_join_next().is_some() {}
+            state.tasks.spawn(crate::role_run::disconnect_watcher(
+                &conn,
+                remote_id.to_string(),
+                format!(
+                    "disconnected from serve peer (service {}, multiplexed)",
+                    self.svc_name
+                ),
+            ));
+            state.conn = Some(conn.clone());
+        }
 
-        // One snapshot, two consumers. The query awaits UNDER the guard —
-        // correctness over lock-holder courtesy: sharing this snapshot
-        // between the established line and the poller baseline closes the
-        // blind window where a fast hole punch (landing inside the first
-        // poll tick) would be swallowed by the poller's silent seeding and
-        // never diffed or logged. A `None` report (paths pending) degrades
-        // to an empty baseline — the seed path handles exactly that case.
+        // One snapshot, two consumers: sharing it between the established
+        // line and the poller baseline closes the blind window where a fast
+        // hole punch (landing inside the first poll tick) would be swallowed
+        // by the poller's silent seeding and never diffed or logged. A
+        // `None` report (paths pending) degrades to an empty baseline — the
+        // seed path handles exactly that case. The connection is already
+        // stored, so cancellation here only loses the poller.
         let report = crate::conn_path::peer_path_report(&self.ep, remote_id).await;
         let baseline = report
             .as_ref()
             .map(|r| r.transports.clone())
             .unwrap_or_default();
-
-        // Keep handles in the state even if caller cancellation interrupts
-        // joining a replaced connection's auxiliary tasks.
-        guard.tasks.abort_all();
-        shutdown::join(&mut guard.tasks).await;
-        spawn_path_change_poller(
-            &self.ep,
-            &conn,
-            self.svc_name.clone(),
-            baseline,
-            &mut guard.tasks,
-        );
-        guard.tasks.spawn(crate::role_run::disconnect_watcher(
-            &conn,
-            remote_id.to_string(),
-            format!(
-                "disconnected from serve peer (service {}, multiplexed)",
-                self.svc_name
-            ),
-        ));
-        guard.conn = Some(conn.clone());
-        drop(guard);
+        {
+            let mut state = self.state.lock().await;
+            // A concurrent invalidate/redial may have replaced this
+            // connection while the report was pending; its poller belongs
+            // to the replacement, not to us.
+            if state
+                .conn
+                .as_ref()
+                .is_some_and(|c| c.stable_id() == conn.stable_id())
+            {
+                let ConnState { tasks, .. } = &mut *state;
+                spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), baseline, tasks);
+            }
+        }
         log_connection_established(remote_id, &self.svc_name, report.as_ref());
         Ok(conn)
     }
@@ -593,8 +610,18 @@ impl ServiceDialer {
     /// Drop the cached multiplexed connection (it died); the next channel
     /// dials a fresh one. The poller is left alone — it ends by itself when
     /// the connection closes, and the next `get_or_dial` replaces it.
-    async fn invalidate(&self) {
-        self.state.lock().await.conn = None;
+    ///
+    /// Only evicts `failed` itself: a channel holding a stale connection must
+    /// not evict a healthy one another channel has since redialed.
+    async fn invalidate(&self, failed: &iroh::endpoint::Connection) {
+        let mut state = self.state.lock().await;
+        if state
+            .conn
+            .as_ref()
+            .is_some_and(|c| c.stable_id() == failed.stable_id())
+        {
+            state.conn = None;
+        }
     }
 
     /// Fresh connection-path report for the cached multiplexed connection,
@@ -710,7 +737,7 @@ async fn open_client_stream(
                 svc = %dialer.svc_name,
                 "multiplexed open_bi failed: {e}, redialing once"
             );
-            dialer.invalidate().await;
+            dialer.invalidate(&conn).await;
             let conn = dialer.get_or_dial().await?;
             conn.open_bi()
                 .await
@@ -932,5 +959,86 @@ mod tests {
             "slow-save-landed",
             "the in-flight save completed and nothing overwrote it afterwards"
         );
+    }
+
+    /// A local serve-like endpoint (no relay) and a dialer pointed at it.
+    async fn local_dialer() -> (iroh::Endpoint, ServiceDialer) {
+        use iroh::endpoint::presets::Minimal;
+        let alpn = proto::alpn_for("t");
+        let server = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .alpns(vec![alpn.clone()])
+            .bind()
+            .await
+            .unwrap();
+        let client = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let mut addr = iroh::EndpointAddr::new(server.id());
+        for sock in server.bound_sockets() {
+            let ip = if sock.ip().is_unspecified() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                sock.ip()
+            };
+            addr = addr.with_ip_addr((ip, sock.port()).into());
+        }
+        let dialer = ServiceDialer {
+            ep: client,
+            addr,
+            alpn,
+            svc_name: "t".to_string(),
+            listen_addr: "127.0.0.1:0".to_string(),
+            state: Mutex::new(ConnState {
+                conn: None,
+                tasks: JoinSet::new(),
+            }),
+            dial: Mutex::new(()),
+        };
+        // Accept and hold every connection so none closes on its own.
+        let accept = server.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(incoming) = accept.accept().await {
+                if let Ok(conn) = incoming.await {
+                    held.push(conn);
+                }
+            }
+        });
+        (server, dialer)
+    }
+
+    /// A channel holding a stale failed connection must not evict the
+    /// healthy connection another channel redialed in the meantime.
+    #[tokio::test]
+    async fn invalidate_only_evicts_the_failed_connection() {
+        let (_server, dialer) = local_dialer().await;
+        let stale = dialer.get_or_dial().await.unwrap();
+        dialer.invalidate(&stale).await;
+        let fresh = dialer.get_or_dial().await.unwrap();
+        assert_ne!(stale.stable_id(), fresh.stable_id());
+
+        // A second channel still reporting the stale failure.
+        dialer.invalidate(&stale).await;
+        let again = dialer.get_or_dial().await.unwrap();
+        assert_eq!(
+            again.stable_id(),
+            fresh.stable_id(),
+            "healthy redialed connection must survive a stale invalidate"
+        );
+    }
+
+    /// The status path must not wait for an in-progress dial, and a
+    /// deadline cancelling a waiter must not wedge later dials.
+    #[tokio::test]
+    async fn path_report_does_not_block_on_a_stuck_dial() {
+        let (_server, dialer) = local_dialer().await;
+        let _dialing = dialer.dial.lock().await; // simulates a long dial
+        let report = tokio::time::timeout(Duration::from_millis(500), dialer.path_report())
+            .await
+            .expect("path_report must not wait for the dial lock");
+        assert!(report.is_none());
     }
 }
