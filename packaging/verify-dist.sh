@@ -101,15 +101,17 @@ check_archive() {
 static() {
     for entry in $EXECUTABLES; do
         bin=${entry%%:*} link=${entry##*:}
-        # .deb: glibc build; .apk: musl build (riscv64gc ships .apk only).
+        # .deb: glibc build; .apk: musl build (riscv64 ships .apk only).
+        # GoReleaser spells the riscv64 arch "riscv64gc" up to 2.18 and
+        # "riscv64" from 2.19, so the globs accept either.
         for pkg_glob in "_*_amd64.deb" "_*_arm64.deb" "_*_amd64.apk" \
-            "_*_arm64.apk" "_*_riscv64gc.apk"; do
+            "_*_arm64.apk" "_*_riscv64*.apk"; do
             pkg=$(only_match "$DIST/${bin}${pkg_glob}") ||
                 { fail "no single $bin package matching ${pkg_glob}"; continue; }
             check_package "$pkg" "$bin" "$link"
         done
         for target in linux-amd64 linux-arm64 linux-amd64-musl \
-            linux-arm64-musl linux-riscv64gc-musl; do
+            linux-arm64-musl "linux-riscv64*-musl"; do
             tgz=$(only_match "$DIST/${bin}-[0-9]*-${target}.tar.gz") ||
                 { fail "no single $bin archive for $target"; continue; }
             check_archive "$tgz" "$bin"
