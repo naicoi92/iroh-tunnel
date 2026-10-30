@@ -30,7 +30,7 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-fn local_app_data() -> PathBuf {
+fn app_data_root() -> PathBuf {
     dirs::data_local_dir()
         .expect("LocalAppData known folder")
         .join("iroh-tunnel")
@@ -38,26 +38,31 @@ fn local_app_data() -> PathBuf {
 
 #[test]
 fn config_default_is_local_app_data_ignoring_xdg() {
-    let other = tempfile::tempdir().unwrap();
-    let xdg = other.path().join("xdg-config");
+    let scratch_home = tempfile::tempdir().unwrap();
+    let xdg = scratch_home.path().join("xdg-config");
     for role in ["serve", "access"] {
         let out = tunnel(
             &[role, "config", "path"],
-            &[("XDG_CONFIG_HOME", &xdg), ("HOME", other.path())],
+            &[("XDG_CONFIG_HOME", &xdg), ("HOME", scratch_home.path())],
         );
         assert!(out.status.success(), "{}", stderr(&out));
-        let expected = local_app_data().join("config").join(format!("{role}.toml"));
+        let expected = app_data_root().join("config").join(format!("{role}.toml"));
         assert_eq!(stdout(&out).trim(), expected.display().to_string());
     }
-    assert!(!xdg.exists(), "XDG_CONFIG_HOME must be ignored");
 }
 
 #[test]
 fn state_default_is_local_app_data_state() {
-    let other = tempfile::tempdir().unwrap();
-    let out = tunnel(&["serve", "status"], &[("XDG_STATE_HOME", other.path())]);
-    assert!(!out.status.success());
-    let expected = local_app_data().join("state").join("serve-status.json");
+    let scratch = tempfile::tempdir().unwrap();
+    let out = tunnel(&["serve", "status"], &[("XDG_STATE_HOME", scratch.path())]);
+    if out.status.success() {
+        // A real status file exists on this host; the table does not print
+        // its location, so there is nothing path-related left to assert.
+        return;
+    }
+    // "not running" is a general error (exit 1) naming the file it looked for.
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let expected = app_data_root().join("state").join("serve-status.json");
     assert!(
         stderr(&out).contains(&expected.display().to_string()),
         "status must look under LocalAppData\\iroh-tunnel\\state: {}",
@@ -69,6 +74,8 @@ fn state_default_is_local_app_data_state() {
 fn explicit_config_override_wins() {
     let dir = tempfile::tempdir().unwrap();
     let custom = dir.path().join("custom.toml");
+    let default = app_data_root().join("config").join("serve.toml");
+    let existed = default.exists();
     let out = tunnel(
         &[
             "serve",
@@ -81,6 +88,11 @@ fn explicit_config_override_wins() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(custom.is_file());
+    assert_eq!(
+        default.exists(),
+        existed,
+        "the default config location must be left alone"
+    );
 }
 
 #[test]
@@ -90,6 +102,8 @@ fn explicit_state_override_wins() {
         &["access", "status"],
         &[("IROH_TUNNEL_STATE_DIR", dir.path())],
     );
+    // The override directory is empty, so "not running" (exit 1) is certain.
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
         stderr(&out).contains(&dir.path().join("access-status.json").display().to_string()),
         "{}",

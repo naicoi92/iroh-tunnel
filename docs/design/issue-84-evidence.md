@@ -21,11 +21,15 @@ description listed as missing: Windows LocalAppData.
 | CFG-01, CFG-PATH-01 Windows `LocalAppData\iroh-tunnel\config` default, XDG ignored | `tests/config_paths_windows.rs::config_default_is_local_app_data_ignoring_xdg` | Windows CI |
 | CFG-01 Windows `...\state` default | `state_default_is_local_app_data_state` | Windows CI |
 | CFG-01 explicit `--config` / `IROH_TUNNEL_STATE_DIR` | `explicit_config_override_wins`, `explicit_state_override_wins` | Windows CI |
-| CFG-02, CFG-MIGRATE-01, CFG-ERROR-01 | `tests/config_paths.rs::macos_migration` | macOS |
+| CFG-ERROR-01 unusable home, unreadable and invalid config guidance | `relative_home_is_rejected_with_guidance`, `unreadable_config_reports_path`, `invalid_config_reports_path_with_config_error_exit` in `tests/config_paths.rs` | macOS, Linux |
+| CFG-02, CFG-MIGRATE-01, CFG-ERROR-01 migration | `tests/config_paths.rs::macos_migration` | macOS |
 
 The Windows known folder cannot be redirected per process, so the Windows
 tests are read-only (`config path`, `status`, and `keygen` into a temp file)
-and compare against `dirs::data_local_dir()` for the installing user.
+and compare against `dirs::data_local_dir()` for the installing user. That is
+the same call `src/paths.rs` uses, so the tests prove the binary applies the
+Windows known folder and layout, not that the folder choice itself is right.
+The default-state test tolerates a real status file on the host.
 
 ## Not verified
 
