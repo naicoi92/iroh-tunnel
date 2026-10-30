@@ -626,3 +626,356 @@ async fn established_client_remains_usable_past_connect_deadline() -> Result<()>
 async fn shutdown_cancels_pending_connection() -> Result<()> {
     retry_scenario("shutdown").await
 }
+
+#[cfg(unix)]
+fn terminate(process: &RoleProcess) -> Result<()> {
+    let status = Command::new("kill")
+        .args(["-TERM", &process.child.id().to_string()])
+        .status()?;
+    anyhow::ensure!(status.success(), "SIGTERM failed");
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn reap(process: &mut RoleProcess, limit: Duration) -> Result<std::process::ExitStatus> {
+    tokio::time::timeout(limit, async {
+        loop {
+            if let Some(status) = process.child.try_wait()? {
+                return Ok(status);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("process exit timeout")?
+}
+
+#[cfg(unix)]
+async fn shutdown_drain_scenario(role: &str) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let serve_home = temp.path().join("serve");
+    let access_home = temp.path().join("access");
+    std::fs::create_dir_all(&serve_home)?;
+    std::fs::create_dir_all(&access_home)?;
+    let serve_key = iroh::SecretKey::generate();
+    let access_key = iroh::SecretKey::generate();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let reservation = TcpListener::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    let serve_path = serve_home.join("serve.toml");
+    let access_path = access_home.join("access.toml");
+    std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
+    std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
+    let mut serve = start("serve", &serve_home, &serve_path, 0)?;
+    let mut access = start("access", &access_home, &access_path, 0)?;
+    let mut new_peer = None;
+    let outcome = tokio::time::timeout(Duration::from_secs(40), async {
+        wait_log(&mut serve, "endpoint ready").await?;
+        wait_log(&mut access, &format!("listen_addr={listen}")).await?;
+        let mut completing = TcpStream::connect(listen).await?;
+        completing.write_all(b"completing").await?;
+        let (mut completing_target, _) = target.accept().await?;
+        let mut marker = [0; 10];
+        completing_target.read_exact(&mut marker).await?;
+        anyhow::ensure!(&marker == b"completing", "wrong completing marker");
+        completing_target.write_all(b"ready").await?;
+        let mut reply = [0; 5];
+        completing.read_exact(&mut reply).await?;
+        anyhow::ensure!(&reply == b"ready", "wrong initial reply");
+        let mut held = TcpStream::connect(listen).await?;
+        held.write_all(b"held-open!").await?;
+        let (mut held_target, _) = target.accept().await?;
+        held_target.read_exact(&mut marker).await?;
+        anyhow::ensure!(&marker == b"held-open!", "wrong held marker");
+        held_target.write_all(b"ready").await?;
+        held.read_exact(&mut reply).await?;
+        anyhow::ensure!(&reply == b"ready", "wrong held reply");
+        let log = wait_log(&mut serve, "stream=2").await?;
+        anyhow::ensure!(log.matches("peer connected via").count() == 1, "not shared: {log}");
+        let (stopping, home) = if role == "access" {
+            (&mut access, &access_home)
+        } else {
+            (&mut serve, &serve_home)
+        };
+        let started = Instant::now();
+        terminate(stopping)?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        // Repeated stop neither resets grace nor interrupts established pipes.
+        terminate(stopping)?;
+        completing.shutdown().await?;
+        let mut eof = [0; 1];
+        anyhow::ensure!(completing_target.read(&mut eof).await? == 0, "missing request EOF");
+        completing_target.write_all(b"final response inside grace").await
+            .context("established target was closed before graceful completion")?;
+        completing_target.shutdown().await?;
+        let mut final_reply = Vec::new();
+        completing.read_to_end(&mut final_reply).await?;
+        anyhow::ensure!(final_reply == b"final response inside grace", "graceful response lost: {final_reply:?}");
+        held.write_all(b"during grace").await?;
+        let mut during = [0; 12];
+        held_target.read_exact(&mut during).await?;
+        anyhow::ensure!(&during == b"during grace", "held pipe did not survive stop");
+        held_target.write_all(b"still alive").await?;
+        let mut alive = [0; 11];
+        held.read_exact(&mut alive).await?;
+        anyhow::ensure!(&alive == b"still alive", "held response mismatch");
+        if role == "access" {
+            anyhow::ensure!(TcpStream::connect(listen).await.is_err(), "Access still accepts clients");
+        } else {
+            // Access retains its existing shared connection. A new stream must
+            // not create a target socket while old streams are draining.
+            let mut rejected = TcpStream::connect(listen).await?;
+            rejected.write_all(b"must not reach target").await?;
+            anyhow::ensure!(tokio::time::timeout(Duration::from_millis(100), target.accept()).await.is_err(), "Serve admitted a stream during drain");
+            // Distinct Access identity also attempts a new peer handshake.
+            let peer_home = temp.path().join("new-peer");
+            std::fs::create_dir_all(&peer_home)?;
+            let reservation = TcpListener::bind("127.0.0.1:0").await?;
+            let peer_listen = reservation.local_addr()?;
+            drop(reservation);
+            let mut cfg = AccessConfig::load(&access_path)?;
+            cfg.node.secret_key = encode_secret_key(&iroh::SecretKey::generate());
+            cfg.services[0].port = peer_listen.port();
+            let config = peer_home.join("access.toml");
+            cfg.save(&config)?;
+            new_peer = Some(start("access", &peer_home, &config, 0)?);
+            wait_log(new_peer.as_mut().unwrap(), &format!("listen_addr={peer_listen}")).await?;
+            let mut pending_peer = TcpStream::connect(peer_listen).await?;
+            pending_peer.write_all(b"new peer must not reach target").await?;
+        }
+        anyhow::ensure!(home.join(format!("state/{role}-status.json")).exists(), "status removed before drain ended");
+        tokio::select! {
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(started) + Duration::from_millis(1500)) => {},
+            result = target.accept() => anyhow::bail!("new channel reached target during drain: {result:?}"),
+        }
+        terminate(stopping)?;
+        let result = tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(4), held.read(&mut eof)) =>
+                result.context("held channel survived drain bound")?,
+            result = target.accept() => anyhow::bail!("new channel reached target during drain: {result:?}"),
+        };
+        anyhow::ensure!(matches!(result, Ok(0) | Err(_)), "held channel returned data: {result:?}");
+        let elapsed = started.elapsed();
+        anyhow::ensure!((Duration::from_secs(2)..Duration::from_secs(4)).contains(&elapsed), "held closure outside grace tolerance: {elapsed:?}");
+        let result = tokio::time::timeout(Duration::from_secs(2), held_target.read(&mut eof)).await?;
+        anyhow::ensure!(matches!(result, Ok(0) | Err(_)), "target remained open: {result:?}");
+        let exit = reap(stopping, Duration::from_secs(3)).await?;
+        anyhow::ensure!(exit.success(), "shutdown exit: {exit}");
+        anyhow::ensure!(!home.join(format!("state/{role}-status.json")).exists(), "own status left behind");
+        if role == "access" {
+            let _rebound = TcpListener::bind(listen).await.context("listener not released")?;
+        }
+        eprintln!("{role}: admission stopped, exact graceful response, held channel closed at {elapsed:?}, successful exit and status cleanup");
+        Ok::<_, anyhow::Error>(())
+    }).await.context("shutdown scenario timeout");
+    for process in [&mut access, &mut serve]
+        .into_iter()
+        .chain(new_peer.iter_mut())
+    {
+        if process.child.try_wait()?.is_none() {
+            process.child.kill()?;
+        }
+        reap(process, Duration::from_secs(5)).await?;
+        if !matches!(&outcome, Ok(Ok(()))) {
+            eprintln!(
+                "shutdown child log: {}",
+                std::fs::read_to_string(&process.log)?
+            );
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome??;
+    Ok(())
+}
+
+// AC-S1 / TCP-02 / #86: ordered stop, bounded drain, then resource teardown.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_shutdown_drains_established_channels_before_forcing_remainder() -> Result<()> {
+    shutdown_drain_scenario("access").await
+}
+
+// AC-S1 / TCP-02 / #86: applies to new streams on existing connections too.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serve_shutdown_drains_established_channels_before_forcing_remainder() -> Result<()> {
+    shutdown_drain_scenario("serve").await
+}
+
+// AC-S2 / #86: pending dial/backoff and shared-dial lock wait cancel promptly.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_shutdown_cancels_pending_retry_without_waiting_for_grace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path();
+    let key = iroh::SecretKey::generate();
+    let peer = iroh::SecretKey::generate();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(25), async {
+        for (round, backoff) in [false, true].into_iter().enumerate() {
+            let reservation = TcpListener::bind("127.0.0.1:0").await?;
+            let listen = reservation.local_addr()?;
+            drop(reservation);
+            let config = home.join("access.toml");
+            std::fs::write(&config, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&key), relay.to_string(), peer.public().to_string(), listen.port()))?;
+            let mut access = start("access", home, &config, round)?;
+            let scenario = async {
+                wait_log(&mut access, &format!("listen_addr={listen}")).await?;
+                let mut first = TcpStream::connect(listen).await?;
+                first.write_all(b"pending dial").await?;
+                let mut second = TcpStream::connect(listen).await?;
+                second.write_all(b"pending lock").await?;
+                if backoff {
+                    wait_log(&mut access, "connect attempt 1 timed out").await?;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let started = Instant::now();
+                terminate(&access)?;
+                // Immediate repeated signal while cancellation is in progress.
+                terminate(&access)?;
+                let mut byte_a = [0; 1];
+                let mut byte_b = [0; 1];
+                let (a, b) = tokio::join!(first.read(&mut byte_a), second.read(&mut byte_b));
+                anyhow::ensure!(matches!(a, Ok(0) | Err(_)) && matches!(b, Ok(0) | Err(_)), "pending clients received data: {a:?}, {b:?}");
+                anyhow::ensure!(started.elapsed() < Duration::from_secs(1), "pending clients consumed drain grace: {:?}", started.elapsed());
+                // Iroh close waits for QUIC close retransmission on failed
+                // connectivity (upstream documents about 3 s). Not pipe grace.
+                let exit = reap(&mut access, Duration::from_secs(5)).await?;
+                anyhow::ensure!(exit.success(), "cancellation exit: {exit}");
+                anyhow::ensure!(started.elapsed() < Duration::from_secs(5), "pending shutdown exceeded close bound: {:?}", started.elapsed());
+                let log = std::fs::read_to_string(&access.log)?;
+                anyhow::ensure!(log.matches("client connection cancelled on shutdown").count() == 2, "pending clients not observed: {log}");
+                anyhow::ensure!(!home.join("state/access-status.json").exists(), "status not cleaned");
+                let _rebound = TcpListener::bind(listen).await?;
+                eprintln!("backoff={backoff}: dial/lock clients cancelled, repeated stop exited at {:?}, listener/status released", started.elapsed());
+                Ok::<_, anyhow::Error>(())
+            }.await;
+            if access.child.try_wait()?.is_none() {
+                access.child.kill()?;
+            }
+            reap(&mut access, Duration::from_secs(5)).await?;
+            if scenario.is_err() {
+                eprintln!("cancellation child log: {}", std::fs::read_to_string(&access.log)?);
+            }
+            scenario?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await.context("pending shutdown scenario timeout");
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome??;
+    Ok(())
+}
+
+// AC-S5 / #86: grace caps waiting; it is not an unconditional delay.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_roles_exit_without_waiting_for_drain_grace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let outcome = async {
+        for role in ["serve", "access"] {
+            let home = temp.path().join(role);
+            std::fs::create_dir_all(&home)?;
+            let reservation = TcpListener::bind("127.0.0.1:0").await?;
+            let listen = reservation.local_addr()?;
+            // Serve has no TCP admission listener: retain real target socket
+            // so another parallel fixture cannot claim its port before rebind.
+            let target = if role == "serve" { Some(reservation) } else { drop(reservation); None };
+            let peer = iroh::SecretKey::generate().public();
+            let reference = if role == "access" { format!("node_id = {:?}\n", peer.to_string()) } else { String::new() };
+            let config = home.join(format!("{role}.toml"));
+            std::fs::write(&config, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n{reference}", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), listen.port()))?;
+            let mut process = start(role, &home, &config, 0)?;
+            let scenario = tokio::time::timeout(Duration::from_secs(35), async {
+                let ready = if role == "access" { format!("listen_addr={listen}") } else { "accepting connections".to_owned() };
+                wait_log(&mut process, &ready).await?;
+                let started = Instant::now();
+                terminate(&process)?;
+                let exit = reap(&mut process, Duration::from_secs(2)).await?;
+                anyhow::ensure!(exit.success(), "idle {role} exit: {exit}");
+                anyhow::ensure!(!home.join(format!("state/{role}-status.json")).exists(), "idle status left behind");
+                if target.is_none() {
+                    let _rebound = TcpListener::bind(listen).await?;
+                }
+                eprintln!("idle {role} exited with resources released at {:?}", started.elapsed());
+                Ok::<_, anyhow::Error>(())
+            }).await.context("idle scenario timeout");
+            if process.child.try_wait()?.is_none() { process.child.kill()?; }
+            reap(&mut process, Duration::from_secs(5)).await?;
+            if !matches!(&scenario, Ok(Ok(()))) {
+                eprintln!("idle child log: {}", std::fs::read_to_string(&process.log)?);
+            }
+            scenario??;
+        }
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome
+}
+
+// AC-S6 / TCP-02: last pipe completion must not discard queued QUIC bytes.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn roles_deliver_last_channel_response_before_early_shutdown_exit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(40), async {
+        for role in ["access", "serve"] {
+            let serve_home = temp.path().join(format!("{role}-serve"));
+            let access_home = temp.path().join(format!("{role}-access"));
+            std::fs::create_dir_all(&serve_home)?;
+            std::fs::create_dir_all(&access_home)?;
+            let serve_key = iroh::SecretKey::generate();
+            let target = TcpListener::bind("127.0.0.1:0").await?;
+            let reservation = TcpListener::bind("127.0.0.1:0").await?;
+            let listen = reservation.local_addr()?;
+            drop(reservation);
+            let serve_path = serve_home.join("serve.toml");
+            let access_path = access_home.join("access.toml");
+            std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
+            std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
+            let mut serve = start("serve", &serve_home, &serve_path, 0)?;
+            let mut access = start("access", &access_home, &access_path, 0)?;
+            let scenario = async {
+                wait_log(&mut serve, "accepting connections").await?;
+                wait_log(&mut access, &format!("listen_addr={listen}")).await?;
+                let mut client = TcpStream::connect(listen).await?;
+                client.write_all(b"last request").await?;
+                client.shutdown().await?;
+                let (mut socket, _) = target.accept().await?;
+                let mut request = Vec::new();
+                socket.read_to_end(&mut request).await?;
+                anyhow::ensure!(request == b"last request", "last request mismatch");
+                let stopping = if role == "access" { &mut access } else { &mut serve };
+                let started = Instant::now();
+                terminate(stopping)?;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let response = vec![b'Z'; 256 * 1024];
+                socket.write_all(&response).await?;
+                socket.shutdown().await?;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let mut received = Vec::new();
+                client.read_to_end(&mut received).await?;
+                anyhow::ensure!(received == response, "{role} lost last response: received {} bytes", received.len());
+                let exit = reap(stopping, Duration::from_secs(3)).await?;
+                anyhow::ensure!(exit.success(), "last-channel exit: {exit}");
+                anyhow::ensure!(started.elapsed() < Duration::from_secs(3), "completed last channel consumed full grace");
+                eprintln!("{role}: last channel delivered 256 KiB and EOF; exited at {:?}", started.elapsed());
+                Ok::<_, anyhow::Error>(())
+            }.await;
+            for process in [&mut access, &mut serve] {
+                if process.child.try_wait()?.is_none() { process.child.kill()?; }
+                reap(process, Duration::from_secs(5)).await?;
+                if scenario.is_err() { eprintln!("last-channel log: {}", std::fs::read_to_string(&process.log)?); }
+            }
+            scenario?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await.context("last-channel scenario timeout");
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome??;
+    Ok(())
+}

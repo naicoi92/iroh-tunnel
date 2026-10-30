@@ -2,9 +2,9 @@
 //!
 //! The two roles share the skeleton: load config → resolve key → build
 //! endpoint → print NodeId → loop until shutdown → drain + close. The
-//! genuinely different pieces (serve's ALPN demux + status-file write;
-//! access's N-listeners + retry-on-dial) live behind the [`RoleStrategy`]
-//! trait so the shared skeleton has one definition site.
+//! genuinely different pieces (ALPN demux, listeners, retry and owned shutdown)
+//! live behind the [`RoleStrategy`] trait. Roles finish draining and cleanup
+//! before returning; the skeleton adds no second grace period.
 //!
 //! Everything here is `pub(crate)` — these are internal seams between two
 //! modules of this crate, not a public extension point.
@@ -17,7 +17,6 @@ use anyhow::Result;
 use iroh::endpoint::Connection;
 
 use crate::config::{Protocol, RoleDoc};
-use crate::shutdown;
 
 // ---------------------------------------------------------------------------
 // Small display helpers (shared, no polymorphism)
@@ -33,7 +32,7 @@ pub(crate) fn protocol_str(p: Protocol) -> &'static str {
     }
 }
 
-/// Spawn a task that logs a disconnect line when the peer's QUIC connection
+/// Future that logs a disconnect line when the peer's QUIC connection
 /// closes.
 ///
 /// The weak handle is registered while `conn` is still alive, so iroh
@@ -43,12 +42,16 @@ pub(crate) fn protocol_str(p: Protocol) -> &'static str {
 /// `disconnected from serve peer` with an `sname` field. Both call sites
 /// now build a single `message` string and a `peer` field, preserving the
 /// information without the structural drift.
-pub(crate) fn spawn_disconnect_watcher(conn: &Connection, peer: String, message: String) {
+pub(crate) fn disconnect_watcher(
+    conn: &Connection,
+    peer: String,
+    message: String,
+) -> impl Future<Output = ()> + Send + 'static {
     let weak = conn.weak_handle();
-    tokio::spawn(async move {
+    async move {
         let _ = weak.closed().await;
         tracing::info!(%peer, "{message}");
-    });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +123,8 @@ pub(crate) async fn connect_with_retry(
 ///
 /// Each implementer carries the genuinely-different pieces (build the
 /// endpoint with role-specific args, print the per-service status lines,
-/// run the role-specific loop). The shared skeleton — load config, resolve
-/// key, print NodeId, wait for shutdown, drain + close — lives in
+/// run the role-specific loop and finish owned shutdown). The shared skeleton
+/// — load config, resolve key, print NodeId, dispatch role — lives in
 /// [`run_with_shutdown`] so it has exactly one definition site.
 ///
 /// The associated type [`RoleStrategy::Config`] is the role's TOML document
@@ -143,9 +146,9 @@ pub(crate) trait RoleStrategy {
 
     /// Run the role's accept/listen loop until `shutdown` resolves.
     ///
-    /// The loop owns the endpoint (cloned if needed) and is responsible for
-    /// spawning per-connection tasks. It MUST return when `shutdown` resolves
-    /// so the shared skeleton can proceed to drain + close.
+    /// The loop owns the endpoint and all descendant tasks. On `shutdown`, it
+    /// seals admission, drains established pipes within one bounded deadline,
+    /// joins/aborts remaining work and closes endpoint/status before returning.
     fn run_loop(
         ep: iroh::Endpoint,
         cfg: Self::Config,
@@ -154,7 +157,7 @@ pub(crate) trait RoleStrategy {
 }
 
 /// Drive a role end-to-end: load → resolve key → endpoint → print → loop →
-/// shutdown footer, with the role's run-loop supplied as a parameter.
+/// owned shutdown, with the role's run-loop supplied as a parameter.
 ///
 /// This is the single definition site of the orchestration; the plain
 /// [`run_with_shutdown`] wraps it with the strategy's stock `run_loop`, and
@@ -206,13 +209,9 @@ where
     S::print_services(&cfg);
 
     tracing::info!("endpoint ready");
-    // Drive the role-specific loop. It MUST honor `shutdown`.
+    // The role owns admission, drain, task joins and endpoint/status cleanup.
     run_loop(ep, cfg).await?;
 
-    // Shared shutdown footer: drain in-flight streams. The endpoint close
-    // itself happens inside the run loop because each role needs to abort
-    // its accept task(s) before closing.
-    shutdown::drain_connections(Duration::from_secs(5)).await;
     Ok(())
 }
 

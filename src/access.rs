@@ -44,6 +44,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+
+use crate::shutdown;
 
 use crate::config::{AccessConfig, AccessService};
 use crate::endpoint;
@@ -216,7 +219,7 @@ impl AccessStrategy {
             );
         }
 
-        let mut handles = Vec::new();
+        let mut listeners = JoinSet::new();
         // One dialer per service, kept alive alongside the listener tasks:
         // the status flush task reads each service's live connection path
         // from its dialer (issue #59).
@@ -296,16 +299,24 @@ impl AccessStrategy {
             crate::status::STATUS_FLUSH_INTERVAL,
             save_access_status,
         ));
-        let (retry_stop, retry_stop_rx) = tokio::sync::watch::channel(false);
-        for dialer in dialers {
-            handles.push(tokio::spawn(listen_loop(dialer, retry_stop_rx.clone())));
+        let (stop, stop_rx) = shutdown::channel();
+        for dialer in &dialers {
+            listeners.spawn(listen_loop(dialer.clone(), stop_rx.clone()));
         }
-        shutdown.await;
-        let _ = retry_stop.send(true);
-        // Abort each per-service listener so they stop accepting new local
-        // clients before the endpoint close tears down the in-flight dials.
-        for h in handles {
-            h.abort();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                Some(result) = listeners.join_next(), if !listeners.is_empty() => shutdown::observe(result),
+            }
+        }
+        shutdown::begin(&stop);
+        // Listeners seal admission and join their own channels against the
+        // shared deadline. Never abort a supervisor with live descendants.
+        shutdown::join(&mut listeners).await;
+        for dialer in &dialers {
+            dialer.stop_auxiliary_tasks().await;
         }
         // Signal the flush task to stop (dropping the sender alone would
         // also close the channel, but only at scope end — far too late).
@@ -321,16 +332,19 @@ impl AccessStrategy {
         // the reader-side pid warning) beats a resurrection race that
         // cannot be won once the save is in-flight.
         let flush_abort = flush.abort_handle();
-        let flush_stopped = tokio::time::timeout(Duration::from_secs(5), &mut flush)
-            .await
-            .is_ok();
-        if !flush_stopped {
-            tracing::warn!(
-                "status flush task did not stop within 5s; aborting it and KEEPING \
-                 the status file (removal could race its in-flight save)"
-            );
-            flush_abort.abort();
-        }
+        let flush_stopped = match tokio::time::timeout(Duration::from_secs(5), &mut flush).await {
+            Ok(result) => {
+                let clean = result.is_ok();
+                shutdown::observe(result);
+                clean
+            }
+            Err(_) => {
+                tracing::warn!("status flush task did not stop within 5s; keeping status file");
+                flush_abort.abort();
+                shutdown::observe(flush.await);
+                false
+            }
+        };
         ep.close().await;
         // Remove the status file only after a clean join AND only if it
         // still belongs to THIS process (its `pid` field decides — two
@@ -490,11 +504,11 @@ struct ServiceDialer {
     state: Mutex<ConnState>,
 }
 
-/// The cached multiplexed connection plus its path-change poller —
-/// the pair `get_or_dial` swaps atomically on every (re)dial.
+/// Cached connection and owned path-poller/disconnect-watcher tasks.
+/// Replacement and cancellation retain ownership under the same lock.
 struct ConnState {
     conn: Option<iroh::endpoint::Connection>,
-    poller: Option<tokio::task::AbortHandle>,
+    tasks: JoinSet<()>,
 }
 
 impl ServiceDialer {
@@ -516,7 +530,7 @@ impl ServiceDialer {
             listen_addr,
             state: Mutex::new(ConnState {
                 conn: None,
-                poller: None,
+                tasks: JoinSet::new(),
             }),
         }
     }
@@ -545,31 +559,35 @@ impl ServiceDialer {
             .map(|r| r.transports.clone())
             .unwrap_or_default();
 
-        // Swap poller + connection atomically under the same guard, so a
-        // racing invalidate+redial can never end with the OLD poller as the
-        // survivor. The old poller also ends by itself once its connection
-        // closes — the abort is just eager cleanup.
-        if let Some(old) = guard.poller.take() {
-            old.abort();
-        }
-        let poller = spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), baseline);
-        *guard = ConnState {
-            conn: Some(conn.clone()),
-            poller: Some(poller),
-        };
-        drop(guard);
-
-        // Emit after publish (no guard needed — the snapshot is in hand).
-        log_connection_established(remote_id, &self.svc_name, report.as_ref());
-        crate::role_run::spawn_disconnect_watcher(
+        // Keep handles in the state even if caller cancellation interrupts
+        // joining a replaced connection's auxiliary tasks.
+        guard.tasks.abort_all();
+        shutdown::join(&mut guard.tasks).await;
+        spawn_path_change_poller(
+            &self.ep,
+            &conn,
+            self.svc_name.clone(),
+            baseline,
+            &mut guard.tasks,
+        );
+        guard.tasks.spawn(crate::role_run::disconnect_watcher(
             &conn,
             remote_id.to_string(),
             format!(
                 "disconnected from serve peer (service {}, multiplexed)",
                 self.svc_name
             ),
-        );
+        ));
+        guard.conn = Some(conn.clone());
+        drop(guard);
+        log_connection_established(remote_id, &self.svc_name, report.as_ref());
         Ok(conn)
+    }
+
+    async fn stop_auxiliary_tasks(&self) {
+        let mut state = self.state.lock().await;
+        state.tasks.abort_all();
+        shutdown::join(&mut state.tasks).await;
     }
 
     /// Drop the cached multiplexed connection (it died); the next channel
@@ -597,43 +615,52 @@ impl ServiceDialer {
 
 /// Bind the service's `listen_addr` and, for each local client, tunnel it.
 ///
-/// Returns only if the listener errors fatally (e.g. the bound socket closes).
-/// Per-client errors are logged, not propagated.
-async fn listen_loop(dialer: Arc<ServiceDialer>, retry_stop: tokio::sync::watch::Receiver<bool>) {
+/// Stop seals admission before draining owned clients. Per-client errors are
+/// logged, not propagated.
+async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     let listen_addr = dialer.listen_addr.clone();
-    let listener = match TcpListener::bind(&listen_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("failed to bind {listen_addr}: {e}");
-            return;
+    let listener = tokio::select! {
+        biased;
+        _ = shutdown::stopped(&mut stop) => return,
+        result = TcpListener::bind(&listen_addr) => match result {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!("failed to bind {listen_addr}: {error}");
+                return;
+            }
         }
     };
     tracing::info!(%listen_addr, "listening for local clients");
-
-    loop {
-        match listener.accept().await {
-            Ok((local_stream, peer_addr)) => {
-                let dialer = dialer.clone();
-                let retry_stop = retry_stop.clone();
-                let deadline = tokio::time::Instant::now() + CLIENT_CONNECT_DEADLINE;
-                tokio::spawn(async move {
-                    match handle_local_connection(&dialer, local_stream, deadline, retry_stop).await
-                    {
-                        Ok(()) => {
-                            tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed")
+    let mut clients = JoinSet::new();
+    let deadline = loop {
+        tokio::select! {
+            biased;
+            deadline = shutdown::stopped(&mut stop) => break deadline,
+            Some(result) = clients.join_next(), if !clients.is_empty() => shutdown::observe(result),
+            result = listener.accept() => match result {
+                Ok((local_stream, peer_addr)) => {
+                    let dialer = dialer.clone();
+                    let stop = stop.clone();
+                    let deadline = tokio::time::Instant::now() + CLIENT_CONNECT_DEADLINE;
+                    clients.spawn(async move {
+                        match handle_local_connection(&dialer, local_stream, deadline, stop).await {
+                            Ok(()) => tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed"),
+                            Err(error) => tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {error}"),
                         }
-                        Err(e) => {
-                            tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {e}")
-                        }
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!("accept error on {listen_addr}: {error}");
+                    tokio::select! {
+                        deadline = shutdown::stopped(&mut stop) => break deadline,
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                     }
-                });
-            }
-            Err(e) => {
-                tracing::warn!("accept error on {listen_addr}: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
             }
         }
-    }
+    };
+    drop(listener);
+    shutdown::drain(&mut clients, deadline).await;
 }
 
 // A single budget includes mutex wait, dial, backoff and opening the stream.
@@ -646,21 +673,21 @@ async fn handle_local_connection(
     dialer: &ServiceDialer,
     local: TcpStream,
     deadline: tokio::time::Instant,
-    mut retry_stop: tokio::sync::watch::Receiver<bool>,
+    mut stop: shutdown::Stop,
 ) -> Result<()> {
     let streams = tokio::select! {
+        biased;
+        _ = shutdown::stopped(&mut stop) => anyhow::bail!("client connection cancelled on shutdown"),
         result = tokio::time::timeout_at(deadline, open_client_stream(dialer)) => {
             result.context("client connection deadline expired")??
         }
-        _ = async {
-            while !*retry_stop.borrow_and_update() {
-                if retry_stop.changed().await.is_err() {
-                    break;
-                }
-            }
-        } => anyhow::bail!("client connection cancelled on shutdown"),
     };
-    crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await
+    // QUIC shutdown queues FIN; pipe completion alone does not prove final
+    // request bytes reached Serve. Keep this task owned until acknowledged.
+    let delivered = streams.0.stopped();
+    crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
+    delivered.await.context("client stream delivery failed")?;
+    Ok(())
 }
 
 async fn open_client_stream(
@@ -771,18 +798,19 @@ fn log_connection_established(
 ///
 /// Lifetime: it holds only a *weak* connection handle (never keeps the
 /// connection alive) and its loop is bounded by `closed()` — the task ends
-/// with the connection. The returned [`tokio::task::AbortHandle`] lets the
-/// owner end it earlier on redial (one poller per service).
+/// with the connection. The owner aborts and joins it on redial or after
+/// channel drain (one poller per service).
 fn spawn_path_change_poller(
     ep: &iroh::Endpoint,
     conn: &iroh::endpoint::Connection,
     svc_name: String,
     initial: Vec<crate::conn_path::TransportStatus>,
-) -> tokio::task::AbortHandle {
+    tasks: &mut JoinSet<()>,
+) {
     let peer = conn.remote_id();
     let weak = conn.weak_handle();
     let ep = ep.clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut last = initial;
         loop {
             // `biased` so a dead connection always wins the race against a
@@ -809,8 +837,7 @@ fn spawn_path_change_poller(
             }
             last = next;
         }
-    })
-    .abort_handle()
+    });
 }
 
 #[cfg(test)]
