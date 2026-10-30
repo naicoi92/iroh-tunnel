@@ -44,6 +44,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+
+use crate::shutdown;
 
 use crate::config::{AccessConfig, AccessService};
 use crate::endpoint;
@@ -216,7 +219,7 @@ impl AccessStrategy {
             );
         }
 
-        let mut handles = Vec::new();
+        let mut listeners = JoinSet::new();
         // One dialer per service, kept alive alongside the listener tasks:
         // the status flush task reads each service's live connection path
         // from its dialer (issue #59).
@@ -296,14 +299,24 @@ impl AccessStrategy {
             crate::status::STATUS_FLUSH_INTERVAL,
             save_access_status,
         ));
-        for dialer in dialers {
-            handles.push(tokio::spawn(listen_loop(dialer)));
+        let (stop, stop_rx) = shutdown::channel();
+        for dialer in &dialers {
+            listeners.spawn(listen_loop(dialer.clone(), stop_rx.clone()));
         }
-        shutdown.await;
-        // Abort each per-service listener so they stop accepting new local
-        // clients before the endpoint close tears down the in-flight dials.
-        for h in handles {
-            h.abort();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                Some(result) = listeners.join_next(), if !listeners.is_empty() => shutdown::observe(result),
+            }
+        }
+        shutdown::begin(&stop);
+        // Listeners seal admission and join their own channels against the
+        // shared deadline. Never abort a supervisor with live descendants.
+        shutdown::join(&mut listeners).await;
+        for dialer in &dialers {
+            dialer.stop_auxiliary_tasks().await;
         }
         // Signal the flush task to stop (dropping the sender alone would
         // also close the channel, but only at scope end — far too late).
@@ -319,16 +332,21 @@ impl AccessStrategy {
         // the reader-side pid warning) beats a resurrection race that
         // cannot be won once the save is in-flight.
         let flush_abort = flush.abort_handle();
-        let flush_stopped = tokio::time::timeout(Duration::from_secs(5), &mut flush)
-            .await
-            .is_ok();
-        if !flush_stopped {
-            tracing::warn!(
-                "status flush task did not stop within 5s; aborting it and KEEPING \
-                 the status file (removal could race its in-flight save)"
-            );
-            flush_abort.abort();
-        }
+        let flush_stopped = match tokio::time::timeout(Duration::from_secs(5), &mut flush).await {
+            Ok(result) => {
+                let clean = result.is_ok();
+                shutdown::observe(result);
+                clean
+            }
+            Err(_) => {
+                tracing::warn!("status flush task did not stop within 5s; keeping status file");
+                flush_abort.abort();
+                shutdown::observe(flush.await);
+                false
+            }
+        };
+        // Test-utils seam: simulate a shutdown stuck in the endpoint close.
+        shutdown::test_hang_point().await;
         ep.close().await;
         // Remove the status file only after a clean join AND only if it
         // still belongs to THIS process (its `pid` field decides — two
@@ -482,17 +500,29 @@ struct ServiceDialer {
     listen_addr: String,
     /// The shared multiplexed connection and its poller, behind ONE lock:
     /// the one-connection-and-one-poller-per-service rule is structural —
-    /// a redial replaces both atomically under the same guard, with no
-    /// cross-lock ordering to reason about. Concurrent channels serialize
-    /// the (re)dial here instead of racing N dials.
+    /// a redial replaces both atomically under the same guard. Lock order is
+    /// `dial` -> `state`, and `state` is never held across a dial, backoff
+    /// or endpoint query. Concurrent channels serialize the (re)dial on
+    /// `dial` instead of racing N dials.
     state: Mutex<ConnState>,
+    /// Serializes dialing without holding `state`; see `get_or_dial`.
+    dial: Mutex<()>,
 }
 
-/// The cached multiplexed connection plus its path-change poller —
-/// the pair `get_or_dial` swaps atomically on every (re)dial.
+/// Cached connection and owned path-poller/disconnect-watcher tasks.
+/// Replacement and cancellation retain ownership under the same lock.
 struct ConnState {
     conn: Option<iroh::endpoint::Connection>,
-    poller: Option<tokio::task::AbortHandle>,
+    tasks: JoinSet<()>,
+}
+
+impl ConnState {
+    /// Whether `conn` is the cached connection (not a replaced or evicted one).
+    fn is_current(&self, conn: &iroh::endpoint::Connection) -> bool {
+        self.conn
+            .as_ref()
+            .is_some_and(|cached| cached.stable_id() == conn.stable_id())
+    }
 }
 
 impl ServiceDialer {
@@ -514,67 +544,94 @@ impl ServiceDialer {
             listen_addr,
             state: Mutex::new(ConnState {
                 conn: None,
-                poller: None,
+                tasks: JoinSet::new(),
             }),
+            dial: Mutex::new(()),
         }
     }
     /// Get the shared multiplexed connection, dialing it if there is none.
     ///
-    /// The lock is held across the retry loop on purpose: N concurrent
-    /// channels produce exactly one connection, not N.
-    async fn get_or_dial(&self) -> Result<iroh::endpoint::Connection> {
-        let mut guard = self.state.lock().await;
-        if let Some(conn) = guard.conn.as_ref() {
+    /// `dial` is held across the retry loop on purpose: N concurrent
+    /// channels produce exactly one connection, not N. The `state` lock is
+    /// only ever held briefly (never across the dial or backoff), so status
+    /// rendering and shutdown are not blocked by a slow dial.
+    ///
+    /// `deadline` bounds the dial and backoff; the caller bounds the lock wait.
+    ///
+    /// The connection is stored in the same synchronous step that follows a
+    /// successful dial, so a caller deadline cannot cancel the future in
+    /// between and discard a dial that already succeeded.
+    async fn get_or_dial(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<iroh::endpoint::Connection> {
+        let _dialing = self.dial.lock().await;
+        if let Some(conn) = self.state.lock().await.conn.as_ref() {
             return Ok(conn.clone());
         }
-        let conn = crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn).await?;
+        let conn =
+            crate::role_run::connect_with_retry(&self.ep, &self.addr, &self.alpn, deadline).await?;
         let remote_id = conn.remote_id();
+        {
+            let mut state = self.state.lock().await;
+            // Aborted tasks of a replaced connection are only reaped here;
+            // the set stays owned by the state until `stop_auxiliary_tasks`.
+            state.tasks.abort_all();
+            while state.tasks.try_join_next().is_some() {}
+            state.tasks.spawn(crate::role_run::disconnect_watcher(
+                &conn,
+                remote_id.to_string(),
+                format!(
+                    "disconnected from serve peer (service {}, multiplexed)",
+                    self.svc_name
+                ),
+            ));
+            state.conn = Some(conn.clone());
+        }
 
-        // One snapshot, two consumers. The query awaits UNDER the guard —
-        // correctness over lock-holder courtesy: sharing this snapshot
-        // between the established line and the poller baseline closes the
-        // blind window where a fast hole punch (landing inside the first
-        // poll tick) would be swallowed by the poller's silent seeding and
-        // never diffed or logged. A `None` report (paths pending) degrades
-        // to an empty baseline — the seed path handles exactly that case.
+        // One snapshot, two consumers: sharing it between the established
+        // line and the poller baseline closes the blind window where a fast
+        // hole punch (landing inside the first poll tick) would be swallowed
+        // by the poller's silent seeding and never diffed or logged. A
+        // `None` report (paths pending) degrades to an empty baseline — the
+        // seed path handles exactly that case. The connection is already
+        // stored, so cancellation here only loses the poller.
         let report = crate::conn_path::peer_path_report(&self.ep, remote_id).await;
         let baseline = report
             .as_ref()
             .map(|r| r.transports.clone())
             .unwrap_or_default();
-
-        // Swap poller + connection atomically under the same guard, so a
-        // racing invalidate+redial can never end with the OLD poller as the
-        // survivor. The old poller also ends by itself once its connection
-        // closes — the abort is just eager cleanup.
-        if let Some(old) = guard.poller.take() {
-            old.abort();
+        {
+            let mut state = self.state.lock().await;
+            // A concurrent invalidate/redial may have replaced this
+            // connection while the report was pending; its poller belongs
+            // to the replacement, not to us.
+            if state.is_current(&conn) {
+                let ConnState { tasks, .. } = &mut *state;
+                spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), baseline, tasks);
+            }
         }
-        let poller = spawn_path_change_poller(&self.ep, &conn, self.svc_name.clone(), baseline);
-        *guard = ConnState {
-            conn: Some(conn.clone()),
-            poller: Some(poller),
-        };
-        drop(guard);
-
-        // Emit after publish (no guard needed — the snapshot is in hand).
         log_connection_established(remote_id, &self.svc_name, report.as_ref());
-        crate::role_run::spawn_disconnect_watcher(
-            &conn,
-            remote_id.to_string(),
-            format!(
-                "disconnected from serve peer (service {}, multiplexed)",
-                self.svc_name
-            ),
-        );
         Ok(conn)
+    }
+
+    async fn stop_auxiliary_tasks(&self) {
+        let mut state = self.state.lock().await;
+        state.tasks.abort_all();
+        shutdown::join(&mut state.tasks).await;
     }
 
     /// Drop the cached multiplexed connection (it died); the next channel
     /// dials a fresh one. The poller is left alone — it ends by itself when
     /// the connection closes, and the next `get_or_dial` replaces it.
-    async fn invalidate(&self) {
-        self.state.lock().await.conn = None;
+    ///
+    /// Only evicts `failed` itself: a channel holding a stale connection must
+    /// not evict a healthy one another channel has since redialed.
+    async fn invalidate(&self, failed: &iroh::endpoint::Connection) {
+        let mut state = self.state.lock().await;
+        if state.is_current(failed) {
+            state.conn = None;
+        }
     }
 
     /// Fresh connection-path report for the cached multiplexed connection,
@@ -595,67 +652,126 @@ impl ServiceDialer {
 
 /// Bind the service's `listen_addr` and, for each local client, tunnel it.
 ///
-/// Returns only if the listener errors fatally (e.g. the bound socket closes).
-/// Per-client errors are logged, not propagated.
-async fn listen_loop(dialer: Arc<ServiceDialer>) {
+/// Stop seals admission before draining owned clients. Per-client errors are
+/// logged, not propagated.
+async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     let listen_addr = dialer.listen_addr.clone();
-    let listener = match TcpListener::bind(&listen_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("failed to bind {listen_addr}: {e}");
-            return;
+    let listener = tokio::select! {
+        biased;
+        _ = shutdown::stopped(&mut stop) => return,
+        result = TcpListener::bind(&listen_addr) => match result {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!("failed to bind {listen_addr}: {error}");
+                return;
+            }
         }
     };
     tracing::info!(%listen_addr, "listening for local clients");
-
-    loop {
-        match listener.accept().await {
-            Ok((local_stream, peer_addr)) => {
-                let dialer = dialer.clone();
-                tokio::spawn(async move {
-                    match handle_local_connection(&dialer, local_stream).await {
-                        Ok(()) => {
-                            tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed")
+    let mut clients = JoinSet::new();
+    let deadline = loop {
+        tokio::select! {
+            biased;
+            deadline = shutdown::stopped(&mut stop) => break deadline,
+            Some(result) = clients.join_next(), if !clients.is_empty() => shutdown::observe(result),
+            result = listener.accept() => match result {
+                Ok((local_stream, peer_addr)) => {
+                    let dialer = dialer.clone();
+                    let stop = stop.clone();
+                    let deadline = tokio::time::Instant::now() + CLIENT_CONNECT_DEADLINE;
+                    clients.spawn(async move {
+                        match handle_local_connection(&dialer, local_stream, deadline, stop).await {
+                            Ok(()) => tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed"),
+                            Err(error) => tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {error}"),
                         }
-                        Err(e) => {
-                            tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {e}")
-                        }
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!("accept error on {listen_addr}: {error}");
+                    tokio::select! {
+                        deadline = shutdown::stopped(&mut stop) => break deadline,
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                     }
-                });
+                }
             }
-            Err(e) => {
-                tracing::warn!("accept error on {listen_addr}: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    };
+    drop(listener);
+    shutdown::drain(&mut clients, deadline).await;
+}
+
+// A single budget includes mutex wait, dial, backoff and opening the stream.
+// Keep established streams outside this timeout. See issue-86-retry-evidence.md.
+const CLIENT_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Tunnel one local client over a stream on the shared service connection.
+/// Errors close only this local client's channel.
+async fn handle_local_connection(
+    dialer: &ServiceDialer,
+    local: TcpStream,
+    deadline: tokio::time::Instant,
+    mut stop: shutdown::Stop,
+) -> Result<()> {
+    let streams = tokio::select! {
+        biased;
+        _ = shutdown::stopped(&mut stop) => anyhow::bail!("client connection cancelled on shutdown"),
+        result = tokio::time::timeout_at(deadline, open_client_stream(dialer, deadline)) => match result {
+            Ok(Ok(streams)) => streams,
+            // The dial loop stops at the same deadline; report one message.
+            Ok(Err(_)) if tokio::time::Instant::now() >= deadline => {
+                anyhow::bail!("client connection deadline expired")
             }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => anyhow::bail!("client connection deadline expired"),
+        }
+    };
+    // QUIC shutdown queues FIN; pipe completion alone does not prove final
+    // request bytes reached Serve. Keep this task owned until acknowledged.
+    let delivered = streams.0.stopped();
+    crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
+    // Bounded: a peer that never acknowledges must not pin this task (and its
+    // status/drain accounting) forever. A missing acknowledgement is NOT
+    // success: it may hide a lost delivery, so it is reported as peer loss
+    // (AC-TCP-06). Nothing is replayed.
+    match crate::pipe::await_delivery(delivered, crate::pipe::DELIVERY_ACK_GRACE).await {
+        crate::pipe::Delivery::Acknowledged => Ok(()),
+        crate::pipe::Delivery::PeerStopped(code) => {
+            anyhow::bail!("peer stopped client stream: {code}")
+        }
+        crate::pipe::Delivery::Unconfirmed => {
+            tracing::warn!(svc = %dialer.svc_name, "peer lost: no delivery acknowledgement within grace");
+            anyhow::bail!("peer lost: delivery unconfirmed (no acknowledgement within grace)")
+        }
+        crate::pipe::Delivery::Lost(error) => {
+            Err(anyhow::Error::new(error).context("client stream delivery failed"))
         }
     }
 }
 
-/// Tunnel one local client over a stream on the shared service connection.
-/// Errors close only this local client's channel.
-async fn handle_local_connection(dialer: &ServiceDialer, local: TcpStream) -> Result<()> {
+async fn open_client_stream(
+    dialer: &ServiceDialer,
+    deadline: tokio::time::Instant,
+) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     // Multiplexed: one stream on the shared connection per channel. If
     // `open_bi` fails with a connection-level error, the cache is dropped and
     // exactly one redial + retry is attempted before giving up — a dead
     // connection surfaces as EOF-style errors on the active channels and the
     // next channel gets a fresh one.
-    let conn = dialer.get_or_dial().await?;
+    let conn = dialer.get_or_dial(deadline).await?;
     match conn.open_bi().await {
         // open_bi returns (SendStream, RecvStream) — send first. Our pipe
         // wants the remote pair as (read, write) = (recv, send), so swap.
-        Ok((send, recv)) => crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await,
+        Ok(streams) => Ok(streams),
         Err(e) => {
             tracing::warn!(
                 svc = %dialer.svc_name,
                 "multiplexed open_bi failed: {e}, redialing once"
             );
-            dialer.invalidate().await;
-            let conn = dialer.get_or_dial().await?;
-            let (send, recv) = conn
-                .open_bi()
+            dialer.invalidate(&conn).await;
+            let conn = dialer.get_or_dial(deadline).await?;
+            conn.open_bi()
                 .await
-                .context("open bidirectional stream failed after redial")?;
-            crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await
+                .context("open bidirectional stream failed after redial")
         }
     }
 }
@@ -741,18 +857,19 @@ fn log_connection_established(
 ///
 /// Lifetime: it holds only a *weak* connection handle (never keeps the
 /// connection alive) and its loop is bounded by `closed()` — the task ends
-/// with the connection. The returned [`tokio::task::AbortHandle`] lets the
-/// owner end it earlier on redial (one poller per service).
+/// with the connection. The owner aborts and joins it on redial or after
+/// channel drain (one poller per service).
 fn spawn_path_change_poller(
     ep: &iroh::Endpoint,
     conn: &iroh::endpoint::Connection,
     svc_name: String,
     initial: Vec<crate::conn_path::TransportStatus>,
-) -> tokio::task::AbortHandle {
+    tasks: &mut JoinSet<()>,
+) {
     let peer = conn.remote_id();
     let weak = conn.weak_handle();
     let ep = ep.clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut last = initial;
         loop {
             // `biased` so a dead connection always wins the race against a
@@ -779,8 +896,7 @@ fn spawn_path_change_poller(
             }
             last = next;
         }
-    })
-    .abort_handle()
+    });
 }
 
 #[cfg(test)]
@@ -873,5 +989,90 @@ mod tests {
             "slow-save-landed",
             "the in-flight save completed and nothing overwrote it afterwards"
         );
+    }
+
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(30)
+    }
+
+    /// A local serve-like endpoint (no relay) and a dialer pointed at it.
+    async fn local_dialer() -> (iroh::Endpoint, ServiceDialer) {
+        use iroh::endpoint::presets::Minimal;
+        let alpn = proto::alpn_for("t");
+        let server = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .alpns(vec![alpn.clone()])
+            .bind()
+            .await
+            .unwrap();
+        let client = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let mut addr = iroh::EndpointAddr::new(server.id());
+        for sock in server.bound_sockets() {
+            let ip = if sock.ip().is_unspecified() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                sock.ip()
+            };
+            addr = addr.with_ip_addr((ip, sock.port()).into());
+        }
+        let dialer = ServiceDialer {
+            ep: client,
+            addr,
+            alpn,
+            svc_name: "t".to_string(),
+            listen_addr: "127.0.0.1:0".to_string(),
+            state: Mutex::new(ConnState {
+                conn: None,
+                tasks: JoinSet::new(),
+            }),
+            dial: Mutex::new(()),
+        };
+        // Accept and hold every connection so none closes on its own.
+        let accept = server.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(incoming) = accept.accept().await {
+                if let Ok(conn) = incoming.await {
+                    held.push(conn);
+                }
+            }
+        });
+        (server, dialer)
+    }
+
+    /// A channel holding a stale failed connection must not evict the
+    /// healthy connection another channel redialed in the meantime.
+    #[tokio::test]
+    async fn invalidate_only_evicts_the_failed_connection() {
+        let (_server, dialer) = local_dialer().await;
+        let stale = dialer.get_or_dial(far_deadline()).await.unwrap();
+        dialer.invalidate(&stale).await;
+        let fresh = dialer.get_or_dial(far_deadline()).await.unwrap();
+        assert_ne!(stale.stable_id(), fresh.stable_id());
+
+        // A second channel still reporting the stale failure.
+        dialer.invalidate(&stale).await;
+        let again = dialer.get_or_dial(far_deadline()).await.unwrap();
+        assert_eq!(
+            again.stable_id(),
+            fresh.stable_id(),
+            "healthy redialed connection must survive a stale invalidate"
+        );
+    }
+
+    /// The status path must not wait for an in-progress dial, and a
+    /// deadline cancelling a waiter must not wedge later dials.
+    #[tokio::test]
+    async fn path_report_does_not_block_on_a_stuck_dial() {
+        let (_server, dialer) = local_dialer().await;
+        let _dialing = dialer.dial.lock().await; // simulates a long dial
+        let report = tokio::time::timeout(Duration::from_millis(500), dialer.path_report())
+            .await
+            .expect("path_report must not wait for the dial lock");
+        assert!(report.is_none());
     }
 }

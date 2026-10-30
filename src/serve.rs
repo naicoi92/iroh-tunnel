@@ -29,6 +29,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::task::JoinSet;
+
+use crate::shutdown;
 
 use crate::config::ServeConfig;
 use crate::endpoint;
@@ -203,8 +206,10 @@ impl ServeStrategy {
         tracing::info!("serve endpoint ready, accepting connections");
         let accept_ep = ep.clone();
         let accept_peers = peers.clone();
-        let accept = tokio::spawn(async move {
-            accept_loop(&accept_ep, targets, accept_peers).await;
+        let (stop, stop_rx) = shutdown::channel();
+        let mut accept = JoinSet::new();
+        accept.spawn(async move {
+            accept_loop(&accept_ep, targets, accept_peers, stop_rx).await;
         });
 
         // Graceful-cleanup inputs captured BEFORE `status` moves into the
@@ -227,11 +232,18 @@ impl ServeStrategy {
             save_status_file,
         ));
 
-        // Wait for the injected shutdown signal, then drain in-flight streams
-        // before closing the endpoint (T-08). The accept task is aborted
-        // first so it stops handing new connections to the pipe.
-        shutdown.await;
-        accept.abort();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                Some(result) = accept.join_next(), if !accept.is_empty() => shutdown::observe(result),
+            }
+        }
+        shutdown::begin(&stop);
+        // The accept supervisor seals handshakes and connection admission;
+        // its connection children seal stream admission and join pipe leaves.
+        shutdown::join(&mut accept).await;
         // Signal the flush task to stop (dropping the sender alone would
         // also close the channel, but only at scope end — far too late).
         let _ = stop_tx.send(());
@@ -246,16 +258,19 @@ impl ServeStrategy {
         // the reader-side pid warning) beats a resurrection race that
         // cannot be won once the save is in-flight.
         let flush_abort = flush.abort_handle();
-        let flush_stopped = tokio::time::timeout(Duration::from_secs(5), &mut flush)
-            .await
-            .is_ok();
-        if !flush_stopped {
-            tracing::warn!(
-                "status flush task did not stop within 5s; aborting it and KEEPING \
-                 the status file (removal could race its in-flight save)"
-            );
-            flush_abort.abort();
-        }
+        let flush_stopped = match tokio::time::timeout(Duration::from_secs(5), &mut flush).await {
+            Ok(result) => {
+                let clean = result.is_ok();
+                shutdown::observe(result);
+                clean
+            }
+            Err(_) => {
+                tracing::warn!("status flush task did not stop within 5s; keeping status file");
+                flush_abort.abort();
+                shutdown::observe(flush.await);
+                false
+            }
+        };
         ep.close().await;
         // Remove the status file only after a clean join AND only if it
         // still belongs to THIS process (its `pid` field decides — two
@@ -520,27 +535,44 @@ async fn status_flush_loop<S, F>(
 
 /// Accept connections forever, demultiplexing each to its service by ALPN.
 ///
-/// Returns only if the endpoint is closed (e.g. after Ctrl-C). Per-connection
-/// errors are logged, not propagated.
+/// Stop cancels admission and pending handshake, then joins connection owners.
+/// Per-connection errors are logged, not propagated.
 async fn accept_loop(
     ep: &iroh::Endpoint,
     targets: HashMap<Vec<u8>, ServiceTarget>,
     peers: PeerTracker,
+    mut stop: shutdown::Stop,
 ) {
+    let mut connections = JoinSet::new();
+    let mut watchers = JoinSet::new();
     loop {
-        // ep.accept() is a Future yielding Option<Incoming>; None means the
-        // endpoint was closed.
-        let Some(incoming) = ep.accept().await else {
-            tracing::info!("endpoint closed, accept loop exiting");
-            return;
-        };
-
-        // Drive the handshake. The Connecting future resolves to a Connection.
-        let conn = match incoming.await {
-            Ok(conn) => conn,
-            Err(e) => {
-                tracing::warn!("incoming handshake failed: {e}");
+        let incoming = tokio::select! {
+            biased;
+            _ = shutdown::stopped(&mut stop) => break,
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                shutdown::observe(result);
                 continue;
+            }
+            Some(result) = watchers.join_next(), if !watchers.is_empty() => {
+                shutdown::observe(result);
+                continue;
+            }
+            incoming = ep.accept() => match incoming {
+                Some(incoming) => incoming,
+                None => break,
+            }
+        };
+        // Dropping a pending handshake cancels it; established connections
+        // remain open until their owned pipes have drained.
+        let conn = tokio::select! {
+            biased;
+            _ = shutdown::stopped(&mut stop) => break,
+            result = incoming => match result {
+                Ok(conn) => conn,
+                Err(error) => {
+                    tracing::warn!("incoming handshake failed: {error}");
+                    continue;
+                }
             }
         };
 
@@ -566,7 +598,11 @@ async fn accept_loop(
         // after the handshake iroh may not have an active-path snapshot
         // yet; that renders as `paths pending` and the status file's
         // `connections` array catches up on its next flush.
-        let report = crate::conn_path::peer_path_report(ep, remote_id).await;
+        let report = tokio::select! {
+            biased;
+            _ = shutdown::stopped(&mut stop) => break,
+            report = crate::conn_path::peer_path_report(ep, remote_id) => report,
+        };
         tracing::info!(
             peer = %remote_id,
             service = %name,
@@ -578,76 +614,189 @@ async fn accept_loop(
         // weak handle is registered while `conn` is still alive (before the
         // stream-handling task takes it), so iroh guarantees the close event is
         // delivered even if the connection drops before this resolves.
-        crate::role_run::spawn_disconnect_watcher(
+        watchers.spawn(crate::role_run::disconnect_watcher(
             &conn,
             remote_id.to_string(),
             format!("peer disconnected (service {name})"),
-        );
+        ));
         let conn_peers = peers.clone();
+        let conn_stop = stop.clone();
 
-        tokio::spawn(async move {
+        connections.spawn(async move {
             // Track the peer for the status file's `connections` array for
             // as long as this connection lives (issue #57). The guard
             // untracks on drop — normal return or panic unwind alike — so
             // the refcount can never leak.
             let _tracked = conn_peers.track(remote_id, &name);
-            handle_connection(&conn, target).await;
+            handle_connection(&conn, target, conn_stop).await;
         });
+    }
+    // Supervisors are not aborted: each joins its own stream children using
+    // the same absolute deadline. Idle connections do not consume grace.
+    shutdown::join(&mut connections).await;
+    watchers.abort_all();
+    shutdown::join(&mut watchers).await;
+}
+
+/// Bound on one stream's local target connect; see `handle_connection`.
+const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connect one stream's local target within `limit`.
+///
+/// A failure or timeout is logged and yields `None`: the caller drops the
+/// stream halves, which resets only this channel; the shared connection and
+/// sibling streams are untouched.
+async fn connect_local<F, T>(
+    connect: F,
+    limit: Duration,
+    local_addr: &str,
+    stream_no: u64,
+) -> Option<T>
+where
+    F: Future<Output = std::io::Result<T>>,
+{
+    match tokio::time::timeout(limit, connect).await {
+        Ok(Ok(local)) => Some(local),
+        Ok(Err(error)) => {
+            tracing::warn!(%local_addr, stream = stream_no,
+                "failed to connect local service, resetting stream: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(%local_addr, stream = stream_no,
+                "timed out connecting local service, resetting stream");
+            None
+        }
     }
 }
 
-/// Supervise one connection: accept bidirectional streams in a loop, connect
-/// the local service for each, and pipe bytes both ways until either side
-/// closes.
-///
-/// Returns when the connection closes (`accept_bi` errors). Per-stream
-/// failures — including a refused local dial — reset only that stream; the
-/// connection and its other streams are unaffected.
-async fn handle_connection(conn: &Connection, target: ServiceTarget) {
+/// Own stream admission and pipe tasks for one multiplexed connection.
+async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
+    let mut streams = JoinSet::new();
     let mut stream_no: u64 = 0;
-    loop {
-        // accept_bi returns (SendStream, RecvStream) — send first. Our pipe
-        // wants the remote pair as (read, write) = (recv, send), so swap.
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::debug!("connection closed: {e}");
-                return;
+    let deadline = loop {
+        let (send, recv) = tokio::select! {
+            biased;
+            deadline = shutdown::stopped(&mut stop) => break Some(deadline),
+            Some(result) = streams.join_next(), if !streams.is_empty() => {
+                shutdown::observe(result);
+                continue;
+            }
+            result = conn.accept_bi() => match result {
+                Ok(pair) => pair,
+                Err(error) => {
+                    tracing::debug!("connection closed: {error}");
+                    break None;
+                }
             }
         };
         stream_no += 1;
         tracing::debug!(stream = stream_no, "accepted stream on connection");
-
-        let local = match TcpStream::connect(&target.local_addr).await {
-            Ok(local) => local,
-            Err(e) => {
-                // Dropping the halves resets this one stream (RESET_STREAM /
-                // STOP_SENDING); the access side surfaces it as a failed
-                // channel while the connection stays usable.
-                tracing::warn!(
-                    local_addr = %target.local_addr,
-                    stream = stream_no,
-                    "failed to connect local service, resetting stream: {e}"
-                );
-                continue;
-            }
-        };
-
-        let counter = target.active_streams();
-        counter.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(async move {
+        let counter = ActiveStream::new(target.active_streams());
+        let local_addr = target.local_addr.clone();
+        streams.spawn(async move {
+            let _counter = counter;
+            // Connect inside the stream's own task: a slow target must not
+            // hold up accepting other streams on this connection. A failed
+            // or timed-out connect closes only this channel (dropping the
+            // stream halves resets it).
+            let Some(local) = connect_local(
+                TcpStream::connect(&local_addr),
+                LOCAL_CONNECT_TIMEOUT,
+                &local_addr,
+                stream_no,
+            )
+            .await
+            else {
+                return;
+            };
+            // AsyncWrite::shutdown only queues QUIC FIN. Keep channel owned
+            // until final bytes are acknowledged, or last-pipe completion
+            // could close the endpoint and discard its queued response. The
+            // wait is bounded: a vanished peer must not pin this task and
+            // the active_streams counter.
+            let delivered = send.stopped();
             match crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await {
-                Ok(()) => tracing::debug!("stream closed normally"),
-                Err(e) => tracing::warn!("stream error: {e}"),
+                Ok(()) => {
+                    match crate::pipe::await_delivery(delivered, crate::pipe::DELIVERY_ACK_GRACE)
+                        .await
+                    {
+                        crate::pipe::Delivery::Acknowledged => {
+                            tracing::debug!("stream closed normally")
+                        }
+                        crate::pipe::Delivery::PeerStopped(code) => {
+                            tracing::debug!(%code, "peer stopped completed stream")
+                        }
+                        crate::pipe::Delivery::Unconfirmed => tracing::warn!(
+                            stream = stream_no,
+                            "peer lost: no delivery acknowledgement within grace"
+                        ),
+                        crate::pipe::Delivery::Lost(error) => {
+                            tracing::warn!("stream delivery error: {error}")
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!("stream error: {error}"),
             }
-            counter.fetch_sub(1, Ordering::Relaxed);
         });
+    };
+    if let Some(deadline) = deadline {
+        shutdown::drain(&mut streams, deadline).await;
+    } else {
+        // Peer loss cannot drain and must never replay partially copied data.
+        streams.abort_all();
+        shutdown::join(&mut streams).await;
+    }
+}
+
+/// Abort/panic-safe status accounting, including tasks not yet first polled.
+struct ActiveStream(Arc<AtomicU64>);
+
+impl ActiveStream {
+    fn new(counter: Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for ActiveStream {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn connect_local_timeout_resets_only_that_channel() {
+        let mut channels = JoinSet::new();
+        channels.spawn(async {
+            let hung = std::future::pending::<std::io::Result<u8>>();
+            connect_local(hung, Duration::from_millis(50), "t:1", 1).await
+        });
+        channels.spawn(async {
+            connect_local(
+                std::future::ready(Ok(7u8)),
+                Duration::from_millis(50),
+                "t:1",
+                2,
+            )
+            .await
+        });
+        channels.spawn(async {
+            let refused =
+                std::future::ready(Err::<u8, _>(std::io::ErrorKind::ConnectionRefused.into()));
+            connect_local(refused, Duration::from_millis(50), "t:1", 3).await
+        });
+        let mut results = Vec::new();
+        while let Some(result) = channels.join_next().await {
+            results.push(result.unwrap());
+        }
+        results.sort();
+        assert_eq!(results, vec![None, None, Some(7)]);
+    }
 
     fn peer() -> iroh::EndpointId {
         iroh::SecretKey::generate().public()

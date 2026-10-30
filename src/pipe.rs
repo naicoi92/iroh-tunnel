@@ -211,9 +211,81 @@ where
     Ok(())
 }
 
+/// How long a completed pipe waits for the peer to acknowledge final stream
+/// bytes. Technical implementation default, not configurable.
+///
+/// Kept below [`crate::shutdown::DRAIN_GRACE`] so that during shutdown a pipe
+/// that completes early in the drain still gets its full acknowledgement wait
+/// before the drain deadline aborts the task; a longer value would be moot.
+pub(crate) const DELIVERY_ACK_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+const _: () = assert!(
+    DELIVERY_ACK_GRACE.as_millis() < crate::shutdown::DRAIN_GRACE.as_millis(),
+    "the delivery acknowledgement wait must fit inside the shutdown drain grace"
+);
+
+/// Outcome of waiting for the peer to acknowledge a finished send stream.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Delivery<E> {
+    /// The peer acknowledged every byte including the FIN.
+    Acknowledged,
+    /// The peer sent STOP_SENDING with this code: it did not read all bytes.
+    PeerStopped(iroh::endpoint::VarInt),
+    /// No acknowledgement within the grace: delivery is unconfirmed, the peer
+    /// may be lost. Bytes are never replayed.
+    Unconfirmed,
+    /// The connection failed before delivery could be confirmed.
+    Lost(E),
+}
+
+/// Wait at most `grace` for `delivered` (a send stream's `stopped()` future).
+///
+/// QUIC shutdown only queues FIN, so pipe completion alone does not prove the
+/// final bytes reached the peer. Callers map every non-[`Delivery::Acknowledged`]
+/// outcome to a peer-loss style error or warning; a timeout is deliberately not
+/// reported as success (AC-TCP-06), and nothing is retransmitted at this layer.
+pub(crate) async fn await_delivery<F, E>(delivered: F, grace: std::time::Duration) -> Delivery<E>
+where
+    F: std::future::Future<Output = Result<Option<iroh::endpoint::VarInt>, E>>,
+{
+    match tokio::time::timeout(grace, delivered).await {
+        Ok(Ok(None)) => Delivery::Acknowledged,
+        Ok(Ok(Some(code))) => Delivery::PeerStopped(code),
+        Ok(Err(error)) => Delivery::Lost(error),
+        Err(_) => Delivery::Unconfirmed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- await_delivery tests ----
+
+    #[tokio::test]
+    async fn await_delivery_reports_unconfirmed_when_no_ack_arrives() {
+        let pending = std::future::pending::<Result<Option<iroh::endpoint::VarInt>, String>>();
+        let outcome = await_delivery(pending, std::time::Duration::from_millis(30)).await;
+        assert_eq!(outcome, Delivery::Unconfirmed);
+    }
+
+    #[tokio::test]
+    async fn await_delivery_maps_ack_peer_stop_and_loss() {
+        let grace = std::time::Duration::from_secs(5);
+        let ok = std::future::ready(Ok::<_, String>(None));
+        assert_eq!(await_delivery(ok, grace).await, Delivery::Acknowledged);
+        let code = iroh::endpoint::VarInt::from_u32(42);
+        let stopped = std::future::ready(Ok::<_, String>(Some(code)));
+        assert_eq!(
+            await_delivery(stopped, grace).await,
+            Delivery::PeerStopped(code)
+        );
+        let lost = std::future::ready(Err::<Option<iroh::endpoint::VarInt>, _>("gone".to_string()));
+        assert_eq!(
+            await_delivery(lost, grace).await,
+            Delivery::Lost("gone".to_string())
+        );
+    }
     use tokio::io::{duplex, AsyncReadExt};
     use tokio::net::TcpListener;
 
