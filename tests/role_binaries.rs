@@ -15,6 +15,8 @@
 //!   parsers have no conflicting short options (unit test in `src/cli.rs`).
 //! - 82.CL3: role-specific invalid options and key-file diagnostics.
 
+mod common;
+
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -444,12 +446,7 @@ fn non_ownership_files(dir: &Path) -> Result<Vec<PathBuf>> {
             found.extend(non_ownership_files(&path)?);
             continue;
         }
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let ownership = path
-            .parent()
-            .is_some_and(|p| p.ends_with(".local/state/iroh-tunnel"))
-            && (name.ends_with(".lock") || name.contains(".owner.json"));
-        if !ownership {
+        if !common::is_ownership_artifact(&path) {
             found.push(path);
         }
     }

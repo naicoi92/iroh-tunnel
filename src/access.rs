@@ -71,7 +71,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
 pub async fn run_quick(cfg: AccessConfig) -> Result<()> {
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("access quick mode: {e}")))?;
-    let claim = crate::role_run::Ownership::Enforced(crate::status::StatusRole::Access).claim()?;
+    let claim = Some(crate::ownership::claim(crate::status::StatusRole::Access)?);
     crate::role_run::run_config::<AccessStrategy, _, _>(cfg, claim, |ep, cfg| {
         AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal())
     })

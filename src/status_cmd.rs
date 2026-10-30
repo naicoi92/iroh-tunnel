@@ -133,20 +133,11 @@ fn warn_unless_live(role: StatusRole, liveness: &Liveness, pid: u32, started_at:
 
 /// One line naming the live owner when no snapshot is readable here.
 fn describe_running(role: StatusRole, tier: Tier, owner: Option<&Owner>, path: &Path) -> String {
-    let who = match owner {
-        Some(o) => match &o.node_id {
-            Some(id) => format!("pid {}, node_id {id}", o.pid),
-            None => format!("pid {}", o.pid),
-        },
-        None => "owner unknown".to_string(),
-    };
-    let scope = match tier {
-        Tier::User => "this user",
-        Tier::Machine => "the system service or another machine-wide process",
-    };
     format!(
-        "{} is running for {scope} ({who}); no status snapshot at {} (it may use another state directory)",
+        "{} is running for {} ({}); no status snapshot at {} (it may use another state directory)",
         role.name(),
+        tier.label(),
+        ownership::describe_owner(owner),
         path.display()
     )
 }

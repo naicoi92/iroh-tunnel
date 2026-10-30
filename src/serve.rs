@@ -56,7 +56,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
 pub async fn run_quick(cfg: ServeConfig) -> Result<()> {
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("serve quick mode: {e}")))?;
-    let claim = crate::role_run::Ownership::Enforced(crate::status::StatusRole::Serve).claim()?;
+    let claim = Some(crate::ownership::claim(crate::status::StatusRole::Serve)?);
     crate::role_run::run_config::<ServeStrategy, _, _>(cfg, claim, |ep, cfg| {
         ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal())
     })

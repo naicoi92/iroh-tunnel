@@ -47,6 +47,10 @@ use crate::status::StatusRole;
 #[cfg(feature = "test-utils")]
 const ENV_MACHINE_LOCK_DIR: &str = "IROH_TUNNEL_MACHINE_LOCK_DIR";
 
+/// Mode bit that lets other users open a lock file for reading.
+#[cfg(unix)]
+const OTHERS_READ: u32 = 0o004;
+
 /// Who is recorded as running a role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Owner {
@@ -153,8 +157,10 @@ fn create_lock_file(path: &Path, mode: u32) -> std::io::Result<File> {
         // The process umask may have narrowed the mode; other users must be
         // able to open a machine lock for reading.
         use std::os::unix::fs::PermissionsExt;
-        if mode & 0o044 != 0 {
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+        if mode & OTHERS_READ != 0 {
+            if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(mode)) {
+                tracing::debug!("could not widen lock mode for {}: {e}", path.display());
+            }
         }
     }
     Ok(file)
@@ -166,16 +172,18 @@ enum Lock {
     Busy,
 }
 
-fn try_exclusive(file: File) -> Result<Lock> {
-    match file.try_lock() {
-        Ok(()) => Ok(Lock::Held(file)),
-        Err(TryLockError::WouldBlock) => Ok(Lock::Busy),
-        Err(TryLockError::Error(e)) => Err(e.into()),
-    }
+#[derive(Clone, Copy)]
+enum LockKind {
+    Exclusive,
+    Shared,
 }
 
-fn try_shared(file: File) -> Result<Lock> {
-    match file.try_lock_shared() {
+fn try_lock(file: File, kind: LockKind) -> Result<Lock> {
+    let result = match kind {
+        LockKind::Exclusive => file.try_lock(),
+        LockKind::Shared => file.try_lock_shared(),
+    };
+    match result {
         Ok(()) => Ok(Lock::Held(file)),
         Err(TryLockError::WouldBlock) => Ok(Lock::Busy),
         Err(TryLockError::Error(e)) => Err(e.into()),
@@ -202,20 +210,43 @@ fn write_owner(dir: &Path, role: StatusRole, node_id: Option<&str>) {
     let path = dir.join(owner_name(role));
     // Informational record: a failed write must not stop the role.
     let tmp = dir.join(format!("{}.{}.tmp", owner_name(role), std::process::id()));
-    if std::fs::write(&tmp, body)
-        .and_then(|()| std::fs::rename(&tmp, &path))
-        .is_err()
-    {
+    if let Err(e) = std::fs::write(&tmp, body).and_then(|()| std::fs::rename(&tmp, &path)) {
         let _ = std::fs::remove_file(&tmp);
-        tracing::debug!("could not publish owner record in {}", dir.display());
+        tracing::debug!("could not publish owner record in {}: {e}", dir.display());
     }
 }
 
-fn describe(owner: Option<&Owner>) -> String {
+/// Human description of a recorded owner: pid, plus public node id when known.
+pub(crate) fn describe_owner(owner: Option<&Owner>) -> String {
     match owner {
+        Some(Owner {
+            pid,
+            node_id: Some(id),
+            ..
+        }) => format!("pid {pid}, node_id {id}"),
         Some(o) => format!("pid {}", o.pid),
         None => "owner unknown".to_string(),
     }
+}
+
+impl Tier {
+    /// Who holds the role at this tier, for messages.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Tier::User => "this user",
+            Tier::Machine => "the system service or another machine-wide process",
+        }
+    }
+}
+
+/// The refusal for a start that finds `role` already running at `scope`.
+fn already_running(role: StatusRole, scope: &str, owner: Option<&Owner>) -> anyhow::Error {
+    conflict(format!(
+        "{} is already running ({scope}; {}); {}",
+        role.name(),
+        describe_owner(owner),
+        stop_hint(role)
+    ))
 }
 
 fn stop_hint(role: StatusRole) -> String {
@@ -250,15 +281,14 @@ pub(crate) fn claim(role: StatusRole) -> Result<RoleClaim> {
     let user_path = user_dir.join(lock_name(role));
     let file = create_lock_file(&user_path, 0o600)
         .with_context(|| format!("cannot open role lock {}", user_path.display()))?;
-    let user_lock = match try_exclusive(file)? {
+    let user_lock = match try_lock(file, LockKind::Exclusive)? {
         Lock::Held(file) => file,
         Lock::Busy => {
-            return Err(conflict(format!(
-                "{} is already running (own-user {}); {}",
-                role.name(),
-                describe(read_owner(&user_dir, role).as_ref()),
-                stop_hint(role)
-            )))
+            return Err(already_running(
+                role,
+                Tier::User.label(),
+                read_owner(&user_dir, role).as_ref(),
+            ))
         }
     };
 
@@ -288,6 +318,16 @@ pub(crate) fn claim(role: StatusRole) -> Result<RoleClaim> {
     })
 }
 
+/// Errors that mean "this account may not create the machine lock".
+fn is_not_elevated(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::ReadOnlyFilesystem
+            | std::io::ErrorKind::NotFound
+    )
+}
+
 enum MachineClaim {
     Exclusive(File),
     Shared(File),
@@ -296,20 +336,26 @@ enum MachineClaim {
 
 fn claim_machine(role: StatusRole, dir: &Path) -> Result<MachineClaim> {
     let path = dir.join(lock_name(role));
-    // Elevated side: able to create the directory and write the lock.
-    let writable = create_dir(dir, 0o755)
-        .and_then(|()| create_lock_file(&path, 0o644))
-        .ok();
-    if let Some(file) = writable {
-        return match try_exclusive(file)? {
-            Lock::Held(file) => Ok(MachineClaim::Exclusive(file)),
-            Lock::Busy => Err(conflict(format!(
-                "{} is already running on this machine ({}); {}",
-                role.name(),
-                describe(read_owner(dir, role).as_ref()),
-                stop_hint(role)
-            ))),
-        };
+    // Elevated side: able to create the directory and write the lock. Only
+    // "no permission" means "not elevated"; any other failure is real.
+    match create_dir(dir, 0o755).and_then(|()| create_lock_file(&path, 0o644)) {
+        Ok(file) => {
+            return match try_lock(file, LockKind::Exclusive)? {
+                Lock::Held(file) => Ok(MachineClaim::Exclusive(file)),
+                Lock::Busy => Err(already_running(
+                    role,
+                    Tier::Machine.label(),
+                    read_owner(dir, role).as_ref(),
+                )),
+            };
+        }
+        Err(e) if is_not_elevated(&e) => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "cannot create machine role lock {}",
+                path.display()
+            )))
+        }
     }
     // Non-elevated side: read-only, shared. Never create anything here.
     let file = match base_options().read(true).open(&path) {
@@ -320,16 +366,13 @@ fn claim_machine(role: StatusRole, dir: &Path) -> Result<MachineClaim> {
                 .context(format!("cannot open machine role lock {}", path.display())))
         }
     };
-    match try_shared(file)? {
+    match try_lock(file, LockKind::Shared)? {
         Lock::Held(file) => Ok(MachineClaim::Shared(file)),
-        Lock::Busy => Err(conflict(format!(
-            "a system service of {} is already running ({}); {} \
-             (with elevated rights, e.g. `{} service stop --system`)",
-            role.name(),
-            describe(read_owner(dir, role).as_ref()),
-            "stop it first",
-            role.name()
-        ))),
+        Lock::Busy => Err(already_running(
+            role,
+            "a system service",
+            read_owner(dir, role).as_ref(),
+        )),
     }
 }
 
@@ -358,7 +401,7 @@ impl RoleClaim {
                     "the {} role already runs with the same public identity ({}); \
                      two processes must not share a key — use `config keygen` to create another one",
                     other.name(),
-                    describe(Some(&owner))
+                    describe_owner(Some(&owner))
                 )));
             }
         }
@@ -375,38 +418,41 @@ impl RoleClaim {
 /// I/O errors other than "no such lock" when opening or testing a lock.
 pub(crate) fn probe(role: StatusRole) -> Result<Liveness> {
     let user_dir = user_dir()?;
-    if let Some(file) = open_existing(&user_dir.join(lock_name(role)), false)? {
-        if let Lock::Busy = try_shared(file)? {
+    if lock_is_held(&user_dir.join(lock_name(role)), false)? {
+        return Ok(Liveness::Running {
+            tier: Tier::User,
+            owner: read_owner(&user_dir, role),
+        });
+    }
+    if let Some(dir) = machine_dir() {
+        // A prober that can open the machine lock for writing tests it
+        // exclusively, or it would miss shared (non-elevated) holders.
+        if lock_is_held(&dir.join(lock_name(role)), true)? {
             return Ok(Liveness::Running {
-                tier: Tier::User,
-                owner: read_owner(&user_dir, role),
+                tier: Tier::Machine,
+                owner: read_owner(&dir, role),
             });
         }
     }
-    if let Some(dir) = machine_dir() {
-        let path = dir.join(lock_name(role));
-        // A prober that could take the machine lock for writing must test it
-        // exclusively, or it would miss shared (non-elevated) holders.
-        let writable = open_existing(&path, true).ok().flatten();
-        let (file, exclusive) = match writable {
-            Some(file) => (Some(file), true),
-            None => (open_existing(&path, false)?, false),
-        };
-        if let Some(file) = file {
-            let outcome = if exclusive {
-                try_exclusive(file)?
-            } else {
-                try_shared(file)?
-            };
-            if let Lock::Busy = outcome {
-                return Ok(Liveness::Running {
-                    tier: Tier::Machine,
-                    owner: read_owner(&dir, role),
-                });
-            }
-        }
-    }
     Ok(Liveness::NotRunning)
+}
+
+/// Whether another process holds the lock at `path`; a missing lock is not
+/// held. The lock is released again before returning.
+fn lock_is_held(path: &Path, prefer_write: bool) -> Result<bool> {
+    let writable = if prefer_write {
+        open_existing(path, true).ok().flatten()
+    } else {
+        None
+    };
+    let (file, kind) = match writable {
+        Some(file) => (Some(file), LockKind::Exclusive),
+        None => (open_existing(path, false)?, LockKind::Shared),
+    };
+    match file {
+        Some(file) => Ok(matches!(try_lock(file, kind)?, Lock::Busy)),
+        None => Ok(false),
+    }
 }
 
 fn open_existing(path: &Path, write: bool) -> Result<Option<File>> {
@@ -428,16 +474,9 @@ fn open_existing(path: &Path, write: bool) -> Result<Option<File>> {
 pub(crate) fn ensure_not_running(role: StatusRole) -> Result<()> {
     match probe(role)? {
         Liveness::NotRunning => Ok(()),
-        Liveness::Running { tier, owner } => Err(conflict(format!(
-            "{} is already running ({}{}); {}",
-            role.name(),
-            match tier {
-                Tier::User => "own-user ",
-                Tier::Machine => "system service or machine-wide ",
-            },
-            describe(owner.as_ref()),
-            stop_hint(role)
-        ))),
+        Liveness::Running { tier, owner } => {
+            Err(already_running(role, tier.label(), owner.as_ref()))
+        }
     }
 }
 
@@ -462,14 +501,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.lock");
         let first = create_lock_file(&path, 0o600).unwrap();
-        let Lock::Held(first) = try_exclusive(first).unwrap() else {
+        let Lock::Held(first) = try_lock(first, LockKind::Exclusive).unwrap() else {
             panic!("first holder must win");
         };
         let second = create_lock_file(&path, 0o600).unwrap();
-        assert!(matches!(try_exclusive(second).unwrap(), Lock::Busy));
+        assert!(matches!(
+            try_lock(second, LockKind::Exclusive).unwrap(),
+            Lock::Busy
+        ));
         drop(first);
         let third = create_lock_file(&path, 0o600).unwrap();
-        assert!(matches!(try_exclusive(third).unwrap(), Lock::Held(_)));
+        assert!(matches!(
+            try_lock(third, LockKind::Exclusive).unwrap(),
+            Lock::Held(_)
+        ));
     }
 
     #[test]

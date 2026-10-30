@@ -261,16 +261,24 @@ where
     F: FnOnce(iroh::Endpoint, S::Config) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    // A configured key is known before binding, so a duplicate identity is
+    // rejected without touching the relay; an ephemeral key only exists
+    // after the endpoint is built and cannot clash.
     let secret_key = cfg.node_mut().secret_key.clone();
-    if let (Some(claim), false) = (&claim, secret_key.is_empty()) {
+    let configured_id = if secret_key.is_empty() {
+        None
+    } else {
         let (key, _) = crate::config::resolve_secret_key(&secret_key)?;
-        claim.publish_identity(&key.public().to_string())?;
+        Some(key.public().to_string())
+    };
+    if let (Some(claim), Some(id)) = (&claim, &configured_id) {
+        claim.publish_identity(id)?;
     }
 
     // Build the role-specific endpoint (serve registers ALPNs, access is
     // outbound-only).
     let ep = S::build_endpoint(&cfg).await?;
-    if let (Some(claim), true) = (&claim, secret_key.is_empty()) {
+    if let (Some(claim), None) = (&claim, &configured_id) {
         claim.publish_identity(&crate::endpoint::node_id_string(&ep))?;
     }
 
