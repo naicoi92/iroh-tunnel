@@ -4,6 +4,17 @@
 
 ### Changed
 
+- **TCP connection lifecycle**: each new Access client has a 30-second
+  establishment deadline including shared-connection wait, retries, backoff
+  and stream opening, with at most 5 seconds per dial. Failed dials use
+  exponential backoff (1, 2, 4, 8, 16, then 30 seconds capped; no jitter),
+  bounded by that deadline. Healthy established channels have no added
+  lifetime timeout; peer loss closes affected channels without replay.
+  Shutdown stops admission and gives active channels one shared 3-second
+  drain grace, then closes remaining channels. Repeated stop does not reset
+  grace; endpoint transport teardown can add time afterward. These are
+  implementation defaults, not configurable settings or delivery guarantees.
+
 - **TCP multiplexing**: Access always reuses a service connection for
   concurrent streams. Legacy `multiplex` configuration values are silently
   ignored and removed by app-owned config saves; `config edit` leaves external

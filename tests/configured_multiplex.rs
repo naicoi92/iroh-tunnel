@@ -50,6 +50,68 @@ fn start(role: &str, home: &Path, config: &Path, round: usize) -> Result<RolePro
     Ok(RoleProcess { child, log })
 }
 
+// No TCP readiness probe: it would admit an extra tunnel channel.
+async fn start_access(
+    home: &Path,
+    config: &Path,
+    round: usize,
+) -> Result<(RoleProcess, std::net::SocketAddr)> {
+    for attempt in 0..8 {
+        let cfg = AccessConfig::load(config)?;
+        anyhow::ensure!(cfg.services.len() == 1, "fixture expects one service");
+        let listen = format!("{}:{}", cfg.services[0].host, cfg.services[0].port).parse()?;
+        let mut access = start("access", home, config, round * 8 + attempt)?;
+        let ready = format!("listening for local clients listen_addr={listen}");
+        match wait_log(&mut access, &ready).await {
+            Ok(_) => return Ok((access, listen)),
+            Err(error) => {
+                let log = std::fs::read_to_string(&access.log)?;
+                // Match both operation/address and OS bind-collision code
+                // on the same line; unrelated errors must never be retried.
+                let collision = log.lines().any(|line| {
+                    line.contains(&format!("failed to bind {listen}:"))
+                        && ["os error 48", "os error 98", "os error 10048"]
+                            .iter()
+                            .any(|code| line.contains(code))
+                });
+                if !collision {
+                    return Err(error);
+                }
+                if access.child.try_wait()?.is_none() {
+                    access.child.kill().context("kill bind-collided Access")?;
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while access.child.try_wait()?.is_none() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .context("reap bind-collided Access timeout")??;
+                eprintln!(
+                    "bind-collided Access pid={} reaped before retry",
+                    access.child.id()
+                );
+                drop(access);
+                // Preserve legacy fields and file semantics under test. A
+                // config save here would silently remove `multiplex`.
+                let reservation = TcpListener::bind((cfg.services[0].host.as_str(), 0)).await?;
+                let mut document: toml_edit::DocumentMut =
+                    std::fs::read_to_string(config)?.parse()?;
+                document["services"]
+                    .as_array_of_tables_mut()
+                    .context("services table")?
+                    .get_mut(0)
+                    .context("first service")?["port"] =
+                    toml_edit::value(i64::from(reservation.local_addr()?.port()));
+                std::fs::write(config, document.to_string())?;
+                drop(reservation);
+            }
+        }
+    }
+    anyhow::bail!("configured listener collision retries exhausted after 8 attempts")
+}
+
 async fn wait_log(process: &mut RoleProcess, expected: &str) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -147,49 +209,31 @@ async fn configured_variant(legacy: &str) -> Result<()> {
         let mut serve = start("serve", &serve_home, &serve_path, round)?;
         let log = wait_log(&mut serve, "endpoint ready").await?;
         assert!(log.contains(&serve_key.public().to_string()));
-        // Retry only address-in-use races; do not connect a readiness probe,
-        // which would itself create an extra tunnel stream/connection.
-        let (mut access, listen) = {
-            let mut ready = None;
-            for attempt in 0..8 {
-                let reservation = TcpListener::bind("127.0.0.1:0").await?;
-                let listen = reservation.local_addr()?;
-                drop(reservation);
-                if round == 0 {
-                    access_source = format!(
-                        "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n{legacy}\n",
-                        encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()
-                    );
-                    std::fs::write(&access_path, &access_source)?;
-                } else {
-                    let mut cfg = AccessConfig::load(&access_path)?;
-                    cfg.services[0].port = listen.port();
-                    cfg.save(&access_path)?;
-                }
-                let mut access = start("access", &access_home, &access_path, round * 8 + attempt)?;
-                match wait_log(
-                    &mut access,
-                    &format!("listen_addr=127.0.0.1:{}", listen.port()),
-                )
-                .await
-                {
-                    Ok(_) => {
-                        ready = Some((access, listen));
-                        break;
-                    }
-                    Err(error) => {
-                        let log = std::fs::read_to_string(&access.log)?;
-                        if !["os error 48", "os error 98", "os error 10048"]
-                            .iter()
-                            .any(|code| log.contains(code))
-                        {
-                            return Err(error);
-                        }
-                    }
-                }
+        let reservation = TcpListener::bind("127.0.0.1:0").await?;
+        let listen = reservation.local_addr()?;
+        drop(reservation);
+        if round == 0 {
+            access_source = format!(
+                "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n{legacy}\n",
+                encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()
+            );
+            std::fs::write(&access_path, &access_source)?;
+        } else {
+            let mut cfg = AccessConfig::load(&access_path)?;
+            cfg.services[0].port = listen.port();
+            cfg.save(&access_path)?;
+        }
+        let (mut access, listen) = start_access(&access_home, &access_path, round).await?;
+        if round == 0 {
+            // Model only fixture's port edit, not app-owned writes: rereading
+            // source here would hide a regression that rewrites on load.
+            let mut expected: toml_edit::DocumentMut = access_source.parse()?;
+            let port = expected["services"][0]["port"].as_integer();
+            if port != Some(i64::from(listen.port())) {
+                expected["services"][0]["port"] = toml_edit::value(i64::from(listen.port()));
+                access_source = expected.to_string();
             }
-            ready.context("configured listener collision retries exhausted")?
-        };
+        }
         let log = wait_log(&mut access, "listening for local clients").await?;
         assert!(log.contains(&access_key.public().to_string()));
         exchange(listen, &target).await?;
@@ -295,7 +339,7 @@ async fn configured_peer_loss_closes_active_channels_without_replay() -> Result<
         encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()
     ))?;
     let mut serve = start("serve", &serve_home, &serve_path, 0)?;
-    let mut access = start("access", &access_home, &access_path, 0)?;
+    let (mut access, listen) = start_access(&access_home, &access_path, 0).await?;
     let mut restarted = None;
     let outcome = tokio::time::timeout(Duration::from_secs(100), async {
         let log = wait_log(&mut serve, "endpoint ready").await?;
@@ -421,7 +465,7 @@ async fn unavailable_peer_retries_then_closes_client_within_deadline() -> Result
         "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n",
         encode_secret_key(&key), relay.to_string(), peer.public().to_string(), listen.port()
     ))?;
-    let mut access = start("access", &home, &config, 0)?;
+    let (mut access, listen) = start_access(&home, &config, 0).await?;
     let outcome = async {
         wait_log(&mut access, &format!("listen_addr={listen}")).await?;
         let started = Instant::now();
@@ -492,7 +536,7 @@ async fn retry_scenario(scenario: &str) -> Result<()> {
     let access_path = access_home.join("access.toml");
     std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
     std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
-    let mut access = start("access", &access_home, &access_path, 0)?;
+    let (mut access, listen) = start_access(&access_home, &access_path, 0).await?;
     let mut serve = None;
     let outcome = tokio::time::timeout(Duration::from_secs(65), async {
         wait_log(&mut access, &format!("listen_addr={listen}")).await?;
@@ -679,7 +723,7 @@ async fn shutdown_drain_scenario(role: &str) -> Result<()> {
     std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
     std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
     let mut serve = start("serve", &serve_home, &serve_path, 0)?;
-    let mut access = start("access", &access_home, &access_path, 0)?;
+    let (mut access, listen) = start_access(&access_home, &access_path, 0).await?;
     let mut new_peer = None;
     let outcome = tokio::time::timeout(Duration::from_secs(40), async {
         wait_log(&mut serve, "endpoint ready").await?;
@@ -750,8 +794,8 @@ async fn shutdown_drain_scenario(role: &str) -> Result<()> {
             cfg.services[0].port = peer_listen.port();
             let config = peer_home.join("access.toml");
             cfg.save(&config)?;
-            new_peer = Some(start("access", &peer_home, &config, 0)?);
-            wait_log(new_peer.as_mut().unwrap(), &format!("listen_addr={peer_listen}")).await?;
+            let (process, peer_listen) = start_access(&peer_home, &config, 0).await?;
+            new_peer = Some(process);
             let mut pending_peer = TcpStream::connect(peer_listen).await?;
             pending_peer.write_all(b"new peer must not reach target").await?;
         }
@@ -830,7 +874,7 @@ async fn access_shutdown_cancels_pending_retry_without_waiting_for_grace() -> Re
             drop(reservation);
             let config = home.join("access.toml");
             std::fs::write(&config, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&key), relay.to_string(), peer.public().to_string(), listen.port()))?;
-            let mut access = start("access", home, &config, round)?;
+            let (mut access, listen) = start_access(home, &config, round).await?;
             let scenario = async {
                 wait_log(&mut access, &format!("listen_addr={listen}")).await?;
                 let mut first = TcpStream::connect(listen).await?;
@@ -898,7 +942,11 @@ async fn idle_roles_exit_without_waiting_for_drain_grace() -> Result<()> {
             let reference = if role == "access" { format!("node_id = {:?}\n", peer.to_string()) } else { String::new() };
             let config = home.join(format!("{role}.toml"));
             std::fs::write(&config, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n{reference}", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), listen.port()))?;
-            let mut process = start(role, &home, &config, 0)?;
+            let (mut process, listen) = if role == "access" {
+                start_access(&home, &config, 0).await?
+            } else {
+                (start(role, &home, &config, 0)?, listen)
+            };
             let scenario = tokio::time::timeout(Duration::from_secs(35), async {
                 let ready = if role == "access" { format!("listen_addr={listen}") } else { "accepting connections".to_owned() };
                 wait_log(&mut process, &ready).await?;
@@ -948,7 +996,7 @@ async fn roles_deliver_last_channel_response_before_early_shutdown_exit() -> Res
             std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()))?;
             std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), serve_key.public().to_string(), listen.port()))?;
             let mut serve = start("serve", &serve_home, &serve_path, 0)?;
-            let mut access = start("access", &access_home, &access_path, 0)?;
+            let (mut access, listen) = start_access(&access_home, &access_path, 0).await?;
             let scenario = async {
                 wait_log(&mut serve, "accepting connections").await?;
                 wait_log(&mut access, &format!("listen_addr={listen}")).await?;
@@ -1012,7 +1060,7 @@ async fn access_reports_peer_stop_as_tunnel_error() -> Result<()> {
     drop(reservation);
     let config = home.join("access.toml");
     std::fs::write(&config, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), key.public().to_string(), listen.port()))?;
-    let mut access = start("access", home, &config, 0)?;
+    let (mut access, listen) = start_access(home, &config, 0).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(40), async {
         wait_log(&mut access, &format!("listen_addr={listen}")).await?;
         let mut client = TcpStream::connect(listen).await?;
@@ -1046,4 +1094,46 @@ async fn access_reports_peer_stop_as_tunnel_error() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
     outcome??;
     Ok(())
+}
+
+// RW-3 / RS-14/15: force first child to collide; only replacement may serve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_listener_retries_confirmed_bind_collision() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let occupied = TcpListener::bind("127.0.0.1:0").await?;
+    let original = occupied.local_addr()?;
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let key = iroh::SecretKey::generate();
+    let serve_path = home.join("serve.toml");
+    let access_path = home.join("access.toml");
+    std::fs::write(&serve_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&key), relay.to_string(), target.local_addr()?.port()))?;
+    std::fs::write(&access_path, format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n", encode_secret_key(&iroh::SecretKey::generate()), relay.to_string(), key.public().to_string(), original.port()))?;
+    let mut serve = start("serve", home, &serve_path, 0)?;
+    let outcome = async {
+        wait_log(&mut serve, "endpoint ready").await?;
+        let (access, listen) = start_access(home, &access_path, 0).await?;
+        anyhow::ensure!(listen != original, "collision did not select a new address");
+        let failed = std::fs::read_to_string(home.join("access-0.log"))?;
+        anyhow::ensure!(
+            failed.contains("failed to bind"),
+            "collision not exercised: {failed}"
+        );
+        // Failed child's endpoint has been reaped before this exact exchange
+        // with same Access identity; retained occupied socket saw no probe.
+        exchange(listen, &target).await?;
+        anyhow::ensure!(
+            tokio::time::timeout(Duration::from_millis(100), occupied.accept())
+                .await
+                .is_err(),
+            "readiness connected to occupied port"
+        );
+        drop(access);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    drop(serve);
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await??;
+    outcome
 }

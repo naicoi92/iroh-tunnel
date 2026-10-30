@@ -54,3 +54,30 @@ trailing bytes. Restart uses same configured identity, distinct
 or unsolicited bytes/closure. No exactly-once claim or unbounded absence of
 replay. fmt and diff check passed. This supersedes prior idle-channel-only
 coverage limit, not platform/release limits.
+
+### RW-3 / RW-4 verified slice
+
+Deterministic collision RED `/tmp/86-rework-collision-red.log`: occupied first
+port caused actual Access child `failed to bind ... Address already in use
+(os error 48)`, no retry, test failed. GREEN
+`/tmp/86-rework-collision-green.log`: failed child killed and `try_wait` reaped
+before same-identity replacement, new listener exact overlapping TCP exchanges,
+occupied socket saw no readiness probe; 1 passed, 4.09 s. Command:
+`cargo +1.91.1 test --all-features --locked --test configured_multiplex configured_listener_retries -- --nocapture`.
+
+All Access starts in configured fixture now use shared eight-attempt helper.
+Only same-line bind operation/address plus known platform address-in-use code
+triggers retry. Other readiness errors propagate. Failed child is killed/reaped
+with 5 s bound before next candidate; replacement readiness requires exact
+`listening for local clients listen_addr=IP:PORT`, then callers use returned
+address. Port-only TOML edit preserves legacy field under test. Original
+legacy-file expectation models only fixture port edits, never rereads app
+output as expected value. No production CLI/config port-zero policy change.
+
+Default-parallel configured suite passed 16/16 in 47.20 s,
+`/tmp/86-rework-configured-green.log`. After strengthening legacy-source
+expectation, `configured_` filter passed 5/5 in 44.11 s,
+`/tmp/86-rework-collision-variants.log`. fmt/diff check passed. Unreleased
+changelog now documents 30 s client budget, 5 s per dial, existing exponential
+backoff, 3 s shared drain and transport teardown caveat. Broader full gates
+and repeated targeted runs follow on committed candidate.
