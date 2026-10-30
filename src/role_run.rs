@@ -2,9 +2,9 @@
 //!
 //! The two roles share the skeleton: load config → resolve key → build
 //! endpoint → print NodeId → loop until shutdown → drain + close. The
-//! genuinely different pieces (serve's ALPN demux + status-file write;
-//! access's N-listeners + retry-on-dial) live behind the [`RoleStrategy`]
-//! trait so the shared skeleton has one definition site.
+//! genuinely different pieces (ALPN demux, listeners, retry and owned shutdown)
+//! live behind the [`RoleStrategy`] trait. Roles finish draining and cleanup
+//! before returning; the skeleton adds no second grace period.
 //!
 //! Everything here is `pub(crate)` — these are internal seams between two
 //! modules of this crate, not a public extension point.
@@ -17,7 +17,6 @@ use anyhow::Result;
 use iroh::endpoint::Connection;
 
 use crate::config::{Protocol, RoleDoc};
-use crate::shutdown;
 
 // ---------------------------------------------------------------------------
 // Small display helpers (shared, no polymorphism)
@@ -33,7 +32,7 @@ pub(crate) fn protocol_str(p: Protocol) -> &'static str {
     }
 }
 
-/// Spawn a task that logs a disconnect line when the peer's QUIC connection
+/// Future that logs a disconnect line when the peer's QUIC connection
 /// closes.
 ///
 /// The weak handle is registered while `conn` is still alive, so iroh
@@ -43,12 +42,16 @@ pub(crate) fn protocol_str(p: Protocol) -> &'static str {
 /// `disconnected from serve peer` with an `sname` field. Both call sites
 /// now build a single `message` string and a `peer` field, preserving the
 /// information without the structural drift.
-pub(crate) fn spawn_disconnect_watcher(conn: &Connection, peer: String, message: String) {
+pub(crate) fn disconnect_watcher(
+    conn: &Connection,
+    peer: String,
+    message: String,
+) -> impl Future<Output = ()> + Send + 'static {
     let weak = conn.weak_handle();
-    tokio::spawn(async move {
+    async move {
         let _ = weak.closed().await;
         tracing::info!(%peer, "{message}");
-    });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +60,11 @@ pub(crate) fn spawn_disconnect_watcher(conn: &Connection, peer: String, message:
 
 /// Initial backoff (ms) for the access dial retry loop.
 const INITIAL_BACKOFF_MS: u64 = 1_000;
+/// First per-attempt dial bound; later attempts get more room (see
+/// [`attempt_timeout`]).
+const DIAL_ATTEMPT_STEP: Duration = Duration::from_secs(5);
+/// Ceiling of the per-attempt dial bound.
+const DIAL_ATTEMPT_MAX: Duration = Duration::from_secs(20);
 /// Maximum backoff (ms) — the schedule caps here and stays flat.
 const MAX_BACKOFF_MS: u64 = 30_000;
 
@@ -70,36 +78,69 @@ pub(crate) fn next_backoff_ms(prev_ms: u64) -> u64 {
     (prev_ms.saturating_mul(2)).min(MAX_BACKOFF_MS)
 }
 
-/// Dial a peer with exponential backoff, retrying forever until success.
+/// Per-attempt dial bound: `5s → 10s → 15s → 20s (cap)`.
+///
+/// A stalled first attempt still leaves room for backoff and a retry inside
+/// the caller's total budget, while a slow-but-working relay or hole-punch
+/// dial gets progressively longer to finish. The caller's deadline, not this,
+/// is the real bound.
+pub(crate) fn attempt_timeout(attempt: u32) -> Duration {
+    DIAL_ATTEMPT_STEP
+        .saturating_mul(attempt)
+        .min(DIAL_ATTEMPT_MAX)
+}
+
+/// Dial a peer with exponential backoff until success or `deadline`.
 ///
 /// Retries [`iroh::Endpoint::connect`] on failure with the schedule
 /// [`INITIAL_BACKOFF_MS`] → [`next_backoff_ms`] → … → [`MAX_BACKOFF_MS`]:
 /// `1s → 2s → 4s → 8s → 16s → 30s (cap)`. On the first success after one or
 /// more failures, logs `reconnected after N attempts`. Per-service
-/// independent: each connection task runs its own retry, so one unreachable
-/// peer never affects another service (Page 04 v2 §1.3).
+/// independent: an unreachable peer never affects another service.
+///
+/// # Errors
+///
+/// Returns an error once `deadline` passes: attempts and backoff sleeps are
+/// both truncated at it, so the loop can never run unbounded (RS-09). Callers
+/// may additionally cancel the future (for shutdown); dropping it cancels the
+/// in-flight dial.
 pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
     addr: &iroh::EndpointAddr,
     alpn: &[u8],
+    deadline: tokio::time::Instant,
 ) -> Result<Connection> {
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut attempt = 1u32;
     loop {
-        match ep.connect(addr.clone(), alpn).await {
-            Ok(conn) => {
+        let now = tokio::time::Instant::now();
+        anyhow::ensure!(now < deadline, "dial deadline expired");
+        // Dropping a timed-out attempt cancels that dial future.
+        let limit = (now + attempt_timeout(attempt)).min(deadline);
+        let dial = tokio::time::timeout_at(limit, ep.connect(addr.clone(), alpn)).await;
+        match dial {
+            Ok(Ok(conn)) => {
                 if attempt > 1 {
                     tracing::info!("reconnected after {attempt} attempts");
                 }
                 return Ok(conn);
             }
-            Err(e) => {
-                tracing::warn!("connect attempt {attempt} failed: {e}, retrying in {backoff_ms}ms");
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                backoff_ms = next_backoff_ms(backoff_ms);
-                attempt += 1;
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "connect attempt {attempt} failed: {error}, retrying in {backoff_ms}ms"
+                );
+            }
+            Err(_) if limit == deadline => anyhow::bail!("dial deadline expired"),
+            Err(_) => {
+                tracing::warn!("connect attempt {attempt} timed out, retrying in {backoff_ms}ms");
             }
         }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(backoff_ms)).min(deadline),
+        )
+        .await;
+        backoff_ms = next_backoff_ms(backoff_ms);
+        attempt += 1;
     }
 }
 
@@ -111,8 +152,8 @@ pub(crate) async fn connect_with_retry(
 ///
 /// Each implementer carries the genuinely-different pieces (build the
 /// endpoint with role-specific args, print the per-service status lines,
-/// run the role-specific loop). The shared skeleton — load config, resolve
-/// key, print NodeId, wait for shutdown, drain + close — lives in
+/// run the role-specific loop and finish owned shutdown). The shared skeleton
+/// — load config, resolve key, print NodeId, dispatch role — lives in
 /// [`run_with_shutdown`] so it has exactly one definition site.
 ///
 /// The associated type [`RoleStrategy::Config`] is the role's TOML document
@@ -134,9 +175,9 @@ pub(crate) trait RoleStrategy {
 
     /// Run the role's accept/listen loop until `shutdown` resolves.
     ///
-    /// The loop owns the endpoint (cloned if needed) and is responsible for
-    /// spawning per-connection tasks. It MUST return when `shutdown` resolves
-    /// so the shared skeleton can proceed to drain + close.
+    /// The loop owns the endpoint and all descendant tasks. On `shutdown`, it
+    /// seals admission, drains established pipes within one bounded deadline,
+    /// joins/aborts remaining work and closes endpoint/status before returning.
     fn run_loop(
         ep: iroh::Endpoint,
         cfg: Self::Config,
@@ -145,7 +186,7 @@ pub(crate) trait RoleStrategy {
 }
 
 /// Drive a role end-to-end: load → resolve key → endpoint → print → loop →
-/// shutdown footer, with the role's run-loop supplied as a parameter.
+/// owned shutdown, with the role's run-loop supplied as a parameter.
 ///
 /// This is the single definition site of the orchestration; the plain
 /// [`run_with_shutdown`] wraps it with the strategy's stock `run_loop`, and
@@ -197,13 +238,9 @@ where
     S::print_services(&cfg);
 
     tracing::info!("endpoint ready");
-    // Drive the role-specific loop. It MUST honor `shutdown`.
+    // The role owns admission, drain, task joins and endpoint/status cleanup.
     run_loop(ep, cfg).await?;
 
-    // Shared shutdown footer: drain in-flight streams. The endpoint close
-    // itself happens inside the run loop because each role needs to abort
-    // its accept task(s) before closing.
-    shutdown::drain_connections(Duration::from_secs(5)).await;
     Ok(())
 }
 
@@ -225,6 +262,12 @@ mod tests {
         // displayed form round-trips through config.
         assert_eq!(protocol_str(Protocol::Tcp), "tcp");
         assert_eq!(protocol_str(Protocol::Udp), "udp");
+    }
+
+    #[test]
+    fn attempt_timeout_grows_then_caps() {
+        let secs: Vec<u64> = (1..=6).map(|n| attempt_timeout(n).as_secs()).collect();
+        assert_eq!(secs, [5, 10, 15, 20, 20, 20]);
     }
 
     #[test]
@@ -267,5 +310,30 @@ mod tests {
         let prev = u64::MAX;
         let next = next_backoff_ms(prev);
         assert_eq!(next, MAX_BACKOFF_MS, "huge input must cap, not overflow");
+    }
+
+    /// The retry loop is bounded by the caller's deadline by construction:
+    /// an unreachable peer yields an error at the deadline, not a hang.
+    #[tokio::test]
+    async fn connect_with_retry_stops_at_the_deadline() {
+        use iroh::endpoint::presets::Minimal;
+        let ep = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        // Nobody listens on this id: every attempt fails or stalls.
+        let addr = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+            .with_ip_addr((std::net::Ipv4Addr::LOCALHOST, 9).into());
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_with_retry(&ep, &addr, b"t", deadline),
+        )
+        .await
+        .expect("connect_with_retry must return by itself at the deadline");
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(4));
     }
 }

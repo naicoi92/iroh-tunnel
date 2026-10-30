@@ -14,7 +14,8 @@ use clap::Parser;
 use iroh_tunnel::cli::{self, Cli, ConfigAction, Role, RoleCmd, ServiceAction};
 use iroh_tunnel::config_cmd;
 use iroh_tunnel::error::CliError;
-use iroh_tunnel::status::StatusRole;
+use iroh_tunnel::shutdown;
+use iroh_tunnel::status::{self, StatusRole};
 use iroh_tunnel::status_cmd;
 use iroh_tunnel::{access, serve, service};
 
@@ -33,7 +34,31 @@ fn main() {
         }
     };
 
-    match rt.block_on(run(parsed)) {
+    // Role to clean up if shutdown is abandoned; only `run` commands own
+    // a status file, but removal is pid-checked so other commands are safe.
+    let status_role = match &parsed.role {
+        Role::Serve { .. } => StatusRole::Serve,
+        Role::Access { .. } => StatusRole::Access,
+    };
+    // Racing the run future means a forced exit first DROPS it: owned tasks
+    // and the endpoint are cancelled before the process status is decided.
+    let outcome = rt.block_on(async {
+        tokio::select! {
+            result = run(parsed) => Ok(result),
+            forced = shutdown::forced_exit() => Err(forced),
+        }
+    });
+    let outcome = match outcome {
+        Ok(result) => result,
+        Err(forced) => {
+            // Exit statuses: 130 repeated stop after grace, 1 watchdog (see
+            // CHANGELOG). Own-state cleanup is still attempted here.
+            eprintln!("error: shutdown abandoned ({forced:?}), exiting");
+            status::remove_own_status_file_for_exit(status_role);
+            std::process::exit(forced.exit_code());
+        }
+    };
+    match outcome {
         Ok(()) => std::process::exit(0),
         Err(e) => {
             eprintln!("error: {e:#}");

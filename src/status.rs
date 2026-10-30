@@ -434,10 +434,29 @@ struct StatusFilePid {
 /// unreadable file, or one that fails to parse is skipped — nothing to
 /// clean, or not ours to judge.
 pub(crate) async fn remove_own_status_file(writer: StatusWriter, state_dir: Option<&Path>) {
+    let state_dir = state_dir.map(Path::to_path_buf);
+    // Blocking filesystem work stays off the async workers (RS-07).
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        remove_own_status_file_blocking(writer, state_dir.as_deref())
+    })
+    .await
+    {
+        tracing::debug!("status cleanup task failed: {error}");
+    }
+}
+
+/// Blocking twin of [`remove_own_status_file`] for the forced-exit path in
+/// `src/main.rs`, where the async runtime is no longer driving cleanup.
+/// Resolves the env-aware default directory, like a normal graceful stop.
+pub fn remove_own_status_file_for_exit(role: StatusRole) {
+    remove_own_status_file_blocking(StatusWriter::new(role), None);
+}
+
+fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path>) {
     let Ok(path) = writer.path_for_state_dir(state_dir) else {
         return;
     };
-    let owns = match tokio::fs::read_to_string(&path).await {
+    let owns = match std::fs::read_to_string(&path) {
         Ok(body) => {
             matches!(
                 serde_json::from_str::<StatusFilePid>(&body),
@@ -449,7 +468,7 @@ pub(crate) async fn remove_own_status_file(writer: StatusWriter, state_dir: Opti
     if !owns {
         return;
     }
-    if let Err(e) = tokio::fs::remove_file(&path).await {
+    if let Err(e) = std::fs::remove_file(&path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             tracing::debug!("failed to remove status file: {e}");
         }
