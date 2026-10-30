@@ -44,10 +44,6 @@ fn new_config(home: &Path, role: &str) -> PathBuf {
         .join(format!("{role}.toml"))
 }
 
-fn mode(path: &Path) -> u32 {
-    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
-}
-
 #[test]
 fn config_default_is_home_dot_config_ignoring_xdg() {
     let (_tmp, home) = home();
@@ -161,6 +157,10 @@ fn unreadable_config_reports_path() {
 #[cfg(target_os = "macos")]
 mod macos_migration {
     use super::*;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
 
     const LEGACY_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
     const NEW_KEY: &str = "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA=";
