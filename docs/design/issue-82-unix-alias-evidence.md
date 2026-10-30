@@ -44,8 +44,20 @@ Used existing Rust builder default `zigbuild`, custom flags, archive build-ID
 selection and additional files with parent stripping. Actual tar validation
 establishes symlink preservation rather than assuming documentation implies it.
 
-## Red → green (macOS arm64)
+## Current fixture invocation
 
+```sh
+uv run --with pyyaml python tests/release_aliases.py --config .goreleaser.macos.yaml --output /tmp/iroh82-alias-new
+uv run --with pyyaml python -m unittest discover -s tests -p test_release_aliases.py
+```
+
+Use `.goreleaser.yaml` on Linux. Fixture requires complete producer matrix and
+at least one successful host OS/architecture/libc forwarding run. Unknown or
+foreign libc is skipped, not assumed executable; zero runtime coverage fails.
+
+## Historical red → green (macOS arm64)
+
+Commands below are historical transcripts, not current invocation instructions.
 Before producer edit:
 
 ```sh
@@ -58,7 +70,7 @@ Red artifact SHA-256:
 `7f9d4071d03a90b2d9c4f59be6ad428fadb7f7124f3b8f88c55e96a061de1cfc`.
 Transcript `/tmp/iroh82-alias-red.log`; retained snapshot config in output dir.
 
-After producer edit, final harness:
+After producer edit, historical harness:
 
 ```sh
 python3 tests/release_aliases.py --config .goreleaser.macos.yaml --output /tmp/iroh82-alias-verified
@@ -138,6 +150,20 @@ preserved producer links), RS-13/15 (Unix gating and isolated relay), RS-14
 Linux snapshot attempt and final commit recorded below. Independent Standards
 and Spec review remains required; implementation self-check is not independent
 review. No PR, push, merge or issue-close action.
+
+## Review rework validation
+
+On macOS arm64, matrix and zero-runtime regression tests passed (5 tests):
+`uv run --with pyyaml python -m unittest discover -s tests -p test_release_aliases.py`.
+The real producer fixture passed with the current `uv` invocation and output
+`/tmp/iroh82-review-rework-1793320718`; transcript `/tmp/iroh82-review-rework.log`.
+Archive SHA-256 `4106dc4820ad0c9c627a77302593904b409ea378a70fb71d72781869bce18892`.
+Actual aliases forwarded both role pairings over the isolated local relay.
+`cargo fmt --all -- --check`, Rust 1.91.1 locked clippy, quick_run (17 passed,
+1 ignored), cli_role_matrix (3 passed), and both GoReleaser checks passed.
+Regression cases cover missing archives, foreign-only full fixture failure,
+extra archives and GNU/musl mismatch. RS-13–15 remain applicable; no Rust edits.
+Linux runtime and pinned producer toolchain limitations below remain open.
 
 ## Linux producer limitation
 

@@ -11,6 +11,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import tarfile
@@ -23,6 +24,68 @@ ALIASES = {"it": "iroh-tunnel", "its": "iroh-tunnel-serve", "ita": "iroh-tunnel-
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def validate_archive_set(config_path, archives):
+    matrices = {
+        ".goreleaser.yaml": {"linux-amd64", "linux-arm64", "linux-amd64-musl",
+                               "linux-arm64-musl", "linux-riscv64-musl"},
+        ".goreleaser.macos.yaml": {"darwin-arm64"},
+    }
+    expected = matrices.get(config_path.name)
+    if expected is None:
+        raise ValueError(f"unsupported producer config: {config_path}")
+    pattern = re.compile(r"^iroh-tunnel-(.+)-(linux-(?:amd64|arm64|riscv64)(?:-musl)?|darwin-arm64)\.tar\.gz$")
+    found = {}
+    unexpected = []
+    for archive in archives:
+        match = pattern.fullmatch(archive.name)
+        if not match or match.group(2) not in expected or match.group(2) in found:
+            unexpected.append(archive.name)
+        else:
+            found[match.group(2)] = match.group(1)
+    missing = expected - found.keys()
+    if missing or unexpected or len(set(found.values())) > 1:
+        raise ValueError(f"archive matrix mismatch: missing={sorted(missing)}, "
+                         f"unexpected={unexpected}, versions={sorted(set(found.values()))}")
+
+
+def linux_libc():
+    # Unknown libc is not proof that either producer flavour can execute.
+    name, _ = platform.libc_ver()
+    if name == "glibc":
+        return "gnu"
+    if name == "musl":
+        return "musl"
+    try:
+        result = subprocess.run(["ldd", "--version"], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    text = (result.stdout + result.stderr).lower()
+    if "musl" in text:
+        return "musl"
+    if "glibc" in text or "gnu libc" in text:
+        return "gnu"
+    return None
+
+
+def host_compatible(archive):
+    host_os = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    host_arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64",
+                 "riscv64": "riscv64"}.get(platform.machine())
+    if not host_os or not host_arch:
+        return False
+    flavour = "-musl" if archive.name.endswith("-musl.tar.gz") else ""
+    if not archive.name.endswith(f"-{host_os}-{host_arch}{flavour}.tar.gz"):
+        return False
+    if host_os == "linux":
+        return linux_libc() == ("musl" if flavour else "gnu")
+    return not flavour
+
+
+def require_runtime_coverage(count):
+    if not count:
+        raise RuntimeError("no host-compatible archive executed alias forwarding; runtime coverage blocked")
 
 
 def main():
@@ -45,7 +108,8 @@ def main():
         check=True,
     )
     archives = sorted((output / "dist").glob("*.tar.gz"))
-    assert archives, "producer emitted no tar archives"
+    validate_archive_set(args.config, archives)
+    runtime_count = 0
     checksum_lines = []
     for checksum in (output / "dist").glob("checksums*.txt"):
         checksum_lines.extend(checksum.read_text().splitlines())
@@ -77,11 +141,8 @@ def main():
             assert set(p.name for p in installed.iterdir()) == {alias, binary}
             print(f"{installed / alias} -> {os.readlink(installed / alias)} "
                   f"resolved sha256={digest(installed / alias)}", flush=True)
-        host_os = {"Darwin": "darwin", "Linux": "linux"}[platform.system()]
-        host_arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64",
-                     "riscv64": "riscv64"}[platform.machine()]
-        if f"-{host_os}-{host_arch}" not in archive.name:
-            print(f"NOT RUN (foreign OS/architecture): {archive.name}", flush=True)
+        if not host_compatible(archive):
+            print(f"NOT RUN (foreign or unknown OS/architecture/libc): {archive.name}", flush=True)
             continue
         for alias, binary in ALIASES.items():
             installed = fixture / alias
@@ -100,6 +161,8 @@ def main():
              "--ignored", "--exact", "--nocapture"],
             env=env, check=True,
         )
+        runtime_count += 1
+    require_runtime_coverage(runtime_count)
 
 
 if __name__ == "__main__":

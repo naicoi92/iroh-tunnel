@@ -11,6 +11,10 @@
 
 ### Added
 
+- **Unix release archives** now include `iroh-tunnel-serve` and
+  `iroh-tunnel-access`, with relative aliases `it`, `its`, and `ita`.
+  Package, Docker, and Homebrew installation ownership is unchanged.
+
 - **Ephemeral quick TCP commands**: `serve -n NAME -t IP:PORT` and
   `access -n NAME -l IP:PORT -N NODE_ID` (also long options), TCP by
   default, optional `--relay-url`, no configuration/key writes. Configured
