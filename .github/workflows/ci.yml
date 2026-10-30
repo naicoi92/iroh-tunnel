@@ -1,9 +1,10 @@
 # CI pipeline — fast checks on every pull request.
 #
-# Two lightweight jobs run IN PARALLEL (no dependency between them) to minimize
-# wall-clock time on PRs:
-#   - lint:  cargo fmt --check + cargo clippy (catches style + correctness issues)
-#   - test:  cargo test (unit/integration tests)
+# Three lightweight jobs run IN PARALLEL (no dependency between them) to
+# minimize wall-clock time on PRs:
+#   - lint:      cargo fmt --check + cargo clippy (catches style + correctness issues)
+#   - packaging: shellcheck + goreleaser check (catches broken release config)
+#   - test:      cargo test (unit/integration tests)
 #
 # Heavy artifact builds (GoReleaser snapshots, Docker, packages) live in
 # snapshot.yml and only run on push to main, not on PRs. Real releases on tag
@@ -61,6 +62,34 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # packaging: static checks for the release configuration and scripts, so a
+  # broken GoReleaser file or shell script fails the pull request instead of the
+  # post-merge snapshot. The heavy artifact builds stay in snapshot.yml.
+  # ---------------------------------------------------------------------------
+  packaging:
+    name: packaging (static)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: latest
+          install-only: true
+
+      - name: goreleaser check (Linux)
+        run: goreleaser check --config .goreleaser.yaml
+
+      - name: goreleaser check (macOS)
+        run: goreleaser check --config .goreleaser.macos.yaml
 
   # ---------------------------------------------------------------------------
   # test: unit + integration tests. Runs in parallel with `lint`.

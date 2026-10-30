@@ -48,8 +48,9 @@ when it is relevant to a change.
 Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
-CI runs exactly these three commands on every pull request, in a `lint` and a
-`test` job. Run them locally before pushing:
+CI runs these three commands on every pull request, in a `lint` and a `test`
+job, plus a `packaging` job that runs `shellcheck` and `goreleaser check`. Run
+the three commands locally before pushing:
 
 ```sh
 cargo fmt --all -- --check
@@ -88,9 +89,9 @@ explaining why.
    `feat(scope): …`, `fix(scope): …`, `refactor(scope): …`, `chore: …` —
    where the scope is usually the module or area (`config`, `service`, `ci`,
    `release`, `role-run`, …).
-3. CI (`lint` + `test`) must pass. Heavier artifact builds (GoReleaser
-   snapshots, Docker, packages) run on `main` pushes only; you do not need to
-   produce release artifacts in a PR.
+3. CI (`lint`, `packaging` + `test`) must pass. Heavier artifact builds
+   (GoReleaser snapshots, Docker, packages) run on `main` pushes only; you do
+   not need to produce release artifacts in a PR.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
 
