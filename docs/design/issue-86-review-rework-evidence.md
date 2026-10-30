@@ -37,3 +37,20 @@ transport failure retains context. GREEN: `/tmp/86-rework-stop-green.log`,
 `cargo +1.91.1 test --all-features --locked --test configured_multiplex access_reports_peer_stop -- --nocapture`.
 `cargo +1.91.1 fmt --all` and `git diff --check` passed. macOS ARM64,
 Rust 1.91.1; local relay only. Full gates pending after all slices.
+
+### RW-2 verified slice
+
+Strengthened real-process peer-loss test passed on unchanged production,
+`cargo +1.91.1 test --all-features --locked --test configured_multiplex configured_peer_loss -- --nocapture`,
+1 passed in 44.02 s; `/tmp/86-rework-inflight-green.log`. No behavioral RED
+claimed: this closes missing scenario coverage. Target receives literal
+`old-first-marker`, then bounded read confirms request is still open with no
+remaining part. Client holds `old-first-request-remainder` and FIN until
+Serve kill/reap; other channel confirms shared connection remains active.
+After reaping, client attempts remainder/FIN (local write success is not
+remote delivery), both clients end and old target sockets close without
+trailing bytes. Restart uses same configured identity, distinct
+`new-client-marker` exchanges exact reply; 2 s sees no extra target accept
+or unsolicited bytes/closure. No exactly-once claim or unbounded absence of
+replay. fmt and diff check passed. This supersedes prior idle-channel-only
+coverage limit, not platform/release limits.

@@ -27,3 +27,13 @@ Commands on macOS arm64, uid 501, Rust 1.91.1, 2026-10-29 UTC, locked Iroh/iroh-
 Test-feature executable SHA-256 `e59c5b3f2eb33d7794f54d37cdf6078e3d226ebde1522b45dd88336f1be9de76`. Processes used `serve run --config` and `access run --config`, temporary configured keys, local target and local test relay only. Test TLS override is insecure and not production. Runtime path not forced; successful local relay configuration does not prove relay-only traffic. Test waits up to 35 seconds for each client and 100 seconds for scenario; these are fixture limits, not approved retry defaults. No claim about arbitrary future replay, in-flight bytes, retry expiry, graceful shutdown, public relay, production TLS or other platforms.
 
 Normal and scenario-error paths kill/reap roles with five-second polling and shut down relay with five-second bound; existing process drop guard is fallback for early setup failures or panics. Independent Standards and Spec reviews remain required; no PR, push, merge or delegation. This is partial #86 evidence, not full issue or release acceptance.
+
+## Review rework supersedes idle-only coverage
+
+See [review-rework evidence](issue-86-review-rework-evidence.md), RW-2.
+Current test holds first request remainder through kill/reap after target
+confirms literal prefix; only then attempts remaining write. Both clients
+end, same identity recovers, distinct new exchange succeeds with 2 s no-replay
+observation. Earlier runs above remain historical idle-channel evidence;
+in-flight coverage now comes from named rework run, not those runs. No
+exactly-once or full release acceptance claim.

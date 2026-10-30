@@ -307,10 +307,15 @@ async fn configured_peer_loss_closes_active_channels_without_replay() -> Result<
         let mut marker = [0; 16];
         first_target.read_exact(&mut marker).await?;
         assert_eq!(&marker, b"old-first-marker");
-        first_target.write_all(b"first-reply").await?;
-        let mut reply = [0; 11];
-        first.read_exact(&mut reply).await?;
-        assert_eq!(&reply, b"first-reply");
+        // First marker is only the prefix of this request. Client holds
+        // its remaining part (and FIN) until Serve is killed, so this is
+        // interrupted transfer, not a completed exchange on an idle pipe.
+        let held_remainder = b"old-first-request-remainder";
+        let mut byte = [0; 1];
+        anyhow::ensure!(
+            tokio::time::timeout(Duration::from_millis(150), first_target.read(&mut byte)).await.is_err(),
+            "first request completed/closed before peer kill"
+        );
         let mut second = TcpStream::connect(listen).await?;
         second.write_all(b"old-second-marker").await?;
         let (mut second_target, _) = target.accept().await?;
@@ -332,6 +337,11 @@ async fn configured_peer_loss_closes_active_channels_without_replay() -> Result<
             }
             Ok::<_, anyhow::Error>(())
         }).await.context("reap killed Serve timeout")??;
+        // Only after kill/reap release the remaining write. TCP may accept
+        // it into a local buffer; that is not delivery. Client must still
+        // fail/end, and no old bytes may reach any target after restart.
+        let _ = first.write_all(held_remainder).await;
+        let _ = first.shutdown().await;
         // Access and target stay alive; only Serve loss can close these channels.
         for client in [&mut first, &mut second] {
             let mut byte = [0; 1];
@@ -368,7 +378,7 @@ async fn configured_peer_loss_closes_active_channels_without_replay() -> Result<
             }
         }).await;
         assert!(quiet.is_err(), "{}", quiet.unwrap());
-        eprintln!("two active channels closed after killed Serve; same identity recovered, exact new exchange, 2s no target replay");
+        eprintln!("target confirmed old-first-marker prefix; remaining request held through Serve kill/reap; both clients ended; same identity recovered, exact different new exchange, 2s no target replay (not exactly-once)");
         Ok::<_, anyhow::Error>(())
     }).await.context("peer loss scenario timeout");
     for process in [&mut access, &mut serve]
