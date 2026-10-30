@@ -268,3 +268,128 @@ async fn configured_true_reuses_connection_and_forwards_after_save_and_restart()
 async fn configured_omitted_reuses_connection_and_forwards_after_save_and_restart() -> Result<()> {
     configured_variant("").await
 }
+
+// TCP-02 / #86: peer loss closes live channels without replay after recovery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_peer_loss_closes_active_channels_without_replay() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let serve_home = temp.path().join("serve");
+    let access_home = temp.path().join("access");
+    std::fs::create_dir_all(&serve_home)?;
+    std::fs::create_dir_all(&access_home)?;
+    let serve_path = serve_home.join("serve.toml");
+    let access_path = access_home.join("access.toml");
+    let serve_key = iroh::SecretKey::generate();
+    let access_key = iroh::SecretKey::generate();
+    let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let reservation = TcpListener::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    std::fs::write(&serve_path, format!(
+        "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = {}\n",
+        encode_secret_key(&serve_key), relay.to_string(), target.local_addr()?.port()
+    ))?;
+    std::fs::write(&access_path, format!(
+        "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = {:?}\nprotocol = \"tcp\"\nport = {}\n",
+        encode_secret_key(&access_key), relay.to_string(), serve_key.public().to_string(), listen.port()
+    ))?;
+    let mut serve = start("serve", &serve_home, &serve_path, 0)?;
+    let mut access = start("access", &access_home, &access_path, 0)?;
+    let mut restarted = None;
+    let outcome = tokio::time::timeout(Duration::from_secs(100), async {
+        let log = wait_log(&mut serve, "endpoint ready").await?;
+        assert!(log.contains(&serve_key.public().to_string()));
+        wait_log(&mut access, &format!("listen_addr=127.0.0.1:{}", listen.port())).await?;
+        let mut first = TcpStream::connect(listen).await?;
+        first.write_all(b"old-first-marker").await?;
+        let (mut first_target, _) = target.accept().await?;
+        let mut marker = [0; 16];
+        first_target.read_exact(&mut marker).await?;
+        assert_eq!(&marker, b"old-first-marker");
+        first_target.write_all(b"first-reply").await?;
+        let mut reply = [0; 11];
+        first.read_exact(&mut reply).await?;
+        assert_eq!(&reply, b"first-reply");
+        let mut second = TcpStream::connect(listen).await?;
+        second.write_all(b"old-second-marker").await?;
+        let (mut second_target, _) = target.accept().await?;
+        let mut marker = [0; 17];
+        second_target.read_exact(&mut marker).await?;
+        assert_eq!(&marker, b"old-second-marker");
+        second_target.write_all(b"second-reply").await?;
+        let mut reply = [0; 12];
+        second.read_exact(&mut reply).await?;
+        assert_eq!(&reply, b"second-reply");
+        let log = wait_log(&mut serve, "stream=2").await?;
+        assert_eq!(log.matches("peer connected via").count(), 1, "{log}");
+        anyhow::ensure!(access.child.try_wait()?.is_none(), "Access exited before peer loss");
+        anyhow::ensure!(serve.child.try_wait()?.is_none(), "Serve exited before peer loss");
+        serve.child.kill().context("kill active Serve")?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while serve.child.try_wait()?.is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        }).await.context("reap killed Serve timeout")??;
+        // Access and target stay alive; only Serve loss can close these channels.
+        for client in [&mut first, &mut second] {
+            let mut byte = [0; 1];
+            let result = tokio::time::timeout(Duration::from_secs(35), client.read(&mut byte))
+                .await.context("client did not close after Serve loss")?;
+            assert!(matches!(result, Ok(0) | Err(_)), "unexpected old client data: {result:?}");
+        }
+        for socket in [&mut first_target, &mut second_target] {
+            let mut byte = [0; 1];
+            let result = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+                .await.context("old target socket did not close after Serve loss")?;
+            assert!(matches!(result, Ok(0) | Err(_)), "unexpected old target bytes: {result:?}");
+        }
+        anyhow::ensure!(access.child.try_wait()?.is_none(), "Access exited after peer loss");
+        let mut next = start("serve", &serve_home, &serve_path, 1)?;
+        let log = wait_log(&mut next, "endpoint ready").await?;
+        assert!(log.contains(&serve_key.public().to_string()), "restarted Serve identity differs");
+        restarted = Some(next);
+        let mut client = TcpStream::connect(listen).await?;
+        client.write_all(b"new-client-marker").await?;
+        let (mut new_target, _) = target.accept().await?;
+        let mut marker = [0; 17];
+        new_target.read_exact(&mut marker).await?;
+        assert_eq!(&marker, b"new-client-marker", "old bytes replayed to recovered target");
+        new_target.write_all(b"new-reply").await?;
+        let mut reply = [0; 9];
+        client.read_exact(&mut reply).await?;
+        assert_eq!(&reply, b"new-reply");
+        let mut byte = [0; 1];
+        let quiet = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                result = target.accept() => format!("unexpected target connection: {result:?}"),
+                result = new_target.read(&mut byte) => format!("unexpected recovered target bytes/closure: {result:?}"),
+            }
+        }).await;
+        assert!(quiet.is_err(), "{}", quiet.unwrap());
+        eprintln!("two active channels closed after killed Serve; same identity recovered, exact new exchange, 2s no target replay");
+        Ok::<_, anyhow::Error>(())
+    }).await.context("peer loss scenario timeout");
+    for process in [&mut access, &mut serve]
+        .into_iter()
+        .chain(restarted.iter_mut())
+    {
+        if process.child.try_wait()?.is_none() {
+            process.child.kill().context("kill fixture role")?;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while process.child.try_wait()?.is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("fixture reap timeout")??;
+    }
+    tokio::time::timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .context("relay shutdown timeout")??;
+    outcome??;
+    Ok(())
+}
