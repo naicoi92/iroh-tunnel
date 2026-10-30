@@ -170,6 +170,26 @@ Both quick roles generate fresh ephemeral identities on restart, without
 creating or changing config files or keys. Do not mix quick flags with configured
 subcommands; use separate `run --config PATH` for saved settings.
 
+To keep the same public identity across restarts without a config file, pass a
+key file with `-k` / `--key-file PATH`. The file holds a base64 secret key, as
+written by `config keygen`. Keep it private; the key is never printed.
+
+### Independent role binaries and aliases
+
+Each role also ships as its own executable. None needs another at runtime:
+
+| Executable | Alias | Roles | Example |
+|---|---|---|---|
+| `iroh-tunnel` | `it` | Serve and Access | `it serve -n postgres -t 127.0.0.1:5432` |
+| `iroh-tunnel-serve` | `its` | Serve only | `its -n postgres -t 127.0.0.1:5432` |
+| `iroh-tunnel-access` | `ita` | Access only | `ita -n postgres -l 127.0.0.1:15432 -N <SERVE_NODE_ID>` |
+
+The options are the same everywhere: `-n/--name`, `-t/--target` (Serve),
+`-l/--listen` and `-N/--node-id` (Access), `-p/--protocol` (default `tcp`),
+`-k/--key-file`, `--relay-url`. A standalone binary has no `serve` or `access`
+word: use `its run --config PATH`. Run `--help` for the full list. Service
+installation for the standalone binaries is not yet supported (issue #90).
+
 **NodeId is public identity, not target authorization.** Knowing NodeId and
 service name lets a peer attempt access. Target services must enforce their own access protection;
 the tunnel does not add an authorization scheme.

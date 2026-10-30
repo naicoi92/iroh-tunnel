@@ -34,10 +34,15 @@ creation by installers (#93–#96) are not covered. The `test-utils` binaries
 disable relay TLS verification: local fixtures only. Exact diagnostics and exit
 codes beyond clap's usage error (2) and `CliError::Config` (2) are not asserted.
 
-## Known gap (code review)
+## Scope boundary: service management
 
-`its service install` / `ita service install` reuse `service::resolve_binary`
-and the `<role> run --config` argv, which only the all-in-one binary accepts.
-Standalone service units are therefore not yet correct; this slice's tests
-cover foreground forwarding only. Also open: key-file permission warning,
-README updates and release packaging (#94).
+Service install/lifecycle is owned by #90, #91 and #92 (blocked by #79, #84,
+#87), not #82. Service units run `<exe> <role> run --config …`, which only the
+all-in-one binary accepts. Until #90 defines standalone units, `its|ita service …`
+exits 5 with a message naming #90 (test
+`standalone_service_install_is_refused_instead_of_writing_a_broken_unit`) and
+`iroh-tunnel <role> service …` is unchanged. #90 must decide the binary path and
+argv for standalone units.
+
+Other open items: key-file permission warning (secret policy CFG-05/#98),
+release packaging and aliases (#94), Linux/Windows runtime evidence (#97).

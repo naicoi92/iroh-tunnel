@@ -691,3 +691,21 @@ fn unusable_key_files_fail_without_revealing_contents_or_writing_config() -> Res
     }
     Ok(())
 }
+
+#[test]
+fn standalone_service_install_is_refused_instead_of_writing_a_broken_unit() -> Result<()> {
+    let (_, its, ita) = installs()?;
+    for install in [&its, &ita] {
+        let form = RoleForm {
+            install,
+            alias: true,
+            prefix: None,
+        };
+        let output = form.output(&["service", "install"])?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(5), "{stderr}");
+        assert!(stderr.contains("not yet supported"), "{stderr}");
+        assert_eq!(std::fs::read_dir(install.home())?.count(), 0);
+    }
+    Ok(())
+}

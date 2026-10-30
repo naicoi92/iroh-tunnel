@@ -18,21 +18,28 @@ use clap::Parser;
 
 /// Entry point of the all-in-one `iroh-tunnel` (`it`) binary.
 pub fn main_all_in_one() -> ! {
-    let parsed = Cli::parse();
-    execute(parsed)
+    execute(Cli::parse(), Packaging::AllInOne)
 }
 
 /// Entry point of the standalone `iroh-tunnel-serve` (`its`) binary.
 pub fn main_serve() -> ! {
-    execute(ServeCli::parse().into_cli())
+    execute(ServeCli::parse().into_cli(), Packaging::Standalone)
 }
 
 /// Entry point of the standalone `iroh-tunnel-access` (`ita`) binary.
 pub fn main_access() -> ! {
-    execute(AccessCli::parse().into_cli())
+    execute(AccessCli::parse().into_cli(), Packaging::Standalone)
 }
 
-fn execute(parsed: Cli) -> ! {
+/// Which executable is running. Service units run `<exe> <role> run`, which
+/// only the all-in-one binary accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Packaging {
+    AllInOne,
+    Standalone,
+}
+
+fn execute(parsed: Cli, packaging: Packaging) -> ! {
     cli::init_tracing(parsed.verbose, parsed.quiet);
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -46,7 +53,7 @@ fn execute(parsed: Cli) -> ! {
         }
     };
 
-    match rt.block_on(run(parsed)) {
+    match rt.block_on(run(parsed, packaging)) {
         Ok(()) => std::process::exit(0),
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -62,7 +69,7 @@ fn execute(parsed: Cli) -> ! {
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
     // The typed role tag comes from ONE match on the CLI enum; the dispatch
     // string is derived from it — an invalid role is unrepresentable, and
     // the two can never disagree.
@@ -72,7 +79,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     match cli.role {
         Role::Serve { cmd: Some(cmd), .. } | Role::Access { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd).await
+            dispatch_role_cmd(status_role, cmd, packaging).await
         }
         Role::Serve { quick, cmd: None } => {
             if quick.protocol != "tcp" {
@@ -141,7 +148,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Result<()> {
+async fn dispatch_role_cmd(
+    status_role: StatusRole,
+    cmd: RoleCmd,
+    packaging: Packaging,
+) -> anyhow::Result<()> {
     let role = status_role.name();
     match cmd {
         RoleCmd::Run { config } => {
@@ -155,6 +166,13 @@ async fn dispatch_role_cmd(status_role: StatusRole, cmd: RoleCmd) -> anyhow::Res
         }
         RoleCmd::Config { action } => dispatch_config(role, action),
         RoleCmd::Status { json } => status_cmd::run(status_role, json),
+        RoleCmd::Service { .. } if packaging == Packaging::Standalone => {
+            Err(CliError::Service(format!(
+                "service management is not yet supported by the standalone {role} binary \
+             (tracked in issue #90); use `iroh-tunnel {role} service ...`"
+            ))
+            .into())
+        }
         RoleCmd::Service { action } => dispatch_service(role, action),
     }
 }
