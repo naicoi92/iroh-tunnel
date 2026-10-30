@@ -262,17 +262,6 @@ async fn roles_with_distinct_keys_coexist_but_a_shared_key_is_rejected() -> Resu
     )?;
     wait_running(&access_state.join("access-status.json"), &mut access)?;
 
-    // Same-role start in a shared HOME is refused by role ownership (RO-01).
-    let shared = world.state("shared");
-    let rejected = spawn(
-        world.command(ACCESS, None, &shared),
-        &access_args(&relay, &serve_key, &serve_id),
-    )?;
-    // Same-role start is refused by role ownership first, so use a fresh
-    // world for the cross-role identity check below.
-    let (code, _) = wait_refused(rejected)?;
-    assert_eq!(code, Some(CONFLICT_EXIT));
-
     let other = World::new()?;
     let other_serve_state = other.state("serve");
     let _serve = start_serve(&other, SERVE, None, &relay, &serve_key, &other_serve_state)?;
@@ -316,6 +305,35 @@ async fn concurrent_starts_admit_exactly_one_owner() -> Result<()> {
 }
 
 #[tokio::test]
+async fn refused_config_run_neither_persists_a_key_nor_touches_the_owner() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let state = world.state("owner");
+    let _owner = start_serve(&world, ALL_IN_ONE, Some("serve"), &relay, &key, &state)?;
+    let before = std::fs::read(state.join("serve-status.json"))?;
+
+    // A configured run with an empty secret_key would generate and save one.
+    let config = world.root.path().join("serve.toml");
+    let body = format!(
+        "[node]\nsecret_key = \"\"\nrelay_urls = [\"{relay}\"]\n\n[[services]]\nname = \"echo\"\nhost = \"127.0.0.1\"\nport = 9\nprotocol = \"tcp\"\n"
+    );
+    std::fs::write(&config, &body)?;
+    let refused = spawn(
+        world.command(SERVE, None, &world.state("other")),
+        &[
+            "run".into(),
+            "--config".into(),
+            config.display().to_string(),
+        ],
+    )?;
+    assert_refused(wait_refused(refused)?, "already running");
+    assert_eq!(std::fs::read_to_string(&config)?, body, "key was persisted");
+    assert_eq!(std::fs::read(state.join("serve-status.json"))?, before);
+    Ok(())
+}
+
+#[tokio::test]
 async fn kill_nine_leftover_neither_blocks_restart_nor_reads_as_live() -> Result<()> {
     let (relay, _server) = relay().await?;
     let world = World::new()?;
@@ -335,7 +353,7 @@ async fn kill_nine_leftover_neither_blocks_restart_nor_reads_as_live() -> Result
         .output()?;
     let text = out(&stale);
     assert!(
-        text.contains("not running") || text.contains("stale"),
+        text.contains("serve is not running") && text.contains("stale"),
         "crash snapshot must not read as live: {text}"
     );
 
@@ -360,7 +378,7 @@ fn status_does_not_trust_a_reused_pid() -> Result<()> {
         .output()?;
     let text = out(&output);
     assert!(
-        text.contains("not running") || text.contains("stale"),
+        text.contains("serve is not running") && text.contains("stale"),
         "pid alone must not prove liveness: {text}"
     );
     Ok(())
@@ -406,6 +424,7 @@ async fn system_tier_lock_refuses_user_start_and_blocks_a_system_start() -> Resu
     // root-owned file seen by a non-elevated user).
     let machine_lock = world.machine().join("serve.lock");
     drop(File::create(&machine_lock)?);
+    let _restore = RestoreMode(world.machine());
     std::fs::set_permissions(&machine_lock, std::fs::Permissions::from_mode(0o444))?;
     std::fs::set_permissions(world.machine(), std::fs::Permissions::from_mode(0o555))?;
     let system = File::open(&machine_lock)?;
@@ -425,11 +444,9 @@ async fn system_tier_lock_refuses_user_start_and_blocks_a_system_start() -> Resu
     wait_running(&world.state("user2").join("serve-status.json"), &mut user)?;
     let later = File::open(&machine_lock)?;
     assert!(
-        later.try_lock().is_err(),
+        matches!(later.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
         "a running user role must hold the machine lock shared"
     );
-    // Restore modes so the tempdir can be removed.
-    std::fs::set_permissions(world.machine(), std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -464,4 +481,14 @@ fn running_as_root() -> bool {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
         .unwrap_or(false)
+}
+
+/// Gives a directory its write bit back so the tempdir can be removed even
+/// when an assertion fails.
+struct RestoreMode(PathBuf);
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
 }

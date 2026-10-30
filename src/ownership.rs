@@ -84,11 +84,19 @@ fn user_dir() -> Result<PathBuf> {
     crate::paths::default_state_dir()
 }
 
+#[cfg(feature = "test-utils")]
 fn machine_dir() -> Option<PathBuf> {
-    #[cfg(feature = "test-utils")]
     if let Some(dir) = std::env::var_os(ENV_MACHINE_LOCK_DIR).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
+    // Test builds never touch the real machine-wide location: without an
+    // explicit directory it lives beside the user tier, so tests that
+    // isolate HOME are isolated from each other and from a real service.
+    user_dir().ok().map(|dir| dir.join("machine"))
+}
+
+#[cfg(not(feature = "test-utils"))]
+fn machine_dir() -> Option<PathBuf> {
     if cfg!(target_os = "linux") {
         Some(PathBuf::from("/run/iroh-tunnel"))
     } else if cfg!(target_os = "macos") {
@@ -172,6 +180,23 @@ enum Lock {
     Busy,
 }
 
+/// Take a role lock exclusively. A status probe holds the same lock for
+/// microseconds, so a busy result is retried briefly before it counts as a
+/// real owner; a genuine owner is still refused within ~75 ms.
+fn claim_lock(file: File) -> Result<Lock> {
+    const ATTEMPTS: u32 = 4;
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+    for attempt in 1..=ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(Lock::Held(file)),
+            Err(TryLockError::WouldBlock) if attempt < ATTEMPTS => std::thread::sleep(PAUSE),
+            Err(TryLockError::WouldBlock) => return Ok(Lock::Busy),
+            Err(TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+    Ok(Lock::Busy)
+}
+
 #[derive(Clone, Copy)]
 enum LockKind {
     Exclusive,
@@ -204,8 +229,12 @@ fn write_owner(dir: &Path, role: StatusRole, node_id: Option<&str>) {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     };
-    let Ok(body) = serde_json::to_string(&owner) else {
-        return;
+    let body = match serde_json::to_string(&owner) {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::debug!("could not encode owner record: {e}");
+            return;
+        }
     };
     let path = dir.join(owner_name(role));
     // Informational record: a failed write must not stop the role.
@@ -252,7 +281,7 @@ fn already_running(role: StatusRole, scope: &str, owner: Option<&Owner>) -> anyh
 fn stop_hint(role: StatusRole) -> String {
     let name = role.name();
     format!(
-        "stop it first (Ctrl+C for a foreground run, `{name} service stop` for a service); \
+        "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop` for a service); \
          nothing is stopped automatically"
     )
 }
@@ -281,7 +310,7 @@ pub(crate) fn claim(role: StatusRole) -> Result<RoleClaim> {
     let user_path = user_dir.join(lock_name(role));
     let file = create_lock_file(&user_path, 0o600)
         .with_context(|| format!("cannot open role lock {}", user_path.display()))?;
-    let user_lock = match try_lock(file, LockKind::Exclusive)? {
+    let user_lock = match claim_lock(file)? {
         Lock::Held(file) => file,
         Lock::Busy => {
             return Err(already_running(
@@ -340,7 +369,7 @@ fn claim_machine(role: StatusRole, dir: &Path) -> Result<MachineClaim> {
     // "no permission" means "not elevated"; any other failure is real.
     match create_dir(dir, 0o755).and_then(|()| create_lock_file(&path, 0o644)) {
         Ok(file) => {
-            return match try_lock(file, LockKind::Exclusive)? {
+            return match claim_lock(file)? {
                 Lock::Held(file) => Ok(MachineClaim::Exclusive(file)),
                 Lock::Busy => Err(already_running(
                     role,
@@ -441,13 +470,24 @@ pub(crate) fn probe(role: StatusRole) -> Result<Liveness> {
 /// held. The lock is released again before returning.
 fn lock_is_held(path: &Path, prefer_write: bool) -> Result<bool> {
     let writable = if prefer_write {
-        open_existing(path, true).ok().flatten()
+        match open_existing(path, true) {
+            Ok(file) => file,
+            Err(e) if is_not_elevated(&e) => None,
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("cannot open role lock {}", path.display())))
+            }
+        }
     } else {
         None
     };
     let (file, kind) = match writable {
         Some(file) => (Some(file), LockKind::Exclusive),
-        None => (open_existing(path, false)?, LockKind::Shared),
+        None => (
+            open_existing(path, false)
+                .with_context(|| format!("cannot open role lock {}", path.display()))?,
+            LockKind::Shared,
+        ),
     };
     match file {
         Some(file) => Ok(matches!(try_lock(file, kind)?, Lock::Busy)),
@@ -455,14 +495,11 @@ fn lock_is_held(path: &Path, prefer_write: bool) -> Result<bool> {
     }
 }
 
-fn open_existing(path: &Path, write: bool) -> Result<Option<File>> {
+fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
     match base_options().read(true).write(write).open(path) {
         Ok(file) => Ok(Some(file)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) if write => Err(e.into()),
-        Err(e) => {
-            Err(anyhow::Error::new(e).context(format!("cannot open role lock {}", path.display())))
-        }
+        Err(e) => Err(e),
     }
 }
 
