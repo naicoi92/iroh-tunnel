@@ -638,6 +638,9 @@ async fn accept_loop(
     shutdown::join(&mut watchers).await;
 }
 
+/// Bound on one stream's local target connect; see `handle_connection`.
+const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Own stream admission and pipe tasks for one multiplexed connection.
 async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
     let mut streams = JoinSet::new();
@@ -660,21 +663,32 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
         };
         stream_no += 1;
         tracing::debug!(stream = stream_no, "accepted stream on connection");
-        let local = tokio::select! {
-            biased;
-            deadline = shutdown::stopped(&mut stop) => break Some(deadline),
-            result = TcpStream::connect(&target.local_addr) => match result {
-                Ok(local) => local,
-                Err(error) => {
-                    tracing::warn!(local_addr = %target.local_addr, stream = stream_no,
-                        "failed to connect local service, resetting stream: {error}");
-                    continue;
-                }
-            }
-        };
         let counter = ActiveStream::new(target.active_streams());
+        let local_addr = target.local_addr.clone();
         streams.spawn(async move {
             let _counter = counter;
+            // Connect inside the stream's own task: a slow target must not
+            // hold up accepting other streams on this connection. A failed
+            // or timed-out connect closes only this channel (dropping the
+            // stream halves resets it).
+            let local = match tokio::time::timeout(
+                LOCAL_CONNECT_TIMEOUT,
+                TcpStream::connect(&local_addr),
+            )
+            .await
+            {
+                Ok(Ok(local)) => local,
+                Ok(Err(error)) => {
+                    tracing::warn!(%local_addr, stream = stream_no,
+                        "failed to connect local service, resetting stream: {error}");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!(%local_addr, stream = stream_no,
+                        "timed out connecting local service, resetting stream");
+                    return;
+                }
+            };
             // AsyncWrite::shutdown only queues QUIC FIN. Keep channel owned
             // until final bytes are acknowledged, or last-pipe completion
             // could close the endpoint and discard its queued response.
