@@ -1,6 +1,6 @@
 # Redesign issue readiness and artifact index
 
-Audit snapshot of artifacts and missing evidence. Issue state and native blockers are not recorded here because they go stale; read them live with `gh api repos/naicoi92/iroh-tunnel/issues/<N>/dependencies/blocked_by` and `gh issue view <N>`. [Specification #68](https://github.com/naicoi92/iroh-tunnel/issues/68) is shared scope; issue bodies contain acceptance checklists. No proposal is automatically approved.
+Audit snapshot of artifacts and missing evidence. Issue state and native blockers are not recorded here because they go stale; read them live as described in the Pickup step of the [implementation workflow](implementation-workflow.md#pickup). [Specification #68](https://github.com/naicoi92/iroh-tunnel/issues/68) is shared scope; issue bodies contain acceptance checklists. No proposal is automatically approved.
 
 | Issue | Artifact | Missing evidence / disposition |
 |---|---|---|

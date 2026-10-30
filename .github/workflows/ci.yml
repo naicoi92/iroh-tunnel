@@ -1,9 +1,10 @@
 # CI pipeline — fast checks on every pull request.
 #
-# Two lightweight jobs run IN PARALLEL (no dependency between them) to minimize
-# wall-clock time on PRs:
-#   - lint:  cargo fmt --check + cargo clippy (catches style + correctness issues)
-#   - test:  cargo test (unit/integration tests)
+# Three lightweight jobs run IN PARALLEL (no dependency between them) to
+# minimize wall-clock time on PRs:
+#   - lint:      cargo fmt --check + cargo clippy (catches style + correctness issues)
+#   - packaging: shellcheck + goreleaser check (catches broken release config)
+#   - test:      cargo test (unit/integration tests)
 #
 # Heavy artifact builds (GoReleaser snapshots, Docker, packages) live in
 # snapshot.yml and only run on push to main, not on PRs. Real releases on tag
@@ -76,7 +77,7 @@ jobs:
           persist-credentials: false
 
       - name: shellcheck
-        run: shellcheck --severity=warning packaging/*.sh docs/*.sh
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
 
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@v7

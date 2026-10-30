@@ -8,18 +8,22 @@ The workflow follows Matt Pocock's [implement](https://github.com/mattpocock/ski
 
 ## Pickup
 
-Run before proposing or starting any issue. A label such as `ready-for-agent` and an empty blocker list mean only that no tracked gate is open; they do not show that the issue's prerequisites exist.
+Run before proposing or starting any issue. A label such as `ready-for-agent` and an empty blocker list show only that no tracked gate is open; they do not show that the issue's prerequisites exist.
 
-1. Run `git fetch` and base the work on `origin/main`; a local `main` can be behind.
-2. Read the issue, its comments and its live native blockers (`gh api repos/naicoi92/iroh-tunnel/issues/<N>/dependencies/blocked_by`).
-3. For each artifact, file, binary and decision the acceptance criteria assume, locate it in `origin/main` or a closed issue and quote where. Name every one that is missing.
+1. Run `git fetch` and base the work on the tip of `origin/main`; a local `main` can be behind.
+2. Read the issue, its comments and its live native blockers: `gh api repos/naicoi92/iroh-tunnel/issues/<N>/dependencies/blocked_by`. This is the only source for issue state; no document in this repository records it.
+3. For each artifact, file, binary and decision the acceptance criteria assume, locate it in `origin/main` or a closed issue and quote where. Examples: an acceptance criterion about "all three binaries" needs three `[[bin]]` entries and three published artifacts; one about aliases needs an approved alias strategy; one about Windows needs a Windows build. Name every prerequisite you cannot locate.
 
-Pickup is done when every assumed prerequisite is located or named as missing. If any is missing, report it and stop before dependent implementation; do not propose the issue as ready.
+Pickup is done when every assumed prerequisite is located or named as missing. If any is missing, report the issue as not ready, list the missing prerequisites, and stop before dependent implementation.
+
+## Release packaging
+
+For release packaging work, a red run of the packaging verification on the unchanged configuration is the red of the TDD slice. Run a local snapshot with `goreleaser release --snapshot --clean --skip=announce,publish,validate`.
 
 ## Implement and review
 
 1. Read [the specification](redesign-spec.md), [traceability](redesign-traceability.md), [acceptance procedures](redesign-acceptance.md), the issue and relevant decisions. Record the acceptance criteria and agreed real-process or platform test seam.
-2. Follow Matt Pocock's `implement` and `tdd` skills (for release packaging, a red run of the verification script on the unchanged configuration counts as the red; a local snapshot is `goreleaser release --snapshot --clean --skip=announce,publish,validate`): one observable behavior per red → green slice, then the appropriate full test suite. Preserve actual red/green evidence and disclose unavailable environments.
+2. Follow Matt Pocock's `implement` and `tdd` skills: one observable behavior per red → green slice, then the appropriate full test suite. Preserve actual red/green evidence and disclose unavailable environments.
 3. Run the `code-review` skill against a pinned base and head with independent **Standards** and **Spec** reviews. Address valid findings and rerun affected tests. External OpenCodeReview and CodeRabbit reviews are temporarily suspended by the repository owner; the owner will add external review later. Preserve both independent review axes.
 4. Open the task's pull request against `main` using the `pr` skill. Include the template below. Require relevant CI and review on the exact final head before merge. Revalidate affected combined behavior after merge.
 
