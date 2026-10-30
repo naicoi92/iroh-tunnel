@@ -17,6 +17,7 @@ pub mod config_cmd;
 pub mod conn_path;
 pub mod endpoint;
 pub mod error;
+pub mod paths;
 pub mod pipe;
 pub mod proto;
 /// `pub(crate)` — internal seam between serve/access, not a public extension
