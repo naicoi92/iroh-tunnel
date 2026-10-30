@@ -1,5 +1,7 @@
 # Decision review packet — UDP, TCP, ownership, service and update
 
+> **Superseded in part by the #77 final decision** ([comment](https://github.com/naicoi92/iroh-tunnel/issues/77#issuecomment-6520850254)): ownership is one detected process per role; separate lock domains, scope identity and cross-user coordination below are historical proposals, not requirements.
+
 These are design decisions in progress. Confirmed choices are user decisions; proposed mechanisms and numeric defaults are not approved. The live GitHub issues and their comments carry the discussion and acceptance criteria. No implementation or benchmark is claimed.
 
 ## UDP routing — #71

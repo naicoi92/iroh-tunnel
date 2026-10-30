@@ -8,7 +8,7 @@
 |---|---|---|
 | `tunnel-contract` | Define service names, peer identity references, protocol compatibility and shared tunnel rules. | — |
 | `configuration` | Role config, identity lifecycle, validation, overrides, legacy migration and secret handling. | `tunnel-contract` |
-| `runtime-ownership` | Role/scope ownership, process lifecycle, status snapshots and cleanup. | `tunnel-contract` |
+| `runtime-ownership` | Role ownership, process lifecycle, status snapshots and cleanup. | `tunnel-contract` |
 | `tcp-forwarding` | Serve and Access TCP forwarding, connection reuse and per-client stream isolation. | `tunnel-contract`, `runtime-ownership` |
 | `udp-forwarding` | Fixed-target UDP forwarding, concurrent client flows and best-effort response routing. | `tunnel-contract`, `runtime-ownership` |
 | `service-management` | Install and manage user/system background services with pinned paths, scope and privilege checks. | `configuration`, `runtime-ownership` |

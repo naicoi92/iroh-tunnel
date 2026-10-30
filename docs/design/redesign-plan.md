@@ -19,7 +19,7 @@ The [canonical tracker spec](https://github.com/naicoi92/iroh-tunnel/issues/68) 
 | Protocol | TCP and best-effort UDP to fixed targets; multiplex always enabled; seek TCP compatibility with 0.4 and test both directions without adding version negotiation. | On 0.4 compatibility failure, user decides trade-off; retry/drain numeric defaults and flow-control policies remain open. |
 | UDP mapping | Opaque payload, client-to-flow association at Access, dedicated Serve-side UDP socket per active flow. | Transport, payload size, fragmentation, timeout, admission, reply source filtering and tuple-reuse risks. |
 | Configuration | Platform paths, explicit overrides, safe macOS migration, ephemeral quick-run identity. | Initial setup, secret disclosure, rotation and concurrent write details. |
-| Operations | Role/scope exclusivity, service privilege behavior, pinned paths and independent updates. | Locking/stale state, privileged config trust, Windows user background, rollback and trust rotation. |
+| Operations | Role exclusivity, service privilege behavior, pinned paths and independent updates. | Detection mechanism (#87), privileged config trust, Windows user background, rollback and trust rotation. |
 | Product scope | Windows plus currently released platforms, installers, separate packages, three images and verified updates. | Detailed platform matrix, exact CLI/exit codes and release recovery policy. |
 
 **Dependency version:** target Iroh stable `1.4.1` was selected during design and adopted by [#101](issue-101-evidence.md); recheck the latest stable before final release evidence. No benchmark has established UDP transport performance.
@@ -32,7 +32,7 @@ These are responsibility boundaries, not a mandate to create eight crates or eig
 |---|---|
 | `tunnel-contract` | Service identity, peer references, compatibility and shared tunnel rules. |
 | `configuration` | Role configuration, identity, validation, migration and secret handling. |
-| `runtime-ownership` | Role/scope ownership, lifecycle, status and cleanup. |
+| `runtime-ownership` | Role ownership, lifecycle, status and cleanup. |
 | `tcp-forwarding` | Multiplexed per-client TCP streams to fixed targets. |
 | `udp-forwarding` | Opaque datagrams, per-client flow association and fixed-target forwarding. |
 | `service-management` | User/system background service operations and platform adapters. |
@@ -64,7 +64,7 @@ The target generally sees the Serve-side endpoint, potentially modified by NAT, 
 
 - macOS/Linux defaults: `~/.config/iroh-tunnel/` and `~/.local/state/iroh-tunnel/`, ignoring XDG directory variables; application-specific overrides remain. Windows uses the resolved `LocalAppData/iroh-tunnel/config` and `state` directories.
 - On macOS use new config when present. Otherwise safely copy legacy config without overwriting, preserve the original and secret permissions, and never generate a substitute identity after copy failure. Verify actual legacy paths.
-- For each role only one process runs at a time: a start is refused when a process of the role is detected, regardless of executable name; Serve and Access are distinct roles. A system service runs as root/Administrator and its installer owns it; the operator stops it before using a user service or `run`. Independent local endpoints must not use the same identity concurrently across roles or scopes; reject the later process. No cross-host intervention is planned. Per RO-03 (#77) the minimum is refusing a later start while an instance runs, keeping the 0.4.2 stop behavior; lock mechanics and crash cleanup are implementation details of #87.
+- For each role only one process runs at a time: a start is refused when a process of the role is detected, regardless of executable name; Serve and Access are distinct roles. A system service runs as root/Administrator and its installer owns it; the operator stops it before using a user service or `run`. Independent local endpoints must not use the same identity concurrently across roles; reject the later process when detected. No cross-host intervention is planned. Per RO-03 (#77) the minimum is refusing a later start while an instance runs, keeping the 0.4.2 stop behavior; lock mechanics and crash cleanup are implementation details of #87.
 - NodeId is public identity, not authorization. Services protect themselves. Secret permissions and disclosure policy require review.
 
 ## Background service and distribution
