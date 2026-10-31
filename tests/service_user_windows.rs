@@ -183,6 +183,11 @@ fn install_refuses_a_state_directory_the_task_cannot_carry() -> Result<()> {
 
 #[test]
 fn start_without_an_installed_task_names_the_install_command() -> Result<()> {
+    // Uses the real per-user lock: `start` checks role ownership first, so a
+    // real serve running on a developer machine would change the outcome.
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+        return Ok(());
+    }
     let fx = Fixture::new()?;
     for verb in ["start", "stop", "status"] {
         let out = fx.command(&["serve", "service", verb, "--user"]).output()?;
@@ -216,6 +221,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
 
     // status reports the task.
     let status = fx.ok(&["serve", "service", "status", "--user"])?;
+    assert!(status.contains("serve is running (pid "), "{status}");
     assert!(status.contains("iroh-tunnel-serve"), "{status}");
 
     // starting a running role is refused by role ownership, not duplicated.
@@ -240,14 +246,25 @@ async fn user_background_task_lifecycle() -> Result<()> {
         stopped_at.elapsed()
     );
 
-    // start and restart keep the configured identity.
+    let stopped = fx.ok(&["serve", "service", "status", "--user"])?;
+    assert!(stopped.contains("serve is not running"), "{stopped}");
+
+    // A hard /End leaves a stale snapshot: remove it so every later read is
+    // from the new process, and require a new pid.
+    let _ = std::fs::remove_file(&status_file);
+
+    // start and restart keep the configured identity in a NEW process.
     fx.ok(&["serve", "service", "start", "--user"])?;
-    wait_for("status after start", || node_id_of(&status_file).is_some())?;
+    wait_for("status after start", || pid_of(&status_file).is_some())?;
+    let started_pid = pid_of(&status_file).unwrap();
+    assert_ne!(started_pid, pid, "start must launch a new process");
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
+
     fx.ok(&["serve", "service", "restart", "--user"])?;
-    wait_for("status after restart", || {
-        node_id_of(&status_file).is_some()
+    wait_for("a new process after restart", || {
+        pid_of(&status_file).is_some_and(|p| p != started_pid)
     })?;
+    assert!(!pid_alive(started_pid), "restart left the old process");
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
 
     // uninstall removes the task and ends the process.

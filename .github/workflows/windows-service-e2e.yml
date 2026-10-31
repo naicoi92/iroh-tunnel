@@ -10,6 +10,10 @@ on:
   pull_request:
     paths:
       - "src/service/**"
+      - "src/app.rs"
+      - "src/paths.rs"
+      - "src/ownership.rs"
+      - "src/status.rs"
       - "tests/service_user_windows.rs"
       - ".github/workflows/windows-service-e2e.yml"
 

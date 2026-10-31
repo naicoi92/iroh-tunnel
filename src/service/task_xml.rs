@@ -60,9 +60,17 @@ fn ensure_plain(what: &str, path: &Path) -> Result<()> {
 pub(super) fn task_action(role: &str, binary: &Path, config: &Path) -> Result<TaskAction> {
     ensure_plain("binary", binary)?;
     ensure_plain("config", config)?;
+    let (Some(binary), Some(config)) = (binary.to_str(), config.to_str()) else {
+        return Err(CliError::Config(
+            "the binary and config paths must be valid Unicode to be registered in a \
+             scheduled task"
+                .into(),
+        )
+        .into());
+    };
     Ok(TaskAction {
-        command: binary.to_string_lossy().into_owned(),
-        arguments: format!("{role} run --config \"{}\"", config.display()),
+        command: binary.to_owned(),
+        arguments: format!("{role} run --config \"{config}\""),
     })
 }
 

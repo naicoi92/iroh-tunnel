@@ -69,10 +69,15 @@ fn not_installed_hint(role: &str) -> String {
     )
 }
 
+/// Whether the role's task is registered for this user.
+///
+/// Lists every task and looks for the name: a failed listing (access denied,
+/// Task Scheduler down) is an error, never "not installed", and the answer
+/// does not depend on the localised "not found" text of `/Query /TN`.
 fn is_installed(role: &str) -> Result<bool> {
-    Ok(schtasks(&["/Query", "/TN", &task_name(role)])?
-        .status
-        .success())
+    let listing = schtasks_ok(&["/Query", "/FO", "CSV", "/NH"])?;
+    let wanted = format!("\\{}\"", task_name(role));
+    Ok(listing.lines().any(|line| line.contains(&wanted)))
 }
 
 fn require_installed(role: &str) -> Result<()> {
@@ -90,7 +95,9 @@ fn require_installed(role: &str) -> Result<()> {
 /// wrapper. Refusing keeps stop reliable and the pinned paths honest.
 fn ensure_default_state(state: &Path) -> Result<()> {
     let default = crate::paths::default_state_dir()?;
-    if state == default {
+    // Windows paths are case-insensitive and accept either separator.
+    let normal = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
+    if normal(state) == normal(&default) {
         return Ok(());
     }
     Err(CliError::Config(format!(
@@ -154,7 +161,8 @@ impl Drop for TempDefinition {
 }
 
 /// Add scope guidance to an access-denied failure (the account is never
-/// changed to work around it).
+/// changed to work around it). Detection reads the English message: on a
+/// localised Windows the failure stays a plain service error (exit 5).
 fn denied_or(error: anyhow::Error, what: &str) -> anyhow::Error {
     if error
         .to_string()
@@ -174,7 +182,8 @@ fn denied_or(error: anyhow::Error, what: &str) -> anyhow::Error {
 pub fn uninstall(role: &str, _scope: ServiceScope) -> Result<()> {
     let name = task_name(role);
     if is_installed(role)? {
-        // A running instance would keep going after its task is deleted.
+        // A running instance would keep going after its task is deleted. A
+        // failed /End only means nothing was running; /Delete reports the rest.
         let _ = schtasks(&["/End", "/TN", &name]);
         schtasks_ok(&["/Delete", "/TN", &name, "/F"])?;
     }
@@ -209,27 +218,56 @@ pub fn stop(role: &str, _scope: ServiceScope) -> Result<()> {
     Ok(())
 }
 
+/// How long `restart` waits for the old process to release the role.
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
     stop(role, scope)?;
+    // `/End` returns before the process is gone; a start that races the old
+    // process would be dropped (IgnoreNew) or refused by role ownership.
+    let deadline = std::time::Instant::now() + RESTART_WAIT;
+    while task_is_running(role)? {
+        if std::time::Instant::now() >= deadline {
+            return Err(CliError::Service(format!(
+                "{} did not stop within {}s after schtasks /End; not starting a second instance",
+                task_name(role),
+                RESTART_WAIT.as_secs()
+            ))
+            .into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     start(role, scope)
 }
 
 pub fn status(role: &str, _scope: ServiceScope) -> Result<()> {
     require_installed(role)?;
+    // The role lock, not the localised task text, says whether it runs.
+    match crate::ownership::probe(status_role(role)?)? {
+        crate::ownership::Liveness::Running { owner, .. } => println!(
+            "{role} is running ({})",
+            crate::ownership::describe_owner(owner.as_ref())
+        ),
+        crate::ownership::Liveness::NotRunning => println!("{role} is not running"),
+    }
     let out = schtasks_ok(&["/Query", "/TN", &task_name(role), "/FO", "LIST", "/V"])?;
     print!("{out}");
     Ok(())
 }
 
+fn status_role(role: &str) -> Result<crate::status::StatusRole> {
+    match role {
+        "serve" => Ok(crate::status::StatusRole::Serve),
+        "access" => Ok(crate::status::StatusRole::Access),
+        other => Err(CliError::Config(format!("unknown role {other:?}")).into()),
+    }
+}
+
 /// Whether the role is running, by its ownership lock. The task `Status`
 /// text is localised, so the lock is the locale-independent source of truth.
 fn task_is_running(role: &str) -> Result<bool> {
-    let status_role = match role {
-        "serve" => crate::status::StatusRole::Serve,
-        _ => crate::status::StatusRole::Access,
-    };
     Ok(matches!(
-        crate::ownership::probe(status_role)?,
+        crate::ownership::probe(status_role(role)?)?,
         crate::ownership::Liveness::Running { .. }
     ))
 }
