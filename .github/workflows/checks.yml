@@ -1,0 +1,48 @@
+# Reusable source checks (fmt + clippy + tests). Called by ci.yml (PR / main)
+# and release.yml (tag gate). `lint` and `test` run IN PARALLEL.
+#
+# Clippy and fmt run once on Linux. Windows only runs the tests: the code has
+# `cfg(unix)` / `cfg(windows)` splits, so the tests catch platform breakage,
+# while a second clippy pass would only repeat the Linux lint.
+
+name: checks
+
+on:
+  workflow_call:
+    inputs:
+      windows:
+        description: Also run the test suite on windows-latest.
+        type: boolean
+        default: false
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt,clippy
+          cache-key: lint
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Show every platform's result instead of cancelling the sibling.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.windows && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test
+      - run: cargo test --all-features --locked

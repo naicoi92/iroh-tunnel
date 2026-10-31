@@ -1,95 +1,106 @@
-# CI pipeline — fast checks on every pull request.
+# CI — runs on pull requests and on pushes to main.
 #
-# Two lightweight jobs run IN PARALLEL (no dependency between them) to minimize
-# wall-clock time on PRs:
-#   - lint:  cargo fmt --check + cargo clippy (catches style + correctness issues)
-#   - test:  cargo test (unit/integration tests)
+# Trigger design (no wasted runner minutes):
+#   - The workflow itself has NO path filter, so the `ci-ok` aggregate check
+#     always reports and can be the single required status check. Path
+#     filtering happens in the `changes` job instead; docs-only PRs skip every
+#     heavy job and still go green.
+#   - New pushes to the same PR cancel the superseded run.
+#   - Pushes to main re-run the same jobs; that is what writes the Rust cache
+#     that PRs and release tags restore from (see .github/actions/setup-rust).
 #
-# Heavy artifact builds (GoReleaser snapshots, Docker, packages) live in
-# snapshot.yml and only run on push to main, not on PRs. Real releases on tag
-# pushes live in release.yml.
+# Job graph (independent jobs run in parallel):
+#   changes ─┬─ checks (lint ∥ test linux ∥ test windows)
+#            ├─ build-check  (all release targets + deb/apk; packaging paths only)
+#            │     └─ docker-check
+#            └─ ci-ok (required check)
 
 name: ci
 
 on:
   pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # lint: format check + clippy. Cheap, fast, fail-fast on style issues.
-  # ---------------------------------------------------------------------------
-  lint:
-    name: lint (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Report both platforms on a failure instead of cancelling the sibling:
-      # a Windows-only lint break should not hide the Linux result.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    env:
-      # sccache wraps rustc to cache compilation output across runs. Set at job
-      # level so every `cargo` invocation (fmt/clippy/build) is covered.
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
-    steps:
-      # persist-credentials: false hardens PR-triggered jobs: this workflow only
-      # reads source (contents: read), so GITHUB_TOKEN should not be persisted
-      # into .git/config where later steps could leak or misuse it.
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain (pinned to rust-version)
-        run: |
-          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
-          rustup default 1.91
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # Formatting is platform-independent; checking it once is enough.
-      - name: cargo fmt
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-  # ---------------------------------------------------------------------------
-  # test: unit + integration tests. Runs in parallel with `lint`.
-  # ---------------------------------------------------------------------------
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      packaging: ${{ steps.filter.outputs.packaging }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'examples/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - '.github/workflows/checks.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+            packaging:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'packaging/**'
+              - 'Dockerfile.goreleaser'
+              - '.github/workflows/build.yml'
+              - '.github/workflows/docker.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
 
-      - name: Install Rust toolchain (pinned to rust-version)
+  checks:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/checks.yml
+    with:
+      windows: true
+
+  # Rehearses the release build (native matrix + deb/apk) only when something
+  # that can break it changed. Artifacts are not published.
+  build-check:
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
+    uses: ./.github/workflows/build.yml
+
+  docker-check:
+    needs: build-check
+    uses: ./.github/workflows/docker.yml
+    with:
+      push: false
+      version: ${{ needs.build-check.outputs.version }}
+
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [changes, checks, build-check, docker-check]
+    runs-on: ubuntu-latest
+    steps:
+      # `skipped` is fine (path filter); `failure` / `cancelled` is not.
+      - name: Verify upstream results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          rustup toolchain install 1.91 --profile minimal --no-self-update
-          rustup default 1.91
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: cargo test
-        run: cargo test --all-features
+          echo "results: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

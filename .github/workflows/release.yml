@@ -1,22 +1,21 @@
 # Release pipeline — publishes real artifacts on a `v*` tag push (ADR-0002).
 #
-# Two jobs, serial: Linux first (owns the GitHub Release), then macOS (appends
-# the darwin binary + Homebrew cask). They live in this one file because the
-# macOS job depends on the Linux job (`needs: release-linux`).
+# GoReleaser is gone: building is native + parallel (build.yml), packaging is
+# standalone nFPM, the image is assembled by buildx from prebuilt binaries, and
+# the GitHub Release / Homebrew cask are plain `gh` / git steps. (GoReleaser's
+# `prebuilt` builder and split/merge are Pro-only, so OSS GoReleaser cannot
+# consume binaries built on separate runners.)
 #
-# Linux (ubuntu-latest, .goreleaser.yaml):
-#   binaries for linux/amd64 + linux/arm64 (cargo-zigbuild), checksums,
-#   .deb (glibc) + .apk (musl, for Alpine LXC/hosts) (nFPM), Docker image on
-#   ghcr.io (buildx multi-arch), and the GitHub Release itself.
+# Job graph — `gate` and `build` start together; nothing is published until
+# BOTH are green, so a failed build never leaves a half-made release:
 #
-# macOS (macos-14, .goreleaser.macos.yaml):
-#   binary for darwin/arm64 (native build) + Homebrew cask. Built natively
-#   because iroh depends on macOS frameworks (SystemConfiguration/
-#   CoreFoundation) that cannot be cross-compiled from Linux.
+#   gate (fmt ∥ clippy ∥ test)  ┐
+#   build (6 targets ∥) → package ┴→ release (draft → upload → publish)
+#                                      ├→ docker (ghcr.io push)
+#                                      └→ homebrew (tap cask)
 #
-# CI-only snapshot builds (no publish) live in snapshot.yml.
-#
-# This replaces the binary-only matrix workflow from T-14 (PR #14).
+# Re-running (workflow_dispatch on a tag ref or "Re-run jobs") replaces the
+# assets of an existing release instead of failing.
 
 name: release
 
@@ -26,117 +25,119 @@ on:
       - "v*"
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Linux: binaries + Docker + deb/apk + owns the GitHub Release.
-  # ---------------------------------------------------------------------------
-  release-linux:
-    name: release (linux)
+  gate:
+    uses: ./.github/workflows/checks.yml
+    with:
+      windows: true
+
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    name: publish GitHub Release
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: target-*
+          path: in/
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist/
+
+      - name: Collect assets and checksums
+        run: |
+          mkdir -p dist
+          cp in/*/*.tar.gz dist/
+          cd dist
+          # Same split as before: Linux tarballs + packages, and darwin on its own.
+          sha256sum ./*.tar.gz ./*.deb ./*.apk | grep -v -- '-darwin-' | sed 's# \./# #' > checksums.txt
+          sha256sum ./*-darwin-*.tar.gz | sed 's# \./# #' > checksums-darwin.txt
+          cat checksums.txt checksums-darwin.txt
+
+      # Draft first so a half-uploaded release is never visible, then publish
+      # in one atomic edit once every asset is attached.
+      - name: Create draft release and upload assets
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            prerelease=()
+            [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+              --generate-notes "${prerelease[@]}"
+          fi
+          gh release upload "$TAG" dist/* --clobber
+
+      - name: Publish release
+        run: gh release edit "$TAG" --draft=false
+
+  docker:
+    needs: [build, release]
+    uses: ./.github/workflows/docker.yml
+    with:
+      push: true
+      version: ${{ needs.build.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+
+  homebrew:
+    name: update Homebrew tap
+    needs: [build, release]
+    # Pre-releases must not move the stable cask.
+    if: ${{ !contains(needs.build.outputs.version, '-') }}
     runs-on: ubuntu-latest
     env:
-      # sccache caches compilation output across release runs. Job-level so the
-      # GoReleaser `before.hooks` + cargo-zigbuild cross builds are both covered.
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+      VERSION: ${{ needs.build.outputs.version }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Rust toolchain (pinned to rust-version)
-        # `rustfmt` + `clippy` are needed because GoReleaser's `before.hooks`
-        # run `cargo fmt -- --check` (and clippy is cheap to include).
+      - uses: actions/download-artifact@v4
+        with:
+          name: target-darwin-arm64
+          path: darwin/
+
+      - name: Render cask
         run: |
-          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
-          rustup default 1.91
+          sha="$(sha256sum darwin/iroh-tunnel-"$VERSION"-darwin-arm64.tar.gz | cut -d' ' -f1)"
+          mkdir -p tap-out
+          bash packaging/homebrew-cask.sh "$VERSION" "$sha" > tap-out/iroh-tunnel.rb
+          cat tap-out/iroh-tunnel.rb
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # mlugg/setup-zig puts `zig` on PATH for subsequent steps, which
-      # GoReleaser's Rust builder (cargo-zigbuild) relies on. Pinned to 0.13.0
-      # to match the verified spike (ADR-0002 §2).
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        run: cargo +1.91 install cargo-zigbuild --locked
-
-      # QEMU lets buildx build the linux/arm64 image from the amd64 runner.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run GoReleaser (Linux)
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: latest
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ---------------------------------------------------------------------------
-  # macOS: darwin binary + Homebrew cask. Appends to the Linux release.
-  # ---------------------------------------------------------------------------
-  release-macos:
-    name: release (macos)
-    runs-on: macos-14
-    needs: release-linux
-    env:
-      # NOTE: no sccache here on purpose — cargo-zigbuild's zigcc wrapper on
-      # macOS is not a compiler sccache can drive (cc-rs prepends sccache
-      # from RUSTC_WRAPPER and rejects the wrapper script with "Compiler not
-      # supported"), which broke the ring build. Linux keeps sccache.
-      SCCACHE_GHA_ENABLED: "false"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install Rust toolchain (pinned to rust-version)
+      - name: Push to naicoi92/homebrew-tap
         run: |
-          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
-          rustup default 1.91
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-
-      # GoReleaser's Rust builder always invokes `cargo zigbuild` even for the
-      # native target, so zig + cargo-zigbuild must be present on macOS too.
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        run: cargo +1.91 install cargo-zigbuild --locked
-
-      - name: Run GoReleaser (macOS)
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: latest
-          args: release --clean --config .goreleaser.macos.yaml
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/naicoi92/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp tap-out/iroh-tunnel.rb tap/Casks/iroh-tunnel.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/iroh-tunnel.rb
+          if git diff --cached --quiet; then
+            echo "cask already up to date"
+          else
+            git commit -m "iroh-tunnel ${VERSION}"
+            git push origin HEAD:main
+          fi

@@ -1,0 +1,33 @@
+# Standalone nFPM config shared by the .deb (glibc) and .apk (musl) packages.
+# Invoked from .github/workflows/build.yml with:
+#   BINARY=<path to iroh-tunnel> ARCH=<amd64|arm64|riscv64> VERSION=<x.y.z>
+#   nfpm package --config packaging/nfpm.yaml --packager <deb|apk> --target <file>
+#
+# Replaces the `nfpms` blocks of the former GoReleaser config (ADR-0002).
+
+name: iroh-tunnel
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+maintainer: naicoi92 <naicoi@lttech.vn>
+vendor: naicoi92
+homepage: https://github.com/naicoi92/iroh-tunnel
+description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
+license: "MIT OR Apache-2.0"
+
+contents:
+  - src: ${BINARY}
+    dst: /usr/bin/iroh-tunnel
+    file_info:
+      mode: 0755
+  # systemd unit for the `serve` role, installed by the package.
+  - src: packaging/iroh-tunnel.service
+    dst: /usr/lib/systemd/system/iroh-tunnel.service
+    type: config|noreplace
+  # Default config directory; the binary reads /etc/iroh-tunnel/serve.toml.
+  - dst: /etc/iroh-tunnel
+    type: dir
+
+scripts:
+  postinstall: packaging/postinstall.sh

@@ -774,14 +774,14 @@ For reporting vulnerabilities and the full policy, see
 | `src/status.rs`            | atomic per-role status-file writers (`StatusWriter`)   |
 | `src/status_cmd.rs`        | `<role> status`: read the file, render the table       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
-| `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
-| `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)  |
-| `packaging/`               | systemd unit + deb postinstall used by nFPM            |
+| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release     |
+| `packaging/`               | systemd unit, nFPM config, postinstall, Homebrew cask  |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Releases
 
-One git tag `vX.Y.Z` produces, via [GoReleaser](https://goreleaser.com):
+One git tag `vX.Y.Z` produces, via native parallel GitHub Actions builds
+(`.github/workflows/release.yml`):
 
 - **Binaries:** `linux/amd64`, `linux/arm64` (glibc + musl), `darwin/arm64`
   (+ checksums), `riscv64gc` musl
@@ -802,8 +802,8 @@ runs, and the compatibility rules. For security issues, follow
 
 - [iroh](https://github.com/n0-computer/iroh) and the n0 team — the P2P
   transport, relay network, and QUIC stack (noq) this project builds on.
-- [GoReleaser](https://goreleaser.com) and its maintainers — the cross-platform
-  release pipeline.
+- [GoReleaser](https://goreleaser.com) and its maintainers — nFPM, used for the
+  `.deb`/`.apk` packages, and the release pipeline this project grew from.
 
 ## License
 
