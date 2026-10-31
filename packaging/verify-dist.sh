@@ -69,8 +69,9 @@ only_match() {
 # List a package's content members, one per line: "path" or "path -> target".
 # Leading "./", package-manager metadata (apk dot-files) and the bare usr and
 # usr/bin directories are dropped; any other directory (for example a stray
-# /etc/iroh-tunnel/) stays in the listing so it fails the exact-member check. The leading `tar -tv` columns differ between GNU and BSD tar, so keep
-# only the trailing path (and link target).
+# /etc/iroh-tunnel/) stays in the listing so it fails the exact-member check.
+# The leading `tar -tv` columns differ between GNU and BSD tar, so keep only the
+# trailing path (and link target).
 list_package() {
     case "$1" in
     *.deb) raw=$(ar p "$1" data.tar.gz > "$TMP/data.tar.gz" && tar -tvzf "$TMP/data.tar.gz") ;;

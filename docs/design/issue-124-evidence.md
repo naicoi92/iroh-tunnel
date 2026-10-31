@@ -23,7 +23,7 @@ Baseline `bcb6577` (origin/main). Branch `redesign/issue-124`. No native blocker
 | Criterion | Evidence | Status |
 |---|---|---|
 | 124.AC1 one archive per role for macOS arm64, Windows x64, Windows ARM64, in the checksum file | `verify-dist.sh windows` 6/6, `macos` 3/3 on a local snapshot | PASS (cross-build, unsigned) |
-| 124.AC2 each binary starts and prints help on a real host; cross-build vs runtime separate | macOS arm64: run locally (`macos` mode). Windows x64/ARM64: CI `windows-runtime` | see PR for CI result |
+| 124.AC2 each binary starts and prints help on a real host; cross-build vs runtime separate | macOS arm64: run locally and in CI (`macos` mode). Windows x64/ARM64: CI `windows runtime (amd64)` and `(arm64)` ran all three roles (`PROCESSOR_ARCHITECTURE` AMD64 and ARM64), digest checked first | PASS (start-up `--help` only) |
 | 124.AC3 names follow the existing convention | `<role>-<version>-<os>-<arch>`; Windows uses `.zip` | PASS |
 
 ## Evidence (macOS arm64 host, GoReleaser snapshot of this tree)
@@ -46,3 +46,8 @@ Baseline `bcb6577` (origin/main). Branch `redesign/issue-124`. No native blocker
   same configs on a tag and was not executed.
 - macOS Intel and Windows packages/containers are out of scope.
 - A real tunnel across Windows (bytes) is for #97.
+- The tag flow (`release.yml`) is not gated by `windows-runtime` or `verify-dist.sh`;
+  those run in `snapshot.yml` only. A release job that publishes Windows archives
+  without running them is for #100/#97 to gate.
+- `install.sh` still says role binaries for macOS/Windows are unpublished; that text
+  and the PowerShell/macOS installers belong to #93.

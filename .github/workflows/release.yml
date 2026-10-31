@@ -5,13 +5,15 @@
 # macOS job depends on the Linux job (`needs: release-linux`).
 #
 # Linux (ubuntu-latest, .goreleaser.yaml):
-#   binaries for linux/amd64 + linux/arm64 (cargo-zigbuild), checksums,
+#   binaries for linux/amd64 + linux/arm64 (cargo-zigbuild) and role .zip
+#   archives for windows/amd64 + windows/arm64 (cross-built, issue #124), checksums,
 #   .deb (glibc) + .apk (musl, for Alpine LXC/hosts) (nFPM) packages and
 #   Docker images on ghcr.io (buildx multi-arch), one per executable, and the
 #   GitHub Release itself.
 #
 # macOS (macos-14, .goreleaser.macos.yaml):
-#   binary for darwin/arm64 (native build) + Homebrew cask. Built natively
+#   binaries for darwin/arm64 (native build; all-in-one, Serve and Access
+#   archives, issue #124) + Homebrew cask (all-in-one). Built natively
 #   because iroh depends on macOS frameworks (SystemConfiguration/
 #   CoreFoundation) that cannot be cross-compiled from Linux.
 #

@@ -99,6 +99,8 @@ jobs:
             dist/*-windows-*.zip
             dist/checksums.txt
           if-no-files-found: error
+          # Unsigned binaries; the artifact only feeds the next job.
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # macOS snapshot: darwin/arm64 binary + Homebrew cask config.
@@ -157,6 +159,8 @@ jobs:
   windows-runtime:
     name: windows runtime (${{ matrix.arch }})
     needs: snapshot-linux
+    # windows-11-arm runners are free for public repositories only; a private
+    # repository needs a larger-runner label here.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -184,7 +188,9 @@ jobs:
             $zip = Get-ChildItem dist -Filter "$role-*-windows-$env:ARCH.zip" |
               Where-Object { $_.Name -match "^$role-\d" } | Select-Object -First 1
             if (-not $zip) { throw "no $role archive for $env:ARCH" }
-            $want = ($sums | Where-Object { $_ -match [regex]::Escape($zip.Name) }) -split '\s+' | Select-Object -First 1
+            # Exact match on the file-name column of "<digest>  <name>".
+            $line = $sums | Where-Object { ($_ -split '\s+')[1] -eq $zip.Name } | Select-Object -First 1
+            $want = if ($line) { ($line -split '\s+')[0] } else { '' }
             $got = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
             if ($want -ne $got) { throw "$($zip.Name): digest $got differs from $want" }
             $out = "run/$role"
