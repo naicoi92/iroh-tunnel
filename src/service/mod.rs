@@ -15,16 +15,40 @@ use anyhow::{Context, Result};
 
 use crate::error::CliError;
 
+pub mod account;
 #[cfg(target_os = "linux")]
 mod busybox;
 #[cfg(target_os = "macos")]
 mod launchd;
+pub mod pin;
 pub mod scope;
+#[cfg(unix)]
+pub mod system;
 #[cfg(target_os = "linux")]
 mod systemd;
 mod task_xml;
+#[cfg(unix)]
+pub mod trust;
 #[cfg(windows)]
 mod windows;
+
+/// Load a role config for `run`, enforcing the privileged trust policy when a
+/// system service asks for it (SM-04). Plain read elsewhere.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] for an unsafe path under a system service, or the
+/// ordinary config errors.
+pub(crate) fn load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
+    #[cfg(unix)]
+    {
+        trust::load_config(path)
+    }
+    #[cfg(not(unix))]
+    {
+        C::load(path)
+    }
+}
 
 /// Restart policy shared by every platform's service template.
 ///
@@ -82,27 +106,60 @@ pub enum ServiceScope {
 /// `config` and `state` must be absolute: they are pinned into the
 /// registration so the service never depends on its own working directory or
 /// home (SM-02).
-pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
+///
+/// `pin` is recorded in a system registration so the root service trusts only
+/// that user's files (SM-04); it is `None` for a user service.
+pub fn install(
+    role: &str,
+    scope: ServiceScope,
+    config: &Path,
+    state: &Path,
+    pin: Option<&pin::Pin>,
+) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::install(role, scope, config, state)
+            systemd::install(role, scope, config, state, pin)
         } else {
-            busybox::install(role, scope, config, state)
+            busybox::install(role, scope, config, state, pin)
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::install(role, scope, config, state)
+        launchd::install(role, scope, config, state, pin)
     }
     #[cfg(windows)]
     {
+        let _ = pin;
         windows::install(role, scope, config, state)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (role, scope, config, state);
+        let _ = (role, scope, config, state, pin);
         unsupported()
+    }
+}
+
+/// The text of the currently installed system registration, if any: where a
+/// previous install's pin is read from to detect a retarget (SM-02).
+pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if linux_is_systemd() {
+            systemd::existing_registration(role, scope)
+        } else {
+            let _ = scope;
+            busybox::existing_registration(role)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        launchd::existing_registration(role, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (role, scope);
+        None
     }
 }
 
