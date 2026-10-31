@@ -62,6 +62,7 @@ iroh-relay = "1.4.1"
 # Turns on this crate's own `test-utils` feature for integration tests
 # (self-dependency feature unification).
 iroh-tunnel = { path = ".", features = ["test-utils"] }
+sha2 = "0.11"
 
 [build-dependencies]
 # vergen-gitcl 9.x — inject git tag into APP_VERSION at build time.

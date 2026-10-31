@@ -60,3 +60,59 @@ over real HTTP by a local server (`IROH_TUNNEL_BASE_URL`). Prompt answers use
   release from this tree is needed for a true end-to-end run (#97).
 - Checksum and archive come from the same host: this detects corruption, not a
   compromised host.
+
+# Update — PowerShell and macOS installers
+
+Baseline `c137636` (origin/main, after #124). Branch `redesign/issue-93-ps`. Native
+blockers #82 and #124 are closed; their outputs are located in `main`:
+`build.yml` publishes `<role>-<version>-windows-{amd64,arm64}.zip` (listed in
+`checksums.txt`) and `<role>-<version>-darwin-arm64.tar.gz` (listed in
+`checksums-darwin.txt`), see `release.yml` "Collect assets and checksums".
+
+## Change
+
+- `install.sh`: macOS Apple silicon (`darwin-arm64`). Checksums come from
+  `checksums-darwin.txt`; the PATH entry is `/etc/paths.d/iroh-tunnel` (one
+  directory per line). Intel macOS is rejected with guidance (no archive is
+  published). Linux behavior is unchanged.
+- `install.ps1`: Windows x64/ARM64. Default `%ProgramFiles%\iroh-tunnel`, all
+  three `.exe`, no aliases (owner decision). SHA-256 from `checksums.txt`,
+  staged then renamed, machine PATH appended only after confirmation, conflict
+  prompt before any change, no-answer means no, never touches services.
+- `tests/installer_ps.rs` (new) and macOS cases in `tests/installer.rs`; the
+  local release server moved to `tests/common/release_server.rs`.
+
+## Acceptance map
+
+| Criterion | Evidence | Status |
+|---|---|---|
+| 93.AC1 default system-wide, all three | `default_flow_installs_all_three_executables`, `dry_run_defaults_to_a_system_wide_directory_and_all_roles`, `macos_default_flow_…` | Linux, macOS (host), PowerShell on pwsh/macOS PASS; real Windows run is CI only |
+| 93.AC2 PATH and conflicts need confirmation | `declining_*`, `accepting_*`, `without_a_terminal_…` (PowerShell and macOS variants) | PASS as above |
+| 93.CL1 decline/accept, artifacts equal intended binaries | installed digests compared with archive members; exact file list (no aliases/staging) | PASS |
+| 93.CL2 service policy | `installer_never_touches_services` (both scripts) | N/A by design |
+
+## Test seam
+
+Real scripts, real `.zip` (`Compress-Archive`, as `build.yml`) and `.tar.gz`
+archives, real HTTP from a local server. Prompts via
+`IROH_TUNNEL_PROMPT_INPUT`. On a non-Windows host the machine PATH is a file
+(`IROH_TUNNEL_PATH_FILE`); on Windows CI `registry_machine_path_is_changed_only_when_accepted`
+writes and restores the real machine PATH.
+
+## Evidence
+
+- Red: `cargo test --test installer macos` 3 failed (404 on `checksums.txt`);
+  `cargo test --test installer_ps` 12 of 14 failed before `install.ps1` existed.
+- Green: `installer` 22/22, `installer_ps` 14/14 (macOS arm64 host, pwsh 7.6),
+  full `cargo test --all-features --locked` clean, `shellcheck`, `clippy -D warnings`.
+- Mutation: skipping the checksum compare fails `checksum_mismatch_…`; always
+  answering yes fails 3 decline tests.
+
+## Limits
+
+- Not run by me: a real Windows host (registry PATH, running-executable
+  replacement, `Program Files` ACLs, Windows PowerShell 5.1), Intel/ARM Windows,
+  real macOS `/etc/paths.d` with sudo, a published release with role archives.
+  The Windows CI job runs the registry test; pwsh/ubuntu CI runs the rest.
+- Checksums only; signatures wait for #100/#80 (DIST-02 gap).
+- Role bytes are not forwarded through installed binaries (#97).
