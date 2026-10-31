@@ -4,6 +4,10 @@
 
 ### Added
 
+- **Windows and macOS role archives (#124)**: the release builds `iroh-tunnel`,
+  `iroh-tunnel-serve` and `iroh-tunnel-access` natively for Windows x64 and
+  ARM64 (`.zip`) and macOS arm64 (`.tar.gz`). Each executable starts on its own
+  runner during the build. Unsigned; no Windows package or installer yet.
 - **User service management (#90)**: `service install|start|stop|restart|status|uninstall`
   take `--user` or `--system`. `install` without a flag asks a non-elevated
   interactive user to choose, and defaults to system for root. A system scope

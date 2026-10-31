@@ -90,10 +90,11 @@ jobs:
       - name: Collect assets and checksums
         run: |
           mkdir -p dist
-          cp in/*/*.tar.gz dist/
+          cp in/*/*.tar.gz in/*/*.zip dist/
           cd dist
-          # Same split as before: Linux tarballs + packages, and darwin on its own.
-          sha256sum ./*.tar.gz ./*.deb ./*.apk | grep -v -- '-darwin-' | sed 's# \./# #' > checksums.txt
+          # Same split as before: Linux and Windows archives + packages, and
+          # darwin on its own.
+          sha256sum ./*.tar.gz ./*.zip ./*.deb ./*.apk | grep -v -- '-darwin-' | sed 's# \./# #' > checksums.txt
           sha256sum ./*-darwin-*.tar.gz | sed 's# \./# #' > checksums-darwin.txt
           cat checksums.txt checksums-darwin.txt
 

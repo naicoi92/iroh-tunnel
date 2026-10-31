@@ -6,6 +6,12 @@
 #                                             all three together, in clean
 #                                             containers; run, then remove
 #   packaging/verify-dist.sh images  [DIST]   run each role image alone
+#   packaging/verify-dist.sh windows [DIST]   inspect the Windows x64/ARM64 role
+#                                             .zip archives and PE format (the
+#                                             executables are not run here)
+#   packaging/verify-dist.sh macos   [DIST]   inspect the macOS arm64 role
+#                                             archives and Mach-O format; run them on a macOS
+#                                             arm64 host
 #   packaging/verify-dist.sh forward [DIST]   forward real bytes through the
 #                                             Serve and Access role images and
 #                                             through the installed packages
@@ -24,7 +30,7 @@
 
 set -eu
 
-MODE="${1:?usage: verify-dist.sh static|runtime|images|forward [DIST]}"
+MODE="${1:?usage: verify-dist.sh static|runtime|images|windows|macos|forward [DIST]}"
 DIST=$(cd "${2:-dist}" && pwd)
 
 # executable:alias, one per package/image. The package name equals the
@@ -62,8 +68,9 @@ only_match() {
 # List a package's content members, one per line: "path" or "path -> target".
 # Leading "./", package-manager metadata (apk dot-files) and the bare usr and
 # usr/bin directories are dropped; any other directory (for example a stray
-# /etc/iroh-tunnel/) stays in the listing so it fails the exact-member check. The leading `tar -tv` columns differ between GNU and BSD tar, so keep
-# only the trailing path (and link target).
+# /etc/iroh-tunnel/) stays in the listing so it fails the exact-member check.
+# The leading `tar -tv` columns differ between GNU and BSD tar, so keep only the
+# trailing path (and link target).
 list_package() {
     case "$1" in
     *.deb) raw=$(ar p "$1" data.tar.gz > "$TMP/data.tar.gz" && tar -tvzf "$TMP/data.tar.gz") ;;
@@ -130,6 +137,72 @@ static() {
                 { fail "no single $bin archive for $target"; continue; }
             check_archive "$tgz" "$bin"
         done
+    done
+}
+
+# Windows and macOS role archives (issue #124). Each archive holds exactly one
+# executable, is listed in a checksum file with the right digest, and the
+# executable has the format for its platform. Format checks prove a
+# cross-build, not that the program runs. A missing archive
+# fails.
+check_platform_archive() {
+    archive="$1" bin="$2" exe="$3" want="$4"
+    CASE_FAILED=0
+    name=$(basename "$archive")
+    case "$archive" in
+    *.zip) members=$(unzip -Z1 "$archive") || { fail "$name: cannot list"; return; } ;;
+    *) members=$(tar -tzf "$archive") || { fail "$name: cannot list"; return; } ;;
+    esac
+    echo "$members" | grep -qx "$exe" || fail "$name: does not contain $exe"
+    for other in $ALL_BINARIES; do
+        [ "$other" = "$bin" ] && continue
+        if echo "$members" | grep -qx "$other\(.exe\)\{0,1\}"; then
+            fail "$name: contains unrelated binary $other"
+        fi
+    done
+    mkdir -p "$TMP/x/$name"
+    case "$archive" in
+    *.zip) unzip -q -o "$archive" -d "$TMP/x/$name" ;;
+    *) tar -xzf "$archive" -C "$TMP/x/$name" ;;
+    esac
+    magic=$(file -b "$TMP/x/$name/$exe")
+    case "$want" in
+    windows-x64) echo "$magic" | grep -q "PE32+ .*x86-64" || fail "$name: not a Windows x64 executable: $magic" ;;
+    windows-arm64) echo "$magic" | grep -q -E "PE32\+ .*(Aarch64|ARM64)" || fail "$name: not a Windows ARM64 executable: $magic" ;;
+    macos-arm64) echo "$magic" | grep -q "Mach-O 64-bit .*arm64" || fail "$name: not a macOS arm64 executable: $magic" ;;
+    esac
+    if [ "$CASE_FAILED" -eq 0 ]; then pass "$name holds only $exe ($want)"; fi
+}
+
+windows() {
+    for entry in $EXECUTABLES; do
+        bin=${entry%%:*}
+        for want in windows-x64:windows-amd64 windows-arm64:windows-arm64; do
+            label=${want%%:*} os_arch=${want##*:}
+            zip=$(only_match "$DIST/${bin}-[0-9]*-${os_arch}.zip") ||
+                { fail "no single $bin archive for $label"; continue; }
+            check_platform_archive "$zip" "$bin" "$bin.exe" "$label"
+        done
+    done
+    skip "Windows executables are not run here; build.yml starts them on native x64 and ARM64 runners"
+}
+
+macos() {
+    for entry in $EXECUTABLES; do
+        bin=${entry%%:*}
+        tgz=$(only_match "$DIST/${bin}-[0-9]*-darwin-arm64.tar.gz") ||
+            { fail "no single $bin archive for macos-arm64"; continue; }
+        check_platform_archive "$tgz" "$bin" "$bin" macos-arm64
+        # Run the role only where it can run: a macOS arm64 host.
+        if [ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ]; then
+            if "$TMP/x/$(basename "$tgz")/$bin" --help >/dev/null 2>&1; then
+                pass "$bin runs on this macOS arm64 host"
+            else
+                fail "$bin did not run on this macOS arm64 host"
+            fi
+        else
+            skip "$bin not run: this host is not macOS arm64"
+        fi
     done
 }
 
@@ -362,6 +435,8 @@ static) static ;;
 runtime) runtime ;;
 images) images ;;
 forward) forward ;;
+windows) windows ;;
+macos) macos ;;
 *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 

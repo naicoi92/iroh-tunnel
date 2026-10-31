@@ -11,14 +11,19 @@
 #   musl-riscv64  ubuntu-latest     riscv64gc-unknown-linux-musl  (cargo-zigbuild:
 #                                   no native runner exists; NanoKVM / buildroot)
 #   darwin-arm64  macos-14          aarch64-apple-darwin
+#   windows-amd64 windows-latest    x86_64-pc-windows-msvc        (.zip)
+#   windows-arm64 windows-11-arm    aarch64-pc-windows-msvc       (.zip)
 #
-# Each Linux target builds all three executables (iroh-tunnel, iroh-tunnel-serve,
-# iroh-tunnel-access) in ONE cargo invocation; darwin ships the all-in-one only.
+# Every target builds all three executables (iroh-tunnel, iroh-tunnel-serve,
+# iroh-tunnel-access) in ONE cargo invocation (issue #124). The smoke test runs
+# each of them on its own native runner, so Windows x64 / ARM64 and macOS arm64
+# start-up is exercised here, not only cross-built. Unsigned (signing is #100).
 # Packaging (package.yml) and the Docker images (docker.yml) consume the
 # artifacts and run in parallel with each other.
 #
 # Artifacts:
-#   target-<id>   the executables + one release tarball per executable
+#   target-<id>   the executables + one release archive per executable
+#                 (.tar.gz; .zip on Windows)
 
 name: build
 
@@ -57,6 +62,10 @@ jobs:
     name: build (${{ matrix.id }})
     needs: version
     runs-on: ${{ matrix.runner }}
+    # The steps below are bash; Windows runners default to PowerShell.
+    defaults:
+      run:
+        shell: bash
     strategy:
       # One broken target fails the whole build, so stop the siblings instead of
       # burning runner minutes on a build that cannot be used.
@@ -68,7 +77,9 @@ jobs:
           - { id: musl-amd64,    runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,     os: linux,  arch: amd64,   suffix: "-musl", musl: true }
           - { id: musl-arm64,    runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl,    os: linux,  arch: arm64,   suffix: "-musl", musl: true }
           - { id: musl-riscv64,  runner: ubuntu-latest,    target: riscv64gc-unknown-linux-musl,  os: linux,  arch: riscv64gc, suffix: "-musl", zig: true }
-          - { id: darwin-arm64,  runner: macos-14,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "", bins: "iroh-tunnel" }
+          - { id: darwin-arm64,  runner: macos-14,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "" }
+          - { id: windows-amd64, runner: windows-latest,   target: x86_64-pc-windows-msvc,        os: windows, arch: amd64,  suffix: "", ext: ".exe" }
+          - { id: windows-arm64, runner: windows-11-arm,   target: aarch64-pc-windows-msvc,       os: windows, arch: arm64,  suffix: "", ext: ".exe" }
     env:
       # Statically link PCRE2 for the `regex` crate so binaries are portable
       # across distros without a libpcre2 shared library at runtime.
@@ -114,39 +125,59 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           ZIG: ${{ matrix.zig }}
-          BINS: ${{ matrix.bins }}
         run: |
           if [ "$ZIG" = "true" ]; then sub=zigbuild; else sub=build; fi
-          flags=(--bins)
-          if [ -n "$BINS" ]; then flags=(); for b in $BINS; do flags+=(--bin "$b"); done; fi
-          cargo "$sub" --release --locked --target "$TARGET" "${flags[@]}"
+          cargo "$sub" --release --locked --target "$TARGET" --bins
 
       - name: Smoke test (native binaries)
         if: ${{ !matrix.zig }}
         env:
           TARGET: ${{ matrix.target }}
-          BINS: ${{ matrix.bins || 'iroh-tunnel iroh-tunnel-serve iroh-tunnel-access' }}
+          EXT: ${{ matrix.ext }}
         run: |
-          out="$("target/$TARGET/release/iroh-tunnel" --version)"
+          echo "runner: $RUNNER_OS $RUNNER_ARCH"
+          out="$("target/$TARGET/release/iroh-tunnel${EXT}" --version)"
           echo "$out"
           [[ "$out" == *"$VERSION"* ]] || { echo "version mismatch: expected $VERSION"; exit 1; }
-          for b in $BINS; do "target/$TARGET/release/$b" --help >/dev/null; done
+          for b in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
+            "target/$TARGET/release/${b}${EXT}" --help >/dev/null
+            echo "ok: $b starts on $RUNNER_OS $RUNNER_ARCH"
+          done
 
       # One tarball per executable (issue #94); each holds only that binary.
       - name: Archive
+        if: matrix.os != 'windows'
         env:
           TARGET: ${{ matrix.target }}
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
           SUFFIX: ${{ matrix.suffix }}
-          BINS: ${{ matrix.bins || 'iroh-tunnel iroh-tunnel-serve iroh-tunnel-access' }}
         run: |
           mkdir -p out
-          for b in $BINS; do
+          for b in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
             cp "target/$TARGET/release/$b" "out/$b"
             tar -czf "out/${b}-${VERSION}-${OS}-${ARCH}${SUFFIX}.tar.gz" \
               -C out "$b" -C .. README.md LICENSE-APACHE LICENSE-MIT
           done
+
+      # One .zip per executable (issue #124), holding only that .exe plus the
+      # README and licenses, flat (no directory inside).
+      - name: Archive (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out | Out-Null
+          foreach ($b in 'iroh-tunnel','iroh-tunnel-serve','iroh-tunnel-access') {
+            $stage = "stage/$b"
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Copy-Item "target/$env:TARGET/release/$b.exe" $stage
+            Copy-Item README.md,LICENSE-APACHE,LICENSE-MIT $stage
+            Compress-Archive -Path "$stage/*" -DestinationPath "out/$b-$env:VERSION-windows-$env:ARCH.zip"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
