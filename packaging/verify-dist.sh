@@ -6,18 +6,25 @@
 #                                             all three together, in clean
 #                                             containers; run, then remove
 #   packaging/verify-dist.sh images  [DIST]   run each role image alone
+#   packaging/verify-dist.sh forward [DIST]   forward real bytes through the
+#                                             Serve and Access role images and
+#                                             through the installed packages
 #
 # static needs only ar/tar. runtime and images need a Docker daemon and only
 # exercise the architecture the daemon runs natively; other architectures are
 # reported as SKIP, never as passed. Run from the repository root.
 #
-# These checks prove package contents, ownership and that each executable
-# starts alone. Forwarding bytes between peers is covered by the process-level
-# tests in tests/role_binaries.rs, which run the same executables.
+# static, runtime and images prove package contents, ownership and that each
+# executable starts alone. forward additionally sends a request through a
+# Serve/Access pair, each in its own container with only that role installed,
+# to an echo target. It needs Internet access: release binaries accept only
+# https:// relays, so the pair meets through the public n0 relays. Because of
+# that it is opt-in and not part of the snapshot workflow. Process-level
+# forwarding for the same executables is also covered by tests/role_binaries.rs.
 
 set -eu
 
-MODE="${1:?usage: verify-dist.sh static|runtime|images [DIST]}"
+MODE="${1:?usage: verify-dist.sh static|runtime|images|forward [DIST]}"
 DIST=$(cd "${2:-dist}" && pwd)
 
 # executable:alias, one per package/image. The package name equals the
@@ -57,16 +64,13 @@ list_package() {
         sed -e 's#^\./##' | grep -v -E '(/|^\.[^ ]*|^)$|^\.' | sort
 }
 
-# The exact files a package must own: its binary, its alias link and, for the
-# all-in-one package only, the default systemd unit.
+# The exact files a package must own: its binary and its alias link. Packages
+# are binary-only, so a unit file or config directory would be a failure.
 expected_members() {
     bin="$1" link="$2"
     {
         echo "usr/bin/$bin"
         echo "usr/bin/$link -> $bin"
-        if [ "$bin" = iroh-tunnel ]; then
-            echo "usr/lib/systemd/system/iroh-tunnel.service"
-        fi
     } | sort
 }
 
@@ -217,10 +221,108 @@ images() {
     skip "images for architectures other than $arch (no native runner)"
 }
 
+# Poll a container's log until it contains a string; fail after ~60s.
+wait_log() {
+    name="$1" needle="$2" tries=0
+    until docker logs "$name" 2>&1 | grep -q -- "$needle"; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 120 ] || return 1
+        sleep 0.5
+    done
+}
+
+# Start one role detached. SPEC is either an image reference (the entrypoint
+# is the role) or "deb:<path>:<alias>" / "apk:<path>:<alias>", which installs
+# that single package into a clean container and runs its alias.
+start_role() {
+    name="$1" net="$2" spec="$3"
+    shift 3
+    case "$spec" in
+    deb:* | apk:*)
+        format=${spec%%:*} rest=${spec#*:}
+        pkg=${rest%:*} alias=${rest##*:}
+        if [ "$format" = deb ]; then
+            image=debian:12-slim install="dpkg -i /pkg.deb"
+        else
+            image=alpine:3.21 install="apk add --allow-untrusted /pkg.apk"
+        fi
+        docker run -d --name "$name" --network "$net" -v "$pkg:/pkg.$format:ro" "$image" \
+            sh -c "$install >/dev/null && exec $alias \"\$@\"" sh "$@" >/dev/null
+        ;;
+    *) docker run -d --name "$name" --network "$net" "$spec" "$@" >/dev/null ;;
+    esac
+}
+
+# One Serve and one Access, each started from its own SPEC (see start_role),
+# reaching an echo target on a private Docker network through the public
+# relays. The client must get its own bytes back. Everything is removed on
+# return.
+forward_case() {
+    net="verify-dist-$$"
+    docker network create "$net" >/dev/null
+    forward_exchange "$net" "$@"
+    docker rm -f "$net-target" "$net-serve" "$net-access" >/dev/null 2>&1 || true
+    docker network rm "$net" >/dev/null 2>&1 || true
+}
+
+forward_exchange() {
+    net="$1" label="$2" serve_spec="$3" access_spec="$4" ok=0 out=""
+    docker run -d --name "$net-target" --network "$net" alpine:3.21 \
+        sh -c 'nc -lk -p 9000 -e cat' >/dev/null
+    target=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$net-target")
+    start_role "$net-serve" "$net" "$serve_spec" -n verify -t "$target:9000"
+    if ! wait_log "$net-serve" "NodeId: "; then
+        fail "$label: serve did not start: $(docker logs "$net-serve" 2>&1 | tail -n 5)"
+        return
+    fi
+    node=$(docker logs "$net-serve" 2>&1 | sed -n 's/^NodeId: //p' | head -n1)
+    start_role "$net-access" "$net" "$access_spec" -n verify -l 0.0.0.0:7000 -N "$node"
+    if ! wait_log "$net-access" "listening for local clients"; then
+        fail "$label: access did not start: $(docker logs "$net-access" 2>&1 | tail -n 5)"
+        return
+    fi
+    # The first dial can race relay registration; retry the whole exchange.
+    for _ in 1 2 3 4 5 6; do
+        out=$(docker run --rm --network "$net" alpine:3.21 \
+            sh -c "echo verify-dist-$label | nc -w 10 $net-access 7000" 2>&1 || true)
+        if [ "$out" = "verify-dist-$label" ]; then ok=1; break; fi
+        sleep 2
+    done
+    if [ "$ok" -eq 1 ]; then
+        pass "$label: client bytes returned unchanged through Serve and Access"
+    else
+        fail "$label: no echo through the tunnel (got [$out]); serve: $(docker logs "$net-serve" 2>&1 | tail -n 3)"
+    fi
+}
+
+local_image() {
+    docker image ls --format '{{.Repository}}:{{.Tag}}' "ghcr.io/naicoi92/$1" |
+        grep -- "-$2\$" | head -n1 || true
+}
+
+forward() {
+    arch=$(docker_arch)
+    serve_img=$(local_image iroh-tunnel-serve "$arch")
+    access_img=$(local_image iroh-tunnel-access "$arch")
+    if [ -n "$serve_img" ] && [ -n "$access_img" ]; then
+        forward_case "role-images" "$serve_img" "$access_img"
+    else
+        fail "no local role images for $arch"
+    fi
+    for format in deb apk; do
+        serve_pkg=$(only_match "$DIST/iroh-tunnel-serve_*_${arch}.$format") &&
+            access_pkg=$(only_match "$DIST/iroh-tunnel-access_*_${arch}.$format") ||
+            { fail "no role .$format packages for $arch"; continue; }
+        forward_case "role-packages-$format" "$format:$serve_pkg:its" "$format:$access_pkg:ita"
+    done
+    skip "forward for architectures other than $arch (no native runner)"
+}
+
 case "$MODE" in
 static) static ;;
 runtime) runtime ;;
 images) images ;;
+forward) forward ;;
 *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
