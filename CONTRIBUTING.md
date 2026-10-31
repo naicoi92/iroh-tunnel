@@ -77,9 +77,8 @@ explaining why.
 | `src/conn_path.rs`          | peer connection-path reports for status files           |
 | `src/status.rs`            | atomic `serve-status.json` writer                      |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
-| `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
-| `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)   |
-| `packaging/`               | `verify-dist.sh` package and image checks              |
+| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |
+| `packaging/`               | nFPM config, Homebrew cask, `verify-dist.sh` checks    |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Pull requests
@@ -89,9 +88,12 @@ explaining why.
    `feat(scope): …`, `fix(scope): …`, `refactor(scope): …`, `chore: …` —
    where the scope is usually the module or area (`config`, `service`, `ci`,
    `release`, `role-run`, …).
-3. CI (`lint`, `packaging` + `test`) must pass. Heavier artifact builds
-   (GoReleaser snapshots, Docker, packages) run on `main` pushes only; you do
-   not need to produce release artifacts in a PR.
+3. CI (`ci-ok`) must pass. A PR runs only what its changes need: fmt, clippy
+   and tests for code changes, shellcheck and actionlint for scripts and
+   workflows; docs-only PRs skip them. Release builds, packages and images are
+   not part of PR CI: they run after a merge that touches dependencies or
+   packaging (`snapshot`) and on tags (`release`). To rehearse them on your
+   branch, run the `snapshot` workflow manually.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
 

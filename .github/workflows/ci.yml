@@ -1,124 +1,95 @@
-# CI pipeline — fast checks on every pull request.
+# Pull-request CI — fast feedback only. No artifact builds here.
 #
-# Three lightweight jobs run IN PARALLEL (no dependency between them) to
-# minimize wall-clock time on PRs:
-#   - lint:      cargo fmt --check + cargo clippy (catches style + correctness issues)
-#   - packaging: shellcheck + goreleaser check (catches broken release config)
-#   - test:      cargo test (unit/integration tests)
+#   changes ─┬─ checks  (fmt ∥ clippy ∥ test linux ∥ test windows)  if code changed
+#            ├─ scripts (shellcheck + actionlint)                   if scripts/workflows changed
+#            └─ ci-ok   (single required check; always reports)
 #
-# Heavy artifact builds (GoReleaser snapshots, Docker, packages) live in
-# snapshot.yml and only run on push to main, not on PRs. Real releases on tag
-# pushes live in release.yml.
+# The release build matrix, packages and images are NOT run on PRs. They run
+# after merge (snapshot.yml, push to main) and on tags (release.yml). To
+# rehearse them on a branch before merging, run the `snapshot` workflow manually
+# (Actions → snapshot → Run workflow, or `gh workflow run snapshot.yml --ref <branch>`).
+#
+# The workflow itself has no path filter so `ci-ok` always reports: a docs-only
+# PR skips every heavy job and still goes green. New pushes to a PR cancel the
+# superseded run.
 
 name: ci
 
 on:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # lint: format check + clippy. Cheap, fast, fail-fast on style issues.
-  # ---------------------------------------------------------------------------
-  lint:
-    name: lint (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Report both platforms on a failure instead of cancelling the sibling:
-      # a Windows-only lint break should not hide the Linux result.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    env:
-      # sccache wraps rustc to cache compilation output across runs. Set at job
-      # level so every `cargo` invocation (fmt/clippy/build) is covered.
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      scripts: ${{ steps.filter.outputs.scripts }}
     steps:
-      # persist-credentials: false hardens PR-triggered jobs: this workflow only
-      # reads source (contents: read), so GITHUB_TOKEN should not be persisted
-      # into .git/config where later steps could leak or misuse it.
-      - uses: actions/checkout@v7
+      # No checkout: on pull_request events the filter reads the changed files
+      # through the API.
+      - uses: dorny/paths-filter@v3
+        id: filter
         with:
-          persist-credentials: false
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'examples/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'install.sh'
+              - '.github/workflows/checks.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+            scripts:
+              - '**/*.sh'
+              - '.github/**'
 
-      - name: Install Rust toolchain (pinned to rust-version)
-        run: |
-          rustup toolchain install 1.91 --profile minimal -c rustfmt,clippy --no-self-update
-          rustup default 1.91
+  checks:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/checks.yml
+    with:
+      windows: true
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # Formatting is platform-independent; checking it once is enough.
-      - name: cargo fmt
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-  # ---------------------------------------------------------------------------
-  # packaging: static checks for the release configuration and scripts, so a
-  # broken GoReleaser file or shell script fails the pull request instead of the
-  # post-merge snapshot. The heavy artifact builds stay in snapshot.yml.
-  # ---------------------------------------------------------------------------
-  packaging:
-    name: packaging (static)
+  # Static checks for shell scripts and workflows; seconds, no build needed.
+  scripts:
+    name: scripts (shellcheck + actionlint)
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+      - name: actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 && ./actionlint -color
 
-      - name: shellcheck
-        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
-
-      - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: latest
-          install-only: true
-
-      - name: goreleaser check (Linux)
-        run: goreleaser check --config .goreleaser.yaml
-
-      - name: goreleaser check (macOS)
-        run: goreleaser check --config .goreleaser.macos.yaml
-
-  # ---------------------------------------------------------------------------
-  # test: unit + integration tests. Runs in parallel with `lint`.
-  # ---------------------------------------------------------------------------
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [changes, checks, scripts]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain (pinned to rust-version)
+      # `skipped` is fine (path filter); `failure` / `cancelled` is not.
+      - name: Verify upstream results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          rustup toolchain install 1.91 --profile minimal --no-self-update
-          rustup default 1.91
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: cargo test
-        run: cargo test --all-features
+          echo "results: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

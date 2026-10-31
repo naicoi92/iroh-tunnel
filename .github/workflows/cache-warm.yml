@@ -1,0 +1,34 @@
+# Writes the Rust build caches that PRs and release tags restore from.
+#
+# GitHub scopes caches by ref: a PR can read main's cache but not another PR's,
+# so without a cache on main every PR starts from a cold compile. rust-cache
+# keys on Cargo.lock and the toolchain, so the cache only needs refreshing when
+# those change; ordinary source changes reuse it. Hence this workflow runs ONLY
+# on a push to main that changes dependencies or the toolchain/cache setup.
+#
+# It runs the same jobs as a PR (checks.yml), so lint/test cache keys match.
+
+name: cache-warm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/checks.yml"
+      - ".github/workflows/cache-warm.yml"
+
+concurrency:
+  group: cache-warm
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      windows: true

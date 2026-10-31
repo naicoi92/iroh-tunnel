@@ -1,0 +1,30 @@
+# Standalone nFPM config (rendered with envsubst; nFPM does not expand env in file paths) for the binary-only .deb (glibc) and .apk (musl)
+# packages. Invoked from .github/workflows/package.yml with:
+#   NAME=<iroh-tunnel[-serve|-access]> ALIAS=<it|its|ita> ARCH=<amd64|arm64|riscv64>
+#   BINARY=<path to the executable> VERSION=<x.y.z> DESCRIPTION=<text>
+#   nfpm package --config packaging/nfpm.yaml --packager <deb|apk> --target <file>
+#
+# Each package owns only its binary and its alias symlink (issue #94): no unit
+# file, config directory or maintainer script. Operators register a service
+# with `<role> service install` (#90).
+
+name: ${NAME}
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+maintainer: naicoi92 <naicoi@lttech.vn>
+vendor: naicoi92
+homepage: https://github.com/naicoi92/iroh-tunnel
+description: "${DESCRIPTION}"
+license: "MIT OR Apache-2.0"
+
+contents:
+  - src: ${BINARY}
+    dst: /usr/bin/${NAME}
+    file_info:
+      mode: 0755
+  # Package-owned alias: the package manager tracks and removes the link.
+  - src: ${NAME}
+    dst: /usr/bin/${ALIAS}
+    type: symlink

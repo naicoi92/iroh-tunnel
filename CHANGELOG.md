@@ -40,6 +40,13 @@
   Homebrew's install steps, so `brew upgrade` replaces it and `brew uninstall`
   removes it (it was previously left dangling). The release config moves off
   the GoReleaser-deprecated `homebrew_casks.hooks.post.install`.
+
+- **CI/CD**: GoReleaser is replaced by native parallel builds
+  (`.github/workflows/build.yml`), standalone nFPM packaging, a prebuilt-binary
+  Docker image and a draft-then-publish release. Release artifact names are
+  unchanged. The glibc binaries are now built on Ubuntu 22.04, so the minimum
+  glibc rises from 2.31 to 2.35 (the static musl builds are unaffected). PR CI
+  skips heavy jobs for docs-only changes; `ci-ok` is the single required check.
 - **Config and state locations**: macOS and Linux now always use
   `~/.config/iroh-tunnel` and `~/.local/state/iroh-tunnel` (XDG variables are
   ignored); Windows uses `%LOCALAPPDATA%\iroh-tunnel\config` and `\state`.

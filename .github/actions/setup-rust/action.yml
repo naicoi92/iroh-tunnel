@@ -1,0 +1,40 @@
+name: setup-rust
+description: >-
+  Install the pinned Rust toolchain (matches Cargo.toml rust-version) and
+  restore/save the Cargo + target cache.
+
+inputs:
+  components:
+    description: Comma-separated rustup components (e.g. "rustfmt,clippy").
+    default: ""
+  targets:
+    description: Comma-separated extra rustup targets.
+    default: ""
+  cache-key:
+    description: Cache key prefix; keep it distinct per job flavour.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      shell: bash
+      env:
+        COMPONENTS: ${{ inputs.components }}
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        args=(--profile minimal --no-self-update)
+        [ -n "$COMPONENTS" ] && args+=(-c "$COMPONENTS")
+        [ -n "$TARGETS" ] && args+=(-t "$TARGETS")
+        rustup toolchain install 1.91 "${args[@]}"
+        rustup default 1.91
+
+    # Only pushes to main write the cache. PRs and tags restore from it
+    # (GitHub scopes caches: a PR can read main's cache, not vice versa), which
+    # keeps the 10 GB cache quota free of per-PR / per-tag churn.
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.cache-key }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+        cache-on-failure: true

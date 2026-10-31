@@ -1,125 +1,57 @@
-# Snapshot pipeline — CI-only builds on push to main, never publishes (ADR-0002).
+# Release rehearsal — builds every release artifact, publishes nothing.
 #
-# Runs `goreleaser release --snapshot --clean` for both Linux and macOS IN
-# PARALLEL (no dependency between the two jobs), which builds all artifacts into
-# dist/ WITHOUT publishing. This catches iroh crate breakage and config
-# regressions early (ADR-0002 §5 risk), before a real tag.
+#   build (6 native targets ∥) ─┬─ package (nFPM + verify-dist.sh)  ┐ in parallel
+#                               └─ docker  (3 images, not pushed)   ┘
 #
-# Pull-request checks (fmt/clippy/test) live in ci.yml. Real releases on tag
-# pushes live in release.yml.
+# fmt / clippy / tests are NOT repeated here: they already passed on the PR
+# (ci.yml). Only what a PR does not exercise runs, and only when something that
+# can break the release changed.
+#
+# Triggers:
+#   - push to main touching dependencies, build script, packaging or the build
+#     workflows. Ordinary source changes do not trigger it.
+#   - workflow_dispatch: rehearse the release on any branch before merging
+#     (`gh workflow run snapshot.yml --ref <branch>`).
 
 name: snapshot
 
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "packaging/**"
+      - "Dockerfile.goreleaser*"
+      - ".github/workflows/build.yml"
+      - ".github/workflows/package.yml"
+      - ".github/workflows/docker.yml"
+      - ".github/workflows/snapshot.yml"
+      - ".github/actions/**"
+
+# A newer push supersedes a rehearsal that is still running.
+concurrency:
+  group: snapshot-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Linux snapshot: linux/amd64 + linux/arm64 binaries (glibc + musl) +
-  # Docker + deb (glibc) + apk (musl).
-  # ---------------------------------------------------------------------------
-  snapshot-linux:
-    name: snapshot (linux)
-    runs-on: ubuntu-latest
-    env:
-      # sccache caches compilation output across snapshot runs (cargo-zigbuild
-      # invokes rustc, which honors RUSTC_WRAPPER). Job-level so the GoReleaser
-      # `before.hooks` + zigbuild builds are both covered.
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+  build:
+    uses: ./.github/workflows/build.yml
 
-      - name: Install Rust toolchain (pinned to rust-version)
-        # `rustfmt` is needed because GoReleaser's `before.hooks` run
-        # `cargo fmt -- --check`.
-        run: |
-          rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
-          rustup default 1.91
+  package:
+    needs: build
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.build.outputs.version }}
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        run: cargo +1.91 install cargo-zigbuild --locked
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: goreleaser snapshot (Linux)
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: latest
-          args: release --snapshot --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Issue #94: each executable ships as its own package, archive and image.
-      - name: Verify separate packages, archives and images
-        run: |
-          packaging/verify-dist.sh static dist
-          packaging/verify-dist.sh runtime dist
-          packaging/verify-dist.sh images dist
-
-  # ---------------------------------------------------------------------------
-  # macOS snapshot: darwin/arm64 binary + Homebrew cask config.
-  # ---------------------------------------------------------------------------
-  snapshot-macos:
-    name: snapshot (macos)
-    runs-on: macos-14
-    env:
-      # NOTE: no sccache here on purpose. cargo-zigbuild's zigcc wrapper on
-      # macOS is not a compiler sccache can drive (cc-rs prepends sccache
-      # because RUSTC_WRAPPER is inherited, and it rejects the wrapper script
-      # with "Compiler not supported"), which broke the ring build. The Linux
-      # jobs keep sccache — verified green there.
-      SCCACHE_GHA_ENABLED: "false"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install Rust toolchain (pinned to rust-version)
-        run: |
-          rustup toolchain install 1.91 --profile minimal -c rustfmt --no-self-update
-          rustup default 1.91
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        run: cargo +1.91 install cargo-zigbuild --locked
-
-      - name: goreleaser snapshot (macOS)
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: latest
-          args: release --snapshot --clean --config .goreleaser.macos.yaml
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  docker:
+    needs: build
+    uses: ./.github/workflows/docker.yml
+    with:
+      push: false
+      version: ${{ needs.build.outputs.version }}

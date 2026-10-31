@@ -18,7 +18,7 @@ Pickup is done when every assumed prerequisite is located or named as missing. I
 
 ## Release packaging
 
-For release packaging work, a red run of the packaging verification on the unchanged configuration is the red of the TDD slice. Run a local snapshot with `goreleaser release --snapshot --clean --skip=announce,publish,validate`.
+For release packaging work, a red run of the packaging verification on the unchanged configuration is the red of the TDD slice. Run the `snapshot` workflow on the branch (`gh workflow run snapshot.yml --ref <branch>`); it builds every target natively, packs with nFPM and runs `packaging/verify-dist.sh`.
 
 ## Implement and review
 

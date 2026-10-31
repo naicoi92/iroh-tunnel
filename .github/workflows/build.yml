@@ -1,0 +1,156 @@
+# Reusable native build + packaging. Called by ci.yml (rehearsal), snapshot.yml
+# (manual) and release.yml (tag). Replaces the GoReleaser build stage.
+#
+# Every target builds on its OWN runner IN PARALLEL, natively where a native
+# runner exists (no zig, no QEMU, no cross toolchain):
+#
+#   gnu-amd64     ubuntu-22.04      x86_64-unknown-linux-gnu      (glibc >= 2.35)
+#   gnu-arm64     ubuntu-22.04-arm  aarch64-unknown-linux-gnu
+#   musl-amd64    ubuntu-latest     x86_64-unknown-linux-musl     (static, Alpine)
+#   musl-arm64    ubuntu-24.04-arm  aarch64-unknown-linux-musl
+#   musl-riscv64  ubuntu-latest     riscv64gc-unknown-linux-musl  (cargo-zigbuild:
+#                                   no native runner exists; NanoKVM / buildroot)
+#   darwin-arm64  macos-14          aarch64-apple-darwin
+#
+# Each Linux target builds all three executables (iroh-tunnel, iroh-tunnel-serve,
+# iroh-tunnel-access) in ONE cargo invocation; darwin ships the all-in-one only.
+# Packaging (package.yml) and the Docker images (docker.yml) consume the
+# artifacts and run in parallel with each other.
+#
+# Artifacts:
+#   target-<id>   the executables + one release tarball per executable
+
+name: build
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: App version (tag without leading v, else <Cargo version>-dev).
+        value: ${{ jobs.version.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Mirrors build.rs (ADR-0003): HEAD on a tag vX.Y.Z -> X.Y.Z, otherwise
+      # <CARGO_PKG_VERSION>-dev, so file names always match `--version`.
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)-dev"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.id }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One broken target fails the whole build, so stop the siblings instead of
+      # burning runner minutes on a build that cannot be used.
+      fail-fast: true
+      matrix:
+        include:
+          - { id: gnu-amd64,     runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,      os: linux,  arch: amd64,   suffix: "" }
+          - { id: gnu-arm64,     runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu,     os: linux,  arch: arm64,   suffix: "" }
+          - { id: musl-amd64,    runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,     os: linux,  arch: amd64,   suffix: "-musl", musl: true }
+          - { id: musl-arm64,    runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl,    os: linux,  arch: arm64,   suffix: "-musl", musl: true }
+          - { id: musl-riscv64,  runner: ubuntu-latest,    target: riscv64gc-unknown-linux-musl,  os: linux,  arch: riscv64gc, suffix: "-musl", zig: true }
+          - { id: darwin-arm64,  runner: macos-14,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "", bins: "iroh-tunnel" }
+    env:
+      # Statically link PCRE2 for the `regex` crate so binaries are portable
+      # across distros without a libpcre2 shared library at runtime.
+      PCRE2_SYS_STATIC: "1"
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      # Full history: build.rs resolves APP_VERSION via `git describe`.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.target }}
+          cache-key: build-${{ matrix.id }}
+
+      - name: Install musl toolchain
+        if: matrix.musl
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+          # cc-rs (C deps such as ring) and the final link must both use musl.
+          key="${TARGET//-/_}"
+          echo "CC_${key}=musl-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${key^^}_LINKER=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Install zig + cargo-zigbuild
+        if: matrix.zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.zig
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          ZIG: ${{ matrix.zig }}
+          BINS: ${{ matrix.bins }}
+        run: |
+          if [ "$ZIG" = "true" ]; then sub=zigbuild; else sub=build; fi
+          flags=(--bins)
+          if [ -n "$BINS" ]; then flags=(); for b in $BINS; do flags+=(--bin "$b"); done; fi
+          cargo "$sub" --release --locked --target "$TARGET" "${flags[@]}"
+
+      - name: Smoke test (native binaries)
+        if: ${{ !matrix.zig }}
+        env:
+          TARGET: ${{ matrix.target }}
+          BINS: ${{ matrix.bins || 'iroh-tunnel iroh-tunnel-serve iroh-tunnel-access' }}
+        run: |
+          out="$("target/$TARGET/release/iroh-tunnel" --version)"
+          echo "$out"
+          [[ "$out" == *"$VERSION"* ]] || { echo "version mismatch: expected $VERSION"; exit 1; }
+          for b in $BINS; do "target/$TARGET/release/$b" --help >/dev/null; done
+
+      # One tarball per executable (issue #94); each holds only that binary.
+      - name: Archive
+        env:
+          TARGET: ${{ matrix.target }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+          SUFFIX: ${{ matrix.suffix }}
+          BINS: ${{ matrix.bins || 'iroh-tunnel iroh-tunnel-serve iroh-tunnel-access' }}
+        run: |
+          mkdir -p out
+          for b in $BINS; do
+            cp "target/$TARGET/release/$b" "out/$b"
+            tar -czf "out/${b}-${VERSION}-${OS}-${ARCH}${SUFFIX}.tar.gz" \
+              -C out "$b" -C .. README.md LICENSE-APACHE LICENSE-MIT
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: target-${{ matrix.id }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
