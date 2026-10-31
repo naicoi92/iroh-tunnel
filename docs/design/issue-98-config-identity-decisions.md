@@ -31,6 +31,8 @@ Observed with the debug binary against an isolated `HOME`, not only by reading c
 | D4 | Write safety | Every mutation validates the resulting document, writes via temp file in the same directory → fsync → rename, and holds an advisory lock on a sibling lock file so writers serialize. `edit` validates after the editor exits and rejects an invalid result, leaving the prior file. All config commands accept `--config`. | Replaces both `fs::write` sites with one shared writer. |
 | D5 | Auto-generated key permissions | Defect, not a policy choice: the `run` auto-generation save path must create the file owner-only, same as `config_cmd`. Folded into D4's shared writer. | Fixes the 0644 finding. |
 
+| D6 | Ephemeral keygen | `config keygen random` prints a fresh random secret key and its node ID to stdout (`Secret key:` / `Node ID:`) and writes nothing: it neither reads nor creates a config file and ignores any existing key. Needs no confirmation (D1 does not apply) and, because the output is the secret, is the one command meant to disclose it (D2 does not apply). **Implemented in this PR** (tests: `keygen_random_*` in `tests/config_paths.rs`). | Role-agnostic; `--config` is accepted but unused. |
+
 ### Still open (do not block D1–D5)
 
 - Windows file-permission/ACL equivalent of 0600 for the shared writer: needs Windows evidence; ownership belongs with #79 for service contexts.
@@ -51,6 +53,7 @@ Each is exercised through the real binary against an isolated `HOME`/`--config`.
 | AC-CFG-08 | `run`, `list`, `show` with no config | Same guidance error naming the path; no file or directory created; no identity generated. |
 | AC-CFG-09 | `run` with a config lacking a key | After first run the file is mode 0600 and contains the persisted key; restart reuses the same NodeId. |
 | AC-CFG-10 | Kill the process during a save | The file is either the old or the new complete document, never truncated. |
+| AC-CFG-12 | `keygen random` with an existing config | Prints key and matching node ID; the config file is byte-identical; no config is created when none exists; two runs differ. |
 | AC-CFG-11 | Every config subcommand with `--config <path>` | Operates on that path and not on the default. |
 
 Confirmed behaviors CFG-01–03 and AC-CFG-01–04 are retained unchanged.

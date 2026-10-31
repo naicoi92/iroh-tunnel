@@ -369,3 +369,54 @@ mod macos_migration {
         assert!(!new_config(&home, "serve").exists());
     }
 }
+
+/// Parse the `Secret key:` and `Node ID:` lines printed by `keygen random`.
+fn random_identity(out: &Output) -> (String, String) {
+    let text = stdout(out);
+    let field = |label: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(label))
+            .unwrap_or_else(|| panic!("missing `{label}` in output: {text}"))
+            .trim()
+            .to_string()
+    };
+    (field("Secret key: "), field("Node ID: "))
+}
+
+#[test]
+fn keygen_random_prints_matching_key_and_node_id_without_touching_config() {
+    let (_tmp, home) = home();
+    let cfg = new_config(&home, "serve");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    let original = "[node]\nsecret_key = \"keep-me\"\n";
+    std::fs::write(&cfg, original).unwrap();
+
+    let out = tunnel(&home, &["serve", "config", "keygen", "random"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let (secret, node_id) = random_identity(&out);
+
+    // The printed secret is a usable key and the printed id is its public half.
+    let bytes = data_encoding::BASE64.decode(secret.as_bytes()).unwrap();
+    let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
+    assert_eq!(
+        iroh::SecretKey::from_bytes(&arr).public().to_string(),
+        node_id
+    );
+
+    // Nothing persisted: config untouched, no key file side effects.
+    assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
+    assert!(!stderr(&out).contains(&secret));
+}
+
+#[test]
+fn keygen_random_creates_no_config_and_differs_each_run() {
+    let (_tmp, home) = home();
+    let first = random_identity(&tunnel(&home, &["access", "config", "keygen", "random"]));
+    let second = random_identity(&tunnel(&home, &["access", "config", "keygen", "random"]));
+    assert_ne!(first.0, second.0);
+    assert_ne!(first.1, second.1);
+    assert!(
+        !home.join(".config").exists(),
+        "random keygen must not create any configuration"
+    );
+}

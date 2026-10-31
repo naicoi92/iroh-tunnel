@@ -202,6 +202,8 @@ pub enum ConfigAction {
     Keygen {
         #[arg(short, long)]
         config: Option<PathBuf>,
+        #[command(subcommand)]
+        mode: Option<KeygenMode>,
     },
     /// Add a service to config.
     Add(AddServiceArgs),
@@ -218,6 +220,13 @@ pub enum ConfigAction {
     Edit,
     /// Print config file path.
     Path,
+}
+
+/// Alternative `config keygen` modes.
+#[derive(Subcommand, Debug)]
+pub enum KeygenMode {
+    /// Print a fresh random secret key and its node ID; nothing is written.
+    Random,
 }
 
 /// Scope selection shared by every service verb.

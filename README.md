@@ -251,6 +251,10 @@ iroh-tunnel serve config show
 iroh-tunnel serve run        # prints:  NodeId: <hex>
 ```
 
+To mint a key without touching any config (for a secret store or `--key-file`),
+use `iroh-tunnel serve config keygen random`: it prints `Secret key:` and
+`Node ID:` and writes nothing.
+
 **2. On the access host** (your laptop, anywhere):
 
 ```sh
