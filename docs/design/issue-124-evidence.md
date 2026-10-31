@@ -29,9 +29,9 @@ its own runner.
 
 | Criterion | Evidence | Status |
 |---|---|---|
-| 124.AC1 one archive per role for macOS arm64, Windows x64, Windows ARM64, in the checksum files | `verify-dist.sh windows` and `macos` in `package.yml`; checksum step in `release.yml` | see PR for CI result |
-| 124.AC2 each binary starts and prints help on a real host; cross-build vs runtime separate | smoke test in `build.yml` runs on the native runner of each target, and prints the runner OS and architecture | see PR for CI result |
-| 124.AC3 names follow the existing convention | `<role>-<version>-<os>-<arch>`; Windows uses `.zip` | by construction; checked by `verify-dist.sh` globs |
+| 124.AC1 one archive per role for macOS arm64, Windows x64, Windows ARM64, in the checksum files | `verify-dist.sh windows` and `macos` in `package.yml`; checksum step in `release.yml` | PASS: snapshot run 41192153962 — `package` ran `verify-dist.sh windows` (6 archives) and `macos` (3 archives); release checksum step covers `.zip` (not exercised: no tag) |
+| 124.AC2 each binary starts and prints help on a real host; cross-build vs runtime separate | smoke test in `build.yml` runs on the native runner of each target, and prints the runner OS and architecture | PASS: same run, all three roles started on Windows X64, Windows ARM64 and macOS ARM64 (and Linux X64/ARM64); start-up only |
+| 124.AC3 names follow the existing convention | `<role>-<version>-<os>-<arch>`; Windows uses `.zip` | PASS: `verify-dist.sh` globs matched `<role>-0.4.2-dev-windows-{amd64,arm64}.zip` and `-darwin-arm64.tar.gz` |
 
 ## Limits
 
