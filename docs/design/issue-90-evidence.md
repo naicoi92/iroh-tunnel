@@ -33,3 +33,11 @@ Independent Standards and Spec reviews: no P0; one P1, fixed.
 - P2 fixed: reuse `scope::is_elevated`/`libc::getuid`, stale launchd docs and hint.
 - P2 noted, not changed: `restart`/`install` do not call the ownership check (0.4.2 lifecycle, spec says only start is refused); registration write is not atomic; role still passed as string in `check_installable_config`; stdin prompt is a one-shot blocking read.
 - Permission test covers a denied home directory only, not inaccessible config/state or ACL before/after evidence.
+
+## Re-review disposition (head reviewed: `0ca75c8`)
+
+Independent Standards and Spec re-review: no P0/P1. Verdict OK with notes.
+
+- Fixed: systemd `Environment=` must not double `$` (only `ExecStart=` expands it); stale test comment; `uid()` doc wording. Covered by a unit test; the quoting logic was also run standalone because `systemd.rs` is not compiled on macOS.
+- Open, deferred: non-atomic registration write (RS-11); string role in `check_installable_config`; blocking stdin read; rerun-command builder could move into `scope.rs`; `(role, config, state)` could become an `InstallSpec`.
+- Spec notes: non-interactive unprivileged install defaults to `--user` (not spec-backed, confirm intent); `sudo` install pins root's paths (SM-02, #91); `check_installable_config` is an added guard.

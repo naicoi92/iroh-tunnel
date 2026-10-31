@@ -38,12 +38,12 @@ fn format_unit_with(
     state: &Path,
     policy: &RestartPolicy,
 ) -> String {
-    let binary = quote_arg(&binary.to_string_lossy());
-    let config = quote_arg(&config.to_string_lossy());
-    let state_env = quote_arg(&format!(
-        "IROH_TUNNEL_STATE_DIR={}",
-        state.to_string_lossy()
-    ));
+    let binary = quote_arg(&binary.to_string_lossy(), Expand::Command);
+    let config = quote_arg(&config.to_string_lossy(), Expand::Command);
+    let state_env = quote_arg(
+        &format!("IROH_TUNNEL_STATE_DIR={}", state.to_string_lossy()),
+        Expand::Environment,
+    );
     // systemd spells restart-on-failure as `Restart=on-failure` (or `no` when
     // the policy disables it). RestartSec is the backoff in seconds.
     let restart = if policy.on_failure {
@@ -71,10 +71,19 @@ fn format_unit_with(
     )
 }
 
-/// Quote one word for a systemd `ExecStart=`/`Environment=` line so paths with
-/// spaces or special characters stay one argument. `%` is doubled because
-/// systemd expands specifiers in unit files.
-fn quote_arg(arg: &str) -> String {
+/// Which systemd line a quoted word goes on; they expand differently.
+#[derive(Clone, Copy)]
+enum Expand {
+    /// `ExecStart=`: `$VAR` is substituted, so a literal `$` is doubled.
+    Command,
+    /// `Environment=`: no `$` substitution, so `$` stays literal.
+    Environment,
+}
+
+/// Quote one word for a systemd unit line so paths with spaces or special
+/// characters stay one argument. `%` is doubled on both lines because systemd
+/// expands specifiers everywhere in unit files.
+fn quote_arg(arg: &str, line: Expand) -> String {
     let plain = !arg.is_empty()
         && arg
             .chars()
@@ -82,11 +91,13 @@ fn quote_arg(arg: &str) -> String {
     if plain {
         return arg.to_owned();
     }
-    let escaped = arg
+    let mut escaped = arg
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
-        .replace('%', "%%")
-        .replace('$', "$$");
+        .replace('%', "%%");
+    if matches!(line, Expand::Command) {
+        escaped = escaped.replace('$', "$$");
+    }
     format!("\"{escaped}\"")
 }
 
@@ -223,6 +234,21 @@ mod tests {
         );
         assert!(
             body.contains("Environment=\"IROH_TUNNEL_STATE_DIR=/home/a b/state\""),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn dollar_is_doubled_in_exec_start_but_literal_in_environment() {
+        let body = format_unit(
+            "serve",
+            Path::new("/usr/bin/iroh-tunnel"),
+            Path::new("/home/$u/serve.toml"),
+            Path::new("/home/$u/state"),
+        );
+        assert!(body.contains("--config \"/home/$$u/serve.toml\""), "{body}");
+        assert!(
+            body.contains("Environment=\"IROH_TUNNEL_STATE_DIR=/home/$u/state\""),
             "{body}"
         );
     }

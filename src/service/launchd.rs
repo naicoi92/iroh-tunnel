@@ -18,7 +18,7 @@ use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Effective user id of the calling process.
+/// Real user id of the calling process.
 fn uid() -> u32 {
     // SAFETY: getuid(2) has no failure mode and no preconditions.
     unsafe { libc::getuid() }

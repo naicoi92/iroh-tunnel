@@ -357,7 +357,7 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
 
-    // install (relative config path, odd characters: it must be pinned absolute).
+    // install from CWD `/` with a config path containing a space: it is pinned absolute.
     ok(&[
         "serve",
         "service",
