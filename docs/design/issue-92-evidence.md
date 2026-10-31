@@ -4,7 +4,7 @@ Mechanism (SM-04, Confirmed in #79): a Task Scheduler task for the current user 
 
 ## Acceptance map
 
-Tested head `009bbfd`; workflow run https://github.com/naicoi92/iroh-tunnel/actions/runs/41219495680 (windows-latest x64 and windows-11-arm ARM64, both green). `user_background_task_lifecycle` and `start_without_an_installed_task…` are opt-in (`IROH_TUNNEL_E2E_SERVICE=1`, set by that workflow) and return early otherwise, so a green ordinary `cargo test` does not exercise them. The lifecycle asserts a new PID after `start` and `restart`, that the old process is gone, `status` reporting running/not running from the role lock, and the same node id.
+Lifecycle tested at head `009bbfd`, run https://github.com/naicoi92/iroh-tunnel/actions/runs/41219495680 (re-run green on every later head) (windows-latest x64 and windows-11-arm ARM64, both green). `user_background_task_lifecycle` and `start_without_an_installed_task…` are opt-in (`IROH_TUNNEL_E2E_SERVICE=1`, set by that workflow) and return early otherwise, so a green ordinary `cargo test` does not exercise them. The lifecycle asserts a new PID after `start` and `restart`, that the old process is gone, `status` reporting running/not running from the role lock, and the same node id.
 
 | Criterion | Test | Result |
 |---|---|---|
@@ -23,7 +23,8 @@ Tested head `009bbfd`; workflow run https://github.com/naicoi92/iroh-tunnel/acti
 
 ## Not verified (disclosed limits)
 
-- **Non-admin create/query/delete without a password is NOT verified.** The GitHub runner user is an elevated administrator (`Mandatory Label\High`); `schtasks /Create /XML` for the current user succeeded, but that does not show a standard user can. The XML binds trigger and principal to the current user and requests `LeastPrivilege` precisely so no administrator right is needed; confirm on a standard-user account.
+- **Non-admin create/query/delete: MEASURED, with limits.** Step "Standard user create/query/delete" of `windows-service-e2e` (run https://github.com/naicoi92/iroh-tunnel/actions/runs/41222175846, x64 and ARM64) creates a local user in `Users` only, launches the real binary as it with `Start-Process -Credential` (`isAdmin=False`, not in Administrators), and runs `service install --user`, `status`, `uninstall`: exit 0 each, `schtasks /Query` afterwards fails as expected. No password prompt for the task (`InteractiveToken`, `LeastPrivilege`). Limits: the user was launched non-interactively, so the logon trigger and an actual run in that user's desktop session were not exercised (`status` correctly said not running); Group Policy that forbids task creation for standard users is not covered; the profile environment was set by the workflow.
+- **Bug found by that probe and fixed:** the task was bound to `USERNAME`/`USERDOMAIN` from the inherited environment; a credentialed launch inherits the parent's variables, which named another account. The user is now read from the process token via `whoami`.
 - **Console window vs Ctrl events not measured.** The task runs the console binary; whether it shows a window in a real desktop logon, and whether hiding it would change Ctrl-event delivery, needs a physical logon session. Since `/End` does not send a Ctrl event, a hidden window has no known drain cost today.
 - **Logon trigger across a real logoff/logon cycle** is not exercised; runners are not rebooted. `schtasks /Run` after install is what is tested.
 - **Restart-on-failure** is rendered (`RestartOnFailure`, 1 minute minimum interval, since Task Scheduler rejects a shorter interval) but a crash-and-restart on Windows is not exercised.
