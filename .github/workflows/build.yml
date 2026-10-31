@@ -22,8 +22,8 @@
 # artifacts and run in parallel with each other.
 #
 # Artifacts:
-#   target-<id>   the executables + one release archive per executable
-#                 (.tar.gz; .zip on Windows)
+#   target-<id>   one release archive per executable (.tar.gz; .zip on
+#                 Windows) and, on Unix targets, the raw executables
 
 name: build
 

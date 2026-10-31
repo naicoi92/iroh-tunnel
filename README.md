@@ -121,9 +121,9 @@ Options: `--version X` (default: latest stable), `--bin-dir DIR`, `--profile-dir
 `--dry-run`. It never registers or changes a service.
 
 It verifies the SHA-256 checksum from the release. Signature verification is not
-available yet (signed release artifacts: issue #100). The release now ships macOS arm64 and Windows x64/ARM64 role archives (issue
-#124), but the installer only supports Linux: PowerShell and macOS installers are
-part of issue #93.
+available yet (signed release artifacts: issue #100). The release now ships macOS arm64 and
+Windows x64/ARM64 role archives (issue #124), but the installer only supports
+Linux: the PowerShell and macOS installers are part of issue #93.
 
 ### Linux (`.deb` / `.apk`)
 

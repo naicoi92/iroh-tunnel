@@ -12,7 +12,7 @@
 # and run IN PARALLEL:
 #
 #   gate (fmt ∥ clippy ∥ test) ───────────┬──────────────┐
-#   build (6 targets ∥) ─┬─ package ──────┴→ release → homebrew
+#   build (8 targets ∥) ─┬─ package ──────┴→ release → homebrew
 #                        └─ docker (also needs gate)
 #
 # Re-running (workflow_dispatch on a tag ref or "Re-run jobs") replaces the
@@ -97,6 +97,15 @@ jobs:
           sha256sum ./*.tar.gz ./*.zip ./*.deb ./*.apk | grep -v -- '-darwin-' | sed 's# \./# #' > checksums.txt
           sha256sum ./*-darwin-*.tar.gz | sed 's# \./# #' > checksums-darwin.txt
           cat checksums.txt checksums-darwin.txt
+          # Issue #124: every role archive for Windows and macOS must be listed.
+          for role in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
+            for arch in amd64 arm64; do
+              grep -q -- " ${role}-${VERSION}-windows-${arch}.zip\$" checksums.txt \
+                || { echo "checksums.txt lacks ${role} windows-${arch}"; exit 1; }
+            done
+            grep -q -- " ${role}-${VERSION}-darwin-arm64.tar.gz\$" checksums-darwin.txt \
+              || { echo "checksums-darwin.txt lacks ${role}"; exit 1; }
+          done
 
       # Draft first so a half-uploaded release is never visible, then publish
       # in one atomic edit once every asset is attached.

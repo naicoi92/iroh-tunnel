@@ -1,5 +1,6 @@
 #!/bin/sh
-# Verify the Linux release artifacts GoReleaser put in dist/ (issue #94).
+# Verify the release artifacts in dist/: Linux packages and archives (issue #94)
+# and Windows and macOS role archives (issue #124).
 #
 #   packaging/verify-dist.sh static  [DIST]   inspect packages and archives
 #   packaging/verify-dist.sh runtime [DIST]   install each package alone, then
@@ -141,10 +142,10 @@ static() {
 }
 
 # Windows and macOS role archives (issue #124). Each archive holds exactly one
-# executable, is listed in a checksum file with the right digest, and the
-# executable has the format for its platform. Format checks prove a
-# cross-build, not that the program runs. A missing archive
-# fails.
+# executable and the executable has the format for its platform. A missing
+# archive fails. Checksums do not exist yet when this runs (release.yml writes
+# and asserts them), and format checks do not prove the program runs: build.yml
+# starts every executable on its own native runner.
 check_platform_archive() {
     archive="$1" bin="$2" exe="$3" want="$4"
     CASE_FAILED=0
