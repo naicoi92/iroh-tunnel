@@ -9,7 +9,8 @@
 # Options:
 #   --version X      install release X instead of the latest stable release
 #   --bin-dir DIR    install into DIR instead of /usr/local/bin
-#   --profile-dir D  write the PATH snippet into D instead of /etc/profile.d
+#   --profile-dir D  write the PATH entry into D instead of /etc/profile.d
+#                    (/etc/paths.d on macOS)
 #   --yes            answer yes to every question
 #   --dry-run        print what would be installed and change nothing
 #   --help
@@ -32,14 +33,16 @@
 #
 # The installer never registers, starts or changes a service.
 #
-# Linux only for now. Windows and macOS release binaries are tracked in #124;
-# the PowerShell installer waits for them.
+# Linux (glibc and musl) and macOS on Apple silicon. Windows uses install.ps1.
+# macOS release archives are listed in checksums-darwin.txt; PATH is extended
+# through /etc/paths.d, which holds one directory per line.
 
 set -eu
 
 DEFAULT_BASE_URL="https://github.com/naicoi92/iroh-tunnel/releases"
 DEFAULT_BIN_DIR="/usr/local/bin"
 DEFAULT_PROFILE_DIR="/etc/profile.d"
+DEFAULT_MACOS_PROFILE_DIR="/etc/paths.d"
 # executable:alias
 ROLES="iroh-tunnel:it iroh-tunnel-serve:its iroh-tunnel-access:ita"
 
@@ -47,7 +50,7 @@ BASE_URL="${IROH_TUNNEL_BASE_URL:-$DEFAULT_BASE_URL}"
 BASE_URL="${BASE_URL%/}"
 VERSION=""
 BIN_DIR="$DEFAULT_BIN_DIR"
-PROFILE_DIR="$DEFAULT_PROFILE_DIR"
+PROFILE_DIR=""
 ASSUME_YES=0
 DRY_RUN=0
 TMP=""
@@ -90,6 +93,12 @@ done
 [ -n "$BIN_DIR" ] || die "--bin-dir must not be empty"
 case "$BIN_DIR" in /*) ;; *) die "--bin-dir must be an absolute path" ;; esac
 case "$BIN_DIR" in *[!A-Za-z0-9/._+-]*) die "--bin-dir may only contain letters, digits and / . _ + -" ;; esac
+case "$PROFILE_DIR" in
+    "") ;;
+    /*[!A-Za-z0-9/._+-]*|/*) ;;
+    *) die "--profile-dir must be an absolute path" ;;
+esac
+case "$PROFILE_DIR" in *[!A-Za-z0-9/._+-]*) die "--profile-dir may only contain letters, digits and / . _ + -" ;; esac
 case "$VERSION" in
     ""|[0-9]*.[0-9]*.[0-9]*) ;;
     *) die "--version must look like 1.2.3" ;;
@@ -106,8 +115,12 @@ detect_target() {
     os=$(uname -s)
     case "$os" in
         Linux) ;;
-        Darwin) die "macOS role binaries are not published yet (tracked in #124). Use the Homebrew cask for the all-in-one binary." ;;
-        *) die "unsupported operating system: $os. Windows role binaries are tracked in #124." ;;
+        Darwin)
+            case "$(uname -m)" in
+                arm64|aarch64) echo darwin-arm64; return ;;
+                *) die "macOS role binaries are published for Apple silicon only. Use the Homebrew cask for the all-in-one binary." ;;
+            esac ;;
+        *) die "unsupported operating system: $os. On Windows use install.ps1." ;;
     esac
     case "$(uname -m)" in
         x86_64|amd64) arch=amd64 ;;
@@ -175,6 +188,11 @@ main() {
     # --- plan -------------------------------------------------------------------
 
     TARGET=$(detect_target)
+    case "$TARGET" in
+        darwin-*) CHECKSUMS_NAME="checksums-darwin.txt"; PROFILE_DEFAULT="$DEFAULT_MACOS_PROFILE_DIR"; PATH_NAME="iroh-tunnel" ;;
+        *) CHECKSUMS_NAME="checksums.txt"; PROFILE_DEFAULT="$DEFAULT_PROFILE_DIR"; PATH_NAME="iroh-tunnel.sh" ;;
+    esac
+    [ -n "$PROFILE_DIR" ] || PROFILE_DIR="$PROFILE_DEFAULT"
 
     # Release base URL for the requested version.
     if [ -n "$VERSION" ]; then
@@ -204,7 +222,7 @@ main() {
     fi
 
     TMP=$(mktemp -d)
-    fetch "$DOWNLOAD_URL/checksums.txt" "$TMP/checksums.txt"
+    fetch "$DOWNLOAD_URL/$CHECKSUMS_NAME" "$TMP/checksums.txt"
 
     if [ -z "$VERSION" ]; then
         VERSION=$(sed -n "s/^[0-9a-fA-F]\{64\} [ *]*iroh-tunnel-\([0-9][^ ]*\)-$TARGET\.tar\.gz\$/\1/p" "$TMP/checksums.txt" | head -n 1)
@@ -249,8 +267,11 @@ main() {
         done
     done
 
-    PATH_SNIPPET="$PROFILE_DIR/iroh-tunnel.sh"
-    SNIPPET_BODY="export PATH=\"\$PATH:$BIN_DIR\""
+    PATH_SNIPPET="$PROFILE_DIR/$PATH_NAME"
+    case "$TARGET" in
+        darwin-*) SNIPPET_BODY="$BIN_DIR" ;;
+        *) SNIPPET_BODY="export PATH=\"\$PATH:$BIN_DIR\"" ;;
+    esac
     CHANGE_PATH=0
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
@@ -314,7 +335,7 @@ main() {
 
     if [ "$DO_PATH" -eq 1 ]; then
         replace "$PATH_SNIPPET.new.$$" "$PATH_SNIPPET"
-        say "wrote $PATH_SNIPPET; open a new login shell to use it."
+        say "wrote $PATH_SNIPPET; open a new shell to use it."
     elif [ "$CHANGE_PATH" -eq 1 ]; then
         say "PATH was not changed. Add $BIN_DIR to PATH yourself, e.g. export PATH=\"\$PATH:$BIN_DIR\""
     fi

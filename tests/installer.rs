@@ -8,10 +8,11 @@
 //! `IROH_TUNNEL_PROMPT_INPUT`, the same read path the script uses for a
 //! terminal.
 //!
-//! Limits: Linux release archives are the only published layout, so the
-//! release platform is forced with `IROH_TUNNEL_TARGET`; the executables are
-//! built for the test host. Windows and macOS role binaries do not exist yet
-//! (#124) and the PowerShell installer is not part of this file.
+//! Limits: the release platform is forced with `IROH_TUNNEL_TARGET` (Linux
+//! `linux-amd64`, macOS `darwin-arm64`); the archives hold executables built
+//! for the test host. Platform detection itself and the default
+//! `/etc/paths.d` are therefore not exercised. The PowerShell installer is in
+//! `installer_ps.rs`.
 //!
 //! Acceptance map:
 //! - 93.AC1 / CL1 (INSTALL-DEFAULT-01): default selection is all three
@@ -19,19 +20,18 @@
 //!   intended archive members; `it`/`its`/`ita` resolve to their roles.
 //! - 93.AC2 / CL1 (INSTALL-CONSENT-01): PATH change and file conflicts need
 //!   confirmation; declining leaves the previous state unchanged.
+//! - macOS cases use `checksums-darwin.txt` and a `paths.d` entry.
 //! - 93.CL2: the installer never registers or changes a service.
 #![cfg(unix)]
 
+mod common;
+
 use anyhow::{Context, Result};
+use common::release_server::ReleaseServer;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::JoinHandle;
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh");
 const TARGET: &str = "linux-amd64";
@@ -63,89 +63,21 @@ fn sha256(path: &Path) -> Result<String> {
         .to_owned())
 }
 
-/// Serves a directory over HTTP; `/latest/download/x` and `/download/vN/x`
-/// both map to files below `root`, like GitHub Releases.
-struct ReleaseServer {
-    url: String,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl ReleaseServer {
-    fn start(root: PathBuf) -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let url = format!("http://{}/releases", listener.local_addr()?);
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        let thread = std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                if flag.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(stream) = stream {
-                    let _ = serve_one(stream, &root);
-                }
-            }
-        });
-        Ok(Self {
-            url,
-            stop,
-            thread: Some(thread),
-        })
-    }
-}
-
-impl Drop for ReleaseServer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(addr) = self.url.strip_prefix("http://") {
-            let _ = TcpStream::connect(addr.split('/').next().unwrap_or(addr));
-        }
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-fn serve_one(mut stream: TcpStream, root: &Path) -> Result<()> {
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf)?;
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let path = request
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/")
-        .trim_start_matches("/releases/")
-        .to_owned();
-    // latest/download/<file> and download/v<ver>/<file> -> <root>/<ver>/<file>
-    let file = if let Some(rest) = path.strip_prefix("latest/download/") {
-        root.join(VERSION).join(rest)
-    } else if let Some(rest) = path.strip_prefix("download/v") {
-        root.join(rest)
-    } else {
-        root.join("missing")
-    };
-    match std::fs::read(&file) {
-        Ok(body) => {
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )?;
-            stream.write_all(&body)?;
-        }
-        Err(_) => {
-            write!(
-                stream,
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// A release directory with one archive per role and a checksum file.
 fn build_release(root: &Path, skip_role: Option<&str>) -> Result<()> {
+    build_release_for(root, skip_role, TARGET)
+}
+
+/// macOS checksums are published in their own file, like the release workflow.
+fn checksum_file(target: &str) -> &'static str {
+    if target.starts_with("darwin-") {
+        "checksums-darwin.txt"
+    } else {
+        "checksums.txt"
+    }
+}
+
+fn build_release_for(root: &Path, skip_role: Option<&str>, target: &str) -> Result<()> {
     let dir = root.join(VERSION);
     std::fs::create_dir_all(&dir)?;
     let mut sums = String::new();
@@ -156,7 +88,7 @@ fn build_release(root: &Path, skip_role: Option<&str>) -> Result<()> {
         let staging = tempfile::tempdir()?;
         std::fs::copy(source, staging.path().join(exe))?;
         std::fs::write(staging.path().join("README.md"), "readme")?;
-        let archive = dir.join(format!("{exe}-{VERSION}-{TARGET}.tar.gz"));
+        let archive = dir.join(format!("{exe}-{VERSION}-{target}.tar.gz"));
         let status = Command::new("tar")
             .arg("-czf")
             .arg(&archive)
@@ -171,7 +103,7 @@ fn build_release(root: &Path, skip_role: Option<&str>) -> Result<()> {
             archive.file_name().unwrap().to_string_lossy()
         ));
     }
-    std::fs::write(dir.join("checksums.txt"), sums)?;
+    std::fs::write(dir.join(checksum_file(target)), sums)?;
     Ok(())
 }
 
@@ -183,6 +115,7 @@ struct Env {
     home: PathBuf,
     answers: PathBuf,
     server: ReleaseServer,
+    target: &'static str,
 }
 
 impl Env {
@@ -194,7 +127,7 @@ impl Env {
         std::fs::create_dir_all(&profile)?;
         std::fs::create_dir_all(&home)?;
         build_release(&release, None)?;
-        let server = ReleaseServer::start(release.clone())?;
+        let server = ReleaseServer::start(release.clone(), VERSION)?;
         Ok(Self {
             bin: root.path().join("usr-local-bin"),
             answers: root.path().join("answers"),
@@ -202,6 +135,7 @@ impl Env {
             profile,
             home,
             server,
+            target: TARGET,
             _root: root,
         })
     }
@@ -233,7 +167,7 @@ impl Env {
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("IROH_TUNNEL_BASE_URL", &self.server.url)
-            .env("IROH_TUNNEL_TARGET", TARGET)
+            .env("IROH_TUNNEL_TARGET", self.target)
             .env("IROH_TUNNEL_PROMPT_INPUT", input)
             .stdin(Stdio::null())
             .output()?)
@@ -569,6 +503,8 @@ fn malformed_version_and_relative_directory_are_rejected() -> Result<()> {
         vec!["--version", "../etc"],
         vec!["--version", "1.2"],
         vec!["--bin-dir", "relative/dir"],
+        vec!["--profile-dir", "relative/dir"],
+        vec!["--profile-dir", "/tmp/with space"],
     ] {
         let out = env.run(&args, None, true)?;
         assert!(!out.status.success(), "{args:?}: {}", text(&out));
@@ -586,5 +522,76 @@ fn no_staging_files_remain_after_success() -> Result<()> {
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect::<std::io::Result<_>>()?;
     assert!(names.iter().all(|n| !n.contains(".new.")), "{names:?}");
+    Ok(())
+}
+
+// --- macOS (arm64): checksums-darwin.txt, /etc/paths.d ---------------------
+
+const DARWIN: &str = "darwin-arm64";
+
+impl Env {
+    /// An environment whose release holds only macOS archives, listed in
+    /// `checksums-darwin.txt` as the release workflow publishes them.
+    fn darwin() -> Result<Self> {
+        let mut env = Self::new()?;
+        std::fs::remove_dir_all(env.release.join(VERSION))?;
+        build_release_for(&env.release, None, DARWIN)?;
+        env.target = DARWIN;
+        Ok(env)
+    }
+}
+
+// 93.AC1 / CL1 on macOS: all three binaries and aliases from the darwin
+// archives, verified against checksums-darwin.txt.
+#[test]
+fn macos_default_flow_installs_all_three_binaries_and_working_aliases() -> Result<()> {
+    let env = Env::darwin()?;
+    let out = env.run(&[], Some("y\n"), false)?;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_all_installed(&env)?;
+    assert_ne!(help(&env.bin.join("its"))?, help(&env.bin.join("ita"))?);
+    Ok(())
+}
+
+#[test]
+fn macos_latest_version_is_read_from_the_darwin_checksum_file() -> Result<()> {
+    let env = Env::darwin()?;
+    let out = env.run(&["--yes"], None, true)?;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("iroh-tunnel {VERSION} installed")),
+        "{}",
+        text(&out)
+    );
+    Ok(())
+}
+
+// 93.AC2 on macOS: PATH is changed through /etc/paths.d (one directory per
+// line), after confirmation.
+#[test]
+fn macos_path_change_writes_a_paths_d_entry_only_when_accepted() -> Result<()> {
+    let env = Env::darwin()?;
+    let out = env.run(&[], Some("n\n"), false)?;
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!env.profile.join("iroh-tunnel").exists());
+
+    let out = env.run(&[], Some("y\n"), false)?;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        std::fs::read_to_string(env.profile.join("iroh-tunnel"))?,
+        format!("{}\n", env.bin.display())
+    );
+    assert!(!env.profile.join("iroh-tunnel.sh").exists());
+    Ok(())
+}
+
+#[test]
+fn macos_declining_a_file_conflict_stops_with_nothing_changed() -> Result<()> {
+    let env = Env::darwin()?;
+    seed_conflicts(&env)?;
+    let before = env.snapshot()?;
+    let out = env.run(&[], Some("n\n"), true)?;
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(before, env.snapshot()?);
     Ok(())
 }

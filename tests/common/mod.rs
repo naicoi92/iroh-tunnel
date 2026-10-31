@@ -2,6 +2,8 @@
 // Each test crate uses a different subset of these helpers.
 #![allow(dead_code)]
 
+pub mod release_server;
+
 use std::path::Path;
 
 /// Role-ownership runtime state (#87): lock and owner records in the default
