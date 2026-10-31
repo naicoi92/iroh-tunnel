@@ -1,20 +1,17 @@
-# Post-merge pipeline — runs on push to main and on demand. Never publishes.
+# Release rehearsal — builds every release artifact, publishes nothing.
 #
-#   checks (fmt ∥ clippy ∥ test)  ┐ independent, in parallel
 #   build (6 native targets ∥) ─┬─ package (nFPM + verify-dist.sh)  ┐ in parallel
 #                               └─ docker  (3 images, not pushed)   ┘
 #
-# Why it exists:
-#   - Verifies the merged result (PRs are checked against an older main).
-#   - Is the only job that WRITES the Rust caches (see .github/actions/setup-rust);
-#     PRs and release tags restore from them, so the build caches stay warm.
-#   - Rehearses the whole release before a tag, catching target breakage early.
+# fmt / clippy / tests are NOT repeated here: they already passed on the PR
+# (ci.yml). Only what a PR does not exercise runs, and only when something that
+# can break the release changed.
 #
 # Triggers:
-#   - push to main, skipping commits that only touch docs / metadata.
-#   - workflow_dispatch: rehearse the release build on any branch before merging.
-#
-# PR feedback lives in ci.yml; real releases (tag v*) in release.yml.
+#   - push to main touching dependencies, build script, packaging or the build
+#     workflows. Ordinary source changes do not trigger it.
+#   - workflow_dispatch: rehearse the release on any branch before merging
+#     (`gh workflow run snapshot.yml --ref <branch>`).
 
 name: snapshot
 
@@ -23,37 +20,29 @@ on:
   push:
     branches: [main]
     paths:
-      - "src/**"
-      - "tests/**"
-      - "examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "build.rs"
-      - "install.sh"
       - "packaging/**"
       - "Dockerfile.goreleaser*"
-      - ".github/workflows/**"
+      - ".github/workflows/build.yml"
+      - ".github/workflows/package.yml"
+      - ".github/workflows/docker.yml"
+      - ".github/workflows/snapshot.yml"
       - ".github/actions/**"
 
-# Never cancel a main run mid-way: an interrupted run leaves the caches cold.
-# Runs for the same ref queue up and only the newest pending one is kept.
+# A newer push supersedes a rehearsal that is still running.
 concurrency:
   group: snapshot-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  checks:
-    uses: ./.github/workflows/checks.yml
-    with:
-      windows: true
-
   build:
     uses: ./.github/workflows/build.yml
 
-  # package and docker only need the build artifacts: they run in parallel.
   package:
     needs: build
     uses: ./.github/workflows/package.yml

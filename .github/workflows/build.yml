@@ -58,7 +58,9 @@ jobs:
     needs: version
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: false
+      # One broken target fails the whole build, so stop the siblings instead of
+      # burning runner minutes on a build that cannot be used.
+      fail-fast: true
       matrix:
         include:
           - { id: gnu-amd64,     runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,      os: linux,  arch: amd64,   suffix: "" }

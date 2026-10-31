@@ -36,9 +36,8 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+      # No checkout: on pull_request events the filter reads the changed files
+      # through the API.
       - uses: dorny/paths-filter@v3
         id: filter
         with:

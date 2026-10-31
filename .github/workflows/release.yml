@@ -34,10 +34,12 @@ permissions:
   contents: read
 
 jobs:
+  # Safety net run in parallel with the build (no wall-clock cost). Windows is
+  # skipped: the tagged commit already passed the full PR matrix.
   gate:
     uses: ./.github/workflows/checks.yml
     with:
-      windows: true
+      windows: false
 
   build:
     uses: ./.github/workflows/build.yml
