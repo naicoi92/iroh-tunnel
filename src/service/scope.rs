@@ -60,6 +60,27 @@ pub(crate) fn is_interactive() -> bool {
     std::io::stdin().is_terminal()
 }
 
+/// Refuse a scope this platform has no backend for.
+///
+/// Windows has only the user-background task: a Windows Service is deferred
+/// (SM-04), so `--system` is reported as unsupported rather than as a missing
+/// privilege that elevation could not fix.
+///
+/// # Errors
+///
+/// [`CliError::Service`] for system scope on Windows; nothing is changed.
+pub fn ensure_supported(scope: ServiceScope) -> Result<()> {
+    if cfg!(windows) && scope == ServiceScope::System {
+        return Err(CliError::Service(
+            "system services are not supported on Windows; use --user, which runs the role \
+             in your logged-in session as a scheduled task"
+                .into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Scope for verbs that act on an existing service when no flag is given:
 /// the elevated installer owns a system service, everyone else a user one.
 pub fn default_scope(elevated: bool) -> ServiceScope {
