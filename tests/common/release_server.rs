@@ -17,6 +17,7 @@ pub struct ReleaseServer {
 }
 
 impl ReleaseServer {
+    /// Serve `root` on a free local port; `version` backs `latest/download`.
     pub fn start(root: PathBuf, version: &str) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let url = format!("http://{}/releases", listener.local_addr()?);
@@ -54,6 +55,7 @@ impl Drop for ReleaseServer {
 }
 
 fn serve_one(mut stream: TcpStream, root: &Path, version: &str) -> Result<()> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf)?;
     let request = String::from_utf8_lossy(&buf[..n]);
@@ -63,6 +65,9 @@ fn serve_one(mut stream: TcpStream, root: &Path, version: &str) -> Result<()> {
         .unwrap_or("/")
         .trim_start_matches("/releases/")
         .to_owned();
+    if path.split('/').any(|part| part == "..") {
+        return Ok(());
+    }
     // latest/download/<file> and download/v<ver>/<file> -> <root>/<ver>/<file>
     let file = if let Some(rest) = path.strip_prefix("latest/download/") {
         root.join(version).join(rest)

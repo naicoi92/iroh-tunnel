@@ -311,7 +311,7 @@ fn no_prompt_is_shown_when_the_directory_is_already_on_path() -> Result<()> {
     let env = Env::new(shell)?;
     let out = env.run(&[], None, true)?;
     assert!(out.status.success(), "{}", text(&out));
-    assert!(!String::from_utf8_lossy(&out.stdout).contains("[y/N]"));
+    assert!(!text(&out).contains("[y/N]"), "{}", text(&out));
     assert_all_installed(&env)
 }
 
@@ -381,7 +381,7 @@ fn reinstalling_the_same_release_asks_nothing() -> Result<()> {
     let before = env.snapshot()?;
     let again = env.run(&[], None, true)?;
     assert!(again.status.success(), "{}", text(&again));
-    assert!(!String::from_utf8_lossy(&again.stdout).contains("[y/N]"));
+    assert!(!text(&again).contains("[y/N]"), "{}", text(&again));
     assert_eq!(before, env.snapshot()?);
     Ok(())
 }
@@ -472,7 +472,9 @@ fn registry_machine_path_is_changed_only_when_accepted() -> Result<()> {
     let read = || -> Result<String> {
         let out = Command::new(shell)
             .args(["-NoProfile", "-Command"])
-            .arg("[Environment]::GetEnvironmentVariable('Path','Machine')")
+            .arg(
+                "[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment').GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)",
+            )
             .output()?;
         Ok(String::from_utf8(out.stdout)?.trim().to_owned())
     };
@@ -489,21 +491,33 @@ fn registry_machine_path_is_changed_only_when_accepted() -> Result<()> {
             .stdin(Stdio::null())
             .output()?)
     };
+    // Restore the runner's PATH whatever happens below.
+    struct Restore<'a>(&'a str, String);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let script = format!(
+                "$k=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment',$true);\
+                 $k.SetValue('Path','{}',[Microsoft.Win32.RegistryValueKind]::ExpandString)",
+                self.1.replace('\'', "''")
+            );
+            let _ = Command::new(self.0)
+                .args(["-NoProfile", "-Command", &script])
+                .status();
+        }
+    }
+    let _restore = Restore(shell, original.clone());
+
     let declined = run("n\n")?;
     assert!(declined.status.success(), "{}", text(&declined));
     assert_eq!(original, read()?);
 
     let accepted = run("y\n")?;
-    let changed = read();
-    // Restore the runner's PATH whatever happened.
-    Command::new(shell)
-        .args(["-NoProfile", "-Command"])
-        .arg(format!(
-            "[Environment]::SetEnvironmentVariable('Path','{}','Machine')",
-            original.replace('\'', "''")
-        ))
-        .status()?;
     assert!(accepted.status.success(), "{}", text(&accepted));
-    assert!(changed?.ends_with(&env.bin.display().to_string()));
+    let changed = read()?;
+    assert_eq!(
+        changed,
+        format!("{original};{}", env.bin.display()),
+        "existing entries, including unexpanded variables, are kept"
+    );
     Ok(())
 }

@@ -116,3 +116,34 @@ writes and restores the real machine PATH.
   The Windows CI job runs the registry test; pwsh/ubuntu CI runs the rest.
 - Checksums only; signatures wait for #100/#80 (DIST-02 gap).
 - Role bytes are not forwarded through installed binaries (#97).
+
+## Review (Standards + Spec, base `c137636`, head `f5b5f7c`)
+
+Fixed, each covered by the suite or a manual check:
+
+- P1 machine PATH: `install.ps1` now reads and writes
+  `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` with
+  `DoNotExpandEnvironmentNames` and `REG_EXPAND_SZ`, so `%SystemRoot%` entries
+  survive. The Windows-only registry test now asserts the exact value
+  (`original;<dir>`) and restores the PATH through a drop guard. Not run on a
+  Windows host by me; first run is the Windows CI job.
+- A failed PATH write after install prints guidance instead of a misleading error.
+- Architecture comes from `PROCESSOR_ARCHITECTURE`/`PROCESSOR_ARCHITEW6432`
+  (no .NET 4.7.1 dependency); `-DryRun` checked for x64 host fallback and
+  `IROH_TUNNEL_TARGET=windows-arm64`.
+- `--profile-dir` is validated like `--bin-dir` (a path with a space could split
+  the unquoted `rm -f` in cleanup); tests added.
+- Two PowerShell prompt-absence assertions checked stdout and could never fail;
+  they now check all output.
+- `ci.yml` code filter includes `install.ps1`.
+- Test hygiene: `run_darwin` duplicate removed (`Env.target`), stale header
+  updated, release server has a read timeout and rejects `..`.
+
+Not changed, disclosed: replacement is rename file by file, so a mid-loop
+failure (e.g. a running `.exe` on Windows) can leave a mixed install; the
+header of `install.ps1` now says so. Test-seam env vars
+(`IROH_TUNNEL_PATH_FILE`, `IROH_TUNNEL_PROMPT_INPUT`) remain in the production
+scripts and are documented. Platform detection (`uname`, Intel rejection) and
+the default `/etc/paths.d` are not exercised by tests; Windows PowerShell 5.1 is
+not tested (pwsh 7 only). #93 stays open until a real Windows run and
+signatures (#100/#80).

@@ -19,6 +19,11 @@ Only checksums are verified. The checksum file comes from the same host as the
 archives, so it detects corruption but not a compromised host. Signature
 verification waits for the signed release artifacts (#100).
 
+Replacement is staged, then renamed file by file; if one rename fails (for
+example a running executable) the others may already be replaced. Rerun after
+stopping the process. Downloaded scripts may need
+`powershell -ExecutionPolicy Bypass -File install.ps1`.
+
 The installer never registers, starts or changes a service. A running
 executable cannot be replaced on Windows: stop it yourself and rerun.
 
@@ -55,6 +60,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $DefaultBaseUrl = 'https://github.com/naicoi92/iroh-tunnel/releases'
 $Executables = @('iroh-tunnel', 'iroh-tunnel-serve', 'iroh-tunnel-access')
+$MachineEnvKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 
 class InstallError : System.Exception {
     InstallError([string]$message) : base($message) {}
@@ -100,13 +106,16 @@ function Confirm-Step([string]$Question) {
 
 function Get-Target {
     if ($env:IROH_TUNNEL_TARGET) { return $env:IROH_TUNNEL_TARGET }
-    if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         Fail 'install.ps1 installs the Windows executables. Use install.sh on Linux and macOS.'
     }
-    switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-        'X64' { return 'windows-amd64' }
-        'Arm64' { return 'windows-arm64' }
-        default { Fail "unsupported CPU architecture: $_" }
+    # PROCESSOR_ARCHITEW6432 names the real CPU inside a 32-bit process.
+    $arch = $env:PROCESSOR_ARCHITEW6432
+    if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
+    switch ($arch) {
+        'AMD64' { return 'windows-amd64' }
+        'ARM64' { return 'windows-arm64' }
+        default { Fail "unsupported CPU architecture: $arch" }
     }
 }
 
@@ -119,7 +128,10 @@ function Get-MachinePath {
         }
         return ''
     }
-    return [string][Environment]::GetEnvironmentVariable('Path', 'Machine')
+    # Read the unexpanded value so %SystemRoot%-style entries survive the rewrite.
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($MachineEnvKey)
+    try { return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    finally { $key.Close() }
 }
 
 function Set-MachinePath([string]$Value) {
@@ -127,7 +139,16 @@ function Set-MachinePath([string]$Value) {
         Set-Content -LiteralPath $env:IROH_TUNNEL_PATH_FILE -Value $Value -NoNewline
     }
     else {
-        [Environment]::SetEnvironmentVariable('Path', $Value, 'Machine')
+        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($MachineEnvKey, $true)
+        try { $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+        finally { $key.Close() }
+        # Tell running programs (Explorer) that the environment changed.
+        try {
+            $id = "iroh-tunnel-$([Guid]::NewGuid().ToString('N'))"
+            [Environment]::SetEnvironmentVariable($id, '1', 'User')
+            [Environment]::SetEnvironmentVariable($id, $null, 'User')
+        }
+        catch { }
     }
 }
 
@@ -280,8 +301,13 @@ function Install-IrohTunnel {
         if ($doPath) {
             $joined = $machinePath.TrimEnd(';')
             if ($joined) { $joined = "$joined;$BinDir" } else { $joined = $BinDir }
-            Set-MachinePath $joined
-            Write-Output 'added to the machine PATH; open a new terminal to use it.'
+            try {
+                Set-MachinePath $joined
+                Write-Output 'added to the machine PATH; open a new terminal to use it.'
+            }
+            catch {
+                Write-Output "installed, but the machine PATH was not changed ($($_.Exception.Message)). Run from an elevated PowerShell or add $BinDir to PATH yourself."
+            }
         }
         elseif ($changePath) {
             Write-Output "PATH was not changed. Add $BinDir to PATH yourself."

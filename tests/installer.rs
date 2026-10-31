@@ -8,10 +8,11 @@
 //! `IROH_TUNNEL_PROMPT_INPUT`, the same read path the script uses for a
 //! terminal.
 //!
-//! Limits: Linux release archives are the only published layout, so the
-//! release platform is forced with `IROH_TUNNEL_TARGET`; the executables are
-//! built for the test host. Windows and macOS role binaries do not exist yet
-//! (#124) and the PowerShell installer is not part of this file.
+//! Limits: the release platform is forced with `IROH_TUNNEL_TARGET` (Linux
+//! `linux-amd64`, macOS `darwin-arm64`); the archives hold executables built
+//! for the test host. Platform detection itself and the default
+//! `/etc/paths.d` are therefore not exercised. The PowerShell installer is in
+//! `installer_ps.rs`.
 //!
 //! Acceptance map:
 //! - 93.AC1 / CL1 (INSTALL-DEFAULT-01): default selection is all three
@@ -19,6 +20,7 @@
 //!   intended archive members; `it`/`its`/`ita` resolve to their roles.
 //! - 93.AC2 / CL1 (INSTALL-CONSENT-01): PATH change and file conflicts need
 //!   confirmation; declining leaves the previous state unchanged.
+//! - macOS cases use `checksums-darwin.txt` and a `paths.d` entry.
 //! - 93.CL2: the installer never registers or changes a service.
 #![cfg(unix)]
 
@@ -113,6 +115,7 @@ struct Env {
     home: PathBuf,
     answers: PathBuf,
     server: ReleaseServer,
+    target: &'static str,
 }
 
 impl Env {
@@ -132,6 +135,7 @@ impl Env {
             profile,
             home,
             server,
+            target: TARGET,
             _root: root,
         })
     }
@@ -163,7 +167,7 @@ impl Env {
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("IROH_TUNNEL_BASE_URL", &self.server.url)
-            .env("IROH_TUNNEL_TARGET", TARGET)
+            .env("IROH_TUNNEL_TARGET", self.target)
             .env("IROH_TUNNEL_PROMPT_INPUT", input)
             .stdin(Stdio::null())
             .output()?)
@@ -499,6 +503,8 @@ fn malformed_version_and_relative_directory_are_rejected() -> Result<()> {
         vec!["--version", "../etc"],
         vec!["--version", "1.2"],
         vec!["--bin-dir", "relative/dir"],
+        vec!["--profile-dir", "relative/dir"],
+        vec!["--profile-dir", "/tmp/with space"],
     ] {
         let out = env.run(&args, None, true)?;
         assert!(!out.status.success(), "{args:?}: {}", text(&out));
@@ -527,40 +533,11 @@ impl Env {
     /// An environment whose release holds only macOS archives, listed in
     /// `checksums-darwin.txt` as the release workflow publishes them.
     fn darwin() -> Result<Self> {
-        let env = Self::new()?;
+        let mut env = Self::new()?;
         std::fs::remove_dir_all(env.release.join(VERSION))?;
         build_release_for(&env.release, None, DARWIN)?;
+        env.target = DARWIN;
         Ok(env)
-    }
-
-    fn run_darwin(&self, args: &[&str], answers: Option<&str>, on_path: bool) -> Result<Output> {
-        let input = match answers {
-            Some(text) => {
-                std::fs::write(&self.answers, text)?;
-                self.answers.clone()
-            }
-            None => PathBuf::from("/nonexistent/no-terminal"),
-        };
-        let path = if on_path {
-            format!("{}:/usr/bin:/bin", self.bin.display())
-        } else {
-            "/usr/bin:/bin".to_owned()
-        };
-        Ok(Command::new("sh")
-            .arg(SCRIPT)
-            .arg("--bin-dir")
-            .arg(&self.bin)
-            .arg("--profile-dir")
-            .arg(&self.profile)
-            .args(args)
-            .env_clear()
-            .env("PATH", path)
-            .env("HOME", &self.home)
-            .env("IROH_TUNNEL_BASE_URL", &self.server.url)
-            .env("IROH_TUNNEL_TARGET", DARWIN)
-            .env("IROH_TUNNEL_PROMPT_INPUT", input)
-            .stdin(Stdio::null())
-            .output()?)
     }
 }
 
@@ -569,7 +546,7 @@ impl Env {
 #[test]
 fn macos_default_flow_installs_all_three_binaries_and_working_aliases() -> Result<()> {
     let env = Env::darwin()?;
-    let out = env.run_darwin(&[], Some("y\n"), false)?;
+    let out = env.run(&[], Some("y\n"), false)?;
     assert!(out.status.success(), "{}", text(&out));
     assert_all_installed(&env)?;
     assert_ne!(help(&env.bin.join("its"))?, help(&env.bin.join("ita"))?);
@@ -579,7 +556,7 @@ fn macos_default_flow_installs_all_three_binaries_and_working_aliases() -> Resul
 #[test]
 fn macos_latest_version_is_read_from_the_darwin_checksum_file() -> Result<()> {
     let env = Env::darwin()?;
-    let out = env.run_darwin(&["--yes"], None, true)?;
+    let out = env.run(&["--yes"], None, true)?;
     assert!(out.status.success(), "{}", text(&out));
     assert!(
         String::from_utf8_lossy(&out.stdout).contains(&format!("iroh-tunnel {VERSION} installed")),
@@ -594,11 +571,11 @@ fn macos_latest_version_is_read_from_the_darwin_checksum_file() -> Result<()> {
 #[test]
 fn macos_path_change_writes_a_paths_d_entry_only_when_accepted() -> Result<()> {
     let env = Env::darwin()?;
-    let out = env.run_darwin(&[], Some("n\n"), false)?;
+    let out = env.run(&[], Some("n\n"), false)?;
     assert!(out.status.success(), "{}", text(&out));
     assert!(!env.profile.join("iroh-tunnel").exists());
 
-    let out = env.run_darwin(&[], Some("y\n"), false)?;
+    let out = env.run(&[], Some("y\n"), false)?;
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(
         std::fs::read_to_string(env.profile.join("iroh-tunnel"))?,
@@ -613,7 +590,7 @@ fn macos_declining_a_file_conflict_stops_with_nothing_changed() -> Result<()> {
     let env = Env::darwin()?;
     seed_conflicts(&env)?;
     let before = env.snapshot()?;
-    let out = env.run_darwin(&[], Some("n\n"), true)?;
+    let out = env.run(&[], Some("n\n"), true)?;
     assert!(!out.status.success(), "{}", text(&out));
     assert_eq!(before, env.snapshot()?);
     Ok(())

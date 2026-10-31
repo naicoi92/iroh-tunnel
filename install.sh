@@ -93,6 +93,12 @@ done
 [ -n "$BIN_DIR" ] || die "--bin-dir must not be empty"
 case "$BIN_DIR" in /*) ;; *) die "--bin-dir must be an absolute path" ;; esac
 case "$BIN_DIR" in *[!A-Za-z0-9/._+-]*) die "--bin-dir may only contain letters, digits and / . _ + -" ;; esac
+case "$PROFILE_DIR" in
+    "") ;;
+    /*[!A-Za-z0-9/._+-]*|/*) ;;
+    *) die "--profile-dir must be an absolute path" ;;
+esac
+case "$PROFILE_DIR" in *[!A-Za-z0-9/._+-]*) die "--profile-dir may only contain letters, digits and / . _ + -" ;; esac
 case "$VERSION" in
     ""|[0-9]*.[0-9]*.[0-9]*) ;;
     *) die "--version must look like 1.2.3" ;;
