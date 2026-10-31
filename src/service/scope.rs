@@ -46,15 +46,16 @@ pub fn is_elevated() -> bool {
     false
 }
 
+/// Whether a person can answer a prompt (stdin is a terminal).
 #[cfg(feature = "test-utils")]
-fn is_interactive() -> bool {
+pub(crate) fn is_interactive() -> bool {
     use std::io::IsTerminal;
     // Integration tests have no terminal; this stands in for one.
     std::env::var_os("IROH_TUNNEL_TEST_INTERACTIVE").is_some() || std::io::stdin().is_terminal()
 }
 
 #[cfg(not(feature = "test-utils"))]
-fn is_interactive() -> bool {
+pub(crate) fn is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }

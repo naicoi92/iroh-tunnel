@@ -13,7 +13,7 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 
 use crate::config::{Protocol, RoleDoc};
@@ -184,7 +184,7 @@ pub(crate) async fn connect_with_retry(
 /// key via the [`crate::config::RoleDoc`] trait.
 pub(crate) trait RoleStrategy {
     /// The TOML config document this role loads.
-    type Config: crate::config::RoleDoc;
+    type Config: crate::config::RoleDoc + Send + 'static;
 
     /// Build the iroh endpoint for this role (serve registers ALPNs, access
     /// dials out only).
@@ -240,8 +240,16 @@ where
     let claim = ownership.claim()?;
     // Load and validate the config, then resolve+persist the secret key. Both
     // steps are shared across roles via the RoleDoc trait.
-    let mut cfg = S::Config::load(config_path)?;
-    cfg.resolve_and_save_key(config_path)?;
+    // The save takes a file lock and fsyncs, so it runs off the async workers
+    // (RS-07). It is awaited to completion, never detached.
+    let path = config_path.to_path_buf();
+    let cfg = tokio::task::spawn_blocking(move || -> Result<S::Config> {
+        let mut cfg = S::Config::load(&path)?;
+        cfg.resolve_and_save_key(&path)?;
+        Ok(cfg)
+    })
+    .await
+    .context("config load task failed")??;
 
     run_config::<S, _, _>(cfg, claim, run_loop).await
 }

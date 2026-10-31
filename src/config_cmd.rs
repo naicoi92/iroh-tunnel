@@ -15,13 +15,24 @@
 //!
 //! Based on Page 06 v5 §1.2 (config subcommand) and §1.5 (config actions).
 
-use std::path::Path;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use toml_edit::DocumentMut;
 
 use crate::cli::AddServiceArgs;
+use crate::config_store::{
+    ensure_node_table, existing_secret_key, parse_doc, read_optional, resolve_target,
+    strip_retired_fields, write_atomic, ConfigLock,
+};
 use crate::error::CliError;
+
+/// Placeholder printed by `config show` instead of a secret.
+const REDACTED: &str = "<redacted>";
+
+/// `[node]` keys `config show` hides unless `--reveal` is given.
+const SECRET_FIELDS: [&str; 2] = ["secret_key", "relay_token"];
 
 /// `config keygen`: generate a new SecretKey, write it into `[node].secret_key`.
 ///
@@ -29,20 +40,76 @@ use crate::error::CliError;
 /// and access pins its own identity so the serve side sees a stable peer. Either
 /// way, downstream configs that reference this node's NodeId must be updated to
 /// match the newly generated key.
-pub fn keygen(role: &str, config: Option<&Path>) -> Result<()> {
-    let path = resolve_config_path(role, config)?;
+///
+/// Replacing an existing key changes the NodeId, so it needs confirmation
+/// (D1): `yes` skips the prompt; without a terminal and without `yes` the
+/// command fails and the key is kept. A first key needs no confirmation.
+pub fn keygen(role: &str, config: Option<&Path>, yes: bool) -> Result<()> {
+    let path = resolve_target(&resolve_config_path(role, config)?);
+    let mut confirmed = yes;
+    // Ask before taking the lock so a slow answer does not stall other
+    // writers; the decision is re-checked under the lock below.
+    if !confirmed
+        && read_optional(&path)?
+            .and_then(|text| text.parse::<DocumentMut>().ok())
+            .is_some_and(|doc| existing_secret_key(&doc).is_some())
+    {
+        confirm_rotation(&path)?;
+        confirmed = true;
+    }
+
     let key = iroh::SecretKey::generate();
     let key_str = crate::config::encode_secret_key(&key);
-
-    let mut doc = load_or_empty(&path)?;
-    ensure_node_table(&mut doc, &path)?;
-    doc["node"]["secret_key"] = toml_edit::value(key_str);
-    write_doc(&path, &mut doc)?;
+    mutate(role, &path, |doc| {
+        if !confirmed && existing_secret_key(doc).is_some() {
+            return Err(rotation_refused(&path));
+        }
+        ensure_node_table(doc, &path)?;
+        doc["node"]["secret_key"] = toml_edit::value(key_str.as_str());
+        Ok(())
+    })?;
 
     println!("Generated new secret_key.");
     println!("New NodeId: {}", key.public());
     println!("WARNING: configs that reference this node's node_id must be updated to match.");
     Ok(())
+}
+
+fn rotation_refused(path: &Path) -> anyhow::Error {
+    CliError::Config(format!(
+        "{} already holds a secret_key; replacing it changes this node's NodeId. \
+         Re-run with --yes to rotate it",
+        path.display()
+    ))
+    .into()
+}
+
+/// Ask the user to confirm replacing the key in `path`.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when no terminal is available or the answer is not
+/// yes; the key is left unchanged either way.
+fn confirm_rotation(path: &Path) -> Result<()> {
+    if !crate::service::scope::is_interactive() {
+        return Err(rotation_refused(path));
+    }
+    eprint!(
+        "{} already holds a secret_key. Replacing it changes this node's NodeId and breaks \
+         peers that pin it. Replace it? [y/N] ",
+        path.display()
+    );
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .context("failed to read the confirmation")?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(CliError::Config("key rotation cancelled; the secret_key is unchanged".into()).into())
+    }
 }
 
 /// `config keygen random`: print a fresh key and its node ID without touching
@@ -63,73 +130,68 @@ pub fn keygen_random() -> Result<()> {
 /// access, duplicate-name check) by re-loading the mutated document through the
 /// schema. A duplicate or invalid entry is a config error → exit 2.
 pub fn add(role: &str, args: &AddServiceArgs) -> Result<()> {
-    let path = resolve_config_path(role, args.config.as_deref())?;
-    let mut doc = load_or_empty(&path)?;
+    let path = resolve_target(&resolve_config_path(role, args.config.as_deref())?);
+    mutate(role, &path, |doc| {
+        // Reject a duplicate name up front with a clear message.
+        if find_service(doc, &args.name).is_some() {
+            return Err(CliError::Config(format!(
+                "a service named '{}' already exists in {}",
+                args.name,
+                path.display()
+            ))
+            .into());
+        }
 
-    // Reject a duplicate name up front with a clear message.
-    if find_service(&doc, &args.name).is_some() {
-        return Err(CliError::Config(format!(
-            "a service named '{}' already exists in {}",
-            args.name,
-            path.display()
-        ))
-        .into());
-    }
+        let mut entry = toml_edit::Table::new();
+        entry["name"] = toml_edit::value(args.name.as_str());
+        entry["protocol"] = toml_edit::value(args.protocol.as_str());
+        entry["host"] = toml_edit::value(args.host.as_str());
+        entry["port"] = toml_edit::value(i64::from(args.port));
+        if role == "access" {
+            let node_id = args.node_id.as_deref().ok_or_else(|| {
+                CliError::Config("--node-id is required when adding an access service".into())
+            })?;
+            entry["node_id"] = toml_edit::value(node_id);
+        }
 
-    let mut entry = toml_edit::Table::new();
-    entry["name"] = toml_edit::value(args.name.as_str());
-    entry["protocol"] = toml_edit::value(args.protocol.as_str());
-    entry["host"] = toml_edit::value(args.host.as_str());
-    entry["port"] = toml_edit::value(i64::from(args.port));
-    if role == "access" {
-        let node_id = args.node_id.as_deref().ok_or_else(|| {
-            CliError::Config("--node-id is required when adding an access service".into())
+        // Append as an array-of-tables element: [[services]].
+        doc["services"].or_insert(toml_edit::Item::ArrayOfTables(Default::default()));
+        let services = doc["services"].as_array_of_tables_mut().ok_or_else(|| {
+            CliError::Config(format!(
+                "invalid config at {}: [services] must be an array of tables",
+                path.display()
+            ))
         })?;
-        entry["node_id"] = toml_edit::value(node_id);
-    }
-
-    // Append as an array-of-tables element: [[services]].
-    doc["services"].or_insert(toml_edit::Item::ArrayOfTables(Default::default()));
-    let services = doc["services"].as_array_of_tables_mut().ok_or_else(|| {
-        CliError::Config(format!(
-            "invalid config at {}: [services] must be an array of tables",
-            path.display()
-        ))
+        services.push(entry);
+        Ok(())
     })?;
-    services.push(entry);
-
-    // Validate the whole document via the schema before persisting.
-    validate_role_doc(role, &doc.to_string(), &path)?;
-    write_doc(&path, &mut doc)?;
     println!("Added service '{}' to {}.", args.name, path.display());
     Ok(())
 }
 
 /// `config remove`: delete the `[[services]]` entry whose `name` matches.
 pub fn remove(role: &str, config: Option<&Path>, name: &str) -> Result<()> {
-    let path = resolve_config_path(role, config)?;
-    let mut doc = load_or_empty(&path)?;
-
-    // No `[services]` table at all → treat as "not found" (config error, exit 2)
-    // rather than a generic internal error.
-    let idx = doc
-        .get("services")
-        .and_then(|i| i.as_array_of_tables())
-        .ok_or_else(|| {
-            CliError::Config(format!("no service named '{name}' in {}", path.display()))
-        })?
-        .iter()
-        .position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
-        .ok_or_else(|| {
-            CliError::Config(format!("no service named '{name}' in {}", path.display()))
-        })?;
-
-    doc["services"]
-        .as_array_of_tables_mut()
-        .context("internal: [services] is not an array-of-tables")?
-        .remove(idx);
-
-    write_doc(&path, &mut doc)?;
+    let path = resolve_target(&resolve_config_path(role, config)?);
+    // Nothing to remove from a missing config: fail without creating files.
+    require_existing(role, &path)?;
+    mutate(role, &path, |doc| {
+        // No `[services]` table at all → treat as "not found" (config error,
+        // exit 2) rather than a generic internal error.
+        let not_found =
+            || CliError::Config(format!("no service named '{name}' in {}", path.display()));
+        let idx = doc
+            .get("services")
+            .and_then(|i| i.as_array_of_tables())
+            .ok_or_else(not_found)?
+            .iter()
+            .position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+            .ok_or_else(not_found)?;
+        doc["services"]
+            .as_array_of_tables_mut()
+            .context("internal: [services] is not an array-of-tables")?
+            .remove(idx);
+        Ok(())
+    })?;
     println!("Removed service '{name}' from {}.", path.display());
     Ok(())
 }
@@ -137,7 +199,7 @@ pub fn remove(role: &str, config: Option<&Path>, name: &str) -> Result<()> {
 /// `config list`: print a compact table of the configured services.
 pub fn list(role: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(role, config)?;
-    let doc = load_or_empty(&path)?;
+    let doc = parse_doc(&require_existing(role, &path)?, &path)?;
     let Some(services) = doc.get("services").and_then(|i| i.as_array_of_tables()) else {
         println!("No services configured ({}).", path.display());
         return Ok(());
@@ -175,20 +237,112 @@ pub fn list(role: &str, config: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// `config show`: pretty-print the raw config file contents.
-pub fn show(role: &str, config: Option<&Path>) -> Result<()> {
+/// `config show`: print the config file contents with `secret_key` and
+/// `relay_token` replaced by a placeholder, unless `reveal` is set (D2).
+/// Comments and formatting are kept; the file itself is never changed.
+pub fn show(role: &str, config: Option<&Path>, reveal: bool) -> Result<()> {
     let path = resolve_config_path(role, config)?;
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read config: {}", path.display()))?;
-    print!("{content}");
+    let text = require_existing(role, &path)?;
+    if reveal {
+        print!("{text}");
+        return Ok(());
+    }
+    // A document that does not parse cannot be redacted, so it is never echoed.
+    let mut doc = parse_doc(&text, &path)?;
+    redact_secrets(&mut doc);
+    print!("{doc}");
     Ok(())
 }
 
-/// `config edit`: open the config file in `$EDITOR`.
+/// Replace the value of every [`SECRET_FIELDS`] key in `[node]`, keeping the
+/// surrounding whitespace and comments.
+fn redact_secrets(doc: &mut DocumentMut) {
+    let Some(node) = doc.get_mut("node").and_then(|n| n.as_table_like_mut()) else {
+        return;
+    };
+    for field in SECRET_FIELDS {
+        let Some(value) = node.get_mut(field).and_then(|i| i.as_value_mut()) else {
+            continue;
+        };
+        let decor = value.decor().clone();
+        *value = toml_edit::Value::from(REDACTED);
+        *value.decor_mut() = decor;
+    }
+}
+
+/// `config edit`: open the config in `$EDITOR`, then validate and save it.
+///
+/// The editor works on a private copy next to the config. The result is
+/// applied only if the live file is unchanged since the copy was taken and the
+/// edited document is valid; otherwise the live file is left as it was and the
+/// edited text is kept in `<config>.rejected` (owner-only) so it is not lost.
 pub fn edit(role: &str, config: Option<&Path>) -> Result<()> {
-    let path = resolve_config_path(role, config)?;
-    edit::edit_file(&path)?;
-    Ok(())
+    let path = resolve_target(&resolve_config_path(role, config)?);
+    let original = read_optional(&path)?;
+    let original_text = original.clone().unwrap_or_default();
+
+    crate::config_store::ensure_parent(&path)?;
+    let scratch = scratch_path(&path);
+    write_atomic(&scratch, original_text.as_bytes())?;
+    let edited = edit::edit_file(&scratch)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| {
+            std::fs::read_to_string(&scratch)
+                .with_context(|| format!("failed to read edited copy: {}", scratch.display()))
+        });
+    let _ = std::fs::remove_file(&scratch);
+    let edited = edited?;
+
+    if edited == original_text {
+        println!("No changes.");
+        return Ok(());
+    }
+
+    let _lock = ConfigLock::acquire(&path)?;
+    if read_optional(&path)? != original {
+        let kept = keep_rejected(&path, &edited);
+        return Err(CliError::Config(format!(
+            "{} changed while it was being edited; your edit was not saved{kept}. \
+             Re-apply it to the current file",
+            path.display()
+        ))
+        .into());
+    }
+    let checked = parse_doc(&edited, &path).and_then(|mut doc| {
+        strip_retired_fields(&mut doc);
+        validate_role_doc(role, &doc.to_string(), &path)?;
+        Ok(doc)
+    });
+    match checked {
+        Ok(doc) => {
+            write_atomic(&path, doc.to_string().as_bytes())?;
+            println!("Saved {}.", path.display());
+            Ok(())
+        }
+        Err(e) => {
+            let kept = keep_rejected(&path, &edited);
+            Err(CliError::Config(format!("{e:#}; the file was not changed{kept}")).into())
+        }
+    }
+}
+
+/// Private copy of the config handed to the editor.
+fn scratch_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".edit-{}.toml", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Keep the rejected edit in `<config>.rejected` and describe where, for the
+/// error message. A failure to keep it is reported instead of hidden.
+fn keep_rejected(path: &Path, edited: &str) -> String {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".rejected");
+    let sidecar = path.with_file_name(name);
+    match write_atomic(&sidecar, edited.as_bytes()) {
+        Ok(()) => format!("; your text is in {}", sidecar.display()),
+        Err(e) => format!("; could not keep your text ({e:#})"),
+    }
 }
 
 /// `config path`: print the resolved config file path.
@@ -221,42 +375,43 @@ pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<s
     crate::paths::default_config_path(role)
 }
 
-/// Load the file as a `toml_edit` document, or return an empty document if the
-/// file does not yet exist (so `add`/`keygen` work on a fresh config).
-fn load_or_empty(path: &Path) -> Result<DocumentMut> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(e).with_context(|| format!("failed to read config: {}", path.display()))
-        }
-    };
-    let doc: DocumentMut = content
-        .parse()
-        .map_err(|e| CliError::Config(format!("failed to parse config {}: {e}", path.display())))?;
-    Ok(doc)
+/// Read `path`, which a read command needs to exist (D3).
+///
+/// # Errors
+///
+/// [`CliError::Config`] with guidance naming the path and the commands that
+/// create a configuration. Nothing is created and no identity is generated.
+pub fn require_existing(role: &str, path: &Path) -> Result<String> {
+    read_optional(path)?.ok_or_else(|| {
+        CliError::Config(format!(
+            "no configuration at {path}. Create one with `config add` or `config keygen` \
+             (`iroh-tunnel {role} config add`, or `iroh-tunnel-{role} config add`), or pass --config",
+            path = path.display()
+        ))
+        .into()
+    })
 }
 
-/// Ensure a `[node]` table exists (used by `keygen` before setting `secret_key`).
+/// Apply `change` to the config at `path` as one validated, atomic, serialized
+/// mutation (CFG-04).
 ///
-/// If `node` is present but not a table (e.g. someone wrote `node = "x"`), that
-/// is a malformed config → `CliError::Config` (exit 2) rather than a panic on
-/// the subsequent index.
-fn ensure_node_table(doc: &mut DocumentMut, path: &Path) -> Result<()> {
-    match doc.get("node") {
-        None => {
-            doc["node"] = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-        Some(item) if item.is_table() => {}
-        Some(_) => {
-            return Err(CliError::Config(format!(
-                "invalid config at {}: [node] must be a table",
-                path.display()
-            ))
-            .into());
-        }
-    }
-    Ok(())
+/// Takes the writer lock, loads the document (empty when the file does not
+/// exist yet), applies `change`, drops retired fields, validates the result
+/// through the role schema and replaces the file atomically and owner-only.
+/// If `change` or validation fails the file is left byte-for-byte unchanged.
+fn mutate(
+    role: &str,
+    path: &Path,
+    change: impl FnOnce(&mut DocumentMut) -> Result<()>,
+) -> Result<()> {
+    let _lock = ConfigLock::acquire(path)?;
+    let text = read_optional(path)?.unwrap_or_default();
+    let mut doc = parse_doc(&text, path)?;
+    change(&mut doc)?;
+    strip_retired_fields(&mut doc);
+    let rendered = doc.to_string();
+    validate_role_doc(role, &rendered, path)?;
+    write_atomic(path, rendered.as_bytes())
 }
 
 /// Return the first `[[services]]` table whose `name` matches, if any.
@@ -272,56 +427,25 @@ fn find_service<'a>(doc: &'a DocumentMut, name: &str) -> Option<&'a toml_edit::T
 /// (name regex/length, port range, node_id length, duplicate names, https
 /// relay_urls). A failure is a `CliError::Config` → exit 2.
 fn validate_role_doc(role: &str, content: &str, path: &Path) -> Result<()> {
-    let parsed: Result<(), anyhow::Error> = match role {
-        "access" => {
-            let cfg: crate::config::AccessConfig = toml::from_str(content)?;
-            cfg.validate()
-        }
-        _ => {
-            let cfg: crate::config::ServeConfig = toml::from_str(content)?;
-            cfg.validate()
-        }
+    let invalid = |detail: String| -> anyhow::Error {
+        CliError::Config(format!("invalid config at {}{detail}", path.display())).into()
     };
-    parsed
-        .map_err(|e| CliError::Config(format!("invalid config at {}: {e}", path.display())).into())
-}
-
-fn write_doc(path: &Path, doc: &mut DocumentMut) -> Result<()> {
-    // Config commands preserve comments/formatting instead of serializing the
-    // schema, so discard the retired field here too (CFG-03).
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(tables) = services.as_array_of_tables_mut() {
-            for service in tables.iter_mut() {
-                service.remove("multiplex");
-            }
-        } else if let Some(array) = services.as_array_mut() {
-            for service in array
-                .iter_mut()
-                .filter_map(|value| value.as_inline_table_mut())
-            {
-                service.remove("multiplex");
-            }
-        }
+    // `toml` errors quote the offending source line, which can hold a secret;
+    // report the message and line only (RS-10).
+    let parse_failure = |e: toml::de::Error| {
+        invalid(format!(
+            "{}: {}",
+            crate::config_store::describe_location(content, e.span()),
+            e.message()
+        ))
+    };
+    match role {
+        "access" => toml::from_str::<crate::config::AccessConfig>(content)
+            .map_err(parse_failure)?
+            .validate(),
+        _ => toml::from_str::<crate::config::ServeConfig>(content)
+            .map_err(parse_failure)?
+            .validate(),
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create config dir: {}", parent.display()))?;
-        }
-    }
-    std::fs::write(path, doc.to_string())
-        .with_context(|| format!("failed to write config: {}", path.display()))?;
-
-    // The serve config carries the node SecretKey, so tighten the file
-    // permissions to owner-only on Unix. Best-effort: a failure to chmod is
-    // logged but does not fail the write (NFR-05: never log the key itself).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!("failed to set restrictive perms on {}: {e}", path.display());
-        }
-    }
-
-    Ok(())
+    .map_err(|e| invalid(format!(": {e}")))
 }

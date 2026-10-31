@@ -15,6 +15,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod config_cmd;
+pub(crate) mod config_store;
 pub mod conn_path;
 pub mod endpoint;
 pub mod error;

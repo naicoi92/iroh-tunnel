@@ -197,26 +197,34 @@ pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
         Ok(cfg)
     }
 
-    /// Serialize and write the config to disk.
+    /// Serialize and write the config to disk: under the writer lock,
+    /// atomically and owner-only (CFG-04).
     fn save(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self).context("failed to serialize config")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("failed to write config: {}", path.display()))?;
-        Ok(())
+        let path = crate::config_store::resolve_target(path);
+        let _lock = crate::config_store::ConfigLock::acquire(&path)?;
+        crate::config_store::write_atomic(&path, content.as_bytes())
     }
 
     /// Resolve the node secret key; if it was just generated, persist it back
     /// into the config file. Returns the resolved key.
     ///
-    /// The key value itself is never logged (NFR-05).
-    fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
+    /// The key is stored by editing the file in place, owner-only, under the
+    /// writer lock; if another process stored a key first, that key is
+    /// adopted. The key value itself is never logged (NFR-05).
+    fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey>
+    where
+        Self: Sized,
+    {
         let (key, needs_save) = resolve_secret_key(&self.node_mut().secret_key)?;
-        if needs_save {
-            tracing::warn!("secret_key empty, generated new key, saving to config");
-            self.node_mut().secret_key = encode_secret_key(&key);
-            self.save(path)?;
+        if !needs_save {
+            return Ok(key);
         }
-        Ok(key)
+        tracing::warn!("secret_key empty, generated new key, saving to config");
+        let stored =
+            crate::config_store::persist_generated_key::<Self>(path, &encode_secret_key(&key))?;
+        self.node_mut().secret_key = stored;
+        Ok(resolve_secret_key(&self.node_mut().secret_key)?.0)
     }
 }
 

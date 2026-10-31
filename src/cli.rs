@@ -205,6 +205,9 @@ pub enum ConfigAction {
         /// Config file to write; not allowed with `random`.
         #[arg(short, long)]
         config: Option<PathBuf>,
+        /// Replace an existing key without asking; not allowed with `random`.
+        #[arg(short, long)]
+        yes: bool,
         #[command(subcommand)]
         mode: Option<KeygenMode>,
     },
@@ -212,17 +215,40 @@ pub enum ConfigAction {
     Add(AddServiceArgs),
     /// Remove a service from config by name.
     Remove {
+        /// Config file path (default: OS-specific).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
         #[arg(long)]
         name: String,
     },
     /// List services in config.
-    List,
-    /// Print config file content (pretty).
-    Show,
-    /// Open config in $EDITOR.
-    Edit,
+    List {
+        /// Config file path (default: OS-specific).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Print config file content; `secret_key` and `relay_token` are hidden
+    /// unless `--reveal` is given.
+    Show {
+        /// Config file path (default: OS-specific).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// Print `secret_key` and `relay_token` instead of hiding them.
+        #[arg(long)]
+        reveal: bool,
+    },
+    /// Open config in $EDITOR; the result is validated before it is saved.
+    Edit {
+        /// Config file path (default: OS-specific).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
     /// Print config file path.
-    Path,
+    Path {
+        /// Config file path (default: OS-specific).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 /// Alternative `config keygen` modes.
