@@ -243,7 +243,7 @@ mod macos_migration {
             write(&legacy, &content, source_mode);
             let before = std::fs::metadata(&legacy).unwrap().modified().unwrap();
 
-            let out = tunnel(&home, &[role, "config", "show"]);
+            let out = tunnel(&home, &[role, "config", "show", "--reveal"]);
             assert!(out.status.success(), "{}", stderr(&out));
             assert_eq!(stdout(&out), content, "migrated bytes must be identical");
 
@@ -324,7 +324,7 @@ mod macos_migration {
         let children: Vec<_> = (0..12)
             .map(|_| {
                 Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
-                    .args(["serve", "config", "show"])
+                    .args(["serve", "config", "show", "--reveal"])
                     .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
                     .env("HOME", &home)
                     .stdout(std::process::Stdio::piped())
@@ -361,6 +361,7 @@ mod macos_migration {
                 "serve",
                 "config",
                 "keygen",
+                "--yes",
                 "--config",
                 custom.to_str().unwrap(),
             ],

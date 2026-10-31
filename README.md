@@ -247,14 +247,32 @@ iroh-tunnel serve config keygen
 # Add the service you want to expose.
 iroh-tunnel serve config add --name postgres --protocol tcp --port 5432
 
-# Run it — note the NodeId it prints. That's the address clients dial.
+# Review the config (secret_key and relay_token are hidden; add --reveal to print them).
 iroh-tunnel serve config show
+
+# Run it — note the NodeId it prints. That's the address clients dial.
 iroh-tunnel serve run        # prints:  NodeId: <hex>
 ```
 
 To mint a key without touching any config (for a secret store or `--key-file`),
 use `iroh-tunnel serve config keygen random`: it prints `Secret key:` and
 `Node ID:` and writes nothing.
+
+Configuration safeguards (all `config` commands accept `--config PATH`):
+
+- `config keygen` asks before replacing an existing key, because that changes
+  the NodeId. Pass `--yes` to skip the question; without a terminal and without
+  `--yes` it fails and keeps the key.
+- `config show` hides `secret_key` and `relay_token` unless you pass `--reveal`.
+- `run`, `list` and `show` with no configuration fail with the same guidance
+  and create nothing — no file, directory or identity. `add` and `keygen`
+  create the file.
+- Every change is validated before it is saved, written atomically (a temp
+  file is fsynced and renamed) and kept owner-only (`0600`). Writers take an
+  advisory lock on `<config>.lock` and wait up to 10 seconds. `config edit`
+  validates your edit when the editor exits; a rejected edit leaves the file
+  unchanged and is kept in `<config>.rejected`. If the file changed while you
+  were editing, your edit is not applied.
 
 **2. On the access host** (your laptop, anywhere):
 
@@ -374,8 +392,8 @@ port = 5433
 Legacy `multiplex` values are silently ignored, including `false`, and removed
 by application-managed config saves (`config add`, `remove`, `keygen`, and
 identity persistence). Loading alone does not rewrite an existing file.
-`config edit` delegates writes to the external editor; its output is not
-rewritten by the app. No setting disables reuse.
+`config edit` validates the editor's result and saves it through the same
+writer, so the field is removed there too. No setting disables reuse.
 
 There is no new protocol negotiation; the ALPN is unchanged. Pre-0.2.0 Serve
 peers accept only one stream per connection and cannot support this contract;

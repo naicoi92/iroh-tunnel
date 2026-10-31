@@ -864,7 +864,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Exit codes, stderr, file hashes and permissions, restart NodeId, redaction scan, commands. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — #99 implementation pending; #98 decisions D1–D6 recorded (only `keygen random` is implemented, in the #98 PR).
+**Execution:** IMPLEMENTED on Unix — #99 evidence in `issue-99-evidence.md` (macOS; Linux in CI). Windows owner-only permission and lock behavior UNVERIFIED.
 
 <a id="release-sign-01"></a>
 ### Case RELEASE-SIGN-01

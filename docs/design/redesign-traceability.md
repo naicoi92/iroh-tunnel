@@ -172,9 +172,9 @@ Exact rule wording from baseline spec, line cited. Acceptance IDs below retain d
 
 | CFG-03 | `docs/design/redesign-spec.md:26` | [#83](https://github.com/naicoi92/iroh-tunnel/issues/83) | AC-CFG-04; AC-TCP-03 | Covered #83.AC2 silently ignore both legacy values and omit upon write. |
 
-| CFG-04 | `docs/design/redesign-spec.md:27` | [#98](https://github.com/naicoi92/iroh-tunnel/issues/98) (decision), [#99](https://github.com/naicoi92/iroh-tunnel/issues/99) | AC-CFG-05, 06, 09, 10, 11 (case CFG-LIFECYCLE-01) | Decided in #98 D4/D5. Not implemented; Windows ACL and lock mechanism remain open for #99. |
+| CFG-04 | `docs/design/redesign-spec.md:27` | [#98](https://github.com/naicoi92/iroh-tunnel/issues/98) (decision), [#99](https://github.com/naicoi92/iroh-tunnel/issues/99) | AC-CFG-05, 06, 09, 10, 11 (case CFG-LIFECYCLE-01) | Decided in #98 D4/D5; implemented in #99 (`src/config_store.rs`, `tests/config_lifecycle.rs`). Windows ACL equivalent and Windows lock behavior UNVERIFIED. |
 
-| CFG-05 | `docs/design/redesign-spec.md:28` | [#98](https://github.com/naicoi92/iroh-tunnel/issues/98) (decision), [#99](https://github.com/naicoi92/iroh-tunnel/issues/99) | AC-CFG-07a, 07b, 08, 12 (case CFG-LIFECYCLE-01) | Decided in #98 D1-D3, D6. `keygen random` implemented in the #98 PR; the rest awaits #99. Exact legacy path and migration synchronization remain deferred. |
+| CFG-05 | `docs/design/redesign-spec.md:28` | [#98](https://github.com/naicoi92/iroh-tunnel/issues/98) (decision), [#99](https://github.com/naicoi92/iroh-tunnel/issues/99) | AC-CFG-07a, 07b, 08, 12 (case CFG-LIFECYCLE-01) | Decided in #98 D1-D3, D6. `keygen random` implemented in the #98 PR; the rest in #99 (`tests/config_lifecycle.rs`). Exact legacy path and migration synchronization remain deferred. |
 
 | RO-01 | `docs/design/redesign-spec.md:34` | [#77](https://github.com/naicoi92/iroh-tunnel/issues/77), [#87](https://github.com/naicoi92/iroh-tunnel/issues/87) | AC-RO-01–03 | Revised by #77 final rule: one detected process per role; covered by the #87 final-rule clarification. Status role/owner only implicit #87.AC2. Different roles conditional distinct identity. |
 

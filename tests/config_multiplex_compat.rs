@@ -101,7 +101,7 @@ multiplex = false
             &peer,
         ],
         vec!["remove", "--name", "remove-me"],
-        vec!["keygen"],
+        vec!["keygen", "--yes"],
     ] {
         std::fs::write(&path, &source)?;
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
@@ -234,7 +234,7 @@ fn config_write_error_is_reported_and_readonly_file_preserved() -> Result<()> {
         return Ok(());
     }
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
-        .args(["access", "config", "keygen", "--config"])
+        .args(["access", "config", "keygen", "--yes", "--config"])
         .arg(&path)
         .output()?;
     assert_eq!(output.status.code(), Some(1));
@@ -277,7 +277,7 @@ fn generated_identity_save_drops_legacy_fields_for_both_roles() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn config_edit_preserves_external_editor_output_including_multiplex() -> Result<()> {
+fn config_edit_saves_valid_editor_output_and_drops_multiplex() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     // edit 0.1 splits editor command on whitespace; fixed Unix temp root avoids
     // a workspace or TMPDIR with spaces changing the executable name.
@@ -286,8 +286,9 @@ fn config_edit_preserves_external_editor_output_including_multiplex() -> Result<
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(&path, "# original\n")?;
     let editor_output = temp.path().join("editor-output.toml");
-    let contents = "# editor owns this file\nservices = [{ name = \"echo\", protocol = \"tcp\", port = 5432, multiplex = false }]\n";
-    std::fs::write(&editor_output, contents)?;
+    let peer = iroh::SecretKey::generate().public();
+    let contents = format!("# editor owns this file\nservices = [{{ name = \"echo\", node_id = \"{peer}\", protocol = \"tcp\", port = 5432, multiplex = false }}]\n");
+    std::fs::write(&editor_output, &contents)?;
     let editor = temp.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\ncat \"$IROH_EDITOR_SOURCE\" > \"$1\"\n")?;
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700))?;
@@ -303,6 +304,11 @@ fn config_edit_preserves_external_editor_output_including_multiplex() -> Result<
         "editor failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(std::fs::read_to_string(&path)?, contents);
+    // `edit` validates and is a config write: the retired field is dropped
+    // (CFG-03) while the editor's comments and layout survive (CFG-04).
+    assert_eq!(
+        std::fs::read_to_string(&path)?,
+        contents.replace(", multiplex = false }", "}")
+    );
     Ok(())
 }

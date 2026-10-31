@@ -185,6 +185,7 @@ async fn dispatch_role_cmd(
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
+            config_cmd::require_existing(role, &path)?;
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
             match status_role {
@@ -234,13 +235,17 @@ fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
             mode: Some(KeygenMode::Random),
             ..
         } => config_cmd::keygen_random(),
-        ConfigAction::Keygen { config, mode: None } => config_cmd::keygen(role, config.as_deref()),
+        ConfigAction::Keygen {
+            config,
+            yes,
+            mode: None,
+        } => config_cmd::keygen(role, config.as_deref(), yes),
         ConfigAction::Add(args) => config_cmd::add(role, &args),
-        ConfigAction::Remove { name } => config_cmd::remove(role, None, &name),
-        ConfigAction::List => config_cmd::list(role, None),
-        ConfigAction::Show => config_cmd::show(role, None),
-        ConfigAction::Edit => config_cmd::edit(role, None),
-        ConfigAction::Path => config_cmd::path(role, None),
+        ConfigAction::Remove { config, name } => config_cmd::remove(role, config.as_deref(), &name),
+        ConfigAction::List { config } => config_cmd::list(role, config.as_deref()),
+        ConfigAction::Show { config, reveal } => config_cmd::show(role, config.as_deref(), reveal),
+        ConfigAction::Edit { config } => config_cmd::edit(role, config.as_deref()),
+        ConfigAction::Path { config } => config_cmd::path(role, config.as_deref()),
     }
 }
 
