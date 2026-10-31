@@ -88,10 +88,11 @@ explaining why.
    `feat(scope): …`, `fix(scope): …`, `refactor(scope): …`, `chore: …` —
    where the scope is usually the module or area (`config`, `service`, `ci`,
    `release`, `role-run`, …).
-3. CI (`ci-ok`) must pass. Docs-only PRs skip the heavy jobs. The release
-   build matrix (native targets, deb/apk, Docker) runs on a PR only when
-   `Cargo.*`, `build.rs`, `packaging/` or the build workflows change; shell
-   scripts and workflows are linted whenever they change.
+3. CI (`ci-ok`) must pass. PRs run only fmt, clippy and tests (plus shellcheck
+   and actionlint when scripts or workflows change); docs-only PRs skip them.
+   The release build, packages and images run after merge (`snapshot`) and on
+   tags (`release`). To rehearse them on your branch, run the `snapshot`
+   workflow manually.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
 

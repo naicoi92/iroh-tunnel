@@ -1,12 +1,20 @@
-# Snapshot — full release rehearsal (native build matrix + deb/apk + Docker
-# image build) WITHOUT publishing anything.
+# Post-merge pipeline — runs on push to main and on demand. Never publishes.
 #
-# Triggers (deliberately narrow — the heavy matrix is not run on every push):
-#   - workflow_dispatch: run it by hand against any ref.
-#   - push to main touching files that can break the release build. Ordinary
-#     source changes are already covered by ci.yml (checks + cache warm-up),
-#     and PRs touching these same paths run the same matrix via ci.yml's
-#     `build-check` before merge.
+#   checks (fmt ∥ clippy ∥ test)  ┐ independent, in parallel
+#   build (6 native targets ∥) ─┬─ package (nFPM + verify-dist.sh)  ┐ in parallel
+#                               └─ docker  (3 images, not pushed)   ┘
+#
+# Why it exists:
+#   - Verifies the merged result (PRs are checked against an older main).
+#   - Is the only job that WRITES the Rust caches (see .github/actions/setup-rust);
+#     PRs and release tags restore from them, so the build caches stay warm.
+#   - Rehearses the whole release before a tag, catching target breakage early.
+#
+# Triggers:
+#   - push to main, skipping commits that only touch docs / metadata.
+#   - workflow_dispatch: rehearse the release build on any branch before merging.
+#
+# PR feedback lives in ci.yml; real releases (tag v*) in release.yml.
 
 name: snapshot
 
@@ -15,25 +23,33 @@ on:
   push:
     branches: [main]
     paths:
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "build.rs"
+      - "install.sh"
       - "packaging/**"
       - "Dockerfile.goreleaser*"
-      - ".github/workflows/build.yml"
-      - ".github/workflows/package.yml"
-      - ".github/workflows/docker.yml"
-      - ".github/workflows/snapshot.yml"
+      - ".github/workflows/**"
       - ".github/actions/**"
 
+# Never cancel a main run mid-way: an interrupted run leaves the caches cold.
+# Runs for the same ref queue up and only the newest pending one is kept.
 concurrency:
   group: snapshot-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      windows: true
+
   build:
     uses: ./.github/workflows/build.yml
 

@@ -1,32 +1,26 @@
-# CI — runs on pull requests and on pushes to main.
+# Pull-request CI — fast feedback only. No artifact builds here.
 #
-# Trigger design (no wasted runner minutes):
-#   - The workflow itself has NO path filter, so the `ci-ok` aggregate check
-#     always reports and can be the single required status check. Path
-#     filtering happens in the `changes` job instead; docs-only PRs skip every
-#     heavy job and still go green.
-#   - New pushes to the same PR cancel the superseded run.
-#   - Pushes to main re-run the same jobs; that is what writes the Rust cache
-#     that PRs and release tags restore from (see .github/actions/setup-rust).
+#   changes ─┬─ checks  (fmt ∥ clippy ∥ test linux ∥ test windows)  if code changed
+#            ├─ scripts (shellcheck + actionlint)                   if scripts/workflows changed
+#            └─ ci-ok   (single required check; always reports)
 #
-# Job graph (independent jobs run in parallel):
-#   changes ─┬─ checks (lint ∥ test linux ∥ test windows)
-#            ├─ scripts (shellcheck + actionlint)
-#            ├─ build-check (all release targets; packaging paths only)
-#            │     ├─ package-check (nFPM + verify-dist.sh)   ┐ in parallel
-#            │     └─ docker-check  (3 images, not pushed)    ┘
-#            └─ ci-ok (required check)
+# The release build matrix, packages and images are NOT run on PRs. They run
+# after merge (snapshot.yml, push to main) and on tags (release.yml). To
+# rehearse them on a branch before merging, run the `snapshot` workflow manually
+# (Actions → snapshot → Run workflow, or `gh workflow run snapshot.yml --ref <branch>`).
+#
+# The workflow itself has no path filter so `ci-ok` always reports: a docs-only
+# PR skips every heavy job and still goes green. New pushes to a PR cancel the
+# superseded run.
 
 name: ci
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -40,7 +34,6 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
-      packaging: ${{ steps.filter.outputs.packaging }}
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       - uses: actions/checkout@v7
@@ -57,18 +50,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
+              - 'install.sh'
               - '.github/workflows/checks.yml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            packaging:
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'build.rs'
-              - 'packaging/**'
-              - 'Dockerfile.goreleaser*'
-              - '.github/workflows/build.yml'
-              - '.github/workflows/package.yml'
-              - '.github/workflows/docker.yml'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
             scripts:
@@ -81,28 +64,6 @@ jobs:
     uses: ./.github/workflows/checks.yml
     with:
       windows: true
-
-  # Rehearses the release build (native matrix + deb/apk) only when something
-  # that can break it changed. Artifacts are not published.
-  build-check:
-    needs: changes
-    if: needs.changes.outputs.packaging == 'true'
-    uses: ./.github/workflows/build.yml
-
-  # package-check and docker-check only need the build artifacts, so they run
-  # in parallel with each other.
-  package-check:
-    needs: build-check
-    uses: ./.github/workflows/package.yml
-    with:
-      version: ${{ needs.build-check.outputs.version }}
-
-  docker-check:
-    needs: build-check
-    uses: ./.github/workflows/docker.yml
-    with:
-      push: false
-      version: ${{ needs.build-check.outputs.version }}
 
   # Static checks for shell scripts and workflows; seconds, no build needed.
   scripts:
@@ -121,7 +82,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, checks, scripts, build-check, package-check, docker-check]
+    needs: [changes, checks, scripts]
     runs-on: ubuntu-latest
     steps:
       # `skipped` is fine (path filter); `failure` / `cancelled` is not.
