@@ -19,9 +19,6 @@ use crate::error::CliError;
 /// Task Scheduler refuses a restart interval below one minute.
 const MIN_RESTART_MINUTES: u64 = 1;
 
-/// Environment variable that pins the state directory (see `paths.rs`).
-const STATE_DIR_ENV: &str = "IROH_TUNNEL_STATE_DIR";
-
 /// The command a task runs.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct TaskAction {
@@ -53,45 +50,20 @@ fn ensure_plain(what: &str, path: &Path) -> Result<()> {
 
 /// Build the action for `iroh-tunnel {role} run --config {config}`.
 ///
-/// A task cannot carry environment variables, so a state directory that
-/// differs from the user's default is pinned through a `cmd.exe` wrapper that
-/// sets `IROH_TUNNEL_STATE_DIR` first. When `state_override` is `None` the
-/// binary is started directly, so `schtasks /End` acts on the tunnel process
-/// itself.
+/// The binary is started directly, never through a shell wrapper: measured on
+/// real Windows, `schtasks /End` terminates only the task's own process, so a
+/// wrapper would be killed and leave the tunnel running orphaned.
 ///
 /// # Errors
 ///
 /// [`CliError::Config`] when a path contains `"` or `%`.
-pub(super) fn task_action(
-    role: &str,
-    binary: &Path,
-    config: &Path,
-    state_override: Option<&Path>,
-) -> Result<TaskAction> {
+pub(super) fn task_action(role: &str, binary: &Path, config: &Path) -> Result<TaskAction> {
     ensure_plain("binary", binary)?;
     ensure_plain("config", config)?;
-    let run = format!(
-        "\"{}\" {role} run --config \"{}\"",
-        binary.display(),
-        config.display()
-    );
-    match state_override {
-        None => Ok(TaskAction {
-            command: binary.to_string_lossy().into_owned(),
-            arguments: format!("{role} run --config \"{}\"", config.display()),
-        }),
-        Some(state) => {
-            ensure_plain("state", state)?;
-            Ok(TaskAction {
-                command: "cmd.exe".to_owned(),
-                // `/s` strips exactly the outer pair of quotes.
-                arguments: format!(
-                    "/d /s /c \"set \"{STATE_DIR_ENV}={}\" && {run}\"",
-                    state.display()
-                ),
-            })
-        }
-    }
+    Ok(TaskAction {
+        command: binary.to_string_lossy().into_owned(),
+        arguments: format!("{role} run --config \"{}\"", config.display()),
+    })
 }
 
 /// Render the Task Scheduler XML for the current user's background task.
@@ -180,13 +152,12 @@ mod tests {
             "serve",
             Path::new(r"C:\Program Files\it\iroh-tunnel.exe"),
             Path::new(r"C:\Users\me\AppData\Local\iroh-tunnel\config\serve.toml"),
-            None,
         )
         .unwrap()
     }
 
     #[test]
-    fn default_state_runs_the_binary_directly_with_the_pinned_config() {
+    fn task_runs_the_binary_directly_with_the_pinned_config() {
         let action = direct();
         assert_eq!(action.command, r"C:\Program Files\it\iroh-tunnel.exe");
         assert_eq!(
@@ -196,42 +167,14 @@ mod tests {
     }
 
     #[test]
-    fn overridden_state_dir_is_pinned_through_a_cmd_wrapper() {
-        let action = task_action(
-            "access",
-            Path::new(r"C:\bin\iroh-tunnel.exe"),
-            Path::new(r"C:\cfg\access.toml"),
-            Some(Path::new(r"D:\st ate")),
-        )
-        .unwrap();
-        assert_eq!(action.command, "cmd.exe");
-        assert_eq!(
-            action.arguments,
-            r#"/d /s /c "set "IROH_TUNNEL_STATE_DIR=D:\st ate" && "C:\bin\iroh-tunnel.exe" access run --config "C:\cfg\access.toml"""#
-        );
-    }
-
-    #[test]
     fn paths_that_cmd_would_rewrite_are_refused_as_config_errors() {
         for bad in [r"C:\100%\a.toml", "C:\\a\"b.toml"] {
-            let err =
-                task_action("serve", Path::new(r"C:\b.exe"), Path::new(bad), None).unwrap_err();
+            let err = task_action("serve", Path::new(r"C:\b.exe"), Path::new(bad)).unwrap_err();
             assert!(
                 matches!(err.downcast_ref::<CliError>(), Some(CliError::Config(_))),
                 "{bad}: {err:?}"
             );
         }
-        let err = task_action(
-            "serve",
-            Path::new(r"C:\b.exe"),
-            Path::new(r"C:\c.toml"),
-            Some(Path::new(r"C:\%TEMP%")),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err.downcast_ref::<CliError>(),
-            Some(CliError::Config(_))
-        ));
     }
 
     #[test]
@@ -289,7 +232,6 @@ mod tests {
             "serve",
             Path::new(r"C:\a&b\it.exe"),
             Path::new(r"C:\<x>\s.toml"),
-            None,
         )
         .unwrap();
         let xml = format_task_xml("serve", r"HOST\o&m", &action, &POLICY);

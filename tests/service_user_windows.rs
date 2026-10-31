@@ -69,8 +69,10 @@ impl Fixture {
     fn config(&self) -> PathBuf {
         self.base().join("cfg dir").join("serve.toml")
     }
+    /// The task cannot carry `IROH_TUNNEL_STATE_DIR`, so the real per-user
+    /// default is used (the test is opt-in and removes its task on exit).
     fn state(&self) -> PathBuf {
-        self.base().join("state dir")
+        iroh_tunnel::paths::default_state_dir().expect("default state dir")
     }
     fn write_config(&self, relay: &str) -> Result<()> {
         let key = iroh::SecretKey::generate();
@@ -89,7 +91,7 @@ impl Fixture {
         let mut command = Command::new(BIN);
         command
             .args(args)
-            .env("IROH_TUNNEL_STATE_DIR", self.state())
+            .env_remove("IROH_TUNNEL_STATE_DIR")
             .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
             .env_remove("IROH_TUNNEL_TEST_INTERACTIVE")
             .stdin(std::process::Stdio::null())
@@ -151,6 +153,30 @@ fn system_scope_is_unsupported_on_windows() -> Result<()> {
             "{args:?}: {err}"
         );
     }
+    assert!(!fx.task_exists(), "nothing may be registered");
+    Ok(())
+}
+
+#[test]
+fn install_refuses_a_state_directory_the_task_cannot_carry() -> Result<()> {
+    let fx = Fixture::new()?;
+    fx.write_config("https://relay.invalid")?;
+    let config = fx.config();
+    let other = fx.base().join("elsewhere");
+    let out = fx
+        .command(&[
+            "serve",
+            "service",
+            "install",
+            "--user",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .env("IROH_TUNNEL_STATE_DIR", &other)
+        .output()?;
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("IROH_TUNNEL_STATE_DIR"), "{err}");
     assert!(!fx.task_exists(), "nothing may be registered");
     Ok(())
 }

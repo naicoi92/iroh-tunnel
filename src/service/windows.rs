@@ -83,17 +83,30 @@ fn require_installed(role: &str) -> Result<()> {
     }
 }
 
-/// The state directory to pin, or `None` when it is the user's default (then
-/// the task runs the binary directly and `/End` acts on the tunnel itself).
-fn state_override(state: &Path) -> Result<Option<&Path>> {
+/// Refuse a state directory other than the user's default.
+///
+/// A scheduled task cannot carry an environment variable, and wrapping the
+/// binary in a shell to set one would make `schtasks /End` kill only the
+/// wrapper. Refusing keeps stop reliable and the pinned paths honest.
+fn ensure_default_state(state: &Path) -> Result<()> {
     let default = crate::paths::default_state_dir()?;
-    Ok((state != default).then_some(state))
+    if state == default {
+        return Ok(());
+    }
+    Err(CliError::Config(format!(
+        "the user-background task always uses the default state directory {}, but \
+         IROH_TUNNEL_STATE_DIR selects {}; unset IROH_TUNNEL_STATE_DIR and re-run",
+        default.display(),
+        state.display()
+    ))
+    .into())
 }
 
 pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
     debug_assert_eq!(scope, ServiceScope::User, "system scope is refused earlier");
     let binary = resolve_binary()?;
-    let action = task_action(role, &binary, config, state_override(state)?)?;
+    ensure_default_state(state)?;
+    let action = task_action(role, &binary, config)?;
     let xml = format_task_xml(role, &current_user()?, &action, &RestartPolicy::DEFAULT);
 
     let definition = TempDefinition::write(&encode_utf16_le(&xml))?;
