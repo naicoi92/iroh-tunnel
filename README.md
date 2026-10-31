@@ -104,6 +104,27 @@ iroh-tunnel --version          # → iroh-tunnel 0.2.0
 The cask removes the macOS quarantine attribute automatically, so Gatekeeper
 will not block the unsigned binary.
 
+### Linux (shell installer)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/install.sh | sudo sh
+```
+
+By default this installs all three binaries system-wide into `/usr/local/bin`:
+`iroh-tunnel` (alias `it`), `iroh-tunnel-serve` (`its`) and
+`iroh-tunnel-access` (`ita`). Aliases are symlinks. The installer asks before
+replacing a different file and before adding the directory to `PATH` (a
+snippet in `/etc/profile.d`). Declining a replacement stops with nothing
+changed. Without a terminal the answer is no; pass `--yes` to accept.
+
+Options: `--version X` (default: latest stable), `--bin-dir DIR`, `--profile-dir DIR`,
+`--dry-run`. It never registers or changes a service.
+
+It verifies the SHA-256 checksum from the release. Signature verification is not
+available yet (signed release artifacts: issue #100). macOS and Windows role
+binaries are not published yet (issue #124), so there is no PowerShell installer
+yet.
+
 ### Linux (`.deb` / `.apk`)
 
 Packages are binary-only: they install the executable and its alias and no
