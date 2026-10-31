@@ -384,8 +384,8 @@ pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<s
 pub fn require_existing(role: &str, path: &Path) -> Result<String> {
     read_optional(path)?.ok_or_else(|| {
         CliError::Config(format!(
-            "no configuration at {path}. Create one with `iroh-tunnel {role} config add` or \
-             `iroh-tunnel {role} config keygen`, or pass --config",
+            "no configuration at {path}. Create one with `config add` or `config keygen` \
+             (`iroh-tunnel {role} config add`, or `iroh-tunnel-{role} config add`), or pass --config",
             path = path.display()
         ))
         .into()

@@ -27,7 +27,7 @@ The owner decided D1–D5 only; these closed the open items or follow from D4 an
 
 ## Review rework
 
-Standards and Spec reviews of `92a3551..9511b4b` found: inline `node = {…}` rejected by keygen/run (fixed, test); parse/validation errors quoted secret lines (fixed: message + line only, test); lock timeout exited 1 (now 2); `remove` on a missing config created a directory (fixed, test); directory-fsync failure after rename reported an error (now a warning); restart-reuse test compared the file to itself (now compares printed NodeId across two runs). Not changed: blocking lock wait in async `run` startup (bounded, startup only); guidance error names `iroh-tunnel <role> config` for standalone binaries too.
+Standards and Spec reviews of `92a3551..9511b4b` found: inline `node = {…}` rejected by keygen/run (fixed, test); parse/validation errors quoted secret lines (fixed: message + line only, test); lock timeout exited 1 (now 2); `remove` on a missing config created a directory (fixed, test); directory-fsync failure after rename reported an error (now a warning); restart-reuse test compared the file to itself (now compares printed NodeId across two runs). Follow-up: `run` loads and saves the key in `spawn_blocking` (RS-07); the guidance error names both `iroh-tunnel <role>` and `iroh-tunnel-<role>`; `tests/config_lifecycle_windows.rs` runs the portable scenarios (AC-CFG-05, 06, 07a, 07b, 08, 11, lock timeout, no secret in parse errors) on the Windows runner. Owner-only ACL, kill-during-save and the `run` restart check remain Unix-only; Windows ACL stays UNVERIFIED.
 
 ## Intentional behavior changes (AC3)
 
