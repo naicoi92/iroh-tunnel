@@ -72,11 +72,7 @@ jobs:
           $script = Join-Path $work 'run.ps1'
           @"
           `$ErrorActionPreference = 'Continue'
-          "whoami=`$(whoami) LOCALAPPDATA=`$env:LOCALAPPDATA USERPROFILE=`$env:USERPROFILE"
-          `$env:USERNAME = (whoami).Split('\\')[1]
-          `$env:USERPROFILE = 'C:\Users\stdtest'
-          `$env:LOCALAPPDATA = 'C:\Users\stdtest\AppData\Local'
-          New-Item -ItemType Directory -Force `$env:LOCALAPPDATA | Out-Null
+          "whoami=`$(whoami) TEMP=`$env:TEMP LOCALAPPDATA=`$env:LOCALAPPDATA"
           `$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrator')
           "isAdmin=`$isAdmin user=`$env:USERNAME"
           `$cfg = '$work\serve.toml'
@@ -91,6 +87,15 @@ jobs:
           "query-after-delete exit=`$LASTEXITCODE (expected non-zero)"
           "@ | Set-Content $script
           $out = Join-Path $work 'out.txt'
+          # The child inherits this environment; point it at the new user's profile.
+          $profileDir = 'C:\Users\stdtest'
+          New-Item -ItemType Directory -Force "$profileDir\AppData\Local\Temp" | Out-Null
+          icacls $profileDir /grant 'stdtest:(OI)(CI)F' /T | Out-Null
+          $env:USERPROFILE = $profileDir
+          $env:LOCALAPPDATA = "$profileDir\AppData\Local"
+          $env:TEMP = "$profileDir\AppData\Local\Temp"
+          $env:TMP = $env:TEMP
+          $env:USERNAME = 'stdtest'
           $p = Start-Process pwsh -Credential $cred -LoadUserProfile -WorkingDirectory $work `
             -ArgumentList '-NoProfile','-File',$script -RedirectStandardOutput $out -RedirectStandardError "$out.err" -Wait -PassThru
           "child exit=$($p.ExitCode)"
