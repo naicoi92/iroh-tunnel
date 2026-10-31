@@ -267,18 +267,22 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
     // when it is not given.
     let existing = |verb: &str, args: &ScopeArgs| -> anyhow::Result<ServiceScope> {
         let scope = explicit(args).unwrap_or_else(|| scope::default_scope(env.elevated));
+        scope::ensure_supported(scope)?;
         let rerun = ["iroh-tunnel", role, "service", verb, flag(scope)].map(str::to_owned);
         scope::ensure_privilege(scope, env.elevated, &rerun)?;
         Ok(scope)
     };
     match action {
         ServiceAction::Install { config, scope } => {
+            // Windows has only the user scope, so there is nothing to ask.
+            let requested = explicit(&scope).or(cfg!(windows).then_some(ServiceScope::User));
             let scope = scope::choose_install_scope(
-                explicit(&scope),
+                requested,
                 env,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stderr(),
             )?;
+            scope::ensure_supported(scope)?;
             // Persist absolute paths: the installed service runs with a
             // different CWD and home, so nothing may stay relative (SM-02).
             let config = absolutize_config_path(&resolve_config_path(role, config)?)?;

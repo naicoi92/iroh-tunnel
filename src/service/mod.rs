@@ -5,7 +5,9 @@
 //! (detected via `/run/systemd/system`), otherwise a BusyBox/SysV init backend
 //! that installs an `/etc/init.d/S??iroh-tunnel-<role>` script. The latter
 //! covers embedded buildroot devices such as the Sipeed NanoKVM, whose busybox
-//! init runs every executable `/etc/init.d/S*` script on boot.
+//! init runs every executable `/etc/init.d/S*` script on boot. On Windows the
+//! backend is a per-user Task Scheduler task that runs in the logged-in
+//! session (user scope only; SM-04, issue #92).
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +22,9 @@ mod launchd;
 pub mod scope;
 #[cfg(target_os = "linux")]
 mod systemd;
+mod task_xml;
+#[cfg(windows)]
+mod windows;
 
 /// Restart policy shared by every platform's service template.
 ///
@@ -90,7 +95,11 @@ pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> 
     {
         launchd::install(role, scope, config, state)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::install(role, scope, config, state)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (role, scope, config, state);
         unsupported()
@@ -111,7 +120,11 @@ pub fn uninstall(role: &str, scope: ServiceScope) -> Result<()> {
     {
         launchd::uninstall(role, scope)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::uninstall(role, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (role, scope);
         unsupported()
@@ -132,7 +145,11 @@ pub fn start(role: &str, scope: ServiceScope) -> Result<()> {
     {
         launchd::start(role, scope)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::start(role, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (role, scope);
         unsupported()
@@ -153,7 +170,11 @@ pub fn stop(role: &str, scope: ServiceScope) -> Result<()> {
     {
         launchd::stop(role, scope)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::stop(role, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (role, scope);
         unsupported()
@@ -174,7 +195,11 @@ pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
     {
         launchd::restart(role, scope)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::restart(role, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (role, scope);
         unsupported()
@@ -195,7 +220,11 @@ pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
     {
         launchd::status(role, scope)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::status(role, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (role, scope);
         unsupported()
@@ -266,10 +295,11 @@ fn linux_is_systemd() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn unsupported() -> Result<()> {
     anyhow::bail!(
-        "service management is only supported on Linux (systemd/BusyBox init) and macOS (launchd)"
+        "service management is only supported on Linux (systemd/BusyBox init), macOS (launchd) \
+         and Windows (user background task)"
     )
 }
 

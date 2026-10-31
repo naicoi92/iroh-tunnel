@@ -1,0 +1,39 @@
+# Real Task Scheduler lifecycle of the Windows user-background role (#92).
+# Manual: it registers a scheduled task on the runner, so it is not part of PR CI.
+#   gh workflow run windows-service-e2e.yml --ref <branch>
+
+name: windows-service-e2e
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: windows-service-e2e
+      - name: Session facts
+        shell: pwsh
+        run: |
+          whoami /all | Select-String -Pattern 'Mandatory Label|Session' 
+          "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          [Environment]::UserInteractive
+          (Get-Process -Id $PID).SessionId
+      - name: User-background lifecycle
+        shell: pwsh
+        env:
+          IROH_TUNNEL_E2E_SERVICE: "1"
+        run: cargo test --all-features --locked --test service_user_windows -- --nocapture --test-threads=1
