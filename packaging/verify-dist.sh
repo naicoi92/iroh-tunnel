@@ -141,6 +141,11 @@ docker_arch() {
     esac
 }
 
+local_image() {
+    docker image ls --format '{{.Repository}}:{{.Tag}}' "ghcr.io/naicoi92/$1" |
+        grep -- "-$2\$" | head -n1 || true
+}
+
 # Install ONE package into an empty container, run its role via the alias, then
 # remove it and check nothing is left behind.
 runtime() {
@@ -152,6 +157,12 @@ runtime() {
         esac
         for entry in $EXECUTABLES; do
             bin=${entry%%:*} link=${entry##*:}
+            # The package manager's own database must name this package as the
+            # owner of the binary and of the alias link.
+            case "$format" in
+            deb) owned="dpkg -S" own_re="^$bin: " ;;
+            apk) owned="apk info -W" own_re="owned by $bin-[0-9]" ;;
+            esac
             pkg=$(only_match "$DIST/${bin}_*_${arch}.$format") ||
                 { fail "no $bin .$format for $arch"; continue; }
             if out=$(docker run --rm -v "$pkg:/pkg.$format:ro" "$image" sh -ec "
@@ -161,12 +172,15 @@ runtime() {
                     if command -v \$other; then echo unexpected \$other; exit 1; fi
                 done
                 test \"\$(readlink \$(command -v $link))\" = $bin
+                for path in /usr/bin/$bin /usr/bin/$link; do
+                    $owned \$path | grep -q \"$own_re\"
+                done
                 $link --help >/dev/null
                 $remove $bin >/dev/null
                 hash -r
                 if command -v $bin || command -v $link; then echo left behind; exit 1; fi
             " 2>&1); then
-                pass "$pkg installs alone on $image, $link --help runs, removal is clean"
+                pass "$pkg installs alone on $image, $link --help runs, removal is clean, package database owns binary and alias"
             else
                 fail "$pkg on $image: $out"
             fi
@@ -206,8 +220,7 @@ images() {
     arch=$(docker_arch)
     for entry in $EXECUTABLES; do
         bin=${entry%%:*}
-        img=$(docker image ls --format '{{.Repository}}:{{.Tag}}' "ghcr.io/naicoi92/$bin" |
-            grep -- "-$arch\$" | head -n1 || true)
+        img=$(local_image "$bin" "$arch")
         [ -n "$img" ] || { fail "no local $bin image for $arch"; continue; }
         entry_point=$(docker image inspect --format '{{json .Config.Entrypoint}}' "$img")
         case "$entry_point" in
@@ -265,7 +278,8 @@ start_role() {
     esac
 }
 
-# One Serve and one Access, each started from its own SPEC (see start_role),
+# One Serve and one Access, each started from its own SPEC (see start_role;
+# optional 5th/6th arguments are the role subcommands of the all-in-one),
 # reaching an echo target on a private Docker network through the public
 # relays. The client must get its own bytes back. Everything is removed on
 # return.
@@ -282,16 +296,20 @@ forward_case() {
 
 forward_exchange() {
     net="$1" label="$2" serve_spec="$3" access_spec="$4" ok=0 out=""
+    # The all-in-one executable selects its role with a subcommand.
+    serve_role="${5:-}" access_role="${6:-}"
     docker run -d --name "$net-target" --network "$net" alpine:3.21 \
         sh -c 'nc -lk -p 9000 -e cat' >/dev/null
     target=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$net-target")
-    start_role "$net-serve" "$net" "$serve_spec" -n verify -t "$target:9000"
+    # shellcheck disable=SC2086 # the role prefix is empty or one word
+    start_role "$net-serve" "$net" "$serve_spec" $serve_role -n verify -t "$target:9000"
     if ! wait_log "$net-serve" "NodeId: "; then
         fail "$label: serve did not start: $(docker logs "$net-serve" 2>&1 | tail -n 5)"
         return
     fi
     node=$(docker logs "$net-serve" 2>&1 | sed -n 's/^NodeId: //p' | head -n1)
-    start_role "$net-access" "$net" "$access_spec" -n verify -l 0.0.0.0:7000 -N "$node"
+    # shellcheck disable=SC2086
+    start_role "$net-access" "$net" "$access_spec" $access_role -n verify -l 0.0.0.0:7000 -N "$node"
     if ! wait_log "$net-access" "listening for local clients"; then
         fail "$label: access did not start: $(docker logs "$net-access" 2>&1 | tail -n 5)"
         return
@@ -310,11 +328,6 @@ forward_exchange() {
     fi
 }
 
-local_image() {
-    docker image ls --format '{{.Repository}}:{{.Tag}}' "ghcr.io/naicoi92/$1" |
-        grep -- "-$2\$" | head -n1 || true
-}
-
 forward() {
     arch=$(docker_arch)
     serve_img=$(local_image iroh-tunnel-serve "$arch")
@@ -324,6 +337,17 @@ forward() {
     else
         fail "no local role images for $arch"
     fi
+    aio_img=$(local_image iroh-tunnel "$arch")
+    if [ -n "$aio_img" ]; then
+        forward_case "all-in-one-image" "$aio_img" "$aio_img" serve access
+    else
+        fail "no local iroh-tunnel image for $arch"
+    fi
+    for format in deb apk; do
+        aio_pkg=$(only_match "$DIST/iroh-tunnel_*_${arch}.$format") ||
+            { fail "no all-in-one .$format for $arch"; continue; }
+        forward_case "all-in-one-package-$format" "$format:$aio_pkg:it" "$format:$aio_pkg:it" serve access
+    done
     for format in deb apk; do
         serve_pkg=$(only_match "$DIST/iroh-tunnel-serve_*_${arch}.$format") &&
             access_pkg=$(only_match "$DIST/iroh-tunnel-access_*_${arch}.$format") ||
