@@ -177,7 +177,7 @@ pub enum RoleCmd {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
-    /// Config management (keygen/add/remove/list/show/edit/path).
+    /// Config management (keygen [random]/add/remove/list/show/edit/path).
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -198,8 +198,11 @@ pub enum RoleCmd {
 /// Config sub-actions.
 #[derive(Subcommand, Debug)]
 pub enum ConfigAction {
-    /// Generate/rotate secret_key, write to config file.
+    /// Generate/rotate secret_key and write it to the config file; use
+    /// `keygen random` to print a key without saving.
+    #[command(args_conflicts_with_subcommands = true)]
     Keygen {
+        /// Config file to write; not allowed with `random`.
         #[arg(short, long)]
         config: Option<PathBuf>,
         #[command(subcommand)]

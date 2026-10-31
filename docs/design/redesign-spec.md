@@ -104,7 +104,7 @@ These scenarios do not change the confirmed rules above. Proposed outcomes requi
 |---|---|---|
 | Invalid config mutation | Reject before persisting; keep prior valid file and identity. | AC-CFG-05: validation failure leaves config unchanged. |
 | Concurrent config writes | Serialize through an advisory lock; no corruption or silent lost update (CFG-04). | AC-CFG-06: two writers do not produce corrupted or silently lost changes. |
-| Key rotation or config display | Rotation changes peer identity and needs confirmation (`--yes` to skip); `show` redacts secrets unless `--reveal` (CFG-05). | AC-CFG-07: approved policy is tested for secret disclosure and rotation before release. |
+| Key rotation or config display | Rotation changes peer identity and needs confirmation (`--yes` to skip); `show` redacts secrets unless `--reveal` (CFG-05). | AC-CFG-07a/07b: approved policy is tested for secret disclosure and rotation before release. |
 | Install service already targeting another user's config | Confirm retarget; decline leaves service and both config files unchanged. | AC-SM-05: declining confirmation produces no retarget. |
 | Missing privilege / unknown invoking user | Stop with elevation instructions; when user is unknown, select interactively or fail with explicit paths in non-interactive mode. | AC-SM-06: no silent root-home substitution. |
 

@@ -48,8 +48,8 @@ pub fn keygen(role: &str, config: Option<&Path>) -> Result<()> {
 /// `config keygen random`: print a fresh key and its node ID without touching
 /// any configuration file or the default path.
 ///
-/// The secret goes to stdout only, so it can be captured (`$(…)`, pipes) while
-/// diagnostics stay on stderr. It is never logged.
+/// The secret goes to stdout only, so it can be captured (`$(…)`, pipes). It is
+/// never logged.
 pub fn keygen_random() -> Result<()> {
     let key = iroh::SecretKey::generate();
     println!("Secret key: {}", crate::config::encode_secret_key(&key));
