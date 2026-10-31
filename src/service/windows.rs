@@ -26,13 +26,20 @@ fn task_name(role: &str) -> String {
     format!("iroh-tunnel-{role}{}", instance_suffix())
 }
 
-/// `DOMAIN\name` of the current user, as Task Scheduler wants it.
+/// `DOMAIN\name` of the account the process runs as, asked of the OS.
+///
+/// `USERNAME`/`USERDOMAIN` are inherited environment and can name another
+/// account than the token (for example after a credentialed launch), which
+/// would bind the logon trigger to the wrong user.
 fn current_user() -> Result<String> {
-    let name = std::env::var("USERNAME").context("USERNAME is not set")?;
-    Ok(match std::env::var("USERDOMAIN") {
-        Ok(domain) if !domain.is_empty() => format!(r"{domain}\{name}"),
-        _ => name,
-    })
+    let output = Command::new("whoami")
+        .output()
+        .context("failed to run whoami")?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || name.is_empty() {
+        return Err(CliError::Service("whoami did not report the current user".into()).into());
+    }
+    Ok(name)
 }
 
 /// Run `schtasks` with `args`, returning its output whatever the status.

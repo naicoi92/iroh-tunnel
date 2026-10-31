@@ -72,6 +72,11 @@ jobs:
           $script = Join-Path $work 'run.ps1'
           @"
           `$ErrorActionPreference = 'Continue'
+          "whoami=`$(whoami) LOCALAPPDATA=`$env:LOCALAPPDATA USERPROFILE=`$env:USERPROFILE"
+          `$env:USERNAME = (whoami).Split('\\')[1]
+          `$env:USERPROFILE = 'C:\Users\stdtest'
+          `$env:LOCALAPPDATA = 'C:\Users\stdtest\AppData\Local'
+          New-Item -ItemType Directory -Force `$env:LOCALAPPDATA | Out-Null
           `$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrator')
           "isAdmin=`$isAdmin user=`$env:USERNAME"
           `$cfg = '$work\serve.toml'
