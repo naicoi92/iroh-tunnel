@@ -147,3 +147,13 @@ scripts and are documented. Platform detection (`uname`, Intel rejection) and
 the default `/etc/paths.d` are not exercised by tests; Windows PowerShell 5.1 is
 not tested (pwsh 7 only). #93 stays open until a real Windows run and
 signatures (#100/#80).
+
+## CI on head `ad4645a` (PR #129, run 41196340659)
+
+All jobs pass (`lint`, `scripts`, `test (ubuntu-latest)`, `test (windows-latest)`, `ci-ok`).
+`windows-latest` ran `installer_ps` 15/15 with PowerShell 7 on a real Windows
+host, including `registry_machine_path_is_changed_only_when_accepted`: decline
+leaves the machine PATH unchanged, accept yields `<original>;<dir>` with
+unexpanded entries kept, and the guard restored the PATH afterwards. This closes
+the "real Windows registry" gap for x64 under pwsh 7. Still not covered: Windows
+ARM64, Windows PowerShell 5.1, Windows file replacement of a running executable.
