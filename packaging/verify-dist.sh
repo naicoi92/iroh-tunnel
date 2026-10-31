@@ -35,7 +35,16 @@ ALL_BINARIES="iroh-tunnel iroh-tunnel-serve iroh-tunnel-access"
 FAILED=0
 CASE_FAILED=0
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# Containers and networks created by images/forward, removed on any exit.
+CLEANUP_CONTAINERS="" CLEANUP_NETWORK=""
+cleanup() {
+    # shellcheck disable=SC2086 # space-separated names
+    [ -z "$CLEANUP_CONTAINERS" ] || docker rm -f $CLEANUP_CONTAINERS >/dev/null 2>&1 || true
+    [ -z "$CLEANUP_NETWORK" ] || docker network rm "$CLEANUP_NETWORK" >/dev/null 2>&1 || true
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 fail() { echo "FAIL: $*" >&2; FAILED=1; CASE_FAILED=1; }
 pass() { echo "ok:   $*"; }
 skip() { echo "SKIP: $*"; }
@@ -51,8 +60,9 @@ only_match() {
 }
 
 # List a package's content members, one per line: "path" or "path -> target".
-# Directories, leading "./" and package-manager metadata (apk dot-files) are
-# dropped. The leading `tar -tv` columns differ between GNU and BSD tar, so keep
+# Leading "./", package-manager metadata (apk dot-files) and the bare usr and
+# usr/bin directories are dropped; any other directory (for example a stray
+# /etc/iroh-tunnel/) stays in the listing so it fails the exact-member check. The leading `tar -tv` columns differ between GNU and BSD tar, so keep
 # only the trailing path (and link target).
 list_package() {
     case "$1" in
@@ -61,7 +71,7 @@ list_package() {
     esac || return 1
     echo "$raw" |
         sed -E -e 's/^.* ([^ ]+ -> [^ ]+)$/\1/' -e t -e 's/^.* ([^ ]+)$/\1/' |
-        sed -e 's#^\./##' | grep -v -E '(/|^\.[^ ]*|^)$|^\.' | sort
+        sed -e 's#^\./##' | grep -v -E -e '^\.' -e '^usr/?$' -e '^usr/bin/?$' -e '^$' | sort
 }
 
 # The exact files a package must own: its binary and its alias link. Packages
@@ -206,8 +216,10 @@ images() {
         esac
         # The image holds exactly one executable: list what it ships in bin dirs.
         cid=$(docker create "$img")
+        CLEANUP_CONTAINERS="$cid"
         shipped=$(docker export "$cid" | tar -tf - | grep -E '(^|/)usr/(local/)?bin/[^/]+$' || true)
         docker rm "$cid" >/dev/null
+        CLEANUP_CONTAINERS=""
         if [ "$shipped" != "usr/local/bin/$bin" ]; then
             fail "$img: bin dirs hold [$shipped], expected only usr/local/bin/$bin"
             continue
@@ -260,9 +272,12 @@ start_role() {
 forward_case() {
     net="verify-dist-$$"
     docker network create "$net" >/dev/null
+    CLEANUP_NETWORK="$net"
+    CLEANUP_CONTAINERS="$net-target $net-serve $net-access"
     forward_exchange "$net" "$@"
     docker rm -f "$net-target" "$net-serve" "$net-access" >/dev/null 2>&1 || true
     docker network rm "$net" >/dev/null 2>&1 || true
+    CLEANUP_NETWORK="" CLEANUP_CONTAINERS=""
 }
 
 forward_exchange() {

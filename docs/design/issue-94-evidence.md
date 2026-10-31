@@ -8,7 +8,7 @@ Baseline `dcced29` (origin/main). Branch `redesign/issue-94`. Builds on PR #116
 | Criterion | Evidence |
 |---|---|
 | 94.AC1 package and image contains the intended artifact, runs its role alone | `verify-dist.sh static` (exact members), `runtime` (install alone, run, remove), `images` (one executable, entrypoint), `forward` (real bytes) |
-| 94.AC2 ownership on supported platforms, Windows where applicable | Linux only. Windows: see Limits |
+| 94.AC2 ownership on supported platforms, Windows where applicable | PARTIAL: Linux only. Windows owned by #93/#100/#97; macOS role casks were removed in #116 and are undecided. See Limits |
 | 94.CL1 ownership, contents, aliases, independent execution; cross-build vs runtime separated | Table below |
 | 94.CL2 service composition | Packages are binary-only: no unit, config dir or maintainer script, so no composition with #79/#91 is claimed |
 | #100 / #97 | Out of scope: signed artifacts (#100), final artifact identities (#97) |
@@ -49,8 +49,10 @@ relay variant is `tests/role_binaries.rs` (9 tests, pass).
   in IMAGE-CREATE-01). Not claimed as verified.
 - **macOS**: the Homebrew cask stays all-in-one; per-role casks were removed in
   #116 and no spec text requires them. Not verified here.
-- amd64 and riscv64: package contents verified statically; amd64 runtime is
-  covered by `snapshot.yml` on the Linux runner, riscv64 has no runner.
-- Package upgrade is checked by hand only.
+- amd64 and riscv64: package contents verified statically only. `snapshot.yml`
+  runs the runtime checks on the amd64 runner but this change has not yet been
+  observed green there (UNVERIFIED until the merge snapshot); riscv64 has no runner.
+- Package upgrade (old all-in-one package to this one, where `it` becomes
+  package-owned and the unit disappears) is UNVERIFIED; legacy migration is #96.
 - `redesign-acceptance.md` cases PACKAGE-CREATE-01 and IMAGE-CREATE-01 stay
   `NOT_RUN` for final-artifact acceptance (#97).
