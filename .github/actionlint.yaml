@@ -1,0 +1,6 @@
+# actionlint 1.7.7 (pinned in ci.yml) predates the GitHub-hosted Windows ARM64
+# runner label, so it reports it as unknown. The label exists for public
+# repositories; build.yml uses it for the windows-arm64 target (issue #124).
+self-hosted-runner:
+  labels:
+    - windows-11-arm
