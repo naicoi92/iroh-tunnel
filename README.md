@@ -121,9 +121,9 @@ Options: `--version X` (default: latest stable), `--bin-dir DIR`, `--profile-dir
 `--dry-run`. It never registers or changes a service.
 
 It verifies the SHA-256 checksum from the release. Signature verification is not
-available yet (signed release artifacts: issue #100). macOS and Windows role
-binaries are not published yet (issue #124), so there is no PowerShell installer
-yet.
+available yet (signed release artifacts: issue #100). The release now ships macOS arm64 and
+Windows x64/ARM64 role archives (issue #124), but the installer only supports
+Linux: the PowerShell and macOS installers are part of issue #93.
 
 ### Linux (`.deb` / `.apk`)
 
@@ -226,8 +226,9 @@ unit, config directory or maintainer script).
 Each release archive contains a single executable (plus README and license).
 The role images use the role executable as their entrypoint, e.g.
 `docker run --rm ghcr.io/naicoi92/iroh-tunnel-serve:<ver> --help`. The macOS
-Homebrew cask still installs only the all-in-one `iroh-tunnel`, and Windows
-release artifacts are not published yet.
+Homebrew cask still installs only the all-in-one `iroh-tunnel`. macOS arm64
+archives for all three executables and Windows x64/ARM64 `.zip` archives for all
+three are published, unsigned; there is no Windows package or installer yet.
 
 **NodeId is public identity, not target authorization.** Knowing NodeId and
 service name lets a peer attempt access. Target services must enforce their own access protection;

@@ -71,9 +71,12 @@ jobs:
       # verify-dist.sh expects archives and packages side by side.
       - name: Verify packages and archives
         run: |
-          cp in/*/*.tar.gz dist/
+          cp in/*/*.tar.gz in/*/*.zip dist/
           packaging/verify-dist.sh static dist
           packaging/verify-dist.sh runtime dist
+          # Issue #124: Windows .zip and macOS role archives.
+          packaging/verify-dist.sh windows dist
+          packaging/verify-dist.sh macos dist
 
       - uses: actions/upload-artifact@v4
         with:
