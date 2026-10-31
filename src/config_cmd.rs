@@ -172,6 +172,8 @@ pub fn add(role: &str, args: &AddServiceArgs) -> Result<()> {
 /// `config remove`: delete the `[[services]]` entry whose `name` matches.
 pub fn remove(role: &str, config: Option<&Path>, name: &str) -> Result<()> {
     let path = resolve_target(&resolve_config_path(role, config)?);
+    // Nothing to remove from a missing config: fail without creating files.
+    require_existing(role, &path)?;
     mutate(role, &path, |doc| {
         // No `[services]` table at all → treat as "not found" (config error,
         // exit 2) rather than a generic internal error.
@@ -425,14 +427,25 @@ fn find_service<'a>(doc: &'a DocumentMut, name: &str) -> Option<&'a toml_edit::T
 /// (name regex/length, port range, node_id length, duplicate names, https
 /// relay_urls). A failure is a `CliError::Config` → exit 2.
 fn validate_role_doc(role: &str, content: &str, path: &Path) -> Result<()> {
-    let checked: Result<()> = match role {
-        "access" => toml::from_str::<crate::config::AccessConfig>(content)
-            .map_err(anyhow::Error::from)
-            .and_then(|cfg| cfg.validate()),
-        _ => toml::from_str::<crate::config::ServeConfig>(content)
-            .map_err(anyhow::Error::from)
-            .and_then(|cfg| cfg.validate()),
+    let invalid = |detail: String| -> anyhow::Error {
+        CliError::Config(format!("invalid config at {}{detail}", path.display())).into()
     };
-    checked
-        .map_err(|e| CliError::Config(format!("invalid config at {}: {e}", path.display())).into())
+    // `toml` errors quote the offending source line, which can hold a secret;
+    // report the message and line only (RS-10).
+    let parse_failure = |e: toml::de::Error| {
+        invalid(format!(
+            "{}: {}",
+            crate::config_store::describe_location(content, e.span()),
+            e.message()
+        ))
+    };
+    match role {
+        "access" => toml::from_str::<crate::config::AccessConfig>(content)
+            .map_err(parse_failure)?
+            .validate(),
+        _ => toml::from_str::<crate::config::ServeConfig>(content)
+            .map_err(parse_failure)?
+            .validate(),
+    }
+    .map_err(|e| invalid(format!(": {e}")))
 }

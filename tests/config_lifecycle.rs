@@ -494,41 +494,81 @@ fn run_persists_a_generated_key_owner_only_and_reuses_it() {
     .unwrap();
     std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-    let run_until_key = |expect_existing: Option<&str>| -> String {
+    // Run until the endpoint prints its NodeId, then kill hard.
+    let run_once = |n: u8| -> (String, String) {
+        let log = world.file(&format!("run-{n}.log"));
         let mut child = world
             .command(&["serve", "run", "--config", p(&cfg)])
-            .stdout(Stdio::null())
+            .stdout(File::create(&log).unwrap())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
-        let key = loop {
-            let text = std::fs::read_to_string(&cfg).unwrap();
-            if let Ok(value) = toml::from_str::<toml::Value>(&text) {
-                if let Some(key) = value.get("node").and_then(|n| n["secret_key"].as_str()) {
-                    if !key.is_empty() {
-                        break key.to_string();
-                    }
+        let node_id = loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            if let Some(rest) = text.split("NodeId: ").nth(1) {
+                if let Some(id) = rest.split_whitespace().next().filter(|i| i.len() >= 64) {
+                    break id.to_string();
                 }
             }
-            assert!(Instant::now() < deadline, "run never persisted a key");
+            assert!(Instant::now() < deadline, "run never printed a NodeId");
             std::thread::sleep(Duration::from_millis(50));
         };
-        // Give the process time to reach the endpoint, then kill it hard.
-        std::thread::sleep(Duration::from_millis(300));
         let _ = child.kill();
         let _ = child.wait();
-        if let Some(existing) = expect_existing {
-            assert_eq!(key, existing);
-        }
-        key
+        (node_id, secret_key_of(&cfg))
     };
 
-    let first = run_until_key(None);
+    let (first_id, first_key) = run_once(1);
     assert_eq!(mode(&cfg), 0o600);
     assert!(std::fs::read_to_string(&cfg).unwrap().contains("# keep me"));
-    let second = run_until_key(Some(&first));
-    assert_eq!(second, first);
+    let (second_id, second_key) = run_once(2);
+    assert_eq!(second_key, first_key, "restart changed the stored key");
+    assert_eq!(second_id, first_id, "restart changed the NodeId");
+}
+
+#[test]
+fn inline_node_table_gets_its_generated_key() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    std::fs::write(&cfg, "node = { relay_urls = [] }\n").unwrap();
+    let output = world.run(&["serve", "config", "keygen", "--config", p(&cfg)]);
+    assert!(output.status.success(), "{}", err(&output));
+    assert!(!secret_key_of(&cfg).is_empty());
+}
+
+#[test]
+fn parse_errors_never_echo_secret_lines() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    let bad = "[node]\nrelay_token = \"leak-me-token\" oops\n";
+    std::fs::write(&cfg, bad).unwrap();
+    for args in [
+        vec!["serve", "config", "show", "--config", p(&cfg)],
+        vec!["serve", "config", "keygen", "--yes", "--config", p(&cfg)],
+    ] {
+        let output = world.run(&args);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!err(&output).contains("leak-me-token"), "{}", err(&output));
+        assert!(err(&output).contains("line 2"), "{}", err(&output));
+    }
+}
+
+#[test]
+fn remove_on_a_missing_config_creates_nothing() {
+    let world = World::new();
+    let cfg = world.file("sub/serve.toml");
+    let output = world.run(&[
+        "serve",
+        "config",
+        "remove",
+        "--config",
+        p(&cfg),
+        "--name",
+        "x",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!world.file("sub").exists());
 }
 
 // --- AC-CFG-11 -------------------------------------------------------------

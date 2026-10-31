@@ -109,10 +109,13 @@ impl ConfigLock {
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(LOCK_POLL);
                 }
-                Err(TryLockError::WouldBlock) => anyhow::bail!(
-                    "another process is writing {}; retry once it finishes",
-                    config.display()
-                ),
+                Err(TryLockError::WouldBlock) => {
+                    return Err(CliError::Config(format!(
+                        "another process is writing {}; retry once it finishes",
+                        config.display()
+                    ))
+                    .into())
+                }
                 Err(TryLockError::Error(e)) => {
                     return Err(e)
                         .with_context(|| format!("failed to lock config: {}", lock_path.display()))
@@ -154,11 +157,13 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         drop(file);
         std::fs::rename(&tmp, path)
             .with_context(|| format!("failed to replace config: {}", path.display()))?;
+        // The rename already replaced the file, so a failed directory sync
+        // only weakens durability; report success rather than a misleading error.
         #[cfg(unix)]
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            File::open(parent)
-                .and_then(|dir| dir.sync_all())
-                .with_context(|| format!("failed to sync config dir: {}", parent.display()))?;
+            if let Err(e) = File::open(parent).and_then(|dir| dir.sync_all()) {
+                tracing::warn!("could not sync config dir {}: {e}", parent.display());
+            }
         }
         Ok(())
     })();
@@ -180,9 +185,24 @@ pub(crate) fn read_optional(path: &Path) -> Result<Option<String>> {
 /// Parse config text into an editable document; a syntax error is a config
 /// error (exit 2).
 pub(crate) fn parse_doc(text: &str, path: &Path) -> Result<DocumentMut> {
-    text.parse()
-        .map_err(|e| CliError::Config(format!("failed to parse config {}: {e}", path.display())))
-        .map_err(Into::into)
+    text.parse::<DocumentMut>().map_err(|e| {
+        let at = describe_location(text, e.span());
+        CliError::Config(format!(
+            "failed to parse config {}{at}: {}",
+            path.display(),
+            e.message()
+        ))
+        .into()
+    })
+}
+
+/// `" (line N)"` for a parse error span. The error's own `Display` quotes the
+/// offending source line, which may hold `secret_key` or `relay_token`, so
+/// diagnostics carry only the line number and message (RS-10).
+pub(crate) fn describe_location(text: &str, span: Option<std::ops::Range<usize>>) -> String {
+    span.map(|s| text.get(..s.start).unwrap_or(text))
+        .map(|before| format!(" (line {})", before.matches('\n').count() + 1))
+        .unwrap_or_default()
 }
 
 /// Drop fields retired from the schema (legacy `multiplex`, CFG-03) so every
@@ -213,7 +233,7 @@ pub(crate) fn ensure_node_table(doc: &mut DocumentMut, path: &Path) -> Result<()
             doc["node"] = toml_edit::Item::Table(toml_edit::Table::new());
             Ok(())
         }
-        Some(item) if item.is_table() => Ok(()),
+        Some(item) if item.is_table_like() => Ok(()),
         Some(_) => Err(CliError::Config(format!(
             "invalid config at {}: [node] must be a table",
             path.display()
@@ -254,8 +274,14 @@ pub(crate) fn persist_generated_key<D: RoleDoc>(path: &Path, encoded: &str) -> R
     doc["node"]["secret_key"] = toml_edit::value(encoded);
     strip_retired_fields(&mut doc);
     let text = doc.to_string();
-    let parsed: D = toml::from_str(&text)
-        .map_err(|e| CliError::Config(format!("invalid config at {}: {e}", path.display())))?;
+    let parsed: D = toml::from_str(&text).map_err(|e| {
+        CliError::Config(format!(
+            "invalid config at {}{}: {}",
+            path.display(),
+            describe_location(&text, e.span()),
+            e.message()
+        ))
+    })?;
     parsed
         .validate()
         .map_err(|e| CliError::Config(format!("invalid config at {}: {e}", path.display())))?;

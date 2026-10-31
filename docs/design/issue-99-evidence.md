@@ -11,7 +11,7 @@ Implements #98 D1–D5 (D6 and AC-CFG-12 shipped in #130). Base `origin/main` 92
 | D3 / AC-CFG-08 | `run`/`list`/`show` without config: one guidance error, exit 2, nothing created | `config_cmd::require_existing`, `app.rs` | `read_commands_without_config_share_one_guidance_error_and_create_nothing` |
 | D4 / AC-CFG-05 | Every mutation validates; file bytes unchanged on failure | `config_cmd::mutate`, `edit` | `invalid_mutations_fail_and_leave_file_bytes_unchanged`, `rejected_edit_keeps_prior_file_and_a_private_sidecar` |
 | D4 / AC-CFG-06 | Concurrent writers serialize | `config_store::ConfigLock` | `concurrent_adds_serialize_without_losing_updates` (8 processes), `lock_held_by_another_writer_times_out_with_a_clear_error`, `edit_conflicting_with_a_concurrent_change_is_rejected` |
-| D4 / AC-CFG-10 | Atomic save (temp, fsync, rename, dir fsync) | `config_store::write_atomic` | `killed_or_concurrent_saves_never_expose_a_truncated_file` (25 SIGKILLs, concurrent reader) |
+| D4 / AC-CFG-10 | Atomic save (temp, fsync, rename, dir fsync) | `config_store::write_atomic` | `killed_or_concurrent_saves_never_expose_a_truncated_file` (25 SIGKILLs plus a concurrent reader; atomicity holds by construction, the test rarely lands inside the write) |
 | D4 / AC-CFG-11 | `--config` on every subcommand | `cli.rs`, `app::dispatch_config` | `every_config_subcommand_honors_config_and_ignores_the_default` |
 | D5 / AC-CFG-09 | `run`-generated key persisted `0600`, reused on restart | `config_store::persist_generated_key` | `run_persists_a_generated_key_owner_only_and_reuses_it` |
 
@@ -20,6 +20,14 @@ Implements #98 D1–D5 (D6 and AC-CFG-12 shipped in #130). Base `origin/main` 92
 - **Lock mechanism:** `std::fs::File::try_lock` (`flock` on Unix, `LockFileEx` on Windows) on sibling `<config>.lock`, polled every 25 ms for up to 10 s, then `another process is writing …`. Test override `IROH_TUNNEL_TEST_CONFIG_LOCK_TIMEOUT_MS` exists only with `test-utils`. Windows: UNVERIFIED.
 - **Sidecar:** a rejected `edit` keeps its text in `<config>.rejected` (`0600`); the config is untouched. `edit` works on a private copy and applies only if the live file is unchanged since the copy (otherwise it reports a conflict and keeps the text), so an editor session cannot overwrite a concurrent change.
 - **Windows permissions:** not enforced; the temp file inherits the directory ACL. Owner-only ACL parity needs Windows evidence and stays open (service contexts: #79).
+
+## Proposals beyond D1–D5 (pending owner confirmation)
+
+The owner decided D1–D5 only; these closed the open items or follow from D4 and are proposals: `<config>.rejected` sidecar (0600); 10 s lock timeout (exit 2); conflict detection for `edit` (live file changed during the session → not applied); the `edit` private scratch copy `<config>.edit-<pid>.toml` (holds secrets, removed on exit, orphaned if `edit` is SIGKILLed); read-only target refusal; rewrites force mode `0600` and the invoking user as owner, which can lock out a different service user that relied on a 0640/0644 config; a persistent `<config>.lock` file. A SIGKILL between temp creation and rename can leave a `0600` `<config>.<pid>.<ns>.tmp` file. Known limit: rename-over fails on a single-file bind mount (EBUSY), so persisting a generated key there fails.
+
+## Review rework
+
+Standards and Spec reviews of `92a3551..9511b4b` found: inline `node = {…}` rejected by keygen/run (fixed, test); parse/validation errors quoted secret lines (fixed: message + line only, test); lock timeout exited 1 (now 2); `remove` on a missing config created a directory (fixed, test); directory-fsync failure after rename reported an error (now a warning); restart-reuse test compared the file to itself (now compares printed NodeId across two runs). Not changed: blocking lock wait in async `run` startup (bounded, startup only); guidance error names `iroh-tunnel <role> config` for standalone binaries too.
 
 ## Intentional behavior changes (AC3)
 
