@@ -18,9 +18,10 @@ on:
         type: string
         required: true
 
-permissions:
-  contents: read
-  packages: write
+# No `permissions:` block on purpose: a called workflow inherits its caller's
+# token and can only narrow it. Rehearsal callers (ci.yml, snapshot.yml) grant
+# `contents: read`; release.yml grants `packages: write` to its calling job for
+# the real push. Declaring any block here would reset `packages` to none.
 
 jobs:
   image:
