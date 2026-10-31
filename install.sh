@@ -67,7 +67,12 @@ See the comments at the top of the script for details.
 USAGE
 }
 
-cleanup() { [ -z "$TMP" ] || rm -rf "$TMP"; }
+STAGED=""
+cleanup() {
+    # shellcheck disable=SC2086 # space-separated paths without spaces
+    [ -z "$STAGED" ] || rm -f $STAGED
+    [ -z "$TMP" ] || rm -rf "$TMP"
+}
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
@@ -83,6 +88,13 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$BIN_DIR" ] || die "--bin-dir must not be empty"
+case "$BIN_DIR" in /*) ;; *) die "--bin-dir must be an absolute path" ;; esac
+case "$BIN_DIR" in *[!A-Za-z0-9/._+-]*) die "--bin-dir may only contain letters, digits and / . _ + -" ;; esac
+case "$VERSION" in
+    ""|[0-9]*.[0-9]*.[0-9]*) ;;
+    *) die "--version must look like 1.2.3" ;;
+esac
+case "$VERSION" in *[!0-9A-Za-z.+-]*) die "--version must look like 1.2.3" ;; esac
 
 # --- platform ---------------------------------------------------------------
 
@@ -157,132 +169,158 @@ confirm() {
     case "$ans" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
 }
 
-# --- plan -------------------------------------------------------------------
+# Everything that changes the system lives in main, which is called on the last
+# line: a download cut short under `curl | sh` then does nothing.
+main() {
+    # --- plan -------------------------------------------------------------------
 
-TARGET=$(detect_target)
+    TARGET=$(detect_target)
 
-# Release base URL for the requested version.
-if [ -n "$VERSION" ]; then
-    DOWNLOAD_URL="$BASE_URL/download/v$VERSION"
-else
-    DOWNLOAD_URL="$BASE_URL/latest/download"
-fi
-
-if [ "$DRY_RUN" -eq 1 ]; then
-    say "Would install for $TARGET from $DOWNLOAD_URL into $BIN_DIR:"
-    for role in $ROLES; do
-        say "  ${role%%:*}  (alias ${role##*:})"
-    done
-    say "Would ask before replacing a different file or changing PATH. No service is touched."
-    exit 0
-fi
-
-have tar || die "tar is required"
-
-# Fail on permissions before downloading anything.
-if [ -d "$BIN_DIR" ]; then
-    [ -w "$BIN_DIR" ] || die "cannot write to $BIN_DIR. Rerun with sudo, or pass --bin-dir DIR."
-else
-    parent=$BIN_DIR
-    while [ ! -d "$parent" ]; do parent=$(dirname "$parent"); done
-    [ -w "$parent" ] || die "cannot create $BIN_DIR. Rerun with sudo, or pass --bin-dir DIR."
-fi
-
-TMP=$(mktemp -d)
-fetch "$DOWNLOAD_URL/checksums.txt" "$TMP/checksums.txt"
-
-if [ -z "$VERSION" ]; then
-    VERSION=$(sed -n "s/^[0-9a-fA-F]\{64\} [ *]*iroh-tunnel-\([0-9][^ ]*\)-$TARGET\.tar\.gz\$/\1/p" "$TMP/checksums.txt" | head -n 1)
-    [ -n "$VERSION" ] || die "the latest release has no iroh-tunnel archive for $TARGET"
-fi
-
-# --- download and verify (nothing installed yet) ------------------------------
-
-expected_sum() { awk -v n="$1" '{ f=$2; sub(/^\*/, "", f) } f == n { print $1; exit }' "$TMP/checksums.txt"; }
-
-mkdir -p "$TMP/stage"
-for role in $ROLES; do
-    exe="${role%%:*}"
-    archive="$exe-$VERSION-$TARGET.tar.gz"
-    want=$(expected_sum "$archive")
-    [ -n "$want" ] || die "release $VERSION does not publish $archive"
-    fetch "$DOWNLOAD_URL/$archive" "$TMP/$archive"
-    got=$(sha256_of "$TMP/$archive")
-    [ "$got" = "$want" ] || die "checksum mismatch for $archive (expected $want, got $got). Nothing was installed."
-    mkdir -p "$TMP/stage/$exe"
-    tar -xzf "$TMP/$archive" -C "$TMP/stage/$exe" || die "cannot extract $archive"
-    [ -f "$TMP/stage/$exe/$exe" ] && [ ! -L "$TMP/stage/$exe/$exe" ] \
-        || die "$archive does not contain the $exe executable"
-done
-
-# --- conflicts and PATH (still nothing installed) -----------------------------
-
-CONFLICTS=""
-for role in $ROLES; do
-    exe="${role%%:*}"
-    alias="${role##*:}"
-    for path in "$BIN_DIR/$exe" "$BIN_DIR/$alias"; do
-        [ -e "$path" ] || [ -L "$path" ] || continue
-        [ ! -d "$path" ] || [ -L "$path" ] || die "$path is a directory; remove it and rerun."
-        if [ "$path" = "$BIN_DIR/$alias" ]; then
-            # An alias that already points at our binary is not a conflict.
-            [ "$(readlink "$path" 2>/dev/null || true)" = "$exe" ] && continue
-        else
-            [ ! -L "$path" ] && [ "$(sha256_of "$path")" = "$(sha256_of "$TMP/stage/$exe/$exe")" ] && continue
-        fi
-        CONFLICTS="$CONFLICTS $path"
-    done
-done
-
-PATH_SNIPPET="$PROFILE_DIR/iroh-tunnel.sh"
-SNIPPET_BODY="export PATH=\"\$PATH:$BIN_DIR\""
-CHANGE_PATH=0
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) CHANGE_PATH=1 ;;
-esac
-if [ "$CHANGE_PATH" -eq 1 ] && [ -e "$PATH_SNIPPET" ] && [ "$(cat "$PATH_SNIPPET")" != "$SNIPPET_BODY" ]; then
-    CONFLICTS="$CONFLICTS $PATH_SNIPPET"
-fi
-
-if [ -n "$CONFLICTS" ]; then
-    say "These files already exist and differ from what this install would write:"
-    for path in $CONFLICTS; do say "  $path"; done
-    confirm "Replace them?" || die "declined; nothing was changed."
-fi
-
-DO_PATH=0
-if [ "$CHANGE_PATH" -eq 1 ]; then
-    if [ -d "$PROFILE_DIR" ] && [ -w "$PROFILE_DIR" ]; then
-        say "$BIN_DIR is not on PATH."
-        if confirm "Add it for all login shells by writing $PATH_SNIPPET?"; then DO_PATH=1; fi
+    # Release base URL for the requested version.
+    if [ -n "$VERSION" ]; then
+        DOWNLOAD_URL="$BASE_URL/download/v$VERSION"
     else
-        say "$BIN_DIR is not on PATH and $PROFILE_DIR is not writable."
+        DOWNLOAD_URL="$BASE_URL/latest/download"
     fi
-fi
 
-# --- install ----------------------------------------------------------------
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "Would install for $TARGET from $DOWNLOAD_URL into $BIN_DIR:"
+        for role in $ROLES; do
+            say "  ${role%%:*}  (alias ${role##*:})"
+        done
+        say "Would ask before replacing a different file or changing PATH. No service is touched."
+        exit 0
+    fi
 
-mkdir -p "$BIN_DIR"
-for role in $ROLES; do
-    exe="${role%%:*}"
-    alias="${role##*:}"
-    tmpbin="$BIN_DIR/.$exe.new.$$"
-    cp "$TMP/stage/$exe/$exe" "$tmpbin"
-    chmod 755 "$tmpbin"
-    mv -f "$tmpbin" "$BIN_DIR/$exe"
-    tmpln="$BIN_DIR/.$alias.new.$$"
-    ln -s "$exe" "$tmpln"
-    mv -f "$tmpln" "$BIN_DIR/$alias"
-    say "installed $BIN_DIR/$exe (alias $alias)"
-done
+    have tar || die "tar is required"
 
-if [ "$DO_PATH" -eq 1 ]; then
-    printf '%s\n' "$SNIPPET_BODY" >"$PATH_SNIPPET"
-    say "wrote $PATH_SNIPPET; open a new login shell to use it."
-elif [ "$CHANGE_PATH" -eq 1 ]; then
-    say "PATH was not changed. Add $BIN_DIR to PATH yourself, e.g. export PATH=\"\$PATH:$BIN_DIR\""
-fi
+    # Fail on permissions before downloading anything.
+    if [ -d "$BIN_DIR" ]; then
+        [ -w "$BIN_DIR" ] || die "cannot write to $BIN_DIR. Rerun with sudo, or pass --bin-dir DIR."
+    else
+        parent=$BIN_DIR
+        while [ ! -d "$parent" ]; do parent=$(dirname "$parent"); done
+        [ -w "$parent" ] || die "cannot create $BIN_DIR. Rerun with sudo, or pass --bin-dir DIR."
+    fi
 
-say "iroh-tunnel $VERSION installed. No service was registered or changed."
-say "Note: only checksums were verified; signature verification is not available yet."
+    TMP=$(mktemp -d)
+    fetch "$DOWNLOAD_URL/checksums.txt" "$TMP/checksums.txt"
+
+    if [ -z "$VERSION" ]; then
+        VERSION=$(sed -n "s/^[0-9a-fA-F]\{64\} [ *]*iroh-tunnel-\([0-9][^ ]*\)-$TARGET\.tar\.gz\$/\1/p" "$TMP/checksums.txt" | head -n 1)
+        [ -n "$VERSION" ] || die "the latest release has no iroh-tunnel archive for $TARGET"
+    fi
+
+    # --- download and verify (nothing installed yet) ------------------------------
+
+    expected_sum() { awk -v n="$1" '{ f=$2; sub(/^\*/, "", f) } f == n { print $1; exit }' "$TMP/checksums.txt"; }
+
+    mkdir -p "$TMP/stage"
+    for role in $ROLES; do
+        exe="${role%%:*}"
+        archive="$exe-$VERSION-$TARGET.tar.gz"
+        want=$(expected_sum "$archive")
+        [ -n "$want" ] || die "release $VERSION does not publish $archive"
+        fetch "$DOWNLOAD_URL/$archive" "$TMP/$archive"
+        got=$(sha256_of "$TMP/$archive")
+        [ "$got" = "$want" ] || die "checksum mismatch for $archive (expected $want, got $got). Nothing was installed."
+        mkdir -p "$TMP/stage/$exe"
+        tar -xzf "$TMP/$archive" -C "$TMP/stage/$exe" || die "cannot extract $archive"
+        [ -f "$TMP/stage/$exe/$exe" ] && [ ! -L "$TMP/stage/$exe/$exe" ] \
+            || die "$archive does not contain the $exe executable"
+    done
+
+    # --- conflicts and PATH (still nothing installed) -----------------------------
+
+    CONFLICTS=""
+    for role in $ROLES; do
+        exe="${role%%:*}"
+        alias="${role##*:}"
+        for path in "$BIN_DIR/$exe" "$BIN_DIR/$alias"; do
+            [ -e "$path" ] || [ -L "$path" ] || continue
+            [ ! -d "$path" ] || [ -L "$path" ] || die "$path is a directory; remove it and rerun."
+            if [ "$path" = "$BIN_DIR/$alias" ]; then
+                # An alias that already points at our binary is not a conflict.
+                [ "$(readlink "$path" 2>/dev/null || true)" = "$exe" ] && continue
+            else
+                [ ! -L "$path" ] && [ "$(sha256_of "$path")" = "$(sha256_of "$TMP/stage/$exe/$exe")" ] && continue
+            fi
+            CONFLICTS="$CONFLICTS $path"
+        done
+    done
+
+    PATH_SNIPPET="$PROFILE_DIR/iroh-tunnel.sh"
+    SNIPPET_BODY="export PATH=\"\$PATH:$BIN_DIR\""
+    CHANGE_PATH=0
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *) CHANGE_PATH=1 ;;
+    esac
+    if [ "$CHANGE_PATH" -eq 1 ] && [ -e "$PATH_SNIPPET" ] && [ "$(cat "$PATH_SNIPPET")" != "$SNIPPET_BODY" ]; then
+        CONFLICTS="$CONFLICTS $PATH_SNIPPET"
+    fi
+
+    if [ -n "$CONFLICTS" ]; then
+        say "These files already exist and differ from what this install would write:"
+        for path in $CONFLICTS; do say "  $path"; done
+        confirm "Replace them?" || die "declined; nothing was changed."
+    fi
+
+    DO_PATH=0
+    if [ "$CHANGE_PATH" -eq 1 ]; then
+        if [ -d "$PROFILE_DIR" ] && [ -w "$PROFILE_DIR" ]; then
+            say "$BIN_DIR is not on PATH."
+            if confirm "Add it for all login shells by writing $PATH_SNIPPET?"; then DO_PATH=1; fi
+        else
+            say "$BIN_DIR is not on PATH and $PROFILE_DIR is not writable."
+        fi
+    fi
+
+    # --- install ----------------------------------------------------------------
+    # Stage every file next to its destination first, then rename them all. A failure
+    # while staging (for example a full disk) leaves the installed files untouched.
+
+    mkdir -p "$BIN_DIR"
+    STAGED=""
+    for role in $ROLES; do
+        exe="${role%%:*}"
+        alias="${role##*:}"
+        tmpbin="$BIN_DIR/.$exe.new.$$"
+        tmpln="$BIN_DIR/.$alias.new.$$"
+        STAGED="$STAGED $tmpbin $tmpln"
+        cp "$TMP/stage/$exe/$exe" "$tmpbin" || die "cannot write to $BIN_DIR"
+        chmod 755 "$tmpbin"
+        ln -s "$exe" "$tmpln" || die "cannot write to $BIN_DIR"
+    done
+    if [ "$DO_PATH" -eq 1 ]; then
+        printf '%s\n' "$SNIPPET_BODY" >"$TMP/profile.sh"
+        cp "$TMP/profile.sh" "$PATH_SNIPPET.new.$$" || die "cannot write to $PROFILE_DIR"
+        STAGED="$STAGED $PATH_SNIPPET.new.$$"
+    fi
+
+    # mv follows a destination symlink to a directory, so drop a symlink first.
+    replace() { # staged destination
+        [ ! -L "$2" ] || rm -f "$2"
+        mv -f "$1" "$2"
+    }
+    for role in $ROLES; do
+        exe="${role%%:*}"
+        alias="${role##*:}"
+        replace "$BIN_DIR/.$exe.new.$$" "$BIN_DIR/$exe"
+        replace "$BIN_DIR/.$alias.new.$$" "$BIN_DIR/$alias"
+        say "installed $BIN_DIR/$exe (alias $alias)"
+    done
+    STAGED=""
+
+    if [ "$DO_PATH" -eq 1 ]; then
+        replace "$PATH_SNIPPET.new.$$" "$PATH_SNIPPET"
+        say "wrote $PATH_SNIPPET; open a new login shell to use it."
+    elif [ "$CHANGE_PATH" -eq 1 ]; then
+        say "PATH was not changed. Add $BIN_DIR to PATH yourself, e.g. export PATH=\"\$PATH:$BIN_DIR\""
+    fi
+
+    say "iroh-tunnel $VERSION installed. No service was registered or changed."
+    say "Note: only checksums were verified; signature verification is not available yet."
+}
+
+main "$@"

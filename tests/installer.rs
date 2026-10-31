@@ -22,7 +22,7 @@
 //! - 93.CL2: the installer never registers or changes a service.
 #![cfg(unix)]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -224,7 +224,7 @@ impl Env {
         };
         Ok(Command::new("sh")
             .arg(SCRIPT)
-            .args(["--bin-dir"])
+            .arg("--bin-dir")
             .arg(&self.bin)
             .arg("--profile-dir")
             .arg(&self.profile)
@@ -499,22 +499,23 @@ fn a_release_missing_one_role_installs_nothing() -> Result<()> {
 
 #[test]
 fn unwritable_directory_fails_before_downloading() -> Result<()> {
-    if std::env::var("USER").is_ok_and(|u| u == "root") {
-        return Ok(()); // root ignores directory permissions
-    }
     let env = Env::new()?;
     std::fs::create_dir_all(&env.bin)?;
     std::fs::set_permissions(&env.bin, std::fs::Permissions::from_mode(0o555))?;
-    // A closed server proves nothing was fetched.
+    // root ignores directory permissions: skip when the directory stays writable.
+    if std::fs::write(env.bin.join(".probe"), "x").is_ok() {
+        return Ok(());
+    }
     let out = env.run(&["--yes"], None, true);
     std::fs::set_permissions(&env.bin, std::fs::Permissions::from_mode(0o755))?;
     let out = out?;
     assert!(!out.status.success(), "{}", text(&out));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("sudo"), "guidance missing: {stderr}");
-    if std::fs::read_dir(&env.bin)?.next().is_some() {
-        bail!("files were written to an unwritable directory");
-    }
+    assert!(
+        std::fs::read_dir(&env.bin)?.next().is_none(),
+        "files were written to an unwritable directory"
+    );
     Ok(())
 }
 
@@ -540,5 +541,50 @@ fn installer_never_touches_services() -> Result<()> {
     let env = Env::new()?;
     let out = env.run(&["--yes"], None, true)?;
     assert!(String::from_utf8_lossy(&out.stdout).contains("No service was registered"));
+    Ok(())
+}
+
+// An alias that is a symlink to a directory must be replaced, not entered.
+#[test]
+fn alias_that_links_to_a_directory_is_replaced() -> Result<()> {
+    let env = Env::new()?;
+    std::fs::create_dir_all(env.bin.join("elsewhere"))?;
+    symlink("elsewhere", env.bin.join("ita"))?;
+    let out = env.run(&["--yes"], None, true)?;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_all_installed(&env)?;
+    assert!(
+        std::fs::read_dir(env.bin.join("elsewhere"))?
+            .next()
+            .is_none(),
+        "the new alias was moved into the linked directory"
+    );
+    Ok(())
+}
+
+#[test]
+fn malformed_version_and_relative_directory_are_rejected() -> Result<()> {
+    let env = Env::new()?;
+    for args in [
+        vec!["--version", "../etc"],
+        vec!["--version", "1.2"],
+        vec!["--bin-dir", "relative/dir"],
+    ] {
+        let out = env.run(&args, None, true)?;
+        assert!(!out.status.success(), "{args:?}: {}", text(&out));
+    }
+    Ok(())
+}
+
+// A failed install leaves no staging files behind.
+#[test]
+fn no_staging_files_remain_after_success() -> Result<()> {
+    let env = Env::new()?;
+    let out = env.run(&["--yes"], None, true)?;
+    assert!(out.status.success(), "{}", text(&out));
+    let names: Vec<_> = std::fs::read_dir(&env.bin)?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<_>>()?;
+    assert!(names.iter().all(|n| !n.contains(".new.")), "{names:?}");
     Ok(())
 }

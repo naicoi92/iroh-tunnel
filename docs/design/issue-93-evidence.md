@@ -35,11 +35,21 @@ over real HTTP by a local server (`IROH_TUNNEL_BASE_URL`). Prompt answers use
 ## Evidence
 
 - Red: before `install.sh` existed the suite could not run (script absent).
-- Green: 15/15 pass (`cargo test --test installer`), `shellcheck` clean.
+- Green: 18/18 pass (`cargo test --test installer`), `shellcheck` clean.
 - Mutation check (test sensitivity): skipping the checksum comparison fails
   `checksum_mismatch_…`; making `confirm` always yes fails 3 decline tests;
   removing the conflict prompt fails `declining_a_file_conflict_…`.
-- `cat install.sh | sh -s -- --help` works (the `curl | sh` path).
+- `cat install.sh | sh -s -- --help` works (the `curl | sh` path). All work is in
+  `main`, called on the last line, so a truncated download is a syntax error and
+  does nothing.
+- Review (Standards + Spec, head `4cfdc85`): fixed a symlink-to-directory alias that
+  was silently not replaced, partial install on a mid-loop failure (now staged,
+  then renamed), leftover staging files, unvalidated `--version`/`--bin-dir`, a
+  false test comment and a `$USER`-based root check. Each has a test. Left as
+  noted: roles are checked with `--help`, not forwarded bytes (role forwarding is
+  covered by `tests/role_binaries.rs` and #97); the final rename loop is not
+  atomic across all files if the process is killed mid-loop (DIST-03 defers
+  partial failures).
 
 ## Limits
 
