@@ -16,7 +16,7 @@ const APP_VERSION: &str = env!("APP_VERSION");
 
 /// CLI entry point.
 #[derive(Parser, Debug)]
-#[command(name = "iroh-tunnel", version = APP_VERSION, about = "P2P port-forwarding tunnel via Iroh")]
+#[command(name = "iroh-tunnel", version = APP_VERSION, about = "P2P port-forwarding tunnel via Iroh", after_help = "Aliases: it = iroh-tunnel, its = iroh-tunnel-serve (Serve only), ita = iroh-tunnel-access (Access only)")]
 pub struct Cli {
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -37,7 +37,7 @@ pub struct Cli {
 /// Top-level role: serve or access.
 #[derive(Subcommand, Debug)]
 pub enum Role {
-    /// Serve role: publish local services into Iroh.
+    /// Serve role: publish local services into Iroh (standalone binary: iroh-tunnel-serve, alias its).
     #[command(args_conflicts_with_subcommands = true)]
     Serve {
         #[command(flatten)]
@@ -45,7 +45,7 @@ pub enum Role {
         #[command(subcommand)]
         cmd: Option<RoleCmd>,
     },
-    /// Access role: consume remote services to local.
+    /// Access role: consume remote services to local (standalone binary: iroh-tunnel-access, alias ita).
     #[command(args_conflicts_with_subcommands = true)]
     Access {
         #[command(flatten)]
@@ -53,6 +53,74 @@ pub enum Role {
         #[command(subcommand)]
         cmd: Option<RoleCmd>,
     },
+}
+
+/// Standalone Serve binary (`iroh-tunnel-serve`, alias `its`).
+#[derive(Parser, Debug)]
+#[command(name = "iroh-tunnel-serve", version = APP_VERSION, about = "Serve role: publish a local service through an Iroh tunnel (alias: its)", args_conflicts_with_subcommands = true)]
+pub struct ServeCli {
+    /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    /// Quiet mode (only errors).
+    #[arg(short, long)]
+    pub quiet: bool,
+    /// Color output: auto | always | never.
+    #[arg(long, default_value = "auto")]
+    pub color: String,
+    #[command(flatten)]
+    pub quick: ServeQuickArgs,
+    #[command(subcommand)]
+    pub cmd: Option<RoleCmd>,
+}
+
+impl ServeCli {
+    /// Equivalent all-in-one invocation, so both paths share one dispatcher.
+    pub fn into_cli(self) -> Cli {
+        Cli {
+            verbose: self.verbose,
+            quiet: self.quiet,
+            color: self.color,
+            role: Role::Serve {
+                quick: self.quick,
+                cmd: self.cmd,
+            },
+        }
+    }
+}
+
+/// Standalone Access binary (`iroh-tunnel-access`, alias `ita`).
+#[derive(Parser, Debug)]
+#[command(name = "iroh-tunnel-access", version = APP_VERSION, about = "Access role: expose a remote Iroh service on a local address (alias: ita)", args_conflicts_with_subcommands = true)]
+pub struct AccessCli {
+    /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    /// Quiet mode (only errors).
+    #[arg(short, long)]
+    pub quiet: bool,
+    /// Color output: auto | always | never.
+    #[arg(long, default_value = "auto")]
+    pub color: String,
+    #[command(flatten)]
+    pub quick: AccessQuickArgs,
+    #[command(subcommand)]
+    pub cmd: Option<RoleCmd>,
+}
+
+impl AccessCli {
+    /// Equivalent all-in-one invocation, so both paths share one dispatcher.
+    pub fn into_cli(self) -> Cli {
+        Cli {
+            verbose: self.verbose,
+            quiet: self.quiet,
+            color: self.color,
+            role: Role::Access {
+                quick: self.quick,
+                cmd: self.cmd,
+            },
+        }
+    }
 }
 
 /// Quick Serve options; omit when using a role command.
@@ -70,6 +138,10 @@ pub struct ServeQuickArgs {
     /// Relay URL used by both peers.
     #[arg(long)]
     pub relay_url: Option<String>,
+    /// File holding a persistent secret key (base64, as written by `config keygen`);
+    /// keeps the public identity stable across restarts. Default: ephemeral identity.
+    #[arg(short = 'k', long)]
+    pub key_file: Option<PathBuf>,
 }
 
 /// Quick Access options; omit when using a role command.
@@ -90,6 +162,10 @@ pub struct AccessQuickArgs {
     /// Relay URL used by both peers.
     #[arg(long)]
     pub relay_url: Option<String>,
+    /// File holding a persistent secret key (base64, as written by `config keygen`);
+    /// keeps the public identity stable across restarts. Default: ephemeral identity.
+    #[arg(short = 'k', long)]
+    pub key_file: Option<PathBuf>,
 }
 
 /// Commands available per role.
@@ -112,7 +188,7 @@ pub enum RoleCmd {
         #[arg(long)]
         json: bool,
     },
-    /// System service management (systemd/launchd).
+    /// Service management: install, start, stop, restart, status, uninstall.
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -144,47 +220,58 @@ pub enum ConfigAction {
     Path,
 }
 
-/// Service sub-actions.
+/// Scope selection shared by every service verb.
 ///
-/// Scope defaults to per-user (LaunchAgent / `systemctl --user`), which needs
-/// no privileges and matches how iroh-tunnel is typically used on a desktop.
-/// Pass `--system` to install as a system-wide daemon (LaunchDaemon /
-/// `/etc/systemd/system`), which requires root and is intended for
-/// server/headless hosts.
+/// With neither flag, `install` offers the choice to a non-elevated
+/// interactive user and defaults to system for root/Administrator; the other
+/// verbs act on the user service unless elevated. A system scope without
+/// privilege is refused with rerun guidance, never elevated or replaced by a
+/// user service.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct ScopeArgs {
+    /// Per-user service (LaunchAgent / `systemctl --user`); needs no privileges.
+    #[arg(long, conflicts_with = "system")]
+    pub user: bool,
+    /// System-wide service (LaunchDaemon / /etc/systemd/system); needs root.
+    #[arg(long)]
+    pub system: bool,
+}
+
+/// Service sub-actions.
 #[derive(Subcommand, Debug)]
 pub enum ServiceAction {
-    /// Install system service (systemd/launchd).
+    /// Install, enable and start the service.
     Install {
+        /// Config file to pin into the service (absolute path is stored).
         #[arg(short, long)]
         config: Option<PathBuf>,
-        /// System-wide daemon (LaunchDaemon / /etc/systemd/system). Requires root.
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Uninstall system service.
+    /// Stop and remove the service.
     Uninstall {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Start system service.
+    /// Start the service.
     Start {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Stop system service.
+    /// Stop the service.
     Stop {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Restart system service.
+    /// Restart the service.
     Restart {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Print system service status.
+    /// Print the service status.
     Status {
-        #[arg(long)]
-        system: bool,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
 }
 
@@ -237,4 +324,38 @@ pub fn init_tracing(verbose: u8, quiet: bool) {
         .with_file(false)
         .with_line_number(false)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use std::collections::HashMap;
+
+    /// No command declares the same short option twice (clap's debug assert
+    /// also covers this) and equivalent options use one letter across roles.
+    #[test]
+    fn short_options_are_consistent_and_conflict_free() {
+        let mut meaning: HashMap<char, String> = HashMap::new();
+        for mut command in [
+            ServeCli::command(),
+            AccessCli::command(),
+            Cli::command().find_subcommand("serve").unwrap().clone(),
+            Cli::command().find_subcommand("access").unwrap().clone(),
+        ] {
+            command.build();
+            let mut seen = HashMap::new();
+            for arg in command.get_arguments() {
+                let (Some(short), Some(long)) = (arg.get_short(), arg.get_long()) else {
+                    continue;
+                };
+                assert!(seen.insert(short, long).is_none(), "duplicate -{short}");
+                let previous = meaning.entry(short).or_insert_with(|| long.to_owned());
+                assert_eq!(previous, long, "-{short} means different options");
+            }
+        }
+        for (short, long) in [('n', "name"), ('p', "protocol"), ('k', "key-file")] {
+            assert_eq!(meaning[&short], long);
+        }
+    }
 }

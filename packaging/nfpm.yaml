@@ -1,11 +1,14 @@
-# Standalone nFPM config shared by the .deb (glibc) and .apk (musl) packages.
-# Invoked from .github/workflows/build.yml with:
-#   BINARY=<path to iroh-tunnel> ARCH=<amd64|arm64|riscv64> VERSION=<x.y.z>
+# Standalone nFPM config (rendered with envsubst; nFPM does not expand env in file paths) for the binary-only .deb (glibc) and .apk (musl)
+# packages. Invoked from .github/workflows/package.yml with:
+#   NAME=<iroh-tunnel[-serve|-access]> ALIAS=<it|its|ita> ARCH=<amd64|arm64|riscv64>
+#   BINARY=<path to the executable> VERSION=<x.y.z> DESCRIPTION=<text>
 #   nfpm package --config packaging/nfpm.yaml --packager <deb|apk> --target <file>
 #
-# Replaces the `nfpms` blocks of the former GoReleaser config (ADR-0002).
+# Each package owns only its binary and its alias symlink (issue #94): no unit
+# file, config directory or maintainer script. Operators register a service
+# with `<role> service install` (#90).
 
-name: iroh-tunnel
+name: ${NAME}
 arch: ${ARCH}
 platform: linux
 version: ${VERSION}
@@ -13,21 +16,15 @@ section: net
 maintainer: naicoi92 <naicoi@lttech.vn>
 vendor: naicoi92
 homepage: https://github.com/naicoi92/iroh-tunnel
-description: "P2P port-forwarding tunnel (TCP/UDP) via Iroh."
+description: "${DESCRIPTION}"
 license: "MIT OR Apache-2.0"
 
 contents:
   - src: ${BINARY}
-    dst: /usr/bin/iroh-tunnel
+    dst: /usr/bin/${NAME}
     file_info:
       mode: 0755
-  # systemd unit for the `serve` role, installed by the package.
-  - src: packaging/iroh-tunnel.service
-    dst: /usr/lib/systemd/system/iroh-tunnel.service
-    type: config|noreplace
-  # Default config directory; the binary reads /etc/iroh-tunnel/serve.toml.
-  - dst: /etc/iroh-tunnel
-    type: dir
-
-scripts:
-  postinstall: packaging/postinstall.sh
+  # Package-owned alias: the package manager tracks and removes the link.
+  - src: ${NAME}
+    dst: /usr/bin/${ALIAS}
+    type: symlink

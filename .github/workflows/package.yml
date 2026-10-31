@@ -1,0 +1,89 @@
+# Reusable .deb / .apk packaging with standalone nFPM. One package per
+# executable (issue #94): iroh-tunnel (alias it), iroh-tunnel-serve (its) and
+# iroh-tunnel-access (ita). Each is binary-only and owns just its binary and
+# its alias symlink. .deb comes from the glibc builds, .apk from the musl builds.
+#
+# Runs in PARALLEL with docker.yml (both only need the build artifacts), then
+# checks the result with packaging/verify-dist.sh (static + runtime install).
+
+name: package
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: package (deb + apk)
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: target-*
+          path: in/
+
+      - name: Install nFPM
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo goreleaser/nfpm --pattern 'nfpm_*_Linux_x86_64.tar.gz' --dir /tmp/nfpm
+          tar -xzf /tmp/nfpm/nfpm_*_Linux_x86_64.tar.gz -C /tmp/nfpm nfpm
+          sudo install /tmp/nfpm/nfpm /usr/local/bin/nfpm
+
+      - name: Build packages
+        run: |
+          mkdir -p dist
+          pack() { # <artifact-id> <pkg-arch> <format> <name> <alias> <description>
+            export NAME="$4" ALIAS="$5" DESCRIPTION="$6" ARCH="$2" \
+              BINARY="$PWD/in/target-$1/$4"
+            # nFPM does not expand env vars in file paths, so render first.
+            # shellcheck disable=SC2016 # the literal ${VAR} list is envsubst's argument
+            envsubst '${NAME} ${ALIAS} ${ARCH} ${BINARY} ${VERSION} ${DESCRIPTION}' \
+              < packaging/nfpm.yaml > "$RUNNER_TEMP/nfpm.yaml"
+            nfpm package --config "$RUNNER_TEMP/nfpm.yaml" --packager "$3" \
+              --target "dist/${4}_${VERSION}_$2.$3"
+          }
+          while IFS=: read -r name alias desc; do
+            pack gnu-amd64 amd64 deb "$name" "$alias" "$desc"
+            pack gnu-arm64 arm64 deb "$name" "$alias" "$desc"
+            pack musl-amd64 amd64 apk "$name" "$alias" "$desc"
+            pack musl-arm64 arm64 apk "$name" "$alias" "$desc"
+            pack musl-riscv64 riscv64 apk "$name" "$alias" "$desc"
+          done <<'LIST'
+          iroh-tunnel:it:P2P port-forwarding tunnel (TCP/UDP) via Iroh (all-in-one: Serve and Access).
+          iroh-tunnel-serve:its:P2P port-forwarding tunnel (TCP/UDP) via Iroh (Serve role only).
+          iroh-tunnel-access:ita:P2P port-forwarding tunnel (TCP/UDP) via Iroh (Access role only).
+          LIST
+          ls -l dist
+
+      # verify-dist.sh expects archives and packages side by side.
+      - name: Verify packages and archives
+        run: |
+          cp in/*/*.tar.gz dist/
+          packaging/verify-dist.sh static dist
+          packaging/verify-dist.sh runtime dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 7

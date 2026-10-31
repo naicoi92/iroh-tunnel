@@ -13,6 +13,14 @@ path = "src/lib.rs"
 [[bin]]
 name = "iroh-tunnel"
 
+[[bin]]
+name = "iroh-tunnel-serve"
+path = "src/bin_serve.rs"
+
+[[bin]]
+name = "iroh-tunnel-access"
+path = "src/bin_access.rs"
+
 [features]
 # Enables the insecure relay-TLS trust override used by integration tests
 # (in-process relay with a self-signed certificate). Never enable in
@@ -22,7 +30,7 @@ test-utils = ["iroh/test-utils"]
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 tokio = { version = "1.53", features = ["full"] }
-iroh = "1.1"
+iroh = "1.4.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1"
@@ -38,9 +46,9 @@ data-encoding = "2.11"
 regex = "1.13"
 
 [target.'cfg(unix)'.dependencies]
-# Unix pid-liveness probe (`kill(pid, 0)`) for the `<role> status` command.
-# Section split mirrors the cfg(unix) call site in src/status_cmd.rs —
-# non-unix builds never compile that code and never link libc. Already in
+# `O_NOFOLLOW` for the role-ownership lock files (src/ownership.rs).
+# Section split mirrors the cfg(unix) call site — non-unix builds never
+# compile that code and never link libc. Already in
 # the dependency tree via iroh/tokio on every platform, so this adds no new
 # code to the build — it only lets us call it directly.
 libc = "0.2"
@@ -48,9 +56,9 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3.27"
 # In-process relay server for the relay-auth integration tests.
-iroh = { version = "1.1", features = ["test-utils"] }
+iroh = { version = "1.4.1", features = ["test-utils"] }
 # AccessControl types for the token relay in tests/relay_auth.rs.
-iroh-relay = "1.1"
+iroh-relay = "1.4.1"
 # Turns on this crate's own `test-utils` feature for integration tests
 # (self-dependency feature unification).
 iroh-tunnel = { path = ".", features = ["test-utils"] }

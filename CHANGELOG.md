@@ -2,7 +2,44 @@
 
 ## [Unreleased]
 
+### Added
+
+- **User service management (#90)**: `service install|start|stop|restart|status|uninstall`
+  take `--user` or `--system`. `install` without a flag asks a non-elevated
+  interactive user to choose, and defaults to system for root. A system scope
+  without privilege exits `3` with a `sudo ...` command that repeats the
+  intended arguments and absolute config path; nothing is elevated, changed or
+  silently replaced by a user service. The service pins the absolute config
+  path and `IROH_TUNNEL_STATE_DIR`, so it no longer depends on its own working
+  directory or home. A denied registration exits `3` with guidance, an invalid
+  or missing config fails at install (`2`). Systemd paths with spaces are quoted.
+- **Role ownership (#87)**: a role (`serve` or `access`) runs as one process
+  at a time, whichever binary, config or state override started it. A later
+  start, and `service start`, is refused with a reason and exit code `6`;
+  nothing is stopped automatically. A non-elevated user detects a running
+  system service through a machine lock (`/run/iroh-tunnel` on Linux,
+  `/var/run/iroh-tunnel` on macOS); the same public identity in the other role
+  is rejected. Locks are kernel advisory locks, so a crash or `kill -9`
+  leftover never blocks the next start. `<role> status` now judges liveness by
+  these locks instead of the recorded pid, and reports a live owner whose
+  snapshot is in another state directory. Systemd units do not restart a
+  refused start (`RestartPreventExitStatus=6`).
+
 ### Changed
+
+- **Packages are binary-only (#94)**: the `iroh-tunnel` `.deb`/`.apk` no longer
+  ship `/usr/lib/systemd/system/iroh-tunnel.service`, `/etc/iroh-tunnel` or a
+  postinstall script. The unit pointed at `/usr/local/bin` while the package
+  installs to `/usr/bin`, and its account and trust settings have no approved
+  policy (#79/#91). Use `iroh-tunnel service install` to register a service.
+
+- **`it` alias is package-owned**: the `.deb`/`.apk` now ship `/usr/bin/it`
+  as a symlink tracked by the package manager instead of creating it in the
+  postinstall script, so removing the package removes the alias.
+- **Homebrew cask `it` alias**: the cask declares the `it` symlink with
+  Homebrew's install steps, so `brew upgrade` replaces it and `brew uninstall`
+  removes it (it was previously left dangling). The release config moves off
+  the GoReleaser-deprecated `homebrew_casks.hooks.post.install`.
 
 - **CI/CD**: GoReleaser is replaced by native parallel builds
   (`.github/workflows/build.yml`), standalone nFPM packaging, a prebuilt-binary
@@ -10,7 +47,6 @@
   unchanged. The glibc binaries are now built on Ubuntu 22.04, so the minimum
   glibc rises from 2.31 to 2.35 (the static musl builds are unaffected). PR CI
   skips heavy jobs for docs-only changes; `ci-ok` is the single required check.
-
 - **Config and state locations**: macOS and Linux now always use
   `~/.config/iroh-tunnel` and `~/.local/state/iroh-tunnel` (XDG variables are
   ignored); Windows uses `%LOCALAPPDATA%\iroh-tunnel\config` and `\state`.
@@ -57,6 +93,14 @@
   subcommands reject mixed quick flags; invalid quick settings use the
   existing config-error exit class with role-specific diagnostics. NodeId
   is public identity, not target authorization; protect exposed services.
+
+- **Separate Linux packages, archives and images per executable**: the
+  all-in-one `iroh-tunnel`, `iroh-tunnel-serve` and `iroh-tunnel-access` each
+  ship as their own `.deb`/`.apk` package, `tar.gz` archive and
+  `ghcr.io/naicoi92/<executable>` image. Each package owns only its binary and
+  its alias link (`it`, `its`, `ita`); role packages ship no service unit. The
+  macOS Homebrew cask still installs only `iroh-tunnel`, and there are no
+  Windows artifacts yet.
 
 - **Windows in CI**: the `lint` and `test` jobs now run on `windows-latest`
   alongside `ubuntu-latest`. `cargo fmt --check` stays Linux-only.

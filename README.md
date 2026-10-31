@@ -104,12 +104,33 @@ iroh-tunnel --version          # → iroh-tunnel 0.2.0
 The cask removes the macOS quarantine attribute automatically, so Gatekeeper
 will not block the unsigned binary.
 
+### Linux (shell installer)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/install.sh | sudo sh
+```
+
+By default this installs all three binaries system-wide into `/usr/local/bin`:
+`iroh-tunnel` (alias `it`), `iroh-tunnel-serve` (`its`) and
+`iroh-tunnel-access` (`ita`). Aliases are symlinks. The installer asks before
+replacing a different file and before adding the directory to `PATH` (a
+snippet in `/etc/profile.d`). Declining a replacement stops with nothing
+changed. Without a terminal the answer is no; pass `--yes` to accept.
+
+Options: `--version X` (default: latest stable), `--bin-dir DIR`, `--profile-dir DIR`,
+`--dry-run`. It never registers or changes a service.
+
+It verifies the SHA-256 checksum from the release. Signature verification is not
+available yet (signed release artifacts: issue #100). macOS and Windows role
+binaries are not published yet (issue #124), so there is no PowerShell installer
+yet.
+
 ### Linux (`.deb` / `.apk`)
 
-Packages ship a systemd unit at `/usr/lib/systemd/system/iroh-tunnel.service`
-and run under a hardened `DynamicUser`. The `.deb` is built against **glibc**
-(Debian/Ubuntu/Fedora/...); the `.apk` is built against **musl** for Alpine
-hosts (LXC, bare-metal) and will not run on a glibc system, and vice versa.
+Packages are binary-only: they install the executable and its alias and no
+service unit. Register a service with `iroh-tunnel service install`. The
+`.deb` is built against **glibc** (Debian/Ubuntu/Fedora/...); the `.apk` is
+built against **musl** for Alpine hosts (LXC, bare-metal) and will not run on a glibc system, and vice versa.
 
 ```sh
 # Debian / Ubuntu (.deb, glibc)
@@ -169,6 +190,44 @@ Use `--relay-url https://your-relay.example` on both roles for a custom relay.
 Both quick roles generate fresh ephemeral identities on restart, without
 creating or changing config files or keys. Do not mix quick flags with configured
 subcommands; use separate `run --config PATH` for saved settings.
+
+To keep the same public identity across restarts without a config file, pass a
+key file with `-k` / `--key-file PATH`. The file holds a base64 secret key, as
+written by `config keygen`. Keep it private; the key is never printed.
+
+### Independent role binaries and aliases
+
+Each role also ships as its own executable. None needs another at runtime:
+
+| Executable | Alias | Roles | Example |
+|---|---|---|---|
+| `iroh-tunnel` | `it` | Serve and Access | `it serve -n postgres -t 127.0.0.1:5432` |
+| `iroh-tunnel-serve` | `its` | Serve only | `its -n postgres -t 127.0.0.1:5432` |
+| `iroh-tunnel-access` | `ita` | Access only | `ita -n postgres -l 127.0.0.1:15432 -N <SERVE_NODE_ID>` |
+
+The options are the same everywhere: `-n/--name`, `-t/--target` (Serve),
+`-l/--listen` and `-N/--node-id` (Access), `-p/--protocol` (default `tcp`),
+`-k/--key-file`, `--relay-url`. A standalone binary has no `serve` or `access`
+word: use `its run --config PATH`. Run `--help` for the full list. Service
+installation for the standalone binaries is not yet supported (issue #90).
+
+Every executable is also published as its own Linux package, archive and
+container image, so you can install only the role you need. Each package owns
+its binary and its alias link; the packages share no files and can be
+installed and removed independently. All packages are binary-only (no service
+unit, config directory or maintainer script).
+
+| Executable | Debian/Ubuntu, Alpine | Container image |
+|---|---|---|
+| `iroh-tunnel` | `iroh-tunnel_<ver>_<arch>.deb` / `.apk` | `ghcr.io/naicoi92/iroh-tunnel` |
+| `iroh-tunnel-serve` | `iroh-tunnel-serve_<ver>_<arch>.deb` / `.apk` | `ghcr.io/naicoi92/iroh-tunnel-serve` |
+| `iroh-tunnel-access` | `iroh-tunnel-access_<ver>_<arch>.deb` / `.apk` | `ghcr.io/naicoi92/iroh-tunnel-access` |
+
+Each release archive contains a single executable (plus README and license).
+The role images use the role executable as their entrypoint, e.g.
+`docker run --rm ghcr.io/naicoi92/iroh-tunnel-serve:<ver> --help`. The macOS
+Homebrew cask still installs only the all-in-one `iroh-tunnel`, and Windows
+release artifacts are not published yet.
 
 **NodeId is public identity, not target authorization.** Knowing NodeId and
 service name lets a peer attempt access. Target services must enforce their own access protection;
@@ -554,6 +613,7 @@ Flags:    -v / -vv   increase logging (debug/trace)  ·  -q quiet (errors only) 
 | `3`  | permission |
 | `4`  | iroh       |
 | `5`  | service    |
+| `6`  | conflict: the role (or its public identity) is already running |
 
 ### Logging
 
@@ -774,8 +834,8 @@ For reporting vulnerabilities and the full policy, see
 | `src/status.rs`            | atomic per-role status-file writers (`StatusWriter`)   |
 | `src/status_cmd.rs`        | `<role> status`: read the file, render the table       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
-| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release     |
-| `packaging/`               | systemd unit, nFPM config, postinstall, Homebrew cask  |
+| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |
+| `packaging/`               | nFPM config, Homebrew cask, `verify-dist.sh` checks    |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Releases

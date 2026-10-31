@@ -12,12 +12,13 @@
 #                                   no native runner exists; NanoKVM / buildroot)
 #   darwin-arm64  macos-14          aarch64-apple-darwin
 #
-# `package` then wraps the glibc binaries into .deb and the musl binaries into
-# .apk with standalone nFPM, reusing packaging/nfpm.yaml.
+# Each Linux target builds all three executables (iroh-tunnel, iroh-tunnel-serve,
+# iroh-tunnel-access) in ONE cargo invocation; darwin ships the all-in-one only.
+# Packaging (package.yml) and the Docker images (docker.yml) consume the
+# artifacts and run in parallel with each other.
 #
-# Artifacts (consumed by docker.yml and release.yml):
-#   target-<id>   iroh-tunnel binary + release tarball for that target
-#   packages      *.deb + *.apk
+# Artifacts:
+#   target-<id>   the executables + one release tarball per executable
 
 name: build
 
@@ -64,8 +65,8 @@ jobs:
           - { id: gnu-arm64,     runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu,     os: linux,  arch: arm64,   suffix: "" }
           - { id: musl-amd64,    runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,     os: linux,  arch: amd64,   suffix: "-musl", musl: true }
           - { id: musl-arm64,    runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl,    os: linux,  arch: arm64,   suffix: "-musl", musl: true }
-          - { id: musl-riscv64,  runner: ubuntu-latest,    target: riscv64gc-unknown-linux-musl,  os: linux,  arch: riscv64, suffix: "-musl", zig: true }
-          - { id: darwin-arm64,  runner: macos-14,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "" }
+          - { id: musl-riscv64,  runner: ubuntu-latest,    target: riscv64gc-unknown-linux-musl,  os: linux,  arch: riscv64gc, suffix: "-musl", zig: true }
+          - { id: darwin-arm64,  runner: macos-14,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "", bins: "iroh-tunnel" }
     env:
       # Statically link PCRE2 for the `regex` crate so binaries are portable
       # across distros without a libpcre2 shared library at runtime.
@@ -111,82 +112,43 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           ZIG: ${{ matrix.zig }}
+          BINS: ${{ matrix.bins }}
         run: |
           if [ "$ZIG" = "true" ]; then sub=zigbuild; else sub=build; fi
-          cargo "$sub" --release --locked --target "$TARGET"
+          flags=(--bins)
+          if [ -n "$BINS" ]; then flags=(); for b in $BINS; do flags+=(--bin "$b"); done; fi
+          cargo "$sub" --release --locked --target "$TARGET" "${flags[@]}"
 
       - name: Smoke test (native binaries)
         if: ${{ !matrix.zig }}
         env:
           TARGET: ${{ matrix.target }}
+          BINS: ${{ matrix.bins || 'iroh-tunnel iroh-tunnel-serve iroh-tunnel-access' }}
         run: |
           out="$("target/$TARGET/release/iroh-tunnel" --version)"
           echo "$out"
           [[ "$out" == *"$VERSION"* ]] || { echo "version mismatch: expected $VERSION"; exit 1; }
+          for b in $BINS; do "target/$TARGET/release/$b" --help >/dev/null; done
 
+      # One tarball per executable (issue #94); each holds only that binary.
       - name: Archive
         env:
           TARGET: ${{ matrix.target }}
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
           SUFFIX: ${{ matrix.suffix }}
+          BINS: ${{ matrix.bins || 'iroh-tunnel iroh-tunnel-serve iroh-tunnel-access' }}
         run: |
           mkdir -p out
-          cp "target/$TARGET/release/iroh-tunnel" out/iroh-tunnel
-          tar -czf "out/iroh-tunnel-${VERSION}-${OS}-${ARCH}${SUFFIX}.tar.gz" \
-            -C out iroh-tunnel \
-            -C .. README.md LICENSE-APACHE LICENSE-MIT
+          for b in $BINS; do
+            cp "target/$TARGET/release/$b" "out/$b"
+            tar -czf "out/${b}-${VERSION}-${OS}-${ARCH}${SUFFIX}.tar.gz" \
+              -C out "$b" -C .. README.md LICENSE-APACHE LICENSE-MIT
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: target-${{ matrix.id }}
           path: out/
-          if-no-files-found: error
-          retention-days: 7
-
-  package:
-    name: package (deb + apk)
-    needs: [version, build]
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: target-*
-          path: in/
-
-      - name: Install nFPM
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download --repo goreleaser/nfpm --pattern 'nfpm_*_Linux_x86_64.tar.gz' --dir /tmp/nfpm
-          tar -xzf /tmp/nfpm/nfpm_*_Linux_x86_64.tar.gz -C /tmp/nfpm nfpm
-          sudo install /tmp/nfpm/nfpm /usr/local/bin/nfpm
-
-      # .deb from glibc builds (Debian/Ubuntu); .apk from musl builds (Alpine).
-      - name: Build packages
-        run: |
-          mkdir -p packages
-          pack() { # <artifact-id> <arch> <format>
-            BINARY="$PWD/in/target-$1/iroh-tunnel" ARCH="$2" \
-              nfpm package --config packaging/nfpm.yaml --packager "$3" \
-              --target "packages/iroh-tunnel_${VERSION}_$2.$3"
-          }
-          pack gnu-amd64 amd64 deb
-          pack gnu-arm64 arm64 deb
-          pack musl-amd64 amd64 apk
-          pack musl-arm64 arm64 apk
-          pack musl-riscv64 riscv64 apk
-          ls -l packages
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: packages
-          path: packages/
           if-no-files-found: error
           retention-days: 7

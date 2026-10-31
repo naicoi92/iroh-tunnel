@@ -1,7 +1,8 @@
-# Reusable multi-arch Docker image from the PREBUILT glibc binaries produced by
+# Reusable multi-arch Docker images (one per executable, issue #94) from the PREBUILT glibc binaries produced by
 # build.yml. Nothing is compiled here and Dockerfile.goreleaser has no RUN
 # step, so no QEMU is needed — buildx only assembles layers.
 #
+# Needs only the two glibc build artifacts, so it runs in PARALLEL with package.yml.
 # push=false rehearses the build (ci.yml); push=true publishes to ghcr.io.
 
 name: docker
@@ -23,14 +24,21 @@ permissions:
 
 jobs:
   image:
-    name: image (linux/amd64 + linux/arm64)
+    name: image (${{ matrix.image }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: iroh-tunnel,        dockerfile: Dockerfile.goreleaser }
+          - { image: iroh-tunnel-serve,  dockerfile: Dockerfile.goreleaser.serve }
+          - { image: iroh-tunnel-access, dockerfile: Dockerfile.goreleaser.access }
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      # Stage binaries at $TARGETPLATFORM/iroh-tunnel (see Dockerfile.goreleaser).
+      # Stage binaries at $TARGETPLATFORM/<binary> (see the Dockerfiles).
       - uses: actions/download-artifact@v4
         with:
           name: target-gnu-amd64
@@ -54,7 +62,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/naicoi92/iroh-tunnel
+          images: ghcr.io/naicoi92/${{ matrix.image }}
           tags: |
             type=raw,value=v${{ inputs.version }},enable=${{ inputs.push }}
             type=raw,value=${{ inputs.version }},enable=${{ inputs.push }}
@@ -63,6 +71,7 @@ jobs:
             type=raw,value=latest,enable=${{ inputs.push && !contains(inputs.version, '-') }}
             type=raw,value=check,enable=${{ !inputs.push }}
           labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.licenses=MIT OR Apache-2.0
             org.opencontainers.image.version=${{ inputs.version }}
 
@@ -70,7 +79,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.goreleaser
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}

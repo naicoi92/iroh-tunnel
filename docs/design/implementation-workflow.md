@@ -6,6 +6,20 @@ Each implementation issue owns one branch, worktree and pull request targeting `
 
 The workflow follows Matt Pocock's [implement](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/implement/SKILL.md), [TDD](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/tdd/SKILL.md), [code review](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/code-review/SKILL.md), and [PR](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/pr/SKILL.md) skills. Read their `SKILL.md` files and referenced guidance before the corresponding stage; install or load the skill package in the agent harness as appropriate. The steps and template below remain available to contributors without that harness.
 
+## Pickup
+
+Run before proposing or starting any issue. A label such as `ready-for-agent` and an empty blocker list show only that no tracked gate is open; they do not show that the issue's prerequisites exist.
+
+1. Run `git fetch` and base the work on the tip of `origin/main`; a local `main` can be behind.
+2. Read the issue, its comments and its live native blockers: `gh api repos/naicoi92/iroh-tunnel/issues/<N>/dependencies/blocked_by`. This is the only source for issue state; no document in this repository records it.
+3. For each artifact, file, binary and decision the acceptance criteria assume, locate it in `origin/main` or a closed issue and quote where. Examples: an acceptance criterion about "all three binaries" needs three `[[bin]]` entries and three published artifacts; one about aliases needs an approved alias strategy; one about Windows needs a Windows build. Name every prerequisite you cannot locate.
+
+Pickup is done when every assumed prerequisite is located or named as missing. If any is missing, report the issue as not ready, list the missing prerequisites, and stop before dependent implementation.
+
+## Release packaging
+
+For release packaging work, a red run of the packaging verification on the unchanged configuration is the red of the TDD slice. Run the `snapshot` workflow on the branch (`gh workflow run snapshot.yml --ref <branch>`); it builds every target natively, packs with nFPM and runs `packaging/verify-dist.sh`.
+
 ## Implement and review
 
 1. Read [the specification](redesign-spec.md), [traceability](redesign-traceability.md), [acceptance procedures](redesign-acceptance.md), the issue and relevant decisions. Record the acceptance criteria and agreed real-process or platform test seam.

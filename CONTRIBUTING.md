@@ -48,8 +48,9 @@ when it is relevant to a change.
 Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
-CI runs exactly these three commands on every pull request, in a `lint` and a
-`test` job. Run them locally before pushing:
+CI runs these three commands on every pull request, in a `lint` and a `test`
+job, plus a `packaging` job that runs `shellcheck` and `goreleaser check`. Run
+the three commands locally before pushing:
 
 ```sh
 cargo fmt --all -- --check
@@ -76,8 +77,8 @@ explaining why.
 | `src/conn_path.rs`          | peer connection-path reports for status files           |
 | `src/status.rs`            | atomic `serve-status.json` writer                      |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
-| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release     |
-| `packaging/`               | systemd unit, nFPM config, postinstall, Homebrew cask  |
+| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |
+| `packaging/`               | nFPM config, Homebrew cask, `verify-dist.sh` checks    |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Pull requests
@@ -89,7 +90,8 @@ explaining why.
    `release`, `role-run`, …).
 3. CI (`ci-ok`) must pass. Docs-only PRs skip the heavy jobs. The release
    build matrix (native targets, deb/apk, Docker) runs on a PR only when
-   `Cargo.*`, `build.rs`, `packaging/` or the build workflows change.
+   `Cargo.*`, `build.rs`, `packaging/` or the build workflows change; shell
+   scripts and workflows are linted whenever they change.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
 

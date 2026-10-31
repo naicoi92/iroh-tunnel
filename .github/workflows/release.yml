@@ -7,12 +7,13 @@
 # consume binaries built on separate runners.)
 #
 # Job graph — `gate` and `build` start together; nothing is published until
-# BOTH are green, so a failed build never leaves a half-made release:
+# the gate and the packages are green, so a failed build never leaves a
+# half-made release. `package` and `docker` both need only the build artifacts
+# and run IN PARALLEL:
 #
-#   gate (fmt ∥ clippy ∥ test)  ┐
-#   build (6 targets ∥) → package ┴→ release (draft → upload → publish)
-#                                      ├→ docker (ghcr.io push)
-#                                      └→ homebrew (tap cask)
+#   gate (fmt ∥ clippy ∥ test) ───────────┬──────────────┐
+#   build (6 targets ∥) ─┬─ package ──────┴→ release → homebrew
+#                        └─ docker (also needs gate)
 #
 # Re-running (workflow_dispatch on a tag ref or "Re-run jobs") replaces the
 # assets of an existing release instead of failing.
@@ -41,9 +42,27 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
 
+  package:
+    needs: build
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.build.outputs.version }}
+
+  # Images need only the glibc binaries, not the packages: start as soon as the
+  # gate and the build are green.
+  docker:
+    needs: [gate, build]
+    uses: ./.github/workflows/docker.yml
+    with:
+      push: true
+      version: ${{ needs.build.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+
   release:
     name: publish GitHub Release
-    needs: [gate, build]
+    needs: [gate, build, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -62,8 +81,9 @@ jobs:
           path: in/
       - uses: actions/download-artifact@v4
         with:
-          name: packages
+          pattern: packages*
           path: dist/
+          merge-multiple: true
 
       - name: Collect assets and checksums
         run: |
@@ -89,16 +109,6 @@ jobs:
 
       - name: Publish release
         run: gh release edit "$TAG" --draft=false
-
-  docker:
-    needs: [build, release]
-    uses: ./.github/workflows/docker.yml
-    with:
-      push: true
-      version: ${{ needs.build.outputs.version }}
-    permissions:
-      contents: read
-      packages: write
 
   homebrew:
     name: update Homebrew tap

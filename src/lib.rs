@@ -11,12 +11,14 @@
 //! by integration tests and by future downstream consumers.
 
 pub mod access;
+pub mod app;
 pub mod cli;
 pub mod config;
 pub mod config_cmd;
 pub mod conn_path;
 pub mod endpoint;
 pub mod error;
+pub(crate) mod ownership;
 pub mod paths;
 pub mod pipe;
 pub mod proto;

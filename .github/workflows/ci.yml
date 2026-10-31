@@ -11,8 +11,10 @@
 #
 # Job graph (independent jobs run in parallel):
 #   changes ─┬─ checks (lint ∥ test linux ∥ test windows)
-#            ├─ build-check  (all release targets + deb/apk; packaging paths only)
-#            │     └─ docker-check
+#            ├─ scripts (shellcheck + actionlint)
+#            ├─ build-check (all release targets; packaging paths only)
+#            │     ├─ package-check (nFPM + verify-dist.sh)   ┐ in parallel
+#            │     └─ docker-check  (3 images, not pushed)    ┘
 #            └─ ci-ok (required check)
 
 name: ci
@@ -39,6 +41,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       packaging: ${{ steps.filter.outputs.packaging }}
+      scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -62,11 +65,15 @@ jobs:
               - 'Cargo.lock'
               - 'build.rs'
               - 'packaging/**'
-              - 'Dockerfile.goreleaser'
+              - 'Dockerfile.goreleaser*'
               - '.github/workflows/build.yml'
+              - '.github/workflows/package.yml'
               - '.github/workflows/docker.yml'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
+            scripts:
+              - '**/*.sh'
+              - '.github/**'
 
   checks:
     needs: changes
@@ -82,6 +89,14 @@ jobs:
     if: needs.changes.outputs.packaging == 'true'
     uses: ./.github/workflows/build.yml
 
+  # package-check and docker-check only need the build artifacts, so they run
+  # in parallel with each other.
+  package-check:
+    needs: build-check
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.build-check.outputs.version }}
+
   docker-check:
     needs: build-check
     uses: ./.github/workflows/docker.yml
@@ -89,10 +104,24 @@ jobs:
       push: false
       version: ${{ needs.build-check.outputs.version }}
 
+  # Static checks for shell scripts and workflows; seconds, no build needed.
+  scripts:
+    name: scripts (shellcheck + actionlint)
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+      - name: actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 && ./actionlint -color
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, checks, build-check, docker-check]
+    needs: [changes, checks, scripts, build-check, package-check, docker-check]
     runs-on: ubuntu-latest
     steps:
       # `skipped` is fine (path filter); `failure` / `cancelled` is not.

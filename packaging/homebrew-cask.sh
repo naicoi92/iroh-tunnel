@@ -33,5 +33,10 @@ cask "iroh-tunnel" do
     system_command "/bin/ln",
                    args: ["-sf", "iroh-tunnel", "#{HOMEBREW_PREFIX}/bin/it"]
   end
+
+  # Remove the \`it\` alias again so uninstall does not leave it dangling.
+  uninstall_postflight do
+    system_command "/bin/rm", args: ["-f", "#{HOMEBREW_PREFIX}/bin/it"]
+  end
 end
 EOF

@@ -19,8 +19,9 @@ on:
       - "Cargo.lock"
       - "build.rs"
       - "packaging/**"
-      - "Dockerfile.goreleaser"
+      - "Dockerfile.goreleaser*"
       - ".github/workflows/build.yml"
+      - ".github/workflows/package.yml"
       - ".github/workflows/docker.yml"
       - ".github/workflows/snapshot.yml"
       - ".github/actions/**"
@@ -35,6 +36,13 @@ permissions:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+
+  # package and docker only need the build artifacts: they run in parallel.
+  package:
+    needs: build
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.build.outputs.version }}
 
   docker:
     needs: build
