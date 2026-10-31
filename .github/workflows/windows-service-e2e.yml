@@ -51,3 +51,43 @@ jobs:
         env:
           IROH_TUNNEL_E2E_SERVICE: "1"
         run: cargo test --all-features --locked --test service_user_windows -- --nocapture --test-threads=1
+      # SM-04 measurement: can a standard (non-admin) user create, query and
+      # delete the logon task without a password prompt? Runs the real binary
+      # as a freshly created local user that is NOT in Administrators.
+      - name: Standard user create/query/delete
+        shell: pwsh
+        run: |
+          cargo build --all-features --locked
+          $exe = (Resolve-Path target/debug/iroh-tunnel.exe).Path
+          $work = Join-Path $env:RUNNER_TEMP 'stduser'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          icacls $work /grant 'Users:(OI)(CI)F' | Out-Null
+          icacls (Split-Path $exe) /grant 'Users:(OI)(CI)RX' /T | Out-Null
+          $pw = 'P@ss-' + [guid]::NewGuid().ToString('N')
+          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name stdtest -Password $sec -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group Users -Member stdtest
+          $cred = [pscredential]::new("$env:COMPUTERNAME\stdtest", $sec)
+          "Administrators members: " + ((Get-LocalGroupMember Administrators).Name -join ', ')
+          $script = Join-Path $work 'run.ps1'
+          @"
+          `$ErrorActionPreference = 'Continue'
+          `$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrator')
+          "isAdmin=`$isAdmin user=`$env:USERNAME"
+          `$cfg = '$work\serve.toml'
+          & '$exe' serve config keygen --config `$cfg --yes 2>&1
+          & '$exe' serve service install --user --config `$cfg 2>&1
+          "install exit=`$LASTEXITCODE"
+          & '$exe' serve service status --user 2>&1
+          "status exit=`$LASTEXITCODE"
+          & '$exe' serve service uninstall --user 2>&1
+          "uninstall exit=`$LASTEXITCODE"
+          schtasks /Query /TN iroh-tunnel-serve 2>&1
+          "query-after-delete exit=`$LASTEXITCODE (expected non-zero)"
+          "@ | Set-Content $script
+          $out = Join-Path $work 'out.txt'
+          $p = Start-Process pwsh -Credential $cred -LoadUserProfile -WorkingDirectory $work `
+            -ArgumentList '-NoProfile','-File',$script -RedirectStandardOutput $out -RedirectStandardError "$out.err" -Wait -PassThru
+          "child exit=$($p.ExitCode)"
+          Get-Content $out, "$out.err"
+          Remove-LocalUser stdtest
