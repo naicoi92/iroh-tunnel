@@ -328,7 +328,40 @@ pub(super) fn write_registration(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| denied(e, "creating", parent))?;
     }
-    std::fs::write(path, contents).map_err(|e| denied(e, "writing", path))
+    // Atomic and never group/world-writable whatever the umask: a root-owned
+    // unit that a group could edit would be a path to root (SM-04), and a
+    // crash mid-write must not leave a truncated unit.
+    let temp = path.with_extension(format!("tmp{}", std::process::id()));
+    let written = (|| {
+        std::fs::write(&temp, contents)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if path.extension().is_none() {
+                0o755
+            } else {
+                0o644
+            };
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode))?;
+        }
+        std::fs::rename(&temp, path)
+    })();
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        denied(e, "writing", path)
+    })
+}
+
+/// The text of an installed registration. Absent is `None`; a registration
+/// that exists but cannot be read counts as one with an unknown owner (empty
+/// text), never as "nothing installed", so the retarget prompt is not skipped.
+#[allow(dead_code)] // unused on targets without a service backend
+pub(super) fn read_registration(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(String::new()),
+    }
 }
 
 // ---------------------------------------------------------------------------

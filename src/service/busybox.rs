@@ -177,7 +177,7 @@ fn run_script(role: &str, verb: &str) -> Result<()> {
 
 /// The installed script's text, if any (to read its pin).
 pub fn existing_registration(role: &str) -> Option<String> {
-    std::fs::read_to_string(script_path(role)).ok()
+    super::read_registration(&script_path(role))
 }
 
 pub fn install(

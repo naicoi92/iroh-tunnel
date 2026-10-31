@@ -251,8 +251,96 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
     })
 }
 
+/// Atomically publish `contents` as `dir/name` through a freshly verified
+/// directory handle: the temp file is created `O_EXCL|O_NOFOLLOW` and renamed
+/// with `renameat`, so a link planted by the directory's owner is never
+/// followed by root. The directory is re-verified on every call, which closes
+/// the swap-after-start race for the status snapshot (SM-04).
+///
+/// # Errors
+///
+/// [`CliError::Permission`] when the directory is no longer safe.
+pub(crate) fn publish(
+    dir: &Path,
+    trusted_uid: u32,
+    name: &str,
+    temp: &str,
+    contents: &[u8],
+) -> Result<()> {
+    use std::io::Write;
+    let dir_entry = walk(dir, trusted_uid, true)?;
+    let fd = dir_entry.file.as_raw_fd();
+    let temp_c = cstring(temp)?;
+    let name_c = cstring(name)?;
+    // SAFETY: `fd` is the verified directory handle, kept open by `dir_entry`;
+    // the names are NUL-terminated; a returned fd is owned by the new `File`.
+    let raw = unsafe {
+        libc::openat(
+            fd,
+            temp_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644 as libc::c_uint,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot create {temp} in {}", dir.display()));
+    }
+    // SAFETY: `raw` is a freshly opened descriptor nobody else owns.
+    let mut file = unsafe { File::from_raw_fd(raw) };
+    let written = file
+        .write_all(contents)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed to write {temp} in {}", dir.display()));
+    // SAFETY: both names are NUL-terminated and `fd` is the open directory.
+    let renamed = written.and_then(|()| {
+        if unsafe { libc::renameat(fd, temp_c.as_ptr(), fd, name_c.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to finalize {name} in {}", dir.display()))
+        }
+    });
+    if renamed.is_err() {
+        // SAFETY: as above; best-effort removal of our own temp file.
+        unsafe { libc::unlinkat(fd, temp_c.as_ptr(), 0) };
+    }
+    renamed
+}
+
+/// Read `dir/name` through a verified directory handle without following a
+/// link; `None` when absent or unreadable.
+pub(crate) fn read_in(dir: &Path, trusted_uid: u32, name: &str) -> Option<String> {
+    let dir_entry = walk(dir, trusted_uid, true).ok()?;
+    let mut file = open_child(&dir_entry.file, OsStr::new(name), false).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// Remove `dir/name` through a verified directory handle (never follows a link).
+pub(crate) fn remove_in(dir: &Path, trusted_uid: u32, name: &str) -> Result<()> {
+    let dir_entry = walk(dir, trusted_uid, true)?;
+    let name_c = cstring(name)?;
+    // SAFETY: `dir_entry` keeps the verified directory open; `name_c` is
+    // NUL-terminated.
+    if unsafe { libc::unlinkat(dir_entry.file.as_raw_fd(), name_c.as_ptr(), 0) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error).with_context(|| format!("failed to remove {name} in {}", dir.display()))
+    }
+}
+
+fn cstring(text: &str) -> Result<CString> {
+    CString::new(text).with_context(|| format!("{text:?} contains a NUL byte"))
+}
+
 /// The trust policy requested by the registration, if any.
-fn trusted_uid_from_env() -> Result<Option<u32>> {
+pub(crate) fn trusted_uid_from_env() -> Result<Option<u32>> {
     match std::env::var(ENV_TRUSTED_UID) {
         Ok(value) => value.trim().parse().map(Some).map_err(|_| {
             CliError::Config(format!(
@@ -436,6 +524,75 @@ mod tests {
         assert!(verify_dir(&file, me()).is_err());
         mode(dir, 0o777);
         assert!(verify_dir(dir, me()).is_err());
+    }
+
+    #[test]
+    fn publish_replaces_atomically_and_never_follows_a_planted_link() {
+        let (tmp, file) = fixture();
+        let dir = file.parent().unwrap();
+        publish(
+            dir,
+            me(),
+            "serve-status.json",
+            "serve-status.json.tmp.1",
+            b"one",
+        )
+        .unwrap();
+        publish(
+            dir,
+            me(),
+            "serve-status.json",
+            "serve-status.json.tmp.2",
+            b"two",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("serve-status.json")).unwrap(),
+            "two"
+        );
+        assert_eq!(
+            read_in(dir, me(), "serve-status.json").as_deref(),
+            Some("two")
+        );
+
+        // A link planted at the final name is replaced, not written through.
+        let victim = tmp.path().canonicalize().unwrap().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        std::fs::remove_file(dir.join("serve-status.json")).unwrap();
+        symlink(&victim, dir.join("serve-status.json")).unwrap();
+        assert!(read_in(dir, me(), "serve-status.json").is_none());
+        publish(
+            dir,
+            me(),
+            "serve-status.json",
+            "serve-status.json.tmp.3",
+            b"three",
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("serve-status.json")).unwrap(),
+            "three"
+        );
+
+        // A link planted at the temp name makes the create fail (O_EXCL).
+        symlink(&victim, dir.join("t")).unwrap();
+        assert!(publish(dir, me(), "serve-status.json", "t", b"x").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+
+        // Removal unlinks a link itself, never its target; absent is fine.
+        remove_in(dir, me(), "t").unwrap();
+        remove_in(dir, me(), "t").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    }
+
+    #[test]
+    fn publish_refuses_a_directory_that_became_unsafe() {
+        let (_tmp, file) = fixture();
+        let dir = file.parent().unwrap();
+        mode(dir, 0o777);
+        assert!(publish(dir, me(), "s", "s.tmp", b"x").is_err());
+        assert!(!dir.join("s").exists());
     }
 
     #[test]

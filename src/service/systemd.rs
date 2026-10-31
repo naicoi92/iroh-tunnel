@@ -129,7 +129,7 @@ fn run_systemctl(scope: ServiceScope, args: &[&str]) -> Result<()> {
 
 /// The installed unit's text, if any (to read its pin).
 pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
-    std::fs::read_to_string(unit_path(role, scope).ok()?).ok()
+    super::read_registration(&unit_path(role, scope).ok()?)
 }
 
 pub fn install(

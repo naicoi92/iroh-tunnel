@@ -20,7 +20,7 @@ const KEY: &str = "iroh-tunnel-pin";
 pub struct Pin {
     /// Absolute, canonical path of the config file the service reads.
     pub config: PathBuf,
-    /// Owner UID of the config directory at install time: the only principal,
+    /// UID of the user the service was installed for: the only principal,
     /// besides root, whose writes the service accepts.
     pub uid: u32,
 }
@@ -35,7 +35,14 @@ impl Pin {
     /// body has no record (a registration from before this policy) or the
     /// record is malformed: the caller must treat both as an unknown target.
     pub fn find(body: &str) -> Option<Self> {
-        let line = body.lines().find(|l| l.contains(KEY))?;
+        // Only a comment line counts: a path inside another directive (the
+        // busybox `CONFIG=` line) could otherwise embed the key and forge it.
+        let line = body.lines().find(|l| {
+            let l = l.trim_start();
+            ["# ", "<!-- "]
+                .iter()
+                .any(|marker| l.strip_prefix(marker).is_some_and(|r| r.starts_with(KEY)))
+        })?;
         let rest = &line[line.find(KEY)? + KEY.len()..];
         let mut config = None;
         let mut uid = None;
@@ -133,6 +140,21 @@ mod tests {
         assert!(!record.contains("--"), "{record}");
         let plist = format!("<!-- {record} -->\n<dict/>");
         assert_eq!(Pin::find(&plist), Some(pin("/a b/--x.toml")));
+    }
+
+    #[test]
+    fn a_path_embedding_the_key_cannot_forge_the_pin() {
+        let forged = pin("/x/iroh-tunnel-pin config=/evil uid=0/serve.toml");
+        let body = format!(
+            "CONFIG=\"{}\"\n# {}\n",
+            forged.config.display(),
+            forged.record()
+        );
+        assert_eq!(Pin::find(&body), Some(forged));
+        assert_eq!(
+            Pin::find("CONFIG=\"/x/iroh-tunnel-pin config=/evil uid=0\"\n"),
+            None
+        );
     }
 
     #[test]

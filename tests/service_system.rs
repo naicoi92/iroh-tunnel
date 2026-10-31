@@ -412,4 +412,59 @@ fn system_service_across_the_privilege_boundary() {
 
     // Once the unsafe condition is removed the service runs again.
     start_and_wait(&bob, "bob's service after the fix");
+
+    // --- RO-03: a real kill leaves files behind; they must not block restart.
+    let pid = std::fs::read_to_string("/var/run/iroh-tunnel-serve.pid")
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(sh(&["kill", "-9", &pid]).status.success());
+    wait_for("the killed process to exit", || {
+        // Without an init to reap it, a killed child stays a zombie (`Z`).
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+            stat.rsplit(") ").next().is_some_and(|r| r.starts_with('Z'))
+        })
+    });
+    assert!(
+        bob.status_file().exists(),
+        "a kill -9 leaves the snapshot behind"
+    );
+    std::fs::write(bob.state().join("serve-status.json.tmp.1.1"), "junk").unwrap();
+    let out = restart();
+    assert!(out.status.success(), "restart: {}", err(&out));
+    wait_for("a fresh snapshot after the crash", || {
+        bob.running_services()
+            .is_some_and(|s| !s.contains(&format!("\"pid\": {pid}")))
+    });
+
+    // --- Root never writes through a link the user plants in the state dir.
+    let victim = Path::new("/root/it91-victim");
+    std::fs::write(victim, "keep").unwrap();
+    let _ = std::fs::remove_file(bob.status_file());
+    std::os::unix::fs::symlink(victim, bob.status_file()).unwrap();
+    let out = restart();
+    assert!(out.status.success(), "restart: {}", err(&out));
+    wait_for("the snapshot to replace the planted link", || {
+        std::fs::symlink_metadata(bob.status_file()).is_ok_and(|m| m.file_type().is_file())
+    });
+    assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep");
+    let _ = std::fs::remove_file(victim);
+
+    // --- A symlinked home is resolved once at install (SM-04), not refused later.
+    let real = PathBuf::from("/home/it91b-real");
+    let _ = std::fs::remove_dir_all(&real);
+    std::fs::rename(&bob.home, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &bob.home).unwrap();
+    let out = run(
+        &["serve", "service", "install"],
+        &[
+            ("SUDO_USER", bob.name),
+            ("IROH_TUNNEL_STATE_DIR", bob_state.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "{}", err(&out));
+    assert!(script().contains("/home/it91b-real/"), "{}", script());
+    wait_for("bob's service via the resolved paths", || {
+        std::fs::metadata(real.join(".local/state/iroh-tunnel/serve-status.json")).is_ok()
+    });
 }

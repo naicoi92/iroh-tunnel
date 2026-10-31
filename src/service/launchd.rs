@@ -160,7 +160,7 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
 
 /// The installed plist's text, if any (to read its pin).
 pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
-    std::fs::read_to_string(plist_path(role, scope).ok()?).ok()
+    super::read_registration(&plist_path(role, scope).ok()?)
 }
 
 pub fn install(

@@ -60,7 +60,10 @@ fn lookup(
         if rc != 0 || found.is_null() {
             return None;
         }
-        // SAFETY: on success the string fields point into `buf`, which is
+        if pwd.pw_name.is_null() || pwd.pw_dir.is_null() {
+            return None;
+        }
+        // SAFETY: both strings are non-null (checked above) and point into `buf`, which is
         // alive and unmodified until this function returns.
         let (name, home) = unsafe {
             (

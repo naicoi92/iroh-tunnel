@@ -121,10 +121,19 @@ pub fn resolve_target(
             })?
         }
     };
-    let state = match request.state {
+    // Canonical like the config: the runtime walk refuses every symlink, so a
+    // symlinked home or /var must be resolved once, here (SM-04).
+    let state = trust::canonical(&match request.state {
         Some(path) => std::path::absolute(path)?,
         None => crate::paths::state_dir_in(&account.home),
-    };
+    })
+    .map_err(|_| {
+        CliError::Config(format!(
+            "the state directory for user {} does not exist; create it as that user \
+             (`mkdir -p`), the service does not create directories in a user's home as root",
+            account.name
+        ))
+    })?;
     Ok(Target {
         account,
         config,
