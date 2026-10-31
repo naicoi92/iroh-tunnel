@@ -292,8 +292,10 @@ pub(crate) fn publish(
         .write_all(contents)
         .and_then(|()| file.sync_all())
         .with_context(|| format!("failed to write {temp} in {}", dir.display()));
-    // SAFETY: both names are NUL-terminated and `fd` is the open directory.
     let renamed = written.and_then(|()| {
+        // SAFETY: `fd` is the verified directory handle kept open by
+        // `dir_entry` for this whole function, and both names are
+        // NUL-terminated `CString`s that outlive the call.
         if unsafe { libc::renameat(fd, temp_c.as_ptr(), fd, name_c.as_ptr()) } == 0 {
             Ok(())
         } else {
@@ -302,8 +304,10 @@ pub(crate) fn publish(
         }
     });
     if renamed.is_err() {
-        // SAFETY: as above; best-effort removal of our own temp file.
-        unsafe { libc::unlinkat(fd, temp_c.as_ptr(), 0) };
+        // SAFETY: `fd` is still the open verified directory handle and
+        // `temp_c` a live NUL-terminated name; this removes only our own temp
+        // file, and its failure is irrelevant to the error being returned.
+        let _ = unsafe { libc::unlinkat(fd, temp_c.as_ptr(), 0) };
     }
     renamed
 }
@@ -311,7 +315,9 @@ pub(crate) fn publish(
 /// Read `dir/name` through a verified directory handle without following a
 /// link; `None` when absent or unreadable.
 pub(crate) fn read_in(dir: &Path, trusted_uid: u32, name: &str) -> Option<String> {
-    let dir_entry = walk(dir, trusted_uid, true).ok()?;
+    let dir_entry = walk(dir, trusted_uid, true)
+        .inspect_err(|e| tracing::debug!("not reading {name}: {e:#}"))
+        .ok()?;
     let mut file = open_child(&dir_entry.file, OsStr::new(name), false).ok()?;
     let mut text = String::new();
     file.read_to_string(&mut text).ok()?;

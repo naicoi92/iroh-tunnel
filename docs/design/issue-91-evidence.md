@@ -23,6 +23,8 @@ Unprivileged system install/verbs: `tests/service_user.rs` (unchanged, passing).
 
 Standards + Spec reviews run on `af6c10c`. Fixed: state dir canonicalized; root status writes via verified handle; pin parse accepts only comment lines (busybox `CONFIG=` spoof); registration written atomically 0644/0755; unreadable registration is an unknown owner, not "nothing installed"; null `pw_dir` check; crash-leftover test. Open/accepted: legacy system registrations without a pin run without the trust check until re-installed (documented); no file-size cap on the config read; macOS/systemd real-root evidence deferred to #97.
 
+Second review pass (`e78ef44`): fixed RS-12 `SAFETY` comments on `renameat`/`unlinkat`, explicit `let _ =` on best-effort unlink, debug log when `read_in` refuses a directory, and a named conflict error when `SUDO_USER` and `--config` belong to different users (unit-tested). Left for a decision: whether "safety confirmation" (91.CL1) means only the retarget prompt; a `TrustedDir` type for the `(path, uid)` clump and splitting `trust.rs` (smells, judgement); `sudo` `env_reset` dropping `IROH_TUNNEL_STATE_DIR`; legacy registrations without a pin.
+
 ## Limits
 
 - Real runs: Linux/BusyBox only. systemd system scope and macOS LaunchDaemon share the code path (pin comment + `IROH_TUNNEL_TRUSTED_UID`) and are covered by template unit tests, not a real root run (no systemd container / macOS root available here). Requires follow-up evidence in #97.

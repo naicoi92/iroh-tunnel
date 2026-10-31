@@ -100,7 +100,26 @@ pub fn resolve_target(
     };
 
     let account = match (from_sudo, request.config) {
-        (Some(account), _) => account,
+        (Some(account), Some(config)) => {
+            // Both given: they must agree, or root would be asked to trust a
+            // file that belongs to someone other than the pinned user.
+            let owner = config_dir_owner(&trust::canonical(config)?)?;
+            if owner.uid != account.uid {
+                return Err(CliError::Config(format!(
+                    "SUDO_USER is {} but {} is in a directory owned by {}; the service can \
+                     only trust one user. Run from {}'s session, or pass a --config under \
+                     {}'s home. Nothing was changed.",
+                    account.name,
+                    config.display(),
+                    owner.name,
+                    owner.name,
+                    account.name
+                ))
+                .into());
+            }
+            account
+        }
+        (Some(account), None) => account,
         (None, Some(config)) => config_dir_owner(&trust::canonical(config)?)?,
         (None, None) if request.interactive => ask_user(request.role, input, prompt)?,
         (None, None) => return Err(unknown_user("no SUDO_USER", request.role)),
@@ -305,6 +324,38 @@ mod tests {
             msg.contains("sudo iroh-tunnel serve service install --system"),
             "{msg}"
         );
+        assert!(msg.contains("--config"), "{msg}");
+    }
+
+    #[test]
+    fn sudo_user_and_a_config_owned_by_someone_else_is_a_named_conflict() {
+        // The current uid owns the temp dir; `root` stands in for SUDO_USER,
+        // which is rejected as an install target, so use the owner mismatch
+        // through a config whose directory owner differs from the account.
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        std::fs::write(&config, "x").unwrap();
+        let me = account::by_uid(unsafe { libc::geteuid() }).expect("current account");
+        if me.uid == 0 {
+            return; // root owns everything; the mismatch needs a non-root owner
+        }
+        let other = if me.name == "daemon" { "bin" } else { "daemon" };
+        if account::by_name(other).is_none_or(|a| a.uid == 0 || a.uid == me.uid) {
+            return;
+        }
+        let request = Request {
+            role: "serve",
+            config: Some(&config),
+            state: None,
+            sudo_user: Some(other),
+            interactive: false,
+        };
+        let err =
+            resolve_target(&request, &mut Cursor::new(String::new()), &mut Vec::new()).unwrap_err();
+        let Some(CliError::Config(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("{err:?}");
+        };
+        assert!(msg.contains(other) && msg.contains(&me.name), "{msg}");
         assert!(msg.contains("--config"), "{msg}");
     }
 
