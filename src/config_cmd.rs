@@ -45,6 +45,18 @@ pub fn keygen(role: &str, config: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// `config keygen random`: print a fresh key and its node ID without touching
+/// any configuration file or the default path.
+///
+/// The secret goes to stdout only, so it can be captured (`$(…)`, pipes). It is
+/// never logged.
+pub fn keygen_random() -> Result<()> {
+    let key = iroh::SecretKey::generate();
+    println!("Secret key: {}", crate::config::encode_secret_key(&key));
+    println!("Node ID: {}", key.public());
+    Ok(())
+}
+
 /// `config add`: append a `[[services]]` entry.
 ///
 /// Validates the new service (name regex/length, port range, node_id for

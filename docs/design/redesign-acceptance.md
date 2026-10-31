@@ -248,7 +248,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Action:** Invoke applicable real configured commands and macOS migration failures; inspect all candidate user paths.
 
-**Expected observable outcome:** Actionable guidance; no silent other-user config fallback or replacement identity after migration failure; source preserved. First-time missing-both behavior not selected.
+**Expected observable outcome:** Actionable guidance; no silent other-user config fallback or replacement identity after migration failure; source preserved. First-time missing-both behavior was selected by #98 D3 (guidance error, nothing created); implementation owned by #99.
 
 **Evidence/platform:** Errors/exits, file hashes/permissions and public-identity evidence. Platform: Linux/macOS/Windows config errors; macOS copy failure.
 
@@ -852,19 +852,19 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 <a id="cfg-lifecycle-01"></a>
 ### Case CFG-LIFECYCLE-01
 
-**Requirements:** S72. **Owner:** #99; final integration #97. **Planning:** MAPPED.
+**Requirements:** S33–S40, S72, CFG-04, CFG-05. **Owner:** #99; decisions #98; final integration #97. **Planning:** MAPPED.
 
 **Source AC:** [98.AC1](#98-ac1); [98.AC2](#98-ac2); [98.AC3](#98-ac3); [99.AC1](#99-ac1); [99.AC2](#99-ac2); [99.AC3](#99-ac3). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #98 command-by-command lifecycle/identity policy and #83 configured baseline.
+**Prerequisites:** Decisions D1–D6 in `issue-98-config-identity-decisions.md` and #83 configured baseline. Isolated `HOME` and `--config` fixtures: valid config with a known key and relay token, invalid-document fixtures, a no-config home, a 0644 config without a key.
 
-**Action:** Run approved config/setup/mutation/rotation/display commands against actual files; restart processes; execute approved invalid/concurrent/secret cases.
+**Action:** Run the real binary for scenarios AC-CFG-05–12: invalid `add`/`remove`/`keygen`/`edit`; two concurrent `add` processes; `keygen` with an existing key without a TTY, with and without `--yes`; `show` with and without `--reveal`; `run`/`list`/`show` with no config; `run` on a config lacking a key, then restart; kill during save; every subcommand with `--config`; `keygen random`.
 
-**Expected observable outcome:** Each approved decision implemented with explicit command/scenario trace; confirmed migration/identity safeguards retained; intentional changes documented. Proposed validation/atomicity/rotation/disclosure outcomes not invented.
+**Expected observable outcome:** Invalid mutations leave file bytes and identity unchanged; concurrent writers never corrupt or silently lose a change; rotation needs confirmation; `show` hides `secret_key` and `relay_token` unless `--reveal`; missing-config commands share one guidance error and create nothing; an auto-generated key is persisted owner-only and reused after restart; a killed save leaves a complete old or new document; `keygen random` prints a key whose derived node ID matches and writes nothing. Confirmed migration/identity safeguards retained; intentional changes documented. Windows owner-only permission and lock behavior not decided: UNVERIFIED until #99 evidence.
 
-**Evidence/platform:** Decision inventory, commands, file/public-ID diffs, secret handling and restart/byte evidence. Platform: Supported Linux/macOS/Windows runtime matrix.
+**Evidence/platform:** Exit codes, stderr, file hashes and permissions, restart NodeId, redaction scan, commands. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #99 #98/#83 blockers; lifecycle decisions unresolved. Planning envelope requires concrete policy assertions before execution.
+**Execution:** BLOCKED — #99 implementation pending; #98 decisions D1–D6 recorded (only `keygen random` is implemented, in the #98 PR).
 
 <a id="release-sign-01"></a>
 ### Case RELEASE-SIGN-01
@@ -1205,7 +1205,7 @@ Owner #97, with dependency upgrade evidence from #101. Execute these against fin
 
 ## Additional owners
 
-- **#98 / #99:** decide and implement approved configuration and identity lifecycle, including actual commands, persistence, failure, concurrency and secret handling as policy requires.
+- **#98 / #99:** #98 recorded the decisions; #99 implements the approved configuration and identity lifecycle, including actual commands, persistence, failure, concurrency and secret handling as policy requires.
 - **#100:** produce and verify actual signed and checksummed artifacts; gate publication on complete accepted evidence.
 - **#101:** select, implement and validate the approved Iroh upgrade, including affected regression on the final version.
 

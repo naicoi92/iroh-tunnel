@@ -193,7 +193,8 @@ subcommands; use separate `run --config PATH` for saved settings.
 
 To keep the same public identity across restarts without a config file, pass a
 key file with `-k` / `--key-file PATH`. The file holds a base64 secret key, as
-written by `config keygen`. Keep it private; the key is never printed.
+written by `config keygen`. Keep it private; `config keygen random` is
+the only command meant to print a key.
 
 ### Independent role binaries and aliases
 
@@ -250,6 +251,10 @@ iroh-tunnel serve config add --name postgres --protocol tcp --port 5432
 iroh-tunnel serve config show
 iroh-tunnel serve run        # prints:  NodeId: <hex>
 ```
+
+To mint a key without touching any config (for a secret store or `--key-file`),
+use `iroh-tunnel serve config keygen random`: it prints `Secret key:` and
+`Node ID:` and writes nothing.
 
 **2. On the access host** (your laptop, anywhere):
 
@@ -598,7 +603,7 @@ iroh-tunnel <ROLE> <COMMAND>
 Roles:    serve | access
 Commands:
   run       Run in the foreground
-  config    Manage config (keygen | add | remove | list | show | edit | path)
+  config    Manage config (keygen [random] | add | remove | list | show | edit | path)
   status    Print the role's status file as a table (--json for the raw file)
 
 Flags:    -v / -vv   increase logging (debug/trace)  ·  -q quiet (errors only)  ·  --color auto|always|never

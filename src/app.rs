@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::{AccessCli, Cli, ConfigAction, Role, RoleCmd, ScopeArgs, ServeCli, ServiceAction};
+use crate::cli::{
+    AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ScopeArgs, ServeCli, ServiceAction,
+};
 use crate::config_cmd;
 use crate::error::CliError;
 use crate::shutdown;
@@ -228,7 +230,11 @@ fn absolutize_config_path(path: &Path) -> anyhow::Result<PathBuf> {
 
 fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
     match action {
-        ConfigAction::Keygen { config } => config_cmd::keygen(role, config.as_deref()),
+        ConfigAction::Keygen {
+            mode: Some(KeygenMode::Random),
+            ..
+        } => config_cmd::keygen_random(),
+        ConfigAction::Keygen { config, mode: None } => config_cmd::keygen(role, config.as_deref()),
         ConfigAction::Add(args) => config_cmd::add(role, &args),
         ConfigAction::Remove { name } => config_cmd::remove(role, None, &name),
         ConfigAction::List => config_cmd::list(role, None),
