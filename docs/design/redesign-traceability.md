@@ -215,7 +215,7 @@ Current planning revision: supplied full tracker snapshots dated 2026-10-29, che
 
 #98/#99 own unresolved configuration/identity decisions and approved implementation; #100 owns actual signed release production; #101 owns selected Iroh upgrade. #97 native blockers in supplied snapshot are #84–#96 and #99–#101 (not #83); refresh live before pickup. #81 worker-reported tests at `bc943290d8393658851995fa99592c54eb071c2d` remain independently unaccepted. User confirms real-process E2E and mandatory short arguments; exact letters and unresolved policy are not invented here.
 
-CFG-04/05 are confirmed by the #98 decision record and owned by #99 (case CFG-LIFECYCLE-01). SM-04, DIST-03 and CLI-03 are not added as confirmed rules. Their dependent planning envelopes remain explicit blockers; references do not promote draft AC to approved policy. TCP-02 uses superseding #86 handoff: numeric defaults/cancellation/error mapping are technical validation, not a new product gate. TC-02 includes both TCP compatibility and UDP support; failed 0.4 direction requires user decision, not automatic release rejection.
+CFG-04/05 are confirmed by the #98 decision record and owned by #99 (case CFG-LIFECYCLE-01). SM-04 is confirmed by the #79 decision (see the spec). DIST-03 and CLI-03 are not added as confirmed rules. Their dependent planning envelopes remain explicit blockers; references do not promote draft AC to approved policy. TCP-02 uses superseding #86 handoff: numeric defaults/cancellation/error mapping are technical validation, not a new product gate. TC-02 includes both TCP compatibility and UDP support; failed 0.4 direction requires user decision, not automatic release rejection.
 
 ## Current confirmed-rule ownership and evidence
 

@@ -626,7 +626,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Policy link, attack transcripts and actual OS privileges/ACL/path effects. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** Await #79 ownership, symlink/integrity and TOCTOU policy (SM-04 is Proposed, not approved); the system service runtime account is root/Administrator (RO-03).
+**Execution:** Await #79 ownership, symlink/integrity and TOCTOU policy (SM-04 is Confirmed); the system service runtime account is root/Administrator (RO-03).
 
 <a id="sm-windows-01"></a>
 ### Case SM-WINDOWS-01
@@ -643,7 +643,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Registration, login/account/architecture, bytes and lifecycle/errors. Platform: Real Windows x64 and ARM64 where available.
 
-**Execution:** BLOCKED — Await #79 Windows mechanism (SM-04 proposes a Task Scheduler user task, not yet approved) and #84/#87 dependencies; no SCM/task adapter assumed until approval.
+**Execution:** BLOCKED — Await #79 Windows mechanism (SM-04 confirms a Task Scheduler user task) and #84/#87 dependencies; implement only the SM-04 Task Scheduler mechanism.
 
 <a id="install-default-01"></a>
 ### Case INSTALL-DEFAULT-01
