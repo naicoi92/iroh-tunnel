@@ -193,7 +193,8 @@ subcommands; use separate `run --config PATH` for saved settings.
 
 To keep the same public identity across restarts without a config file, pass a
 key file with `-k` / `--key-file PATH`. The file holds a base64 secret key, as
-written by `config keygen`. Keep it private; only `config keygen random` prints a key, and `config show` redacts it.
+written by `config keygen`. Keep it private; `config keygen random` is
+the only command meant to print a key.
 
 ### Independent role binaries and aliases
 

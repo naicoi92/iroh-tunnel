@@ -1,6 +1,6 @@
 # Issue #98 — configuration and identity lifecycle decisions
 
-Status: **decisions D1–D6 recorded from owner answers and applied to the spec (CFG-04, CFG-05, AC-CFG-05–12).** This is a decision and evidence gate; the only production change is `config keygen random` (D6). Base: `origin/main` 42ef3a8.
+Status: **decisions D1–D6 recorded from the owner's answers to structured questions in the agent session on 2026-10-31 (not yet echoed as an issue comment) and applied to the spec (CFG-04, CFG-05, AC-CFG-05–12).** This is a decision and evidence gate; the only production change is `config keygen random` (D6). Base: `origin/main` 42ef3a8.
 
 ## 1. Inventory of current behavior (criterion 1)
 
@@ -42,7 +42,7 @@ Rows marked *observed* were reproduced with the debug binary against an isolated
 | D4 | Write safety | Every mutation validates the resulting document, writes via temp file in the same directory → fsync → rename, and holds an advisory lock on a sibling lock file so writers serialize. `edit` validates after the editor exits and rejects an invalid result, leaving the prior file. All config commands accept `--config`. | Replaces both `fs::write` sites with one shared writer. |
 | D5 | Auto-generated key permissions | Defect, not a policy choice: the `run` auto-generation save path must create the file owner-only, same as `config_cmd`. Folded into D4's shared writer. | Fixes the 0644 finding. |
 
-| D6 | Ephemeral keygen | `config keygen random` prints a fresh random secret key and its node ID to stdout (`Secret key:` / `Node ID:`) and writes nothing: it neither reads nor creates a config file and ignores any existing key. Needs no confirmation (D1 does not apply) and, because the output is the secret, is the one command meant to disclose it (D2 does not apply). **Implemented in this PR** (tests: `keygen_random_*` in `tests/config_paths.rs`). | Role-agnostic; `--config` is accepted but unused. |
+| D6 | Ephemeral keygen | `config keygen random` prints a fresh random secret key and its node ID to stdout (`Secret key:` / `Node ID:`) and writes nothing: it neither reads nor creates a config file and ignores any existing key. Needs no confirmation (D1 does not apply) and, because the output is the secret, is the one command meant to disclose it (D2 does not apply). **Implemented in this PR** (tests: `keygen_random_*` in `tests/config_paths.rs`). | Role-agnostic; `--config` together with `random` is rejected at parse time rather than silently ignored. |
 
 ### Still open (do not block D1–D5)
 

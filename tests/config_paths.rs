@@ -370,6 +370,23 @@ mod macos_migration {
     }
 }
 
+/// Sorted relative paths of everything under `root`.
+fn dir_listing(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            out.push(path.strip_prefix(root).unwrap().to_path_buf());
+            if path.is_dir() {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
 /// Parse the `Secret key:` and `Node ID:` lines printed by `keygen random`.
 fn random_identity(out: &Output) -> (String, String) {
     let text = stdout(out);
@@ -443,23 +460,11 @@ fn keygen_random_rejects_config_path_instead_of_ignoring_it() {
         ],
     );
     assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("cannot be used with"),
+        "expected a clap conflict error: {}",
+        stderr(&out)
+    );
     assert!(!target.exists());
     assert!(!stdout(&out).contains("Secret key"));
-}
-
-/// Sorted relative paths of everything under `root`.
-fn dir_listing(root: &Path) -> Vec<PathBuf> {
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            out.push(path.strip_prefix(root).unwrap().to_path_buf());
-            if path.is_dir() {
-                walk(&path, root, out);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
-    out.sort();
-    out
 }
