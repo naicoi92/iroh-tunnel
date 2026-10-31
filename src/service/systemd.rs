@@ -4,12 +4,12 @@
 //! `~/.config/systemd/user` (user scope). Each action delegates to `systemctl`
 //! with `--user` added automatically for the per-user domain.
 
-use super::{resolve_binary, RestartPolicy, ServiceScope};
+use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 fn unit_name(role: &str) -> String {
-    format!("iroh-tunnel-{role}.service")
+    format!("iroh-tunnel-{role}{}.service", instance_suffix())
 }
 
 /// Where the unit file lives for the given scope.
@@ -27,13 +27,23 @@ fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
 ///
 /// The restart directives come from the shared [`RestartPolicy`] so they stay
 /// in sync with the launchd plist template.
-fn format_unit(role: &str, binary: &Path, config: &Path) -> String {
-    format_unit_with(role, binary, config, &RestartPolicy::DEFAULT)
+fn format_unit(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
+    format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT)
 }
 
-fn format_unit_with(role: &str, binary: &Path, config: &Path, policy: &RestartPolicy) -> String {
-    let binary = binary.to_string_lossy();
-    let config = config.to_string_lossy();
+fn format_unit_with(
+    role: &str,
+    binary: &Path,
+    config: &Path,
+    state: &Path,
+    policy: &RestartPolicy,
+) -> String {
+    let binary = quote_arg(&binary.to_string_lossy(), Expand::Command);
+    let config = quote_arg(&config.to_string_lossy(), Expand::Command);
+    let state_env = quote_arg(
+        &format!("IROH_TUNNEL_STATE_DIR={}", state.to_string_lossy()),
+        Expand::Environment,
+    );
     // systemd spells restart-on-failure as `Restart=on-failure` (or `no` when
     // the policy disables it). RestartSec is the backoff in seconds.
     let restart = if policy.on_failure {
@@ -51,6 +61,7 @@ fn format_unit_with(role: &str, binary: &Path, config: &Path, policy: &RestartPo
          [Service]\n\
          Type=simple\n\
          ExecStart={binary} {role} run --config {config}\n\
+         Environment={state_env}\n\
          Restart={restart}\n\
          RestartSec={restart_sec}\n\
          RestartPreventExitStatus=6\n\
@@ -58,6 +69,36 @@ fn format_unit_with(role: &str, binary: &Path, config: &Path, policy: &RestartPo
          [Install]\n\
          WantedBy=default.target\n"
     )
+}
+
+/// Which systemd line a quoted word goes on; they expand differently.
+#[derive(Clone, Copy)]
+enum Expand {
+    /// `ExecStart=`: `$VAR` is substituted, so a literal `$` is doubled.
+    Command,
+    /// `Environment=`: no `$` substitution, so `$` stays literal.
+    Environment,
+}
+
+/// Quote one word for a systemd unit line so paths with spaces or special
+/// characters stay one argument. `%` is doubled on both lines because systemd
+/// expands specifiers everywhere in unit files.
+fn quote_arg(arg: &str, line: Expand) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@+=:,./-".contains(c));
+    if plain {
+        return arg.to_owned();
+    }
+    let mut escaped = arg
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    if matches!(line, Expand::Command) {
+        escaped = escaped.replace('$', "$$");
+    }
+    format!("\"{escaped}\"")
 }
 
 /// Run `systemctl [--user] <args...>`, bailing on non-zero exit.
@@ -76,16 +117,11 @@ fn run_systemctl(scope: ServiceScope, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
+pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
     let binary = resolve_binary()?;
-    let unit = format_unit(role, &binary, config);
+    let unit = format_unit(role, &binary, config, state);
     let path = unit_path(role, scope)?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&path, &unit).with_context(|| format!("failed to write {}", path.display()))?;
+    write_registration(&path, &unit)?;
 
     let name = unit_name(role);
     run_systemctl(scope, &["daemon-reload"])?;
@@ -156,6 +192,7 @@ mod tests {
             "serve",
             Path::new("/usr/bin/iroh-tunnel"),
             Path::new("/etc/cfg"),
+            Path::new("/var/state"),
         );
         assert!(body.contains("Restart=on-failure"), "body: {body}");
         assert!(body.contains("RestartSec=5"), "body: {body}");
@@ -170,9 +207,50 @@ mod tests {
             on_failure: false,
             delay_secs: 0,
         };
-        let body = format_unit_with("serve", Path::new("/x"), Path::new("/y"), &policy);
+        let body = format_unit_with(
+            "serve",
+            Path::new("/x"),
+            Path::new("/y"),
+            Path::new("/z"),
+            &policy,
+        );
         assert!(body.contains("Restart=no"), "body: {body}");
         assert!(body.contains("RestartSec=0"), "body: {body}");
+    }
+
+    #[test]
+    fn unit_pins_state_dir_and_quotes_paths_with_spaces() {
+        let body = format_unit(
+            "serve",
+            Path::new("/usr/bin/iroh-tunnel"),
+            Path::new("/home/a b/serve.toml"),
+            Path::new("/home/a b/state"),
+        );
+        assert!(
+            body.contains(
+                "ExecStart=/usr/bin/iroh-tunnel serve run --config \"/home/a b/serve.toml\""
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("Environment=\"IROH_TUNNEL_STATE_DIR=/home/a b/state\""),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn dollar_is_doubled_in_exec_start_but_literal_in_environment() {
+        let body = format_unit(
+            "serve",
+            Path::new("/usr/bin/iroh-tunnel"),
+            Path::new("/home/$u/serve.toml"),
+            Path::new("/home/$u/state"),
+        );
+        assert!(body.contains("--config \"/home/$$u/serve.toml\""), "{body}");
+        assert!(
+            body.contains("Environment=\"IROH_TUNNEL_STATE_DIR=/home/$u/state\""),
+            "{body}"
+        );
     }
 
     #[test]

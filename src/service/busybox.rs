@@ -17,10 +17,11 @@
 //! targets exist before iroh-tunnel binds/dials.
 //!
 //! Scope: BusyBox init is system-wide only (no per-user domain exists), so
-//! both System and User scopes install to `/etc/init.d` — User scope prints a
+//! both scopes manage the one `/etc/init.d` script — User scope prints a
 //! note rather than failing. Requires root.
 
-use super::{resolve_binary, ServiceScope};
+use super::{resolve_binary, write_registration, ServiceScope};
+use crate::error::CliError;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -44,9 +45,10 @@ fn script_path(role: &str) -> PathBuf {
 /// Pure function (no I/O) so the template can be unit-tested without touching
 /// the filesystem. Paths are embedded verbatim inside double quotes; system
 /// paths never need shell escaping in practice.
-fn format_script(role: &str, binary: &Path, config: &Path) -> String {
+fn format_script(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
     let binary = binary.to_string_lossy();
     let config = config.to_string_lossy();
+    let state = state.to_string_lossy();
     let pidfile = format!("/var/run/iroh-tunnel-{role}.pid");
     let logfile = format!("/var/log/iroh-tunnel-{role}.log");
     format!(
@@ -57,6 +59,7 @@ fn format_script(role: &str, binary: &Path, config: &Path) -> String {
 DAEMON="{binary}"
 ROLE="{role}"
 CONFIG="{config}"
+export IROH_TUNNEL_STATE_DIR="{state}"
 PIDFILE="{pidfile}"
 LOG="{logfile}"
 
@@ -121,21 +124,22 @@ fn set_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Bail unless running as root (uid 0). The init script lives under
-/// `/etc/init.d` and writes a PID file under `/var/run`, so root is required.
-/// Uses `id -u` to avoid a libc dependency just for getuid(2).
-#[cfg(unix)]
+/// Refuse unless running as root. The init script lives under `/etc/init.d`
+/// and writes a PID file under `/var/run`, so root is required. BusyBox has no
+/// per-user services, so a user-scope request is refused too: it is never
+/// silently turned into a system install.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] with rerun guidance.
 fn require_root() -> Result<()> {
-    let out = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .context("failed to run `id -u` to check privileges")?;
-    let is_root = String::from_utf8_lossy(&out.stdout).trim() == "0";
-    if !is_root {
-        bail!(
-            "installing a system service on this host requires root. \
-             Re-run with sudo — BusyBox init installs under /etc/init.d."
-        );
+    if !super::scope::is_elevated() {
+        return Err(CliError::Permission(
+            "this host runs BusyBox init, which has no per-user services; managing the \
+             /etc/init.d service requires root. Nothing was changed. Re-run with sudo."
+                .into(),
+        )
+        .into());
     }
     Ok(())
 }
@@ -155,24 +159,18 @@ fn run_script(role: &str, verb: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn install(role: &str, scope: ServiceScope, config: &Path) -> Result<()> {
+pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
     require_root()?;
     if scope == ServiceScope::User {
         eprintln!(
-            "note: this host runs BusyBox init (no systemd); installing a \
-             system-wide /etc/init.d script. BusyBox has no per-user services, \
-             so --system is implied."
+            "note: this host runs BusyBox init (no systemd); the service is a \
+             system-wide /etc/init.d script owned by root."
         );
     }
     let binary = resolve_binary()?;
-    let script = format_script(role, &binary, config);
+    let script = format_script(role, &binary, config, state);
     let path = script_path(role);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&path, &script)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_registration(&path, &script)?;
     set_executable(&path)?;
     // Start now. A start failure is surfaced, but the script is installed, so
     // the service will come up on the next boot regardless.
@@ -249,10 +247,15 @@ mod tests {
             "serve",
             Path::new("/usr/local/bin/iroh-tunnel"),
             Path::new("/etc/iroh-tunnel/serve.toml"),
+            Path::new("/var/lib/iroh-tunnel"),
         );
         assert!(s.starts_with("#!/bin/sh"), "must start with sh shebang");
         assert!(s.contains("DAEMON=\"/usr/local/bin/iroh-tunnel\""), "{s}");
         assert!(s.contains("CONFIG=\"/etc/iroh-tunnel/serve.toml\""), "{s}");
+        assert!(
+            s.contains("export IROH_TUNNEL_STATE_DIR=\"/var/lib/iroh-tunnel\""),
+            "{s}"
+        );
         assert!(
             s.contains("PIDFILE=\"/var/run/iroh-tunnel-serve.pid\""),
             "{s}"
