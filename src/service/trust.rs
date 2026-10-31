@@ -359,6 +359,24 @@ pub(crate) fn trusted_uid_from_env() -> Result<Option<u32>> {
     }
 }
 
+/// Whether this is root run by a service manager with no trust pin: the
+/// registration predates the policy. systemd sets `INVOCATION_ID` and launchd
+/// `XPC_SERVICE_NAME`; a foreground `sudo` run sets neither and is unaffected.
+/// BusyBox init sets nothing, so that backend cannot be told apart (it is
+/// refused only after re-install, which pins it).
+fn is_unpinned_service(root: bool, env_set: impl Fn(&str) -> bool) -> bool {
+    root && ["INVOCATION_ID", "XPC_SERVICE_NAME"]
+        .iter()
+        .any(|name| env_set(name))
+}
+
+fn unpinned_refusal() -> String {
+    "this system service was installed before configuration trust checks existed, so it would \
+     read a user's file as root without verifying it. Nothing was changed. Re-install it with \
+     `sudo iroh-tunnel <role> service install --system`"
+        .to_owned()
+}
+
 /// Load a role config for `run`.
 ///
 /// A plain read normally. Under a system service (`IROH_TUNNEL_TRUSTED_UID`
@@ -373,6 +391,13 @@ pub(crate) fn trusted_uid_from_env() -> Result<Option<u32>> {
 /// invalid or keyless config.
 pub(crate) fn load_config<C: RoleDoc>(path: &Path) -> Result<C> {
     let Some(uid) = trusted_uid_from_env()? else {
+        // SM-04: fail closed. A root process started by a service manager
+        // without a pin is a registration from before the policy.
+        // SAFETY: geteuid(2) has no preconditions and cannot fail.
+        let root = unsafe { libc::geteuid() } == 0;
+        if is_unpinned_service(root, |name| std::env::var_os(name).is_some()) {
+            return Err(CliError::Permission(unpinned_refusal()).into());
+        }
         return C::load(path);
     };
     if let Some(state) = std::env::var_os(ENV_STATE_DIR).filter(|d| !d.is_empty()) {
@@ -395,6 +420,24 @@ pub(crate) fn load_config<C: RoleDoc>(path: &Path) -> Result<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_under_a_service_manager_without_a_pin_is_a_legacy_registration() {
+        let manager = |name: &str| name == "INVOCATION_ID";
+        let launchd = |name: &str| name == "XPC_SERVICE_NAME";
+        let none = |_: &str| false;
+        assert!(is_unpinned_service(true, manager));
+        assert!(is_unpinned_service(true, launchd));
+        // A foreground root run (no manager) and any non-root run are not.
+        assert!(!is_unpinned_service(true, none));
+        assert!(!is_unpinned_service(false, manager));
+    }
+
+    #[test]
+    fn legacy_refusal_tells_the_operator_to_reinstall() {
+        let msg = unpinned_refusal();
+        assert!(msg.contains("service install --system"), "{msg}");
+    }
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     fn me() -> u32 {

@@ -21,9 +21,11 @@ Unprivileged system install/verbs: `tests/service_user.rs` (unchanged, passing).
 
 ## Independent review dispositions
 
-Standards + Spec reviews run on `af6c10c`. Fixed: state dir canonicalized; root status writes via verified handle; pin parse accepts only comment lines (busybox `CONFIG=` spoof); registration written atomically 0644/0755; unreadable registration is an unknown owner, not "nothing installed"; null `pw_dir` check; crash-leftover test. Open/accepted: legacy system registrations without a pin run without the trust check until re-installed (documented); no file-size cap on the config read; macOS/systemd real-root evidence deferred to #97.
+Standards + Spec reviews run on `af6c10c`. Fixed: state dir canonicalized; root status writes via verified handle; pin parse accepts only comment lines (busybox `CONFIG=` spoof); registration written atomically 0644/0755; unreadable registration is an unknown owner, not "nothing installed"; null `pw_dir` check; crash-leftover test. Open/accepted: pre-pin BusyBox registrations are not detected (see Decisions); no file-size cap on the config read; macOS/systemd real-root evidence deferred to #97.
 
 Second review pass (`e78ef44`): fixed RS-12 `SAFETY` comments on `renameat`/`unlinkat`, explicit `let _ =` on best-effort unlink, debug log when `read_in` refuses a directory, and a named conflict error when `SUDO_USER` and `--config` belong to different users (unit-tested). Left for a decision: whether "safety confirmation" (91.CL1) means only the retarget prompt; a `TrustedDir` type for the `(path, uid)` clump and splitting `trust.rs` (smells, judgement); `sudo` `env_reset` dropping `IROH_TUNNEL_STATE_DIR`; legacy registrations without a pin.
+
+Decisions (per the redesign spec): (1) "safety confirmation" for an elevated install is the SM-02 retarget prompt; re-installing for the same user asks nothing, because idempotency is "proposed, not confirmed" (SM Operations) — no extra prompt added. (2) `TrustedDir` / splitting `trust.rs` is deferred to a follow-up (RS-01: no speculative generality; smell is judgement only). (3) SM-04 "refuse (fail closed)": root started by systemd (`INVOCATION_ID`) or launchd (`XPC_SERVICE_NAME`) with no `IROH_TUNNEL_TRUSTED_UID` is refused with re-install guidance (exit 3); a foreground `sudo … run` is unaffected. Real-root E2E asserts the refusal and that the live service is unaffected. BusyBox init sets no manager variable, so a pre-pin BusyBox script is not detected; it is only fixed by re-install.
 
 ## Limits
 

@@ -450,6 +450,26 @@ fn system_service_across_the_privilege_boundary() {
     assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep");
     let _ = std::fs::remove_file(victim);
 
+    // --- SM-04 fail closed: root under a service manager with no pin (a
+    // registration from before the policy) is refused; a foreground root run
+    // of the same config is not a service and is unaffected.
+    let out = run(&["serve", "service", "stop", "--system"], &[]);
+    assert!(out.status.success(), "stop: {}", err(&out));
+    let legacy = Command::new(BIN)
+        .args(["serve", "run", "--config", bob.config().to_str().unwrap()])
+        .env("HOME", "/root")
+        .env("INVOCATION_ID", "legacy-unit")
+        .env_remove("IROH_TUNNEL_TRUSTED_UID")
+        .env("IROH_TUNNEL_STATE_DIR", "/tmp/it91-legacy-state")
+        .output()
+        .unwrap();
+    assert_eq!(legacy.status.code(), Some(3), "{}", err(&legacy));
+    assert!(
+        err(&legacy).contains("service install --system"),
+        "{}",
+        err(&legacy)
+    );
+
     // --- A symlinked home is resolved once at install (SM-04), not refused later.
     let real = PathBuf::from("/home/it91b-real");
     let _ = std::fs::remove_dir_all(&real);
