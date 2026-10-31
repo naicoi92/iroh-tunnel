@@ -199,8 +199,10 @@ changelog:
 #   - .apk from the musl build   → Alpine (LXC, bare-metal)
 # Architectures are inferred from each build's targets (amd64, arm64; the
 # riscv64gc build yields .apk only). The `-musl` ids feed the .apk packages.
-# The role packages are binary-only: service registration for the standalone
-# binaries is tracked by #79/#90/#91, so no unit file is shipped for them.
+# Every package is binary-only (issue #94): no unit file, config directory or
+# maintainer script. Operators register a service with `<role> service
+# install` (#90); a package-shipped unit would need the account, trust and
+# pinned-path policy of #79/#91, which is not approved yet.
 nfpms:
   - id: iroh-tunnel
     bindir: /usr/bin
@@ -220,15 +222,6 @@ nfpms:
       - src: iroh-tunnel
         dst: /usr/bin/it
         type: symlink
-      # systemd unit for the `serve` role, installed by the package.
-      - src: packaging/iroh-tunnel.service
-        dst: /usr/lib/systemd/system/iroh-tunnel.service
-        type: config|noreplace
-      # Default config directory; the binary reads /etc/iroh-tunnel/serve.toml.
-      - dst: /etc/iroh-tunnel
-        type: dir
-    scripts:
-      postinstall: packaging/postinstall.sh
 
   - id: iroh-tunnel-musl
     bindir: /usr/bin
@@ -248,15 +241,6 @@ nfpms:
       - src: iroh-tunnel
         dst: /usr/bin/it
         type: symlink
-      # systemd unit for the `serve` role, installed by the package.
-      - src: packaging/iroh-tunnel.service
-        dst: /usr/lib/systemd/system/iroh-tunnel.service
-        type: config|noreplace
-      # Default config directory; the binary reads /etc/iroh-tunnel/serve.toml.
-      - dst: /etc/iroh-tunnel
-        type: dir
-    scripts:
-      postinstall: packaging/postinstall.sh
 
   - id: iroh-tunnel-serve
     bindir: /usr/bin

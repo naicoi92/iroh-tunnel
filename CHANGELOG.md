@@ -27,6 +27,11 @@
 
 ### Changed
 
+- **Packages are binary-only (#94)**: the `iroh-tunnel` `.deb`/`.apk` no longer
+  ship `/usr/lib/systemd/system/iroh-tunnel.service`, `/etc/iroh-tunnel` or a
+  postinstall script. The unit pointed at `/usr/local/bin` while the package
+  installs to `/usr/bin`, and its account and trust settings have no approved
+  policy (#79/#91). Use `iroh-tunnel service install` to register a service.
 
 - **`it` alias is package-owned**: the `.deb`/`.apk` now ship `/usr/bin/it`
   as a symlink tracked by the package manager instead of creating it in the

@@ -106,10 +106,10 @@ will not block the unsigned binary.
 
 ### Linux (`.deb` / `.apk`)
 
-Packages ship a systemd unit at `/usr/lib/systemd/system/iroh-tunnel.service`
-and run under a hardened `DynamicUser`. The `.deb` is built against **glibc**
-(Debian/Ubuntu/Fedora/...); the `.apk` is built against **musl** for Alpine
-hosts (LXC, bare-metal) and will not run on a glibc system, and vice versa.
+Packages are binary-only: they install the executable and its alias and no
+service unit. Register a service with `iroh-tunnel service install`. The
+`.deb` is built against **glibc** (Debian/Ubuntu/Fedora/...); the `.apk` is
+built against **musl** for Alpine hosts (LXC, bare-metal) and will not run on a glibc system, and vice versa.
 
 ```sh
 # Debian / Ubuntu (.deb, glibc)
@@ -193,9 +193,8 @@ installation for the standalone binaries is not yet supported (issue #90).
 Every executable is also published as its own Linux package, archive and
 container image, so you can install only the role you need. Each package owns
 its binary and its alias link; the packages share no files and can be
-installed and removed independently. The `iroh-tunnel` package also
-ships the default systemd unit and `/etc/iroh-tunnel`; the role packages are
-binary-only (no service unit).
+installed and removed independently. All packages are binary-only (no service
+unit, config directory or maintainer script).
 
 | Executable | Debian/Ubuntu, Alpine | Container image |
 |---|---|---|
@@ -816,7 +815,7 @@ For reporting vulnerabilities and the full policy, see
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.goreleaser.yaml`         | Linux release pipeline (binaries, Docker, .deb/.apk)   |
 | `.goreleaser.macos.yaml`   | macOS release pipeline (darwin binary, Homebrew cask)  |
-| `packaging/`               | systemd unit, deb postinstall, `verify-dist.sh` checks |
+| `packaging/`               | `verify-dist.sh` package and image checks              |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Releases
