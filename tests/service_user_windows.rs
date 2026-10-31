@@ -200,9 +200,14 @@ async fn user_background_task_lifecycle() -> Result<()> {
 
     // stop: the process ends. Whether it drained is reported, not gated.
     let pid = pid_of(&status_file).expect("pid in status file");
+    eprintln!("DIAG process tree before /End:\n{}", process_tree());
     let stopped_at = Instant::now();
     fx.ok(&["serve", "service", "stop", "--user"])?;
-    wait_for("the stopped task's process to exit", || !pid_alive(pid))?;
+    let exited = wait_for("the stopped task's process to exit", || !pid_alive(pid));
+    if exited.is_err() {
+        eprintln!("DIAG process tree after /End:\n{}", process_tree());
+    }
+    exited?;
     let drained = !status_file.exists();
     eprintln!(
         "EVIDENCE schtasks /End: pid {pid} gone after {:?}; status file removed (graceful drain): {drained}",
@@ -235,6 +240,17 @@ fn pid_alive(pid: u64) -> bool {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")))
         .unwrap_or(false)
+}
+
+/// `name pid parent` for every iroh-tunnel and cmd process (diagnostics only).
+fn process_tree() -> String {
+    let script = "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'iroh-tunnel|cmd' } \
+                  | ForEach-Object { \"$($_.Name) pid=$($_.ProcessId) parent=$($_.ParentProcessId) $($_.CommandLine)\" }";
+    Command::new("pwsh")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 fn pid_of(status_file: &Path) -> Option<u64> {
