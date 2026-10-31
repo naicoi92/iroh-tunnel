@@ -44,11 +44,13 @@ These are design decisions in progress. Confirmed choices are user decisions; pr
 
 **Confirmed:** a user may edit managed config; an authorized administrator may restart a system service with sudo to apply edits. Pin paths, report invalid configuration, and do not silently change account, ownership or permissions.
 
-**Proposed:** compare system registration with runtime running as the intended unprivileged user against a privileged runtime with strict, limited config semantics and secure path handling. A system registration is not itself proof of root runtime. Account choice is not decided; feasibility differs by OS.
+**Confirmed (#77):** a system service runs as root/Administrator and its installer owns it.
+
+**Proposed (owner agreed in review, pending recorded decision):** (1) config trust: check at start only, open without following symlinks, verify owner/mode (Windows: owner/DACL) on the opened handle and every parent directory, fail closed with path/owner/mode, never chown/chmod, group-writable refused by default; the parent-directory check is new design without verified prior art. (2) Windows user-background: Task Scheduler task for the current user (logon trigger, interactive token, no elevation), `schtasks` run/end/query, shared `RestartPolicy`, existing status snapshot; stop is `schtasks /End` per RO-03 and a terminate-without-drain result is recorded as a known limitation, not fixed with a new stop command. (3) Windows system scope is Deferred; `--system` stays unsupported. (4) Console visibility versus Ctrl-event delivery is decided by measurement in #92; the task `Hidden` setting does not hide the window. Research: `docs/design/issue-79-prior-art-research.md`.
 
 **Evidence:** [systemd execution settings](https://freedesktop.org/software/systemd/man/latest/systemd.exec.html), [Apple launchd guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) and [Windows service accounts](https://learn.microsoft.com/en-us/windows/win32/services/service-user-accounts) describe platform account mechanisms, not proof that existing adapters implement them securely.
 
-**Remaining decisions:** runtime account, trusted user identification, directory and file permissions, symlink and replacement/TOCTOU handling; Windows logged-in user-background mechanism. Protect against unauthorized writers without rejecting legitimate administrator-approved edits.
+**Remaining decisions:** measured `/End` drain behavior and console visibility on real Windows (#92); whether Windows system scope gets its own issue. Protect against unauthorized writers without rejecting legitimate administrator-approved edits.
 
 **Acceptance tests:** user edit followed by authorized restart, invalid config with clear diagnostics, unauthorized user/process, parent-directory replacement, symlink and race attempts, real OS account privileges and Windows background lifecycle.
 
