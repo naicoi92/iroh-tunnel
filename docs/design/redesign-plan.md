@@ -97,7 +97,7 @@ Criteria IDs refer to the [capability specifications](redesign-spec.md); propose
 | Coverage | Trace | Evidence required |
 |---|---|---|
 | Compatible peers and role binaries | AC-TC-01–03, AC-CLI-01–04 | Exercise all three binaries independently; test TCP with 0.4 in both directions and present failures for user decision; help/defaults match. |
-| Config, identity and migration | AC-CFG-01–04; proposed AC-CFG-05–07 | Run new/legacy config, failed copy, secrets and concurrent mutation cases; verify identity is preserved. |
+| Config, identity and migration | AC-CFG-01–04; AC-CFG-05–12 (decided in #98, implemented by #99) | Run new/legacy config, failed copy, secrets and concurrent mutation cases; verify identity is preserved. |
 | Runtime ownership | AC-RO-01–03; proposed AC-RO-04–06 | Concurrent `it`/role binary starts, distinct roles, crash/stale status and ownership cleanup using approved policy. |
 | TCP | AC-TCP-01–03; proposed AC-TCP-04–06 | Real clients share a connection, transfer independently; exercise target and peer failures, no silent replay. |
 | UDP | AC-UDP-01–04; proposed AC-UDP-05–06 | Concurrent clients and interleaved replies, exact payload/boundary checks, empty and oversized datagrams, expiry/reconnect, late replies and resource exhaustion. Document remaining tuple-reuse risk. |

@@ -254,6 +254,22 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Execution:** NOT_RUN — no independently accepted final-artifact run attached.
 
+### Case CFG-LIFECYCLE-01
+
+**Requirements:** S33–S40, CFG-04, CFG-05. **Owner:** #99; decisions #98. **Planning:** MAPPED.
+
+**Source AC:** [98.AC3](#98-ac3); scenarios AC-CFG-05–12 in `issue-98-config-identity-decisions.md`.
+
+**Prerequisites:** Isolated `HOME` and `--config` fixtures: valid config with a known key and relay token, invalid-document fixtures, no-config home, 0644 config without a key.
+
+**Action:** Run the real binary for each scenario: invalid `add`/`remove`/`keygen`/`edit`; two concurrent `add` processes; `keygen` with an existing key without a TTY, with and without `--yes`; `show` with and without `--reveal`; `run`/`list`/`show` with no config; `run` on a config lacking a key then restart; kill during save; every subcommand with `--config`; `keygen random`.
+
+**Expected observable outcome:** Invalid mutations leave file bytes and identity unchanged; concurrent writers never corrupt or silently lose a change; rotation needs confirmation; `show` hides both secrets unless `--reveal`; missing-config commands share one guidance error and create nothing; an auto-generated key is persisted with mode 0600 and reused after restart; a killed save leaves a complete old or new document; `keygen random` prints a key whose derived node ID matches and writes nothing.
+
+**Evidence/platform:** Exit codes, stderr, file hashes and permissions, restart NodeId, redaction scan. Platform: Linux/macOS/Windows; Windows owner-only permission and lock evidence otherwise UNVERIFIED.
+
+**Execution:** NOT_RUN — no independently accepted final-artifact run attached.
+
 <a id="tcp-compat-01"></a>
 ### Case TCP-COMPAT-01
 

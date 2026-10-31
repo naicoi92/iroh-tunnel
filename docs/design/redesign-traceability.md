@@ -172,6 +172,10 @@ Exact rule wording from baseline spec, line cited. Acceptance IDs below retain d
 
 | CFG-03 | `docs/design/redesign-spec.md:26` | [#83](https://github.com/naicoi92/iroh-tunnel/issues/83) | AC-CFG-04; AC-TCP-03 | Covered #83.AC2 silently ignore both legacy values and omit upon write. |
 
+| CFG-04 | `docs/design/redesign-spec.md:27` | [#98](https://github.com/naicoi92/iroh-tunnel/issues/98) (decision), [#99](https://github.com/naicoi92/iroh-tunnel/issues/99) | AC-CFG-05, 06, 09, 10, 11 (case CFG-LIFECYCLE-01) | Decided in #98 D4/D5. Not implemented; Windows ACL and lock mechanism remain open for #99. |
+
+| CFG-05 | `docs/design/redesign-spec.md:28` | [#98](https://github.com/naicoi92/iroh-tunnel/issues/98) (decision), [#99](https://github.com/naicoi92/iroh-tunnel/issues/99) | AC-CFG-07a, 07b, 08, 12 (case CFG-LIFECYCLE-01) | Decided in #98 D1-D3, D6. `keygen random` implemented in the #98 PR; the rest awaits #99. Exact legacy path and migration synchronization remain deferred. |
+
 | RO-01 | `docs/design/redesign-spec.md:34` | [#77](https://github.com/naicoi92/iroh-tunnel/issues/77), [#87](https://github.com/naicoi92/iroh-tunnel/issues/87) | AC-RO-01–03 | Revised by #77 final rule: one detected process per role; covered by the #87 final-rule clarification. Status role/owner only implicit #87.AC2. Different roles conditional distinct identity. |
 
 | RO-02 | `docs/design/redesign-spec.md:36` | [#77](https://github.com/naicoi92/iroh-tunnel/issues/77), [#87](https://github.com/naicoi92/iroh-tunnel/issues/87) | No dedicated confirmed identity AC; AC-RO-01–03 insufficient | PARTIAL #77 confirmed comments; #87 trace/body omits cross-role/scope identity exclusion, path-override bypass, secret-free artifacts and no cross-host intervention. #77 final rule recorded; detection of the system service by a non-elevated user is verified in #87. |
@@ -211,7 +215,7 @@ Current planning revision: supplied full tracker snapshots dated 2026-10-29, che
 
 #98/#99 own unresolved configuration/identity decisions and approved implementation; #100 owns actual signed release production; #101 owns selected Iroh upgrade. #97 native blockers in supplied snapshot are #84–#96 and #99–#101 (not #83); refresh live before pickup. #81 worker-reported tests at `bc943290d8393658851995fa99592c54eb071c2d` remain independently unaccepted. User confirms real-process E2E and mandatory short arguments; exact letters and unresolved policy are not invented here.
 
-CFG-04/05, SM-04, DIST-03 and CLI-03 are not added as confirmed rules. Their dependent planning envelopes remain explicit blockers; references do not promote draft AC to approved policy. TCP-02 uses superseding #86 handoff: numeric defaults/cancellation/error mapping are technical validation, not a new product gate. TC-02 includes both TCP compatibility and UDP support; failed 0.4 direction requires user decision, not automatic release rejection.
+CFG-04/05 are confirmed by the #98 decision record and owned by #99 (case CFG-LIFECYCLE-01). SM-04, DIST-03 and CLI-03 are not added as confirmed rules. Their dependent planning envelopes remain explicit blockers; references do not promote draft AC to approved policy. TCP-02 uses superseding #86 handoff: numeric defaults/cancellation/error mapping are technical validation, not a new product gate. TC-02 includes both TCP compatibility and UDP support; failed 0.4 direction requires user decision, not automatic release rejection.
 
 ## Current confirmed-rule ownership and evidence
 
