@@ -30,10 +30,46 @@ builds:
     flags:
       - --release
 
+  # Role binaries (issue #124). Archives only: the Homebrew cask below stays
+  # all-in-one until per-role casks are decided (see #94 evidence).
+  - id: iroh-tunnel-serve-macos
+    builder: rust
+    binary: iroh-tunnel-serve
+    targets:
+      - aarch64-apple-darwin
+    flags:
+      - --release
+
+  - id: iroh-tunnel-access-macos
+    builder: rust
+    binary: iroh-tunnel-access
+    targets:
+      - aarch64-apple-darwin
+    flags:
+      - --release
+
 archives:
   - id: macos
+    ids:
+      - iroh-tunnel-macos
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-serve-macos
+    ids:
+      - iroh-tunnel-serve-macos
+    formats: [tar.gz]
+    name_template: "iroh-tunnel-serve-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-access-macos
+    ids:
+      - iroh-tunnel-access-macos
+    formats: [tar.gz]
+    name_template: "iroh-tunnel-access-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - README.md
       - LICENSE*
@@ -59,6 +95,8 @@ changelog:
 # replacement and is also valid for CLI tools (installed into bin).
 homebrew_casks:
   - name: iroh-tunnel
+    ids:
+      - macos
     binaries:
       - iroh-tunnel
     repository:

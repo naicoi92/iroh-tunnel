@@ -14,6 +14,13 @@ on:
   push:
     branches:
       - main
+  # Release-config changes are rehearsed before merge.
+  pull_request:
+    paths:
+      - ".goreleaser*.yaml"
+      - "packaging/**"
+      - ".github/workflows/snapshot.yml"
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
@@ -80,6 +87,19 @@ jobs:
           packaging/verify-dist.sh runtime dist
           packaging/verify-dist.sh images dist
 
+      # Issue #124: Windows x64/ARM64 role archives (cross-built here).
+      - name: Verify Windows role archives
+        run: packaging/verify-dist.sh windows dist
+
+      - name: Upload Windows archives
+        uses: actions/upload-artifact@v5
+        with:
+          name: windows-archives
+          path: |
+            dist/*-windows-*.zip
+            dist/checksums.txt
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # macOS snapshot: darwin/arm64 binary + Homebrew cask config.
   # ---------------------------------------------------------------------------
@@ -123,3 +143,53 @@ jobs:
           args: release --snapshot --clean --config .goreleaser.macos.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Issue #124: macOS arm64 role archives; runs each role on this host.
+      - name: Verify macOS role archives
+        run: packaging/verify-dist.sh macos dist
+
+  # ---------------------------------------------------------------------------
+  # Windows runtime (issue #124): run the cross-built role binaries on real
+  # Windows x64 and ARM64 runners. Verifies the archive digest, then each
+  # executable starts and prints its help. This is start-up evidence only; it
+  # does not forward bytes.
+  # ---------------------------------------------------------------------------
+  windows-runtime:
+    name: windows runtime (${{ matrix.arch }})
+    needs: snapshot-linux
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: amd64
+          - runner: windows-11-arm
+            arch: arm64
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: windows-archives
+          path: dist
+
+      - name: Verify digest, extract and run each role
+        shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          $sums = Get-Content dist/checksums.txt
+          foreach ($role in 'iroh-tunnel','iroh-tunnel-serve','iroh-tunnel-access') {
+            $zip = Get-ChildItem dist -Filter "$role-*-windows-$env:ARCH.zip" |
+              Where-Object { $_.Name -match "^$role-\d" } | Select-Object -First 1
+            if (-not $zip) { throw "no $role archive for $env:ARCH" }
+            $want = ($sums | Where-Object { $_ -match [regex]::Escape($zip.Name) }) -split '\s+' | Select-Object -First 1
+            $got = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+            if ($want -ne $got) { throw "$($zip.Name): digest $got differs from $want" }
+            $out = "run/$role"
+            Expand-Archive $zip.FullName -DestinationPath $out
+            $help = & "$out/$role.exe" --help
+            if ($LASTEXITCODE -ne 0) { throw "$role --help exited $LASTEXITCODE" }
+            Write-Host "ok: $($zip.Name) runs on $env:PROCESSOR_ARCHITECTURE`n$($help | Select-Object -First 1)"
+          }

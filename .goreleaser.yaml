@@ -120,6 +120,43 @@ builds:
     flags:
       - --release
 
+  # Windows builds (issue #124) — cross-built from Linux with cargo-zigbuild,
+  # one per executable, for x64 (GNU ABI) and ARM64 (gnullvm). They feed the
+  # .zip archives only: no package or image is built from them. Unsigned;
+  # signing is #100. Cross-build evidence is not runtime evidence.
+  - id: iroh-tunnel-windows
+    builder: rust
+    binary: iroh-tunnel
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-pc-windows-gnu
+      - aarch64-pc-windows-gnullvm
+    flags:
+      - --release
+
+  - id: iroh-tunnel-serve-windows
+    builder: rust
+    binary: iroh-tunnel-serve
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-pc-windows-gnu
+      - aarch64-pc-windows-gnullvm
+    flags:
+      - --release
+
+  - id: iroh-tunnel-access-windows
+    builder: rust
+    binary: iroh-tunnel-access
+    env:
+      - PCRE2_SYS_STATIC=1
+    targets:
+      - x86_64-pc-windows-gnu
+      - aarch64-pc-windows-gnullvm
+    flags:
+      - --release
+
 # One archive per executable and libc flavour. The all-in-one archive keeps the
 # historical `iroh-tunnel-<version>-<os>-<arch>` name; role archives are named
 # after their executable. The musl archives are tagged `-musl` so Alpine users
@@ -170,6 +207,30 @@ archives:
       - iroh-tunnel-access-musl
     formats: [tar.gz]
     name_template: "iroh-tunnel-access-{{ .Version }}-{{ .Os }}-{{ .Arch }}-musl"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-windows
+    ids:
+      - iroh-tunnel-windows
+    formats: [zip]
+    name_template: "iroh-tunnel-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-serve-windows
+    ids:
+      - iroh-tunnel-serve-windows
+    formats: [zip]
+    name_template: "iroh-tunnel-serve-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+  - id: iroh-tunnel-access-windows
+    ids:
+      - iroh-tunnel-access-windows
+    formats: [zip]
+    name_template: "iroh-tunnel-access-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - README.md
       - LICENSE*
