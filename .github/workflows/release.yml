@@ -1,22 +1,22 @@
-# Release pipeline — publishes real artifacts on a `v*` tag push (ADR-0002).
+# Release pipeline — on a `v*` tag push builds, signs and VERIFIES the real
+# artifacts and uploads them to a DRAFT release (ADR-0002, issue #100).
+# Nothing becomes public here: publishing the release, the Homebrew cask and the
+# images is `promote.yml`, run by hand only after the final #97 evidence exists.
 #
-# GoReleaser is gone: building is native + parallel (build.yml), packaging is
-# standalone nFPM, the image is assembled by buildx from prebuilt binaries, and
-# the GitHub Release / Homebrew cask are plain `gh` / git steps. (GoReleaser's
-# `prebuilt` builder and split/merge are Pro-only, so OSS GoReleaser cannot
-# consume binaries built on separate runners.)
+# Building is native + parallel (build.yml), packaging is standalone nFPM, and
+# the checksums are signed keyless with cosign (Sigstore) by THIS workflow, so
+# the certificate identity is
+#   https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/<tag>
+# issuer https://token.actions.githubusercontent.com — what `update` pins.
 #
-# Job graph — `gate` and `build` start together; nothing is published until
-# the gate and the packages are green, so a failed build never leaves a
-# half-made release. `package` and `docker` both need only the build artifacts
-# and run IN PARALLEL:
+#   gate (fmt ∥ clippy ∥ test) ──────────────────────────────┐
+#   build (8 targets ∥) ─┬─ package ─ sign ─ verify ─ draft ──┘
+#                        └─ docker (rehearsal, not pushed)
 #
-#   gate (fmt ∥ clippy ∥ test) ───────────┬──────────────┐
-#   build (8 targets ∥) ─┬─ package ──────┴→ release → homebrew
-#                        └─ docker (also needs gate)
-#
+# `verify` runs the shipped SigstoreVerifier (#95) on the signed files, incl.
+# wrong identity, changed payload and missing/invalid material.
 # Re-running (workflow_dispatch on a tag ref or "Re-run jobs") replaces the
-# assets of an existing release instead of failing.
+# assets of an existing DRAFT; a published release is never modified.
 
 name: release
 
@@ -50,28 +50,31 @@ jobs:
     with:
       version: ${{ needs.build.outputs.version }}
 
-  # Images need only the glibc binaries, not the packages: start as soon as the
-  # gate and the build are green.
+  # Image rehearsal only: pushing to ghcr.io is public promotion and is not
+  # done by a tag (docs/design/issue-100-evidence.md, open decision).
   docker:
     needs: [gate, build]
     uses: ./.github/workflows/docker.yml
     with:
-      push: true
+      push: false
       version: ${{ needs.build.outputs.version }}
     permissions:
       contents: read
-      packages: write
 
-  release:
-    name: publish GitHub Release
+  # Checksums and keyless signatures. This is the only job with `id-token`, and
+  # it runs release.yml itself (not a reusable workflow), so the certificate
+  # identity is exactly
+  #   https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/<tag>
+  # which is what the updater pins (src/update.rs, #95).
+  sign:
+    name: checksums + keyless signature
     needs: [gate, build, package]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+      id-token: write
     env:
-      GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.build.outputs.version }}
-      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -92,25 +95,103 @@ jobs:
           mkdir -p dist
           cp in/*/*.tar.gz in/*/*.zip dist/
           cd dist
-          # Same split as before: Linux and Windows archives + packages, and
-          # darwin on its own.
+          # Linux and Windows archives + packages, and darwin on its own.
           sha256sum ./*.tar.gz ./*.zip ./*.deb ./*.apk | grep -v -- '-darwin-' | sed 's# \./# #' > checksums.txt
           sha256sum ./*-darwin-*.tar.gz | sed 's# \./# #' > checksums-darwin.txt
           cat checksums.txt checksums-darwin.txt
-          # Issue #124: every role archive for Windows and macOS must be listed.
-          for role in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
-            for arch in amd64 arm64; do
-              grep -q -- " ${role}-${VERSION}-windows-${arch}.zip\$" checksums.txt \
-                || { echo "checksums.txt lacks ${role} windows-${arch}"; exit 1; }
-            done
-            grep -q -- " ${role}-${VERSION}-darwin-arm64.tar.gz\$" checksums-darwin.txt \
-              || { echo "checksums-darwin.txt lacks ${role}"; exit 1; }
+
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.4
+
+      # Keyless: the certificate is issued to this workflow run's OIDC token and
+      # logged in the Sigstore transparency log. The bundle is the verification
+      # material the updater fetches as <checksums file>.sigstore.json.
+      - name: Sign checksums (keyless)
+        working-directory: dist
+        run: |
+          for f in checksums.txt checksums-darwin.txt; do
+            cosign sign-blob --yes --new-bundle-format \
+              --bundle "$f.sigstore.json" "$f"
           done
 
-      # Draft first so a half-uploaded release is never visible, then publish
-      # in one atomic edit once every asset is attached.
+      - name: Verify the complete artifact set
+        run: packaging/verify-release-set.sh dist "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-set
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # Verifies the REAL signed artifacts with the verifier the updater ships
+  # (SigstoreVerifier, #95): pinned issuer and exact identity of this run, plus
+  # wrong identity, changed payload and missing/invalid material.
+  verify:
+    name: verify signed artifacts
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RELEASE_DIST: ${{ github.workspace }}/release-set
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: release-verify
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-set
+          path: release-set/
+      - name: Verify with the shipped verifier
+        run: |
+          cargo test --locked --test release_artifacts -- --ignored --nocapture --test-threads=1 \
+            | tee "$RUNNER_TEMP/verify.log"
+          {
+            echo "### Signed release set \`$RELEASE_TAG\`"
+            echo "Issuer \`https://token.actions.githubusercontent.com\`, identity" \
+                 "\`https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/$RELEASE_TAG\`"
+            echo
+            echo '```'
+            grep '^sha256:' "$RUNNER_TEMP/verify.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Uploads to a DRAFT and stops. Publishing is `promote.yml`, run only after
+  # the final #97 evidence exists; nothing public changes here.
+  draft:
+    name: upload draft release
+    needs: [gate, build, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-set
+          path: dist/
+
+      # Draft first so a half-uploaded release is never visible. Re-running
+      # replaces the assets of an existing DRAFT; a published release is never
+      # modified by this workflow.
       - name: Create draft release and upload assets
         run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null | grep -q false; then
+            echo "release $TAG is already published; refusing to modify it" >&2
+            exit 1
+          fi
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             prerelease=()
             [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
@@ -118,48 +199,6 @@ jobs:
               --generate-notes "${prerelease[@]}"
           fi
           gh release upload "$TAG" dist/* --clobber
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "\(.digest)  \(.name)"' | sort -k2 >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish release
-        run: gh release edit "$TAG" --draft=false
-
-  homebrew:
-    name: update Homebrew tap
-    needs: [build, release]
-    # Pre-releases must not move the stable cask.
-    if: ${{ !contains(needs.build.outputs.version, '-') }}
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.build.outputs.version }}
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: target-darwin-arm64
-          path: darwin/
-
-      - name: Render cask
-        run: |
-          sha="$(sha256sum darwin/iroh-tunnel-"$VERSION"-darwin-arm64.tar.gz | cut -d' ' -f1)"
-          mkdir -p tap-out
-          bash packaging/homebrew-cask.sh "$VERSION" "$sha" > tap-out/iroh-tunnel.rb
-          cat tap-out/iroh-tunnel.rb
-
-      - name: Push to naicoi92/homebrew-tap
-        run: |
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/naicoi92/homebrew-tap.git" tap
-          mkdir -p tap/Casks
-          cp tap-out/iroh-tunnel.rb tap/Casks/iroh-tunnel.rb
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/iroh-tunnel.rb
-          if git diff --cached --quiet; then
-            echo "cask already up to date"
-          else
-            git commit -m "iroh-tunnel ${VERSION}"
-            git push origin HEAD:main
-          fi

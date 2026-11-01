@@ -17,7 +17,7 @@
 # Every target builds all three executables (iroh-tunnel, iroh-tunnel-serve,
 # iroh-tunnel-access) in ONE cargo invocation (issue #124). The smoke test runs
 # each of them on its own native runner, so Windows x64 / ARM64 and macOS arm64
-# start-up is exercised here, not only cross-built. Unsigned (signing is #100).
+# start-up is exercised here, not only cross-built. Unsigned here; release.yml signs the checksums (#100).
 # Packaging (package.yml) and the Docker images (docker.yml) consume the
 # artifacts and run in parallel with each other.
 #

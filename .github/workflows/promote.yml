@@ -1,0 +1,123 @@
+# Public promotion of a release that `release.yml` left as a DRAFT (issue #100).
+#
+# Manual on purpose: run it only after the final #97 evidence for the exact
+# artifacts of this tag exists. It re-verifies the complete set and its
+# signatures from the draft's own assets, then publishes and updates the
+# Homebrew cask. Nothing here rebuilds or re-signs.
+
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, e.g. v0.4.3.
+        type: string
+        required: true
+      evidence:
+        description: URL of the accepted final #97 evidence for this tag.
+        type: string
+        required: true
+
+concurrency:
+  group: promote-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: re-verify and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_DIST: ${{ github.workspace }}/dist
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - name: Require the final evidence reference
+        env:
+          EVIDENCE: ${{ inputs.evidence }}
+        run: |
+          [[ "$EVIDENCE" == https://github.com/${{ github.repository }}/* ]] \
+            || { echo "evidence must be a URL in this repository" >&2; exit 1; }
+
+      # The tag, not the dispatching branch, fixes the verifier and the set
+      # script that judge the artifacts.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - id: v
+        run: |
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          [[ "$TAG" == *-* ]] && echo "prerelease=true" >> "$GITHUB_OUTPUT" || echo "prerelease=false" >> "$GITHUB_OUTPUT"
+
+      - name: Download the draft's assets
+        run: |
+          is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+          [[ "$is_draft" == true ]] || { echo "$TAG is not a draft" >&2; exit 1; }
+          mkdir dist
+          gh release download "$TAG" --dir dist
+
+      - name: Complete artifact set
+        run: packaging/verify-release-set.sh dist "${{ steps.v.outputs.version }}"
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: release-verify
+      - name: Signatures with the shipped verifier
+        run: cargo test --locked --test release_artifacts -- --ignored --test-threads=1
+
+      - name: Publish release
+        run: |
+          gh release edit "$TAG" --draft=false
+          echo "Published \`$TAG\`. Evidence: ${{ inputs.evidence }}" >> "$GITHUB_STEP_SUMMARY"
+
+  homebrew:
+    name: update Homebrew tap
+    needs: publish
+    # Pre-releases must not move the stable cask.
+    if: ${{ needs.publish.outputs.prerelease != 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.publish.outputs.version }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Render cask from the published checksums
+        run: |
+          gh release download "${{ inputs.tag }}" --pattern checksums-darwin.txt
+          sha="$(awk -v n="iroh-tunnel-${VERSION}-darwin-arm64.tar.gz" '$2 == n { print $1 }' checksums-darwin.txt)"
+          [[ -n "$sha" ]] || { echo "no darwin checksum for iroh-tunnel" >&2; exit 1; }
+          mkdir -p tap-out
+          bash packaging/homebrew-cask.sh "$VERSION" "$sha" > tap-out/iroh-tunnel.rb
+          cat tap-out/iroh-tunnel.rb
+
+      - name: Push to naicoi92/homebrew-tap
+        run: |
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/naicoi92/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp tap-out/iroh-tunnel.rb tap/Casks/iroh-tunnel.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/iroh-tunnel.rb
+          if git diff --cached --quiet; then
+            echo "cask already up to date"
+          else
+            git commit -m "iroh-tunnel ${VERSION}"
+            git push origin HEAD:main
+          fi
