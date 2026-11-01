@@ -881,7 +881,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Actual producer/verifier commands, immutable artifact/signature/checksum IDs and CI promotion configuration/results. Platform: Supported release artifact matrix; cross-build labeled separately.
 
-**Execution:** BLOCKED — Native #100 #80/#82 dependencies; actual signed production and final #97 acceptance not established.
+**Execution:** IMPLEMENTED for prerelease `v0.4.3-rc.2` (draft) — see `issue-100-evidence.md`. UNVERIFIED: stable release set, Linux/Windows `update` runs on signed files, `promote.yml` dry run, final #97 acceptance.
 
 <a id="dependency-01"></a>
 ### Case DEPENDENCY-01
