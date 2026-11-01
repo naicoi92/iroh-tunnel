@@ -3,8 +3,9 @@
 # Manual on purpose: run it only after the final #97 evidence for the exact
 # artifacts of this tag exists. The gate is human attestation (the evidence URL
 # is recorded, not machine-checked). It re-verifies the complete set and its
-# signatures from the draft's own assets, then publishes and updates the
-# Homebrew cask. Nothing here rebuilds or re-signs.
+# signatures from the draft's own assets, then publishes, updates the Homebrew
+# cask and pushes the three role images to ghcr.io (#141) from the binaries in
+# the signed archives. Nothing here rebuilds or re-signs.
 
 name: promote
 
@@ -131,3 +132,18 @@ jobs:
             git commit -m "iroh-tunnel ${VERSION}"
             git push origin HEAD:main
           fi
+
+  # Public promotion of the role images (#141): same gate as the release, after
+  # it is published. Only this job may write packages. The binaries come from
+  # the signed glibc archives, so the images hold exactly the released bytes.
+  images:
+    name: push role images to ghcr.io
+    needs: publish
+    uses: ./.github/workflows/docker.yml
+    with:
+      push: true
+      version: ${{ needs.publish.outputs.version }}
+      release_tag: ${{ inputs.tag }}
+    permissions:
+      contents: read
+      packages: write
