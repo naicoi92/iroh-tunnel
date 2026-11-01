@@ -196,6 +196,8 @@ mod locked {
         let err = result.expect_err("a locked executable cannot be replaced");
         eprintln!("locked replace error: {err:#}");
         assert!(format!("{err:#}").contains("cannot replace"), "{err:#}");
+        assert!(format!("{err:#}").contains("stop it"), "{err:#}");
+        assert!(!format!("{err:#}").contains("sudo"), "{err:#}");
         assert!(alive, "the running process must not be stopped");
         assert_eq!(std::fs::read(&exe)?, before);
         assert_eq!(leftovers(dir.path()), Vec::<String>::new());
@@ -228,6 +230,10 @@ mod locked {
         eprintln!("self-update exit={:?} stderr={stderr}", out.status.code());
         assert!(!out.status.success(), "{stderr}");
         assert!(stderr.contains("cannot replace"), "{stderr}");
+        assert!(
+            stderr.contains("stop it") && !stderr.contains("sudo"),
+            "{stderr}"
+        );
         assert_eq!(std::fs::read(&exe)?, before);
         assert_eq!(leftovers(dir.path()), Vec::<String>::new());
         assert!(Command::new(&exe)

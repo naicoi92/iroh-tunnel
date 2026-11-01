@@ -261,6 +261,15 @@ fn parse_version(raw: &str) -> anyhow::Result<String> {
     Ok(v.to_owned())
 }
 
+/// What to do when the OS denies replacing the executable. On Windows "access
+/// denied" is also what a running image reports, and `sudo` does not exist.
+#[cfg(windows)]
+const REPLACE_DENIED_HINT: &str =
+    "if this executable is running (a tunnel, or this very command), \
+     stop it and run the update again from another copy; otherwise check the file permissions";
+#[cfg(not(windows))]
+const REPLACE_DENIED_HINT: &str = "rerun with sufficient privileges (for example sudo)";
+
 /// A permission failure while replacing is reported as [`CliError::Permission`]
 /// (exit 3, RS-06); everything else keeps its unclassified exit 1.
 fn classify_replace_error(err: anyhow::Error) -> anyhow::Error {
@@ -270,10 +279,7 @@ fn classify_replace_error(err: anyhow::Error) -> anyhow::Error {
             .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
     });
     if denied {
-        CliError::Permission(format!(
-            "{err:#}; rerun with sufficient privileges (for example sudo)"
-        ))
-        .into()
+        CliError::Permission(format!("{err:#}; {REPLACE_DENIED_HINT}")).into()
     } else {
         err
     }
