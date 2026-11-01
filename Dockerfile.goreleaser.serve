@@ -9,6 +9,8 @@ FROM gcr.io/distroless/cc-debian12
 ARG TARGETPLATFORM
 
 ENV HOME=/tmp
+# `update` reads this to point at image redeployment instead of replacing files (#96).
+ENV IROH_TUNNEL_CONTAINER=1
 
 COPY $TARGETPLATFORM/iroh-tunnel-serve /usr/local/bin/iroh-tunnel-serve
 

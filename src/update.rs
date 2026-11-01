@@ -16,6 +16,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::cli::UpdateArgs;
 use crate::error::CliError;
+use crate::update_owner::{self, Owner};
 
 /// Release location; overridable for tests and mirrors (same variable as `install.sh`).
 const DEFAULT_BASE_URL: &str = "https://github.com/naicoi92/iroh-tunnel/releases";
@@ -118,6 +119,8 @@ pub struct UpdateContext<'a> {
     pub install_path: PathBuf,
     /// Checks the signature of the release checksums (skipped by `--insecure`).
     pub verifier: &'a dyn SignatureVerifier,
+    /// Who owns the installed file (decides delegation, see [`update_owner`]).
+    pub owner: Owner,
 }
 
 /// Entry point of the `update` command for the executable `exe_name`.
@@ -136,6 +139,7 @@ pub async fn run(args: UpdateArgs, exe_name: &str, current_version: &str) -> any
         exe_name,
         target,
         current_version,
+        owner: update_owner::detect(&install_path),
         install_path,
         verifier: &SigstoreVerifier::release(),
     };
@@ -147,6 +151,9 @@ pub async fn run(args: UpdateArgs, exe_name: &str, current_version: &str) -> any
 /// # Errors
 /// See [`run`].
 pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Result<()> {
+    if !owner_allows_update(args, ctx)? {
+        return Ok(());
+    }
     let requested = args.to.as_deref().map(parse_version).transpose()?;
     if args.insecure {
         eprintln!(
@@ -246,6 +253,33 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
     );
     println!("restart any running tunnel to use the new version (it was not stopped)");
     Ok(())
+}
+
+/// Apply the ownership policy (#96): a file owned by a package manager or a
+/// container image is updated through its owner. Returns `false` when the
+/// guidance was printed and nothing must be replaced.
+///
+/// A package-owned file can still be replaced with `--yes`; a container image
+/// never is.
+fn owner_allows_update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Result<bool> {
+    let Some(guidance) = ctx.owner.guidance(ctx.exe_name) else {
+        return Ok(true);
+    };
+    if !ctx.owner.overwrite_allowed_with_confirmation() {
+        println!("{guidance}");
+        return Ok(false);
+    }
+    if args.yes {
+        eprintln!(
+            "warning: replacing {} although it is managed by a package manager; \
+             the package database will no longer match the file",
+            ctx.install_path.display()
+        );
+        return Ok(true);
+    }
+    println!("{guidance}");
+    println!("to replace the file anyway, run again with --yes");
+    Ok(false)
 }
 
 /// Accepts `1.2.3` or `v1.2.3` (plus pre-release/build suffix); the result is

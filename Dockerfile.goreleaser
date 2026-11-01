@@ -20,6 +20,8 @@ ARG TARGETPLATFORM
 # The iroh-tunnel binary runs as PID 1; it does not need a root home dir,
 # but we set HOME so config discovery via the `dirs` crate resolves cleanly.
 ENV HOME=/tmp
+# `update` reads this to point at image redeployment instead of replacing files (#96).
+ENV IROH_TUNNEL_CONTAINER=1
 
 COPY $TARGETPLATFORM/iroh-tunnel /usr/local/bin/iroh-tunnel
 
