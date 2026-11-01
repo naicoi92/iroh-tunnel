@@ -250,11 +250,19 @@ runtime() {
                     $owned \$path | grep -q \"$own_re\"
                 done
                 $link --help >/dev/null
+                # #96: a package-owned binary is updated by its manager. Both the
+                # full name and the alias point at the package and change nothing.
+                before=\$(sha256sum /usr/bin/$bin)
+                for cmd in $bin $link; do
+                    out=\$(\$cmd update -i 2>&1)
+                    printf '%s' \"\$out\" | grep -q 'owned by the package \"$bin\"'
+                done
+                test \"\$(sha256sum /usr/bin/$bin)\" = \"\$before\"
                 $remove $bin >/dev/null
                 hash -r
                 if command -v $bin || command -v $link; then echo left behind; exit 1; fi
             " 2>&1); then
-                pass "$pkg installs alone on $image, $link --help runs, removal is clean, package database owns binary and alias"
+                pass "$pkg installs alone on $image, $link --help runs, update points at the package manager and changes nothing, removal is clean, package database owns binary and alias"
             else
                 fail "$pkg on $image: $out"
             fi
