@@ -24,4 +24,6 @@ Tag pushes (`release.yml`) still only rehearse (`push: false`); `ci.yml`/`snapsh
 - `actionlint .github/workflows/*.yml`: clean.
 - Staging step logic rehearsed locally on a synthetic release (checksum OK, extraction for both arches).
 - Not run end to end: needs a real promotion (public). Limits: no registry push, no `docker buildx` run of the promote path; verify on the first promotion and record digests here.
-- A published release stays modified-never; if `images` fails after `publish`, re-run the failed job (idempotent tag push).
+- Review (Standards and Spec, independent, base `b364f32` head `7879149`): no hard violations; both verdicts "OK with notes". Fixed: stale header in `docker.yml`, stale statements in `issue-100-evidence.md`. Archive layout checked: `build.yml` packs the binary as a top-level member, as the staging `tar` expects.
+- **Open, retry gap:** `images` runs after `publish`. If it fails, "Re-run failed jobs" of the same run re-runs only `images` (the release is already public and `publish` stays succeeded). A fresh dispatch of the same tag stops at the draft check. An images-only entry point is not added (it would be a second, separately gated path); decide if wanted.
+- Digests live in each job's step summary; copy them into this file after the first promotion, as the run logs expire.

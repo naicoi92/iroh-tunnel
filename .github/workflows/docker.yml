@@ -2,7 +2,9 @@
 # build.yml. Nothing is compiled here and Dockerfile.goreleaser has no RUN
 # step, so no QEMU is needed — buildx only assembles layers.
 #
-# Needs only the two glibc build artifacts, so it runs in PARALLEL with package.yml.
+# Rehearsal mode needs only the two glibc build artifacts, so it runs in PARALLEL
+# with package.yml. Promotion mode (`release_tag` set, #141) takes the binaries
+# from the signed release archives instead.
 # push=false rehearses the build (ci.yml); push=true publishes to ghcr.io.
 
 name: docker
