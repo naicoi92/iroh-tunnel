@@ -28,3 +28,13 @@ Baseline `cf124d0` (origin/main). Branch `redesign/issue-95-standalone-update`. 
 - Windows (x64/ARM64, zip path, locked running executable) and Linux native were not run; `tests/update.rs` is `cfg(unix)`. Evidence belongs to #97.
 - Release tests use a local server and a shell-script payload, not signed final artifacts.
 - New dependencies: `reqwest` (already in the tree), `rustls` (`ring`), `sha2`, `flate2`, `tar`, `zip`; prior art in `issue-95-update-prior-art-research.md`.
+
+## Follow-up — keyless signature verifier (branch `redesign/issue-95-signature-verifier`)
+
+`SigstoreVerifier` replaces the fail-closed placeholder. It verifies the `checksums*.txt` bundle offline against the embedded Sigstore public-good trusted root (certificate chain, SCT, transparency log), requires issuer `https://token.actions.githubusercontent.com` and a signer identity starting with `https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/v`. Wrong issuer, wrong identity, changed payload and missing, empty or invalid bundles fail and keep the installed binary.
+
+Evidence uses a real `cosign sign-blob` bundle (`tests/fixtures/sigstore/`, copied from sigstore-rust test data; signer `w.vollprecht@gmail.com`, issuer GitHub OAuth), not artifacts of this project: genuine accepted for its own issuer/identity; payload change, wrong identity, wrong issuer, release pin, bad bundle rejected; real binary rejects the foreign bundle (exit 1, file unchanged).
+
+Assumptions for #100 (to confirm there): bundle published as `<checksums file>.sigstore.json`, produced by `cosign sign-blob --new-bundle-format` (or an equivalent v0.3 message-signature bundle) in the release workflow on a `v*` tag; the repository is public (the transparency log is required).
+
+New dependencies: `sigstore-verify`, `sigstore-trust-root`, `sigstore-types` 0.15 (`aws-lc-rs` provider; adds `aws-lc-sys`, a C build, to every target — see CI/snapshot evidence). Trusted root is embedded: a Sigstore key rotation needs a new release (DIST-03: reinstall).
