@@ -754,7 +754,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Source AC:** [95.AC1](#95-ac1); [95.CL3](#95-cl3). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #80 exact unsafe bypass scope and invalid verification fixture.
+**Prerequisites:** Invalid verification fixture. Policy: `--insecure` / `-i` skips signature and checksum and warns (#80).
 
 **Action:** Invoke actual explicit unsafe bypass and compare normal failure path.
 
@@ -762,7 +762,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Explicit command/warning, approved scope link and resulting artifact/hash. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #80 exact checksum-bypass semantics and replacement policy.
+**Execution:** BLOCKED — Await #95 implementation and #100 signed artifacts. The #80 policy is decided.
 
 <a id="update-running-01"></a>
 ### Case UPDATE-RUNNING-01
@@ -788,15 +788,15 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Source AC:** [95.AC2](#95-ac2). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #80 recovery/rotation/partial-failure and Windows running-file replacement contract.
+**Prerequisites:** #80 policy: stage beside the target then rename; any failure reports the error and keeps the old binary; rotation deferred.
 
 **Action:** Inject replacement failure/partial write; exercise recovery and trust rotation, including Windows locked executable.
 
-**Expected observable outcome:** Observed replacement/recovery/rotation follows approved policy; no automatic tunnel stop. No invented staging, atomicity or rollback guarantee.
+**Expected observable outcome:** An injected replacement failure, including a locked Windows executable, leaves the old binary intact and reports the error; no automatic tunnel stop. No rollback guarantee.
 
 **Evidence/platform:** Approved policy, OS filesystem behavior, old/new hashes, running process and recovery transcript. Platform: Actual supported OS, including Windows locked running executable.
 
-**Execution:** BLOCKED — Await #80 platform replacement, rollback/partial failure and signing trust rotation policy.
+**Execution:** BLOCKED — Await #95 implementation. The #80 policy is decided; rotation is deferred (DIST-03).
 
 <a id="package-update-01"></a>
 ### Case PACKAGE-UPDATE-01
