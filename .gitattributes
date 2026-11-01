@@ -1,0 +1,2 @@
+# Signed fixtures are verified byte for byte; never convert line endings.
+tests/fixtures/sigstore/* -text
