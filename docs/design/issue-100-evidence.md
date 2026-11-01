@@ -10,7 +10,7 @@ Baseline `ad7094c` (origin/main). Blockers #80, #82 and #124 closed at pickup. P
 - `packaging/verify-release-set.sh` checks the full matrix: 3 roles × (5 Linux archives + 2 Windows zips + 5 packages) in `checksums.txt`, 3 darwin-arm64 archives in `checksums-darwin.txt`, both bundles; every listed file present and matching; nothing extra.
 - `verify` runs `tests/release_artifacts.rs -- --ignored` on the REAL files with the verifier from #95 (`SigstoreVerifier`).
 - `draft` uploads to a DRAFT release and stops. A published release is never modified.
-- `promote.yml` (manual, requires an evidence URL) re-downloads the draft, repeats the set check and signature verification at the tag's commit, publishes, then updates the Homebrew cask from the published checksums. Image push and cask update no longer run on a tag.
+- `promote.yml` (manual, requires an evidence URL) re-downloads the draft, repeats the set check and signature verification at the tag's commit, publishes, then updates the Homebrew cask from the published checksums. Image push and cask update no longer run on a tag; the image push is a job of `promote.yml` since #141.
 
 ## Acceptance
 
@@ -32,7 +32,7 @@ Immutable identifiers of the signed inputs (rc.2): `checksums.txt` `sha256:e167b
 
 - Only a prerelease tag was produced. The draft `v0.4.3-rc.2` and its tags are disposable; the final stable set and #97 acceptance remain open (RELEASE-SIGN-01 final integration).
 - Verified by running `update` on macOS arm64 only; Linux and Windows runtimes were not exercised against the signed files. Their archives are signed and listed identically.
-- `ghcr.io` image push moved out of the tag workflow into no workflow yet: after promotion no job pushes the images. Pushing them is public promotion; adding a gated job to `promote.yml` or a follow-up issue is **open for the owner** and must be settled before release.
+- `ghcr.io` image push moved out of the tag workflow; settled by #141 as a gated `images` job in `promote.yml`.
 - `promote.yml` was not run end to end (it would publish). Its inputs are validated and passed through `env:`; actions are pinned to version tags, not commit SHAs, as in the rest of the repository.
 - `macos-14` is being retired (brownout failed the first rc); `build.yml` now uses `macos-15`.
 - cosign pinned to `v3.1.4` via `sigstore/cosign-installer@v4.1.2`. A Sigstore trusted-root rotation needs a new release (DIST-03).

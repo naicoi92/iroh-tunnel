@@ -50,8 +50,8 @@ jobs:
     with:
       version: ${{ needs.build.outputs.version }}
 
-  # Image rehearsal only: pushing to ghcr.io is public promotion and is not
-  # done by a tag (docs/design/issue-100-evidence.md, open decision).
+  # Image rehearsal only: pushing to ghcr.io is public promotion and is done by
+  # promote.yml, not by a tag (#141).
   docker:
     needs: [gate, build]
     uses: ./.github/workflows/docker.yml
