@@ -44,6 +44,13 @@ which = "8"
 edit = "0.1"
 data-encoding = "2.11"
 regex = "1.13"
+# `update`: release download, checksum and archive extraction (issue #95).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.11"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW` for the role-ownership lock files (src/ownership.rs).
@@ -62,7 +69,6 @@ iroh-relay = "1.4.1"
 # Turns on this crate's own `test-utils` feature for integration tests
 # (self-dependency feature unification).
 iroh-tunnel = { path = ".", features = ["test-utils"] }
-sha2 = "0.11"
 
 [build-dependencies]
 # vergen-gitcl 9.x — inject git tag into APP_VERSION at build time.

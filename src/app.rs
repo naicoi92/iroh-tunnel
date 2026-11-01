@@ -15,6 +15,7 @@ use crate::error::CliError;
 use crate::shutdown;
 use crate::status::{self, StatusRole};
 use crate::status_cmd;
+use crate::update;
 use crate::{access, cli, serve, service};
 use anyhow::Context as _;
 use clap::Parser;
@@ -59,8 +60,9 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     // Role to clean up if shutdown is abandoned; only `run` commands own
     // a status file, but removal is pid-checked so other commands are safe.
     let status_role = match &parsed.role {
-        Role::Serve { .. } => StatusRole::Serve,
-        Role::Access { .. } => StatusRole::Access,
+        Role::Serve { .. } => Some(StatusRole::Serve),
+        Role::Access { .. } => Some(StatusRole::Access),
+        Role::Update(_) => None,
     };
     // Racing the run future means a forced exit first DROPS it: owned tasks
     // and the endpoint are cancelled before the process status is decided.
@@ -76,7 +78,9 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
             // Exit statuses: 130 repeated stop after grace, 1 watchdog (see
             // CHANGELOG). Own-state cleanup is still attempted here.
             eprintln!("error: shutdown abandoned ({forced:?}), exiting");
-            status::remove_own_status_file_for_exit(status_role);
+            if let Some(role) = status_role {
+                status::remove_own_status_file_for_exit(role);
+            }
             std::process::exit(forced.exit_code());
         }
     };
@@ -104,8 +108,12 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
     let status_role = match &cli.role {
         Role::Serve { .. } => StatusRole::Serve,
         Role::Access { .. } => StatusRole::Access,
+        Role::Update(args) => {
+            return update::run(args.clone(), "iroh-tunnel", env!("APP_VERSION")).await;
+        }
     };
     match cli.role {
+        Role::Update(_) => unreachable!("handled above"),
         Role::Serve { cmd: Some(cmd), .. } | Role::Access { cmd: Some(cmd), .. } => {
             dispatch_role_cmd(status_role, cmd, packaging).await
         }
@@ -195,6 +203,16 @@ async fn dispatch_role_cmd(
         }
         RoleCmd::Config { action } => dispatch_config(role, action),
         RoleCmd::Status { json } => status_cmd::run(status_role, json),
+        RoleCmd::Update(args) => match packaging {
+            Packaging::Standalone => {
+                let exe = format!("iroh-tunnel-{role}");
+                update::run(args, &exe, env!("APP_VERSION")).await
+            }
+            Packaging::AllInOne => Err(CliError::Config(
+                "update acts on the invoked executable; run `iroh-tunnel update`".into(),
+            )
+            .into()),
+        },
         RoleCmd::Service { .. } if packaging == Packaging::Standalone => {
             Err(CliError::Service(format!(
                 "service management is not yet supported by the standalone {role} binary; \

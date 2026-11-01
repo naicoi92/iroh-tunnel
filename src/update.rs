@@ -1,13 +1,353 @@
-//! Standalone executable replacement (DIST-02, issue #80 policy).
+//! `update`: replace the running standalone executable with a verified
+//! release (DIST-02, issue #80 policy).
 //!
-//! The verified file is staged beside the installed executable and renamed
-//! over it. Any failure reports the OS error and leaves the installed
-//! executable untouched; a running process keeps its already-open image.
+//! Flow: resolve the release → fetch `checksums*.txt` → (unless `--insecure`)
+//! verify its signature → download the role archive → compare its SHA-256 →
+//! extract exactly one entry in memory → stage beside the installed file and
+//! rename over it. Any failure reports the error and leaves the installed
+//! executable untouched. A running tunnel is never stopped; the operator is
+//! told to restart it.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
+use anyhow::{bail, Context as _};
+use sha2::{Digest as _, Sha256};
+
+use crate::cli::UpdateArgs;
+
+/// Release location; overridable for tests and mirrors (same variable as `install.sh`).
+const DEFAULT_BASE_URL: &str = "https://github.com/naicoi92/iroh-tunnel/releases";
+const BASE_URL_ENV: &str = "IROH_TUNNEL_BASE_URL";
+/// Upper bounds on downloaded/extracted data (RS-09).
+const MAX_CHECKSUMS_BYTES: usize = 1 << 20;
+const MAX_ARCHIVE_BYTES: usize = 256 << 20;
+const MAX_EXECUTABLE_BYTES: u64 = 512 << 20;
+
+/// Verifies the authenticity of the release checksums (keyless CI signature).
+///
+/// `signed` is the exact `checksums*.txt` content, `bundle` its verification
+/// material fetched from the release.
+pub trait SignatureVerifier {
+    /// # Errors
+    /// Returns an error unless `bundle` proves that the pinned CI identity
+    /// signed `signed`.
+    fn verify(&self, signed: &[u8], bundle: &[u8]) -> anyhow::Result<()>;
+}
+
+/// Production verifier until the signed release pipeline (#100) fixes the
+/// bundle format and identity. It never accepts anything, so without
+/// `--insecure` no unsigned release can replace the installed executable.
+pub struct PendingSigstoreVerifier;
+
+impl SignatureVerifier for PendingSigstoreVerifier {
+    fn verify(&self, _signed: &[u8], _bundle: &[u8]) -> anyhow::Result<()> {
+        bail!("signature verification is not available in this build yet (issue #100)")
+    }
+}
+
+/// Everything `update` needs from its surroundings.
+pub struct UpdateContext<'a> {
+    /// Release base, e.g. `https://github.com/<owner>/<repo>/releases`.
+    pub base_url: String,
+    /// Executable being replaced, e.g. `iroh-tunnel-serve`.
+    pub exe_name: &'a str,
+    /// Platform id as in `install.sh`, e.g. `linux-amd64-musl`.
+    pub target: &'a str,
+    /// Version of the running executable.
+    pub current_version: &'a str,
+    /// Absolute path of the installed executable.
+    pub install_path: PathBuf,
+    pub verifier: &'a dyn SignatureVerifier,
+}
+
+/// Entry point of the `update` command for the executable `exe_name`.
+///
+/// # Errors
+/// Fails on unsupported platforms, network or verification errors and
+/// replacement errors; the installed executable is unchanged in every case.
+pub async fn run(args: UpdateArgs, exe_name: &str, current_version: &str) -> anyhow::Result<()> {
+    let target = current_target()?;
+    let install_path = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("cannot locate the running executable")?;
+    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
+    let ctx = UpdateContext {
+        base_url,
+        exe_name,
+        target,
+        current_version,
+        install_path,
+        verifier: &PendingSigstoreVerifier,
+    };
+    update(&args, &ctx).await
+}
+
+/// Core of `update`, with the environment injected.
+///
+/// # Errors
+/// See [`run`].
+pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Result<()> {
+    let requested = args.to.as_deref().map(parse_version).transpose()?;
+    if args.insecure {
+        eprintln!(
+            "warning: --insecure skips signature and checksum verification; \
+             you accept responsibility for the installed file"
+        );
+    }
+    let client = http_client()?;
+    let release_url = match &requested {
+        Some(v) => format!("{}/download/v{v}", ctx.base_url.trim_end_matches('/')),
+        None => format!("{}/latest/download", ctx.base_url.trim_end_matches('/')),
+    };
+    let checksums_name = checksums_name(ctx.target);
+    let checksums = fetch(
+        &client,
+        &format!("{release_url}/{checksums_name}"),
+        MAX_CHECKSUMS_BYTES,
+    )
+    .await
+    .with_context(|| format!("cannot fetch {checksums_name}"))?;
+    if !args.insecure {
+        let bundle = fetch(
+            &client,
+            &format!("{release_url}/{checksums_name}.sigstore.json"),
+            MAX_CHECKSUMS_BYTES,
+        )
+        .await
+        .context("cannot fetch the signature bundle; pass --insecure to skip verification")?;
+        ctx.verifier
+            .verify(&checksums, &bundle)
+            .context("signature verification failed; the installed executable was not changed")?;
+    }
+    let checksums = String::from_utf8(checksums).context("checksums file is not UTF-8")?;
+    let version = match requested {
+        Some(v) => v,
+        None => latest_version(&checksums, ctx.exe_name, ctx.target)?,
+    };
+    if version == ctx.current_version {
+        println!("{} is already at {version}", ctx.exe_name);
+        return Ok(());
+    }
+
+    let archive_name = archive_name(ctx.exe_name, &version, ctx.target);
+    let want = expected_sum(&checksums, &archive_name);
+    if want.is_none() && !args.insecure {
+        bail!("release {version} does not publish {archive_name}");
+    }
+    let archive = fetch(
+        &client,
+        &format!("{release_url}/{archive_name}"),
+        MAX_ARCHIVE_BYTES,
+    )
+    .await
+    .with_context(|| format!("cannot download {archive_name}"))?;
+    if !args.insecure {
+        let got = hex(&Sha256::digest(&archive));
+        if want != Some(got.as_str()) {
+            bail!(
+                "checksum mismatch for {archive_name} (expected {}, got {got}); \
+                 the installed executable was not changed",
+                want.unwrap_or("none")
+            );
+        }
+    }
+
+    let exe_name = ctx.exe_name.to_owned();
+    let entry = entry_name(&exe_name, ctx.target);
+    let contents =
+        tokio::task::spawn_blocking(move || extract_entry(&archive, &archive_name, &entry))
+            .await
+            .context("extraction task failed")??;
+    let install_path = ctx.install_path.clone();
+    tokio::task::spawn_blocking(move || replace_executable(&install_path, &contents))
+        .await
+        .context("replacement task failed")??;
+
+    println!(
+        "updated {} from {} to {version}",
+        ctx.install_path.display(),
+        ctx.current_version
+    );
+    println!("restart any running tunnel to use the new version (it was not stopped)");
+    Ok(())
+}
+
+/// Accepts `1.2.3` or `v1.2.3` (plus pre-release/build suffix); the result is
+/// embedded in URLs and file names, so anything else is rejected.
+fn parse_version(raw: &str) -> anyhow::Result<String> {
+    let v = raw.strip_prefix('v').unwrap_or(raw);
+    let valid = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.\-]+)?$")
+        .expect("static regex")
+        .is_match(v);
+    if !valid {
+        bail!("invalid version {raw:?}; expected e.g. 0.4.2");
+    }
+    Ok(v.to_owned())
+}
+
+/// Platform id matching the release asset names (`install.sh` `detect_target`).
+fn current_target() -> anyhow::Result<&'static str> {
+    let target = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "darwin-arm64"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "windows-amd64"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "windows-arm64"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "musl"
+    )) {
+        "linux-amd64-musl"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "linux-amd64"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        target_env = "musl"
+    )) {
+        "linux-arm64-musl"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "linux-arm64"
+    } else if cfg!(all(target_os = "linux", target_arch = "riscv64")) {
+        "linux-riscv64gc-musl"
+    } else {
+        bail!("no release is published for this platform; use the installer instead");
+    };
+    Ok(target)
+}
+
+fn checksums_name(target: &str) -> &'static str {
+    if target.starts_with("darwin-") {
+        "checksums-darwin.txt"
+    } else {
+        "checksums.txt"
+    }
+}
+
+fn is_windows(target: &str) -> bool {
+    target.starts_with("windows-")
+}
+
+fn archive_name(exe: &str, version: &str, target: &str) -> String {
+    let ext = if is_windows(target) { "zip" } else { "tar.gz" };
+    format!("{exe}-{version}-{target}.{ext}")
+}
+
+/// File name of the executable inside the archive.
+fn entry_name(exe: &str, target: &str) -> String {
+    if is_windows(target) {
+        format!("{exe}.exe")
+    } else {
+        exe.to_owned()
+    }
+}
+
+/// SHA-256 listed for `file` in a `sha256sum`-style checksums file.
+fn expected_sum<'a>(checksums: &'a str, file: &str) -> Option<&'a str> {
+    checksums.lines().find_map(|line| {
+        let (sum, name) = line.split_once(char::is_whitespace)?;
+        (name.trim_start_matches([' ', '*']) == file && sum.len() == 64).then_some(sum)
+    })
+}
+
+/// Newest published version of `exe` for `target`: the single one the
+/// `latest` release lists.
+fn latest_version(checksums: &str, exe: &str, target: &str) -> anyhow::Result<String> {
+    let prefix = format!("{exe}-");
+    let suffix_tgz = format!("-{target}.tar.gz");
+    let suffix_zip = format!("-{target}.zip");
+    checksums
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .map(|n| n.trim_start_matches('*'))
+        .find_map(|n| {
+            let mid = n.strip_prefix(&prefix)?;
+            let v = mid
+                .strip_suffix(&suffix_tgz)
+                .or_else(|| mid.strip_suffix(&suffix_zip))?;
+            v.chars().next()?.is_ascii_digit().then(|| v.to_owned())
+        })
+        .with_context(|| format!("the latest release has no {exe} archive for {target}"))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    // Already installed (by another component) is fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .user_agent(concat!("iroh-tunnel/", env!("CARGO_PKG_VERSION")))
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .context("cannot create HTTP client")
+}
+
+/// GET `url`, failing on non-success status or when the body exceeds `max` bytes.
+async fn fetch(client: &reqwest::Client, url: &str, max: usize) -> anyhow::Result<Vec<u8>> {
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > max {
+            bail!("response from {url} exceeds {max} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Read exactly one regular-file entry named `entry` out of the archive.
+/// Nothing is written to disk and no other entry is looked at (RS-11).
+fn extract_entry(archive: &[u8], archive_name: &str, entry: &str) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    if archive_name.ends_with(".zip") {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
+            .with_context(|| format!("cannot read {archive_name}"))?;
+        let file = zip
+            .by_name(entry)
+            .with_context(|| format!("{archive_name} does not contain {entry}"))?;
+        if !file.is_file() {
+            bail!("{entry} in {archive_name} is not a regular file");
+        }
+        file.take(MAX_EXECUTABLE_BYTES).read_to_end(&mut out)?;
+    } else {
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+        let mut found = false;
+        for e in tar
+            .entries()
+            .with_context(|| format!("cannot read {archive_name}"))?
+        {
+            let e = e?;
+            let path = e.path()?;
+            if path.as_ref() == Path::new(entry) || path.as_ref() == Path::new("./").join(entry) {
+                if !e.header().entry_type().is_file() {
+                    bail!("{entry} in {archive_name} is not a regular file");
+                }
+                e.take(MAX_EXECUTABLE_BYTES).read_to_end(&mut out)?;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            bail!("{archive_name} does not contain {entry}");
+        }
+    }
+    if out.is_empty() {
+        bail!("{entry} in {archive_name} is empty");
+    }
+    Ok(out)
+}
 
 /// Staging file beside the target; removed on drop unless [`disarm`](Self::disarm)ed
 /// after a successful rename.
