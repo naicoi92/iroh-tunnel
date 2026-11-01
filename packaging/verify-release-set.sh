@@ -1,8 +1,8 @@
 #!/bin/sh
 # Verify that DIST holds the complete, consistent release artifact set (#100):
 # every role archive and package for the supported matrix, both checksum files,
-# a signature bundle for each checksum file, every artifact listed in (and
-# matching) its checksum file, and nothing else.
+# a signature bundle for each checksum file, every expected artifact listed in
+# (and matching) its checksum file, and no unexpected file in DIST.
 #
 #   packaging/verify-release-set.sh DIST VERSION
 #

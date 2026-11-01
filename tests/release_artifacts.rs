@@ -197,7 +197,8 @@ impl Real {
         })
     }
 
-    /// Exact signer identity of the release workflow run for this tag.
+    /// Signer identity of the release workflow run for this tag. The verifier
+    /// matches it as a prefix, so it is also checked for equality below.
     fn identity(&self) -> String {
         format!(
             "https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/{}",
@@ -225,9 +226,9 @@ impl Real {
 /// Print `sha256  name` for every asset: the immutable identifiers recorded as
 /// evidence by the workflow summary.
 fn print_identifiers(dir: &Path) -> Result<()> {
-    let mut names: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .collect();
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<_>>()?;
     names.sort();
     for name in names {
         let digest = hex(&Sha256::digest(std::fs::read(dir.join(&name))?));
@@ -238,7 +239,7 @@ fn print_identifiers(dir: &Path) -> Result<()> {
 
 #[test]
 #[ignore = "needs the real signed release artifacts (RELEASE_DIST, RELEASE_TAG)"]
-fn signed_release_bundles_verify_for_pinned_issuer_and_exact_identity() -> Result<()> {
+fn signed_release_bundles_verify_for_pinned_issuer_and_release_identity() -> Result<()> {
     let real = Real::from_env()?;
     let verifier = SigstoreVerifier::new(CI_ISSUER, &real.identity());
     for Signed {

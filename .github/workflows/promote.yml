@@ -1,7 +1,8 @@
 # Public promotion of a release that `release.yml` left as a DRAFT (issue #100).
 #
 # Manual on purpose: run it only after the final #97 evidence for the exact
-# artifacts of this tag exists. It re-verifies the complete set and its
+# artifacts of this tag exists. The gate is human attestation (the evidence URL
+# is recorded, not machine-checked). It re-verifies the complete set and its
 # signatures from the draft's own assets, then publishes and updates the
 # Homebrew cask. Nothing here rebuilds or re-signs.
 
@@ -41,12 +42,16 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
-      - name: Require the final evidence reference
+      - name: Validate inputs
         env:
           EVIDENCE: ${{ inputs.evidence }}
+          REPO: ${{ github.repository }}
         run: |
-          [[ "$EVIDENCE" == https://github.com/${{ github.repository }}/* ]] \
-            || { echo "evidence must be a URL in this repository" >&2; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+            || { echo "tag must look like v1.2.3 or v1.2.3-rc.1" >&2; exit 1; }
+          prefix="https://github.com/${REPO}/"
+          [[ "$EVIDENCE" == "$prefix"* && "$EVIDENCE" =~ ^[A-Za-z0-9._/:#?=\&%-]+$ ]] \
+            || { echo "evidence must be a plain URL in this repository" >&2; exit 1; }
 
       # The tag, not the dispatching branch, fixes the verifier and the set
       # script that judge the artifacts.
@@ -68,7 +73,9 @@ jobs:
           gh release download "$TAG" --dir dist
 
       - name: Complete artifact set
-        run: packaging/verify-release-set.sh dist "${{ steps.v.outputs.version }}"
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: packaging/verify-release-set.sh dist "$VERSION"
 
       - uses: ./.github/actions/setup-rust
         with:
@@ -77,9 +84,11 @@ jobs:
         run: cargo test --locked --test release_artifacts -- --ignored --test-threads=1
 
       - name: Publish release
+        env:
+          EVIDENCE: ${{ inputs.evidence }}
         run: |
           gh release edit "$TAG" --draft=false
-          echo "Published \`$TAG\`. Evidence: ${{ inputs.evidence }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published \`$TAG\`. Attested evidence: $EVIDENCE" >> "$GITHUB_STEP_SUMMARY"
 
   homebrew:
     name: update Homebrew tap
@@ -91,6 +100,7 @@ jobs:
       VERSION: ${{ needs.publish.outputs.version }}
       TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
       GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,7 +109,7 @@ jobs:
 
       - name: Render cask from the published checksums
         run: |
-          gh release download "${{ inputs.tag }}" --pattern checksums-darwin.txt
+          gh release download "$TAG" --pattern checksums-darwin.txt
           sha="$(awk -v n="iroh-tunnel-${VERSION}-darwin-arm64.tar.gz" '$2 == n { print $1 }' checksums-darwin.txt)"
           [[ -n "$sha" ]] || { echo "no darwin checksum for iroh-tunnel" >&2; exit 1; }
           mkdir -p tap-out
