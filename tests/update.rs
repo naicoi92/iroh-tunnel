@@ -168,7 +168,7 @@ fn update_without_verification_material_keeps_installed_binary() -> Result<()> {
 
     let out = run_update(&install.exe, &server.url, &[])?;
 
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("signature"),
         "{}",
@@ -355,5 +355,70 @@ fn insecure_skips_checksum_of_a_changed_payload() -> Result<()> {
     in_process(&server, &Reject, &exe, &args(None, true))?;
 
     assert_eq!(run_installed(&exe)?, "NEW-9.9.9");
+    Ok(())
+}
+
+#[test]
+fn latest_never_downgrades_a_newer_installed_version() -> Result<()> {
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "0.0.5", "linux-amd64", false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "0.0.5")?;
+    let (_dir, exe) = old_install()?;
+    let ctx = UpdateContext {
+        base_url: server.url.clone(),
+        exe_name: EXE,
+        target: "linux-amd64",
+        current_version: "0.1.0",
+        install_path: exe.clone(),
+        verifier: &Accept,
+    };
+
+    tokio::runtime::Runtime::new()?.block_on(update(&args(None, false), &ctx))?;
+
+    assert_eq!(std::fs::read(&exe)?, OLD_BYTES);
+    Ok(())
+}
+
+#[test]
+fn insecure_with_explicit_version_needs_no_checksums_file() -> Result<()> {
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "9.9.9", "linux-amd64", false)?;
+    std::fs::remove_file(releases.path().join("9.9.9/checksums.txt"))?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process(&server, &Reject, &exe, &args(Some("9.9.9"), true))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-9.9.9");
+    Ok(())
+}
+
+#[test]
+fn unwritable_install_dir_exits_with_permission_code_and_keeps_binary() -> Result<()> {
+    let Some(target) = host_target() else {
+        return Ok(());
+    };
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "9.9.9", target, false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+    let install = install_real_binary()?;
+    let dir = install.exe.parent().unwrap().to_owned();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))?;
+    let probe_ok = std::fs::File::create(dir.join("probe")).is_ok();
+    let before = std::fs::read(&install.exe)?;
+
+    let out = run_update(&install.exe, &server.url, &["-i"])?;
+
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+    if probe_ok {
+        return Ok(()); // running as root: permission cannot be denied
+    }
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&install.exe)?, before);
     Ok(())
 }

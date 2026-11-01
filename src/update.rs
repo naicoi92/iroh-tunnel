@@ -15,6 +15,7 @@ use anyhow::{bail, Context as _};
 use sha2::{Digest as _, Sha256};
 
 use crate::cli::UpdateArgs;
+use crate::error::CliError;
 
 /// Release location; overridable for tests and mirrors (same variable as `install.sh`).
 const DEFAULT_BASE_URL: &str = "https://github.com/naicoi92/iroh-tunnel/releases";
@@ -58,6 +59,7 @@ pub struct UpdateContext<'a> {
     pub current_version: &'a str,
     /// Absolute path of the installed executable.
     pub install_path: PathBuf,
+    /// Checks the signature of the release checksums (skipped by `--insecure`).
     pub verifier: &'a dyn SignatureVerifier,
 }
 
@@ -101,32 +103,47 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
         None => format!("{}/latest/download", ctx.base_url.trim_end_matches('/')),
     };
     let checksums_name = checksums_name(ctx.target);
-    let checksums = fetch(
-        &client,
-        &format!("{release_url}/{checksums_name}"),
-        MAX_CHECKSUMS_BYTES,
-    )
-    .await
-    .with_context(|| format!("cannot fetch {checksums_name}"))?;
-    if !args.insecure {
-        let bundle = fetch(
+    // An unverified install of a named version needs no checksums file at all.
+    let skip_checksums = args.insecure && requested.is_some();
+    let checksums = if skip_checksums {
+        String::new()
+    } else {
+        let bytes = fetch(
             &client,
-            &format!("{release_url}/{checksums_name}.sigstore.json"),
+            &format!("{release_url}/{checksums_name}"),
             MAX_CHECKSUMS_BYTES,
         )
         .await
-        .context("cannot fetch the signature bundle; pass --insecure to skip verification")?;
-        ctx.verifier
-            .verify(&checksums, &bundle)
-            .context("signature verification failed; the installed executable was not changed")?;
-    }
-    let checksums = String::from_utf8(checksums).context("checksums file is not UTF-8")?;
+        .with_context(|| format!("cannot fetch {checksums_name}"))?;
+        if !args.insecure {
+            let bundle = fetch(
+                &client,
+                &format!("{release_url}/{checksums_name}.sigstore.json"),
+                MAX_CHECKSUMS_BYTES,
+            )
+            .await
+            .context("cannot fetch the signature bundle; pass --insecure to skip verification")?;
+            ctx.verifier.verify(&bytes, &bundle).context(
+                "signature verification failed; the installed executable was not changed",
+            )?;
+        }
+        String::from_utf8(bytes).context("checksums file is not UTF-8")?
+    };
+    let explicit = requested.is_some();
     let version = match requested {
         Some(v) => v,
         None => latest_version(&checksums, ctx.exe_name, ctx.target)?,
     };
     if version == ctx.current_version {
         println!("{} is already at {version}", ctx.exe_name);
+        return Ok(());
+    }
+    if !explicit && is_older(&version, ctx.current_version) {
+        println!(
+            "{} {} is newer than the latest release {version}; nothing to do \
+             (use --to {version} to install it anyway)",
+            ctx.exe_name, ctx.current_version
+        );
         return Ok(());
     }
 
@@ -162,7 +179,8 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
     let install_path = ctx.install_path.clone();
     tokio::task::spawn_blocking(move || replace_executable(&install_path, &contents))
         .await
-        .context("replacement task failed")??;
+        .context("replacement task failed")?
+        .map_err(classify_replace_error)?;
 
     println!(
         "updated {} from {} to {version}",
@@ -184,6 +202,38 @@ fn parse_version(raw: &str) -> anyhow::Result<String> {
         bail!("invalid version {raw:?}; expected e.g. 0.4.2");
     }
     Ok(v.to_owned())
+}
+
+/// A permission failure while replacing is reported as [`CliError::Permission`]
+/// (exit 3, RS-06); everything else keeps its unclassified exit 1.
+fn classify_replace_error(err: anyhow::Error) -> anyhow::Error {
+    let denied = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    });
+    if denied {
+        CliError::Permission(format!(
+            "{err:#}; rerun with sufficient privileges (for example sudo)"
+        ))
+        .into()
+    } else {
+        err
+    }
+}
+
+/// True when `version` is strictly older than `current` (numeric core only;
+/// a `-dev` or pre-release suffix of `current` is ignored).
+fn is_older(version: &str, current: &str) -> bool {
+    fn core(v: &str) -> Option<[u64; 3]> {
+        let mut parts = v.split(['-', '+']).next()?.split('.');
+        let mut out = [0; 3];
+        for slot in &mut out {
+            *slot = parts.next()?.parse().ok()?;
+        }
+        Some(out)
+    }
+    matches!((core(version), core(current)), (Some(v), Some(c)) if v < c)
 }
 
 /// Platform id matching the release asset names (`install.sh` `detect_target`).
@@ -320,7 +370,7 @@ fn extract_entry(archive: &[u8], archive_name: &str, entry: &str) -> anyhow::Res
         if !file.is_file() {
             bail!("{entry} in {archive_name} is not a regular file");
         }
-        file.take(MAX_EXECUTABLE_BYTES).read_to_end(&mut out)?;
+        file.take(MAX_EXECUTABLE_BYTES + 1).read_to_end(&mut out)?;
     } else {
         let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
         let mut found = false;
@@ -334,7 +384,7 @@ fn extract_entry(archive: &[u8], archive_name: &str, entry: &str) -> anyhow::Res
                 if !e.header().entry_type().is_file() {
                     bail!("{entry} in {archive_name} is not a regular file");
                 }
-                e.take(MAX_EXECUTABLE_BYTES).read_to_end(&mut out)?;
+                e.take(MAX_EXECUTABLE_BYTES + 1).read_to_end(&mut out)?;
                 found = true;
                 break;
             }
@@ -343,54 +393,59 @@ fn extract_entry(archive: &[u8], archive_name: &str, entry: &str) -> anyhow::Res
             bail!("{archive_name} does not contain {entry}");
         }
     }
+    if out.len() as u64 > MAX_EXECUTABLE_BYTES {
+        bail!("{entry} in {archive_name} exceeds {MAX_EXECUTABLE_BYTES} bytes");
+    }
     if out.is_empty() {
         bail!("{entry} in {archive_name} is empty");
     }
     Ok(out)
 }
 
-/// Staging file beside the target; removed on drop unless [`disarm`](Self::disarm)ed
-/// after a successful rename.
+/// Staging file beside the target; removed on drop unless
+/// [`disarm`](Self::disarm)ed after a successful rename.
 struct StagedFile {
     path: PathBuf,
     armed: std::cell::Cell<bool>,
 }
 
 impl StagedFile {
-    fn create(dir: &Path, target: &Path) -> anyhow::Result<Self> {
-        let name = format!(".iroh-tunnel-update-{}.tmp", std::process::id());
-        let path = dir.join(name);
-        std::fs::OpenOptions::new()
+    /// Create the file exclusively (`O_EXCL`, so a pre-planted file or symlink
+    /// is never followed) and write `contents` through that single handle.
+    fn create(
+        dir: &Path,
+        target: &Path,
+        contents: &[u8],
+        permissions: &std::fs::Permissions,
+    ) -> anyhow::Result<Self> {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!(
+            ".iroh-tunnel-update-{}-{nonce:08x}-{seq}.tmp",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .with_context(|| format!("cannot stage update beside {}", target.display()))?;
-        Ok(Self {
+        let staged = Self {
             path,
             armed: std::cell::Cell::new(true),
-        })
-    }
-
-    fn write(
-        &self,
-        contents: &[u8],
-        permissions: &std::fs::Permissions,
-        target: &Path,
-    ) -> anyhow::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&self.path)
-            .with_context(|| format!("cannot write staged update for {}", target.display()))?;
-        file.write_all(contents)
-            .and_then(|()| file.sync_all())
-            .with_context(|| format!("cannot write staged update for {}", target.display()))?;
-        drop(file);
-        std::fs::set_permissions(&self.path, permissions.clone()).with_context(|| {
+        };
+        file.set_permissions(permissions.clone()).with_context(|| {
             format!(
                 "cannot set permissions on staged update for {}",
                 target.display()
             )
-        })
+        })?;
+        file.write_all(contents)
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("cannot write staged update for {}", target.display()))?;
+        Ok(staged)
     }
 
     fn disarm(&self) {
@@ -417,7 +472,9 @@ impl Drop for StagedFile {
 ///
 /// Returns the OS error, with context, when `target` does not exist, the
 /// staging file cannot be created, written or given permissions, or the
-/// rename fails (for example a file the OS keeps locked on Windows). In every
+/// rename fails (for example a file the OS keeps locked on Windows, where
+/// replacing the executable that is currently running is expected to fail with
+/// the OS error; policy #80, covered by Windows runner evidence in #97). In every
 /// case the installed executable and its directory are left as they were.
 pub fn replace_executable(target: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let installed = std::fs::metadata(target)
@@ -427,8 +484,7 @@ pub fn replace_executable(target: &Path, contents: &[u8]) -> anyhow::Result<()> 
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
-    let staged = StagedFile::create(dir, target)?;
-    staged.write(contents, &installed.permissions(), target)?;
+    let staged = StagedFile::create(dir, target, contents, &installed.permissions())?;
     std::fs::rename(&staged.path, target)
         .with_context(|| format!("cannot replace {}", target.display()))?;
     staged.disarm();
@@ -494,5 +550,36 @@ mod tests {
 
         assert!(replace_executable(&target, b"new").is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn older_detection_ignores_dev_suffix_and_handles_garbage() {
+        assert!(is_older("0.4.1", "0.4.2"));
+        assert!(!is_older("0.4.2", "0.4.2-dev"));
+        assert!(!is_older("0.4.3", "0.4.2"));
+        assert!(!is_older("x", "0.4.2"));
+    }
+
+    #[test]
+    fn permission_denied_becomes_exit_class_permission() {
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let err = classify_replace_error(anyhow::Error::new(io).context("cannot stage"));
+        assert!(matches!(
+            err.downcast_ref::<CliError>(),
+            Some(CliError::Permission(_))
+        ));
+        let other = classify_replace_error(anyhow::anyhow!("boom"));
+        assert!(other.downcast_ref::<CliError>().is_none());
+    }
+
+    #[test]
+    fn staging_names_are_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("t");
+        std::fs::write(&target, b"o").unwrap();
+        let perms = std::fs::metadata(&target).unwrap().permissions();
+        let a = StagedFile::create(dir.path(), &target, b"a", &perms).unwrap();
+        let b = StagedFile::create(dir.path(), &target, b"b", &perms).unwrap();
+        assert_ne!(a.path, b.path);
     }
 }
