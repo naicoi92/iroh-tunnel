@@ -53,6 +53,19 @@ pub enum Role {
         #[command(subcommand)]
         cmd: Option<RoleCmd>,
     },
+    /// Update this executable (iroh-tunnel) to the latest stable or a chosen release.
+    Update(UpdateArgs),
+}
+
+/// Options of `update`; it replaces only the executable that is running.
+#[derive(Args, Debug, Clone)]
+pub struct UpdateArgs {
+    /// Release to install, e.g. 0.4.2 (default: latest stable).
+    #[arg(long = "to", value_name = "VERSION")]
+    pub to: Option<String>,
+    /// Skip the signature and checksum verification (unsafe; prints a warning).
+    #[arg(short = 'i', long)]
+    pub insecure: bool,
 }
 
 /// Standalone Serve binary (`iroh-tunnel-serve`, alias `its`).
@@ -193,6 +206,8 @@ pub enum RoleCmd {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Update this standalone executable to the latest stable or a chosen release.
+    Update(UpdateArgs),
 }
 
 /// Config sub-actions.

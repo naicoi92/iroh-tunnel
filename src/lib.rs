@@ -31,3 +31,4 @@ pub mod service;
 pub mod shutdown;
 pub mod status;
 pub mod status_cmd;
+pub mod update;

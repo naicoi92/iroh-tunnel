@@ -23,6 +23,17 @@
 
 ### Added
 
+- **`update` for the standalone executables (#95, policy #80)**:
+  `iroh-tunnel update`, `iroh-tunnel-serve update` and `iroh-tunnel-access update`
+  (also `its`/`ita`) replace only the executable you run, with the latest stable
+  release or `--to VERSION`. The release checksum is compared before anything is
+  installed; the file is staged beside the installed one and renamed over it, and
+  any failure keeps the installed executable. A running tunnel is never stopped:
+  restart it afterwards. `--insecure` / `-i` skips signature and checksum and
+  warns. Permission failures exit `3`.
+  **Not yet available:** signature verification (needs the signed release
+  artifacts of #100), so until then `update` works only with `--insecure`;
+  package- and container-owned installs are not detected yet (#96).
 - **Windows and macOS role archives (#124)**: the release builds `iroh-tunnel`,
   `iroh-tunnel-serve` and `iroh-tunnel-access` natively for Windows x64 and
   ARM64 (`.zip`) and macOS arm64 (`.tar.gz`). Each executable starts on its own

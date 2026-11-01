@@ -623,6 +623,7 @@ Commands:
   run       Run in the foreground
   config    Manage config (keygen [random] | add | remove | list | show | edit | path)
   status    Print the role's status file as a table (--json for the raw file)
+  update    Update the executable you run (--to VERSION, --insecure / -i). Does not stop a running tunnel.
 
 Flags:    -v / -vv   increase logging (debug/trace)  ·  -q quiet (errors only)  ·  --color auto|always|never
 ```
