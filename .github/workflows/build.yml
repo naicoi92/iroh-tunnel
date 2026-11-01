@@ -10,7 +10,7 @@
 #   musl-arm64    ubuntu-24.04-arm  aarch64-unknown-linux-musl
 #   musl-riscv64  ubuntu-latest     riscv64gc-unknown-linux-musl  (cargo-zigbuild:
 #                                   no native runner exists; NanoKVM / buildroot)
-#   darwin-arm64  macos-14          aarch64-apple-darwin
+#   darwin-arm64  macos-15          aarch64-apple-darwin
 #   windows-amd64 windows-latest    x86_64-pc-windows-msvc        (.zip)
 #   windows-arm64 windows-11-arm    aarch64-pc-windows-msvc       (.zip)
 #
@@ -77,7 +77,7 @@ jobs:
           - { id: musl-amd64,    runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,     os: linux,  arch: amd64,   suffix: "-musl", musl: true }
           - { id: musl-arm64,    runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl,    os: linux,  arch: arm64,   suffix: "-musl", musl: true }
           - { id: musl-riscv64,  runner: ubuntu-latest,    target: riscv64gc-unknown-linux-musl,  os: linux,  arch: riscv64gc, suffix: "-musl", zig: true }
-          - { id: darwin-arm64,  runner: macos-14,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "" }
+          - { id: darwin-arm64,  runner: macos-15,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "" }
           - { id: windows-amd64, runner: windows-latest,   target: x86_64-pc-windows-msvc,        os: windows, arch: amd64,  suffix: "", ext: ".exe" }
           - { id: windows-arm64, runner: windows-11-arm,   target: aarch64-pc-windows-msvc,       os: windows, arch: arm64,  suffix: "", ext: ".exe" }
     env:
