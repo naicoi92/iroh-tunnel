@@ -316,6 +316,12 @@ images() {
         else
             fail "$img: --help failed: $out"
         fi
+        # #96: inside an image `update` points at redeployment and touches nothing.
+        if out=$(docker run --rm "$img" update --yes 2>&1) && printf '%s' "$out" | grep -q 'redeploy'; then
+            pass "$img update prints redeploy guidance"
+        else
+            fail "$img: update did not print redeploy guidance: $out"
+        fi
     done
     skip "images for architectures other than $arch (no native runner)"
 }

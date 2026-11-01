@@ -267,6 +267,7 @@ fn in_process(
         current_version: "0.0.1",
         install_path: install.to_owned(),
         verifier,
+        owner: iroh_tunnel::update_owner::Owner::Standalone,
     };
     tokio::runtime::Runtime::new()?.block_on(update(args, &ctx))
 }
@@ -275,6 +276,7 @@ fn args(to: Option<&str>, insecure: bool) -> UpdateArgs {
     UpdateArgs {
         to: to.map(str::to_owned),
         insecure,
+        yes: false,
     }
 }
 
@@ -371,6 +373,7 @@ fn latest_never_downgrades_a_newer_installed_version() -> Result<()> {
         current_version: "0.1.0",
         install_path: exe.clone(),
         verifier: &Accept,
+        owner: iroh_tunnel::update_owner::Owner::Standalone,
     };
 
     tokio::runtime::Runtime::new()?.block_on(update(&args(None, false), &ctx))?;

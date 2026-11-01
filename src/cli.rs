@@ -66,6 +66,10 @@ pub struct UpdateArgs {
     /// Skip the signature and checksum verification (unsafe; prints a warning).
     #[arg(short = 'i', long)]
     pub insecure: bool,
+    /// Replace an executable that a package manager owns, after you accept that the
+    /// package database will no longer match the file. Never applies to containers.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 /// Standalone Serve binary (`iroh-tunnel-serve`, alias `its`).

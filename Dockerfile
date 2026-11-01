@@ -23,4 +23,7 @@ FROM gcr.io/distroless/cc-debian12
 
 COPY --from=builder /app/target/release/iroh-tunnel /usr/local/bin/iroh-tunnel
 
+# `update` reads this to point at image redeployment instead of replacing files (#96).
+ENV IROH_TUNNEL_CONTAINER=1
+
 ENTRYPOINT ["iroh-tunnel"]

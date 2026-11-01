@@ -67,10 +67,12 @@ fn run_update(server: &ReleaseServer, target: &str, install: &Path) -> Result<()
         current_version: "0.0.1",
         install_path: install.to_owned(),
         verifier: &Accept,
+        owner: iroh_tunnel::update_owner::Owner::Standalone,
     };
     let args = UpdateArgs {
         to: None,
         insecure: false,
+        yes: false,
     };
     tokio::runtime::Runtime::new()?.block_on(update(&args, &ctx))
 }
