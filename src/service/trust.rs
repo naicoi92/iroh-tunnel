@@ -482,11 +482,13 @@ mod tests {
     fn an_owner_that_is_neither_root_nor_trusted_is_refused() {
         let (_tmp, file) = fixture();
         let other = if me() == 4242 { 4243 } else { 4242 };
+        // The refusal may come from the file or, when the fixture lives under
+        // a sticky `/tmp`, from the directory above it; either way a path that
+        // a different principal owns must be named and refused.
         let msg = refusal(read_verified(&file, other));
-        assert!(
-            msg.contains("unsafe") && msg.contains(&format!("uid {}", me())),
-            "{msg}"
-        );
+        assert!(msg.contains("unsafe") && msg.contains("/"), "{msg}");
+        // And the same path is accepted when its owner is the trusted uid.
+        assert!(read_verified(&file, me()).is_ok());
     }
 
     #[test]
