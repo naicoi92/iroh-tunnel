@@ -10,7 +10,7 @@ Baseline `bf54453` (origin/main). Branch `redesign/issue-96-update-ownership`. B
 | 96.AC2 legacy bundled package does not silently update unrelated binaries | The legacy all-in-one package (`/usr/bin/iroh-tunnel`) falls under the same package rule; `only_the_invoked_file_changes_when_a_package_owner_is_overridden` | **PARTIAL**: no real legacy package fixture was run |
 | 96.CL1 package, container and standalone paths together with the #95 updater; aliases | Standalone path unchanged and still passes (`tests/update.rs`, 14 tests); alias symlink resolved by `current_exe().canonicalize()` so only the target changes | Aliases: Unix by design; no dedicated alias test yet |
 | 96.CL2 approved decisions only | Decisions in the issue comment; Windows alias and Windows package managers stay DIST-03 | Pass |
-| Images set `IROH_TUNNEL_CONTAINER=1` | `Dockerfile`, `Dockerfile.goreleaser`, `.serve`, `.access`; `packaging/verify-dist.sh images` now runs `update --yes` in each image and expects the redeploy guidance | **Not run**: images are built by `snapshot.yml`; run it on this branch |
+| Images set `IROH_TUNNEL_CONTAINER=1` | `Dockerfile`, `Dockerfile.goreleaser`, `.serve`, `.access`; `packaging/verify-dist.sh images` now runs `update --yes` in each image and expects the redeploy guidance | Run locally: `Dockerfile.goreleaser.serve` built with a Linux arm64 binary (distroless): `docker run iroh96-serve update --yes` and `update -i` print the redeploy guidance, exit 0, `IROH_TUNNEL_CONTAINER=1` in the image env. `verify-dist.sh images` itself was not run (CI does not call it; needs all three images); the other three Dockerfiles carry the same line |
 
 ## Findings while verifying
 
