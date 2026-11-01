@@ -14,6 +14,7 @@
 //! `launchctl start <label>` searched the *caller's* domain, found nothing, and
 //! returned 3 — even though the job was loaded in the system domain.
 
+use super::pin::Pin;
 use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -75,8 +76,9 @@ fn xml_escape(s: &str) -> String {
 ///
 /// The KeepAlive block comes from the shared [`RestartPolicy`] so the
 /// "restart on crash" behavior stays in sync with the systemd unit template.
+#[cfg(test)]
 fn format_plist(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
-    format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT)
+    format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT, None)
 }
 
 fn format_plist_with(
@@ -85,6 +87,7 @@ fn format_plist_with(
     config: &Path,
     state: &Path,
     policy: &RestartPolicy,
+    pin: Option<&Pin>,
 ) -> String {
     let label = xml_escape(&label(role));
     let binary = xml_escape(&binary.to_string_lossy());
@@ -105,8 +108,18 @@ fn format_plist_with(
     } else {
         ""
     };
+    // A system daemon reads a user's files as root: say whose (SM-04).
+    let pin_comment = pin.map_or_else(String::new, |p| format!("<!-- {} -->\n", p.record()));
+    let trust_env = pin.map_or_else(String::new, |p| {
+        format!(
+            "\t\t<key>{}</key>\n\t\t<string>{}</string>\n",
+            super::trust::ENV_TRUSTED_UID,
+            p.uid
+        )
+    });
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         {pin_comment}\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyManifest-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
          <dict>\n\
@@ -124,6 +137,7 @@ fn format_plist_with(
          \t<dict>\n\
          \t\t<key>IROH_TUNNEL_STATE_DIR</key>\n\
          \t\t<string>{state}</string>\n\
+         {trust_env}\
          \t</dict>\n\
          \t<key>RunAtLoad</key>\n\
          \t<true/>\n\
@@ -144,9 +158,20 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
+/// The installed plist's text, if any (to read its pin).
+pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
+    super::read_registration(&plist_path(role, scope).ok()?)
+}
+
+pub fn install(
+    role: &str,
+    scope: ServiceScope,
+    config: &Path,
+    state: &Path,
+    pin: Option<&Pin>,
+) -> Result<()> {
     let binary = resolve_binary()?;
-    let plist = format_plist(role, &binary, config, state);
+    let plist = format_plist_with(role, &binary, config, state, &RestartPolicy::DEFAULT, pin);
     let path = plist_path(role, scope)?;
     write_registration(&path, &plist)?;
 
@@ -417,6 +442,7 @@ mod tests {
             Path::new("/y"),
             Path::new("/z"),
             &policy,
+            None,
         );
         assert!(
             !body.contains("<key>KeepAlive</key>"),

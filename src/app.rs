@@ -283,6 +283,9 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
                 &mut std::io::stderr(),
             )?;
             scope::ensure_supported(scope)?;
+            if scope == ServiceScope::System {
+                return install_system(role, config, env);
+            }
             // Persist absolute paths: the installed service runs with a
             // different CWD and home, so nothing may stay relative (SM-02).
             let config = absolutize_config_path(&resolve_config_path(role, config)?)?;
@@ -301,7 +304,7 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
             .collect();
             scope::ensure_privilege(scope, env.elevated, &rerun)?;
             check_installable_config(role, &config)?;
-            service::install(role, scope, &config, &state)
+            service::install(role, scope, &config, &state, None)
         }
         ServiceAction::Uninstall { scope } => {
             service::uninstall(role, existing("uninstall", &scope)?)
@@ -324,6 +327,82 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
     }
 }
 
+/// Install a system service for the invoking user's files (SM-01, SM-02,
+/// SM-04). Unprivileged callers are refused with rerun guidance; an elevated
+/// caller must name a real user, never root's own home.
+#[cfg(unix)]
+fn install_system(
+    role: &str,
+    config: Option<PathBuf>,
+    env: service::scope::Environment,
+) -> anyhow::Result<()> {
+    use service::{system, trust, ServiceScope};
+
+    if !env.elevated {
+        // Same guidance as before: absolute path, no elevation, no fallback.
+        let config = absolutize_config_path(&resolve_config_path(role, config)?)?;
+        let rerun: Vec<String> = [
+            "iroh-tunnel",
+            role,
+            "service",
+            "install",
+            "--system",
+            "--config",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([config.to_string_lossy().into_owned()])
+        .collect();
+        return service::scope::ensure_privilege(ServiceScope::System, false, &rerun);
+    }
+
+    let sudo_user = std::env::var("SUDO_USER").ok();
+    let state_override = std::env::var_os("IROH_TUNNEL_STATE_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    let config_abs = config.as_deref().map(absolutize_config_path).transpose()?;
+    let mut input = std::io::stdin().lock();
+    let mut prompt = std::io::stderr();
+    let target = system::resolve_target(
+        &system::Request {
+            role,
+            config: config_abs.as_deref(),
+            state: state_override.as_deref(),
+            sudo_user: sudo_user.as_deref(),
+            interactive: env.interactive,
+        },
+        &mut input,
+        &mut prompt,
+    )?;
+    // Fail closed before registering anything root would later refuse to run.
+    trust::verify_dir(&target.state, target.account.uid)?;
+    let text = trust::read_verified(&target.config, target.account.uid)?;
+    check_installable_text(role, &text, &target.config)?;
+    system::confirm_retarget(
+        service::existing_registration(role, ServiceScope::System).as_deref(),
+        &target,
+        env.interactive,
+        &mut input,
+        &mut prompt,
+    )?;
+    service::install(
+        role,
+        ServiceScope::System,
+        &target.config,
+        &target.state,
+        Some(&target.pin()),
+    )
+}
+
+#[cfg(not(unix))]
+fn install_system(
+    _role: &str,
+    _config: Option<PathBuf>,
+    _env: service::scope::Environment,
+) -> anyhow::Result<()> {
+    service::scope::ensure_supported(service::ServiceScope::System)
+}
+
 /// The state directory the installed service will write to, as an absolute
 /// path: `IROH_TUNNEL_STATE_DIR` when set, otherwise the platform default.
 fn pinned_state_dir() -> anyhow::Result<PathBuf> {
@@ -342,6 +421,21 @@ fn check_installable_config(role: &str, config: &Path) -> anyhow::Result<()> {
         "serve" => crate::config::ServeConfig::load(config).map(drop),
         _ => crate::config::AccessConfig::load(config).map(drop),
     };
+    installable(role, config, loaded)
+}
+
+/// [`check_installable_config`] for text already read from a verified handle.
+#[cfg(unix)]
+fn check_installable_text(role: &str, text: &str, config: &Path) -> anyhow::Result<()> {
+    use crate::config::RoleDoc;
+    let loaded = match role {
+        "serve" => crate::config::ServeConfig::from_toml(text, config).map(drop),
+        _ => crate::config::AccessConfig::from_toml(text, config).map(drop),
+    };
+    installable(role, config, loaded)
+}
+
+fn installable(role: &str, config: &Path, loaded: anyhow::Result<()>) -> anyhow::Result<()> {
     loaded.map_err(|e| {
         CliError::Config(format!(
             "cannot install the service: {e:#}. Create or fix the config first \

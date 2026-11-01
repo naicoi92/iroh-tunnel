@@ -4,6 +4,7 @@
 //! `~/.config/systemd/user` (user scope). Each action delegates to `systemctl`
 //! with `--user` added automatically for the per-user domain.
 
+use super::pin::Pin;
 use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -27,8 +28,9 @@ fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
 ///
 /// The restart directives come from the shared [`RestartPolicy`] so they stay
 /// in sync with the launchd plist template.
+#[cfg(test)]
 fn format_unit(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
-    format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT)
+    format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT, None)
 }
 
 fn format_unit_with(
@@ -37,6 +39,7 @@ fn format_unit_with(
     config: &Path,
     state: &Path,
     policy: &RestartPolicy,
+    pin: Option<&Pin>,
 ) -> String {
     let binary = quote_arg(&binary.to_string_lossy(), Expand::Command);
     let config = quote_arg(&config.to_string_lossy(), Expand::Command);
@@ -52,8 +55,14 @@ fn format_unit_with(
         "no"
     };
     let restart_sec = policy.delay_secs;
+    // A system service reads a user's files as root: say whose (SM-04).
+    let pin_comment = pin.map_or_else(String::new, |p| format!("# {}\n", p.record()));
+    let trust_env = pin.map_or_else(String::new, |p| {
+        let var = format!("{}={}", super::trust::ENV_TRUSTED_UID, p.uid);
+        format!("Environment={}\n", quote_arg(&var, Expand::Environment))
+    });
     format!(
-        "[Unit]\n\
+        "{pin_comment}[Unit]\n\
          Description=Iroh Tunnel ({role})\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
@@ -62,6 +71,7 @@ fn format_unit_with(
          Type=simple\n\
          ExecStart={binary} {role} run --config {config}\n\
          Environment={state_env}\n\
+         {trust_env}\
          Restart={restart}\n\
          RestartSec={restart_sec}\n\
          RestartPreventExitStatus=6\n\
@@ -117,15 +127,29 @@ fn run_systemctl(scope: ServiceScope, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
+/// The installed unit's text, if any (to read its pin).
+pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
+    super::read_registration(&unit_path(role, scope).ok()?)
+}
+
+pub fn install(
+    role: &str,
+    scope: ServiceScope,
+    config: &Path,
+    state: &Path,
+    pin: Option<&Pin>,
+) -> Result<()> {
     let binary = resolve_binary()?;
-    let unit = format_unit(role, &binary, config, state);
+    let unit = format_unit_with(role, &binary, config, state, &RestartPolicy::DEFAULT, pin);
     let path = unit_path(role, scope)?;
     write_registration(&path, &unit)?;
 
     let name = unit_name(role);
     run_systemctl(scope, &["daemon-reload"])?;
-    run_systemctl(scope, &["enable", "--now", &name])?;
+    run_systemctl(scope, &["enable", &name])?;
+    // `restart`, not `enable --now`: a re-install over a running unit must pick
+    // up the new registration instead of leaving the old process running.
+    run_systemctl(scope, &["restart", &name])?;
     println!("Installed and started {name} at {}", path.display());
     Ok(())
 }
@@ -213,6 +237,7 @@ mod tests {
             Path::new("/y"),
             Path::new("/z"),
             &policy,
+            None,
         );
         assert!(body.contains("Restart=no"), "body: {body}");
         assert!(body.contains("RestartSec=0"), "body: {body}");

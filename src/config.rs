@@ -191,7 +191,16 @@ pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
     {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {}", path.display()))?;
-        let cfg: Self = toml::from_str(&content)
+        Self::from_toml(&content, path)
+    }
+
+    /// Parse and validate config text already read from `path` (used when the
+    /// bytes come from a verified handle rather than a path lookup).
+    fn from_toml(content: &str, path: &Path) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        let cfg: Self = toml::from_str(content)
             .with_context(|| format!("failed to parse config: {}", path.display()))?;
         cfg.validate()?;
         Ok(cfg)

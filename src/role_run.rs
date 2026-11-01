@@ -244,7 +244,7 @@ where
     // (RS-07). It is awaited to completion, never detached.
     let path = config_path.to_path_buf();
     let cfg = tokio::task::spawn_blocking(move || -> Result<S::Config> {
-        let mut cfg = S::Config::load(&path)?;
+        let mut cfg = crate::service::load_config::<S::Config>(&path)?;
         cfg.resolve_and_save_key(&path)?;
         Ok(cfg)
     })

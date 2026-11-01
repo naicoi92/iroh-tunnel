@@ -348,8 +348,6 @@ impl StatusWriter {
                 value.role().name()
             );
         }
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("failed to create status dir: {}", dir.display()))?;
         let path = dir.join(self.file_name());
         // Serialize the INNER schema — the enum is a type-level tie, not a
         // JSON tag.
@@ -359,6 +357,23 @@ impl StatusWriter {
         }
         .context("failed to encode status JSON")?;
 
+        // Under a system service root writes into a user-owned directory:
+        // go through a verified handle instead of paths (SM-04).
+        #[cfg(unix)]
+        if let Some(uid) = crate::service::trust::trusted_uid_from_env()? {
+            let temp = format!(
+                "{}.tmp.{}.{}",
+                self.file_name(),
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            crate::service::trust::publish(dir, uid, self.file_name(), &temp, content.as_bytes())?;
+            // Best-effort, like the path-based branch below.
+            let _ = crate::service::trust::remove_in(dir, uid, LEGACY_STATUS_FILE_NAME);
+            return Ok(path);
+        }
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create status dir: {}", dir.display()))?;
         // Write to a temp file in the same directory, then rename — atomic
         // on POSIX, and on Windows for same-volume same-directory renames.
         // `<name>.tmp.<pid>.<counter>` keeps every save's temp file unique
@@ -456,6 +471,26 @@ fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path
     let Ok(path) = writer.path_for_state_dir(state_dir) else {
         return;
     };
+    #[cfg(unix)]
+    if let Ok(Some(uid)) = crate::service::trust::trusted_uid_from_env() {
+        use crate::service::trust::{read_in, remove_in};
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+        else {
+            return;
+        };
+        let ours = read_in(dir, uid, name).is_some_and(|body| {
+            matches!(
+                serde_json::from_str::<StatusFilePid>(&body),
+                Ok(probe) if probe.pid == std::process::id()
+            )
+        });
+        if ours {
+            if let Err(e) = remove_in(dir, uid, name) {
+                tracing::debug!("failed to remove status file: {e:#}");
+            }
+        }
+        return;
+    }
     let owns = match std::fs::read_to_string(&path) {
         Ok(body) => {
             matches!(

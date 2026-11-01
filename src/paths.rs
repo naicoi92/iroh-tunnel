@@ -58,6 +58,23 @@ fn default_config_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".config").join(APP_DIR))
 }
 
+/// Config file of `role` under an explicit `home`, without consulting `HOME`
+/// or migrating anything. Used when root installs a system service for
+/// another user's account (SM-02): the installer's own home must never be
+/// substituted.
+#[cfg(unix)]
+pub fn config_path_in(home: &Path, role: &str) -> PathBuf {
+    home.join(".config")
+        .join(APP_DIR)
+        .join(format!("{role}.toml"))
+}
+
+/// State directory under an explicit `home` (see [`config_path_in`]).
+#[cfg(unix)]
+pub fn state_dir_in(home: &Path) -> PathBuf {
+    home.join(".local").join("state").join(APP_DIR)
+}
+
 /// Default directory holding the `<role>-status.json` files.
 ///
 /// # Errors
