@@ -51,6 +51,9 @@ sha2 = "0.11"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4.46", default-features = false }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+sigstore-verify = { version = "0.15", default-features = false, features = ["aws-lc-rs"] }
+sigstore-trust-root = { version = "0.15", default-features = false }
+sigstore-types = { version = "0.15", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW` for the role-ownership lock files (src/ownership.rs).

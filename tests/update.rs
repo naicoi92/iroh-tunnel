@@ -422,3 +422,42 @@ fn unwritable_install_dir_exits_with_permission_code_and_keeps_binary() -> Resul
     assert_eq!(std::fs::read(&install.exe)?, before);
     Ok(())
 }
+
+/// Real binary, real Sigstore bundle, but not signed by this project: the
+/// default verifier must reject it and leave the installed file alone.
+#[test]
+fn bundle_from_a_foreign_signer_is_rejected_by_the_real_binary() -> Result<()> {
+    let Some(target) = host_target() else {
+        return Ok(());
+    };
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "9.9.9", target, false)?;
+    let checksums = if target.starts_with("darwin-") {
+        "checksums-darwin.txt"
+    } else {
+        "checksums.txt"
+    };
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sigstore/cosign-v3-blob.sigstore.json"
+        ),
+        releases
+            .path()
+            .join(format!("9.9.9/{checksums}.sigstore.json")),
+    )?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+
+    let out = run_update(&install.exe, &server.url, &[])?;
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("signature"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
