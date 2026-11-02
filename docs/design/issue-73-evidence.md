@@ -63,3 +63,23 @@ None yet.
 ## Follow-ups after approval
 
 Promote UDP-05 to Confirmed in the spec, add an ADR for the transport choice (hard to reverse, surprising, real trade-off), update acceptance case UDP-LIMIT-01, and hand numeric bounds to #74.
+
+## API probe (not a benchmark)
+
+`examples/udp_bench_probe.rs`, Iroh 1.4.1, in-process relay (`iroh::test_utils`), loopback, one run. It only confirms the harness assumptions; it measures no latency, loss or throughput and decides nothing.
+
+| Observation | Forced relay (`clear_ip_transports`) | Direct (after holepunch) |
+|---|---|---|
+| Selected path | relay | ip (relay path still open, not selected) |
+| `max_datagram_size` | 1162 | 1414 |
+| Sizes 64, 512, limit−1, limit | all received intact | all received intact |
+| limit+1 | `send_datagram` returns `TooLarge`, nothing sent | same |
+| Server-side limit | equal to client limit | equal to client limit |
+
+Findings:
+
+- The datagram limit differs by path (1162 relay, 1414 direct on loopback), so the dynamic limit in UDP-05 principle 6 is necessary; a fixed value would waste direct capacity or break on relay.
+- Oversize is refused synchronously by the sender, so drop-and-count (principle 3) needs no wire-level detection.
+- The direct path is not selected immediately after connect; the harness must wait for `is_ip() && is_selected()` and record the selected path per run.
+- Not yet observed: limit change on migration mid-session, loss behavior, queue drops (`datagram_send_buffer_space`).
+- Loopback only: numbers do not represent real networks.

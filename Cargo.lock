@@ -1899,6 +1899,7 @@ name = "iroh-tunnel"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "data-encoding",
  "dirs",
