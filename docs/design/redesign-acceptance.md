@@ -439,7 +439,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved policy, old/new flow and socket trace, recipient observations and risk documentation. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #71/#78 lifecycle, source filtering and late-reply policy; UDP deferred.
+**Execution:** BLOCKED — #71 decided lifecycle semantics (spec UDP-04: connected-socket source filtering, session-bound flows, quarantine); await #73/#74/#78 numeric values; UDP deferred.
 
 <a id="udp-limit-01"></a>
 ### Case UDP-LIMIT-01
