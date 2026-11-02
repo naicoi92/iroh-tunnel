@@ -23,3 +23,11 @@ _Avoid_: Connection generation, epoch
 **Quarantine**:
 The period after a flow expires during which its upstream endpoint is not reused.
 _Avoid_: Cooldown, grace period
+
+**Datagram limit**:
+The largest UDP payload the tunnel can currently carry intact between an Access and a Serve. It can change during a session incarnation.
+_Avoid_: MTU, max packet size
+
+**Oversized datagram**:
+A client UDP datagram larger than the current datagram limit. It is dropped and counted, never delivered in part.
+_Avoid_: Large packet, truncated datagram

@@ -456,7 +456,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved limits, delivered/drop counters, memory/handles/queues and cleanup observations. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #73/#74/#78 payload/transport/resource decisions and measured bounds; UDP deferred.
+**Execution:** BLOCKED — #73 proposes principles (spec UDP-05: no fragmentation, no stream fallback, drop and count oversized, fail fast without datagram support) and awaits benchmark and owner approval; await #74/#78 resource decisions and measured bounds; UDP deferred.
 
 <a id="udp-path-01"></a>
 ### Case UDP-PATH-01
