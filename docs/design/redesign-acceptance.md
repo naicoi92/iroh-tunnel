@@ -397,7 +397,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Source AC:** [88.AC1](#88-ac1); [88.CL2](#88-cl2). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #78 transport contract, real roles and UDP clients sharing one Access peer plus clients on two Access peers.
+**Prerequisites:** Transport contract in `udp-integration-contract.md`, real roles and UDP clients sharing one Access peer plus clients on two Access peers.
 
 **Action:** Send distinct opaque binary/empty/variable datagrams to fixed target; deliberately interleave replies, including equal local flow numbers across peers where observable.
 
@@ -405,7 +405,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Client/target packet payload/length/recipient traces, public peer IDs and path proof. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — UDP design/benchmark/implementation deferred; native #78 awaits #71/#73/#74 contract.
+**Execution:** BLOCKED — implementation pending #88; contract in `udp-integration-contract.md` (#78).
 
 <a id="udp-socket-01"></a>
 ### Case UDP-SOCKET-01
@@ -422,7 +422,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Socket/packet observations, actual selected connection strategy and exact documentation excerpts. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #78 transport/lifecycle contract unresolved and UDP work deferred; confirmed socket baseline not reopened.
+**Execution:** BLOCKED — implementation pending #88; contract in `udp-integration-contract.md` (#78); confirmed socket baseline not reopened.
 
 <a id="udp-lifecycle-01"></a>
 ### Case UDP-LIFECYCLE-01
@@ -431,7 +431,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Source AC:** [89.AC1](#89-ac1); [89.AC2](#89-ac2). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #71/#78 expiry/reconnect/source-filter/tuple-reuse policy and UDP run path.
+**Prerequisites:** Expiry, reconnect, source-filter and tuple-reuse policy in UDP-04, UDP-06 and `udp-integration-contract.md`, and the UDP run path.
 
 **Action:** Induce idle expiry/reconnect, delayed replies after OS tuple reuse and replies from another source endpoint.
 
@@ -439,7 +439,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved policy, old/new flow and socket trace, recipient observations and risk documentation. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — #71 decided lifecycle semantics (spec UDP-04: connected-socket source filtering, session-bound flows, quarantine); await #73/#74/#78 numeric values; UDP deferred.
+**Execution:** BLOCKED — #71 decided lifecycle semantics (spec UDP-04: connected-socket source filtering, session-bound flows, quarantine); numeric defaults set in UDP-06 (untested); implementation pending #89.
 
 <a id="udp-limit-01"></a>
 ### Case UDP-LIMIT-01
@@ -450,15 +450,15 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Prerequisites:** Approved #73/#74/#78 transport, payload/resource/cleanup policy; instrumentation.
 
-**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected (the proposed UDP-05 principle excludes it unless the owner overrides it) inject fragment loss/duplicates/malicious reassembly.
+**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected (UDP-05 excludes it unless the owner overrides it) inject fragment loss/duplicates/malicious reassembly.
 
 **Expected observable outcome:** Documented bounded size/admission/drop/cleanup behavior matches approved values; never present partial datagram as intact. No numeric bound, fragment scheme or drop policy approved by this catalog.
 
 **Evidence/platform:** Approved limits, delivered/drop counters, memory/handles/queues and cleanup observations. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — #73 proposes principles (spec UDP-05: no fragmentation, no stream fallback, drop and count oversized, fail fast without datagram support) and awaits benchmark and owner approval; await #74/#78 resource decisions and measured bounds; UDP deferred.
+**Execution:** BLOCKED — policy decided (UDP-05, UDP-06; contract in `udp-integration-contract.md`); implementation pending #89. Defaults are untested estimates.
 
-**#74 proposal (Proposed, pending owner approval on #74; spec UDP-06):** loopback cases to run in CI: (1) service flow cap, (2) per-peer flow cap, (3) idle expiry, quarantine, then reuse, (4) late reply to the quarantine sink is dropped and counted, (5) slow-consumer isolation, (6) datagram limit plus 1 dropped and counted, (7) no flow survives a new session incarnation, (8) bind or descriptor exhaustion refuses the flow without crashing, (9) interleaved replies are never cross-delivered. These do not change the BLOCKED status above, and direct/relay and per-platform runs stay with #78/#97. NOT RUN, recorded as known risks: a planned `tc netem` impairment scenario, limit shrink on path migration, and bounded memory over a long run (E3). Numeric defaults are untested estimates.
+**#74 decision (Confirmed, spec UDP-06; defaults untested):** loopback cases to run in CI: (1) service flow cap, (2) per-peer flow cap, (3) idle expiry, quarantine, then reuse, (4) late reply to the quarantine sink is dropped and counted, (5) slow-consumer isolation, (6) datagram limit plus 1 dropped and counted, (7) no flow survives a new session incarnation, (8) bind or descriptor exhaustion refuses the flow without crashing, (9) interleaved replies are never cross-delivered. These do not change the BLOCKED status above, and direct/relay and per-platform runs stay with #78/#97. NOT RUN, recorded as known risks: a planned `tc netem` impairment scenario, limit shrink on path migration, and bounded memory over a long run (E3). Numeric defaults are untested estimates.
 
 <a id="udp-path-01"></a>
 ### Case UDP-PATH-01
@@ -475,7 +475,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Path telemetry/packet evidence, impairment commands and raw benchmark data. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — UDP deferred; #71/#73/#74/#78 and selected-version #101 evidence required for final run.
+**Execution:** BLOCKED — needs an impairment-capable direct and forced-relay environment and the implementation (#88, #89); the policy is decided.
 
 <a id="sm-scope-01"></a>
 ### Case SM-SCOPE-01
@@ -1053,7 +1053,7 @@ Locators use the supplied complete issue snapshots (bodies, comments and native 
 | <a id="88-ac1"></a>88.AC1 | [#88 body, Acceptance criteria, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/88#acceptance-criteria) | Real clients receive correctly associated interleaved responses; delivered payload and datagram boundaries are unchanged. |
 | <a id="88-ac2"></a>88.AC2 | [#88 body, Acceptance criteria, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/88#acceptance-criteria) | Serve uses a dedicated upstream socket per active flow; shared Iroh connection is allowed and best-effort semantics are documented. |
 | <a id="88-cl1"></a>88.CL1 | [#88 clarification, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/88#issuecomment-6491343233) | Document and verify target-visible Serve-side source endpoint behavior, including possible NAT rewriting and stability only for the lifetime of the upstream socket; do not promise original client IP transparency. |
-| <a id="88-cl2"></a>88.CL2 | [#88 clarification, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/88#issuecomment-6491343233) | Verify interleaved clients across Access peers as well as clients sharing a peer, preserving opaque datagrams and response association. Expiry, filtering and tuple-reuse policy remain gated by #71/#73/#74/#78. |
+| <a id="88-cl2"></a>88.CL2 | [#88 clarification, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/88#issuecomment-6491343233) | Verify interleaved clients across Access peers as well as clients sharing a peer, preserving opaque datagrams and response association. Expiry, filtering and tuple-reuse policy follow UDP-04 and UDP-06 and `udp-integration-contract.md`. |
 | <a id="89-ac1"></a>89.AC1 | [#89 body, Acceptance criteria, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/89#acceptance-criteria) | Exercise expiry, reconnect, late packets, source filtering, oversized datagrams and resource exhaustion with observable outcomes. |
 | <a id="89-ac2"></a>89.AC2 | [#89 body, Acceptance criteria, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/89#acceptance-criteria) | Verify direct and forced-relay paths and document tuple-reuse residual risks; do not claim absolute isolation. |
 | <a id="90-ac1"></a>90.AC1 | [#90 body, Acceptance criteria, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/90#acceptance-criteria) | Real supported-platform service installation, start, stop, restart, status and uninstall use the selected absolute paths. |
