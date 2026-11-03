@@ -450,13 +450,13 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Prerequisites:** Approved #73/#74/#78 transport, payload/resource/cleanup policy; instrumentation.
 
-**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected inject fragment loss/duplicates/malicious reassembly.
+**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected (the proposed UDP-05 principle excludes it unless the owner overrides it) inject fragment loss/duplicates/malicious reassembly.
 
 **Expected observable outcome:** Documented bounded size/admission/drop/cleanup behavior matches approved values; never present partial datagram as intact. No numeric bound, fragment scheme or drop policy approved by this catalog.
 
 **Evidence/platform:** Approved limits, delivered/drop counters, memory/handles/queues and cleanup observations. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #73/#74/#78 payload/transport/resource decisions and measured bounds; UDP deferred.
+**Execution:** BLOCKED — #73 proposes principles (spec UDP-05: no fragmentation, no stream fallback, drop and count oversized, fail fast without datagram support) and awaits benchmark and owner approval; await #74/#78 resource decisions and measured bounds; UDP deferred.
 
 <a id="udp-path-01"></a>
 ### Case UDP-PATH-01
