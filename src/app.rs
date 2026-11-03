@@ -118,12 +118,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
             dispatch_role_cmd(status_role, cmd, packaging).await
         }
         Role::Serve { quick, cmd: None } => {
-            if quick.protocol != "tcp" {
-                return Err(CliError::Config(
-                    "serve quick mode supports only tcp protocol; use --protocol tcp".into(),
-                )
-                .into());
-            }
+            let protocol = quick_protocol("serve", &quick.protocol)?;
             let target = quick.target.ok_or_else(|| {
                 CliError::Config("serve quick mode: --target IP:PORT is required".into())
             })?;
@@ -138,7 +133,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                     name: quick.name.ok_or_else(|| {
                         CliError::Config("serve quick mode: --name is required".into())
                     })?,
-                    protocol: crate::config::Protocol::Tcp,
+                    protocol,
                     host: target.ip().to_string(),
                     port: target.port(),
                 }],
@@ -146,12 +141,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
             serve::run_quick(cfg).await
         }
         Role::Access { quick, cmd: None } => {
-            if quick.protocol != "tcp" {
-                return Err(CliError::Config(
-                    "access quick mode supports only tcp protocol; use --protocol tcp".into(),
-                )
-                .into());
-            }
+            let protocol = quick_protocol("access", &quick.protocol)?;
             let listen = quick.listen.ok_or_else(|| {
                 CliError::Config("access quick mode: --listen IP:PORT is required".into())
             })?;
@@ -173,7 +163,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                         CliError::Config("access quick mode: --name is required".into())
                     })?,
                     node_id,
-                    protocol: crate::config::Protocol::Tcp,
+                    protocol,
                     host: listen.ip().to_string(),
                     port: listen.port(),
                     relay_urls: vec![],
@@ -181,6 +171,17 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
             };
             access::run_quick(cfg).await
         }
+    }
+}
+
+/// Parse a quick-mode `--protocol` value.
+fn quick_protocol(role: &str, value: &str) -> Result<crate::config::Protocol, CliError> {
+    match value {
+        "tcp" => Ok(crate::config::Protocol::Tcp),
+        "udp" => Ok(crate::config::Protocol::Udp),
+        other => Err(CliError::Config(format!(
+            "{role} quick mode supports tcp or udp protocol, got '{other}'; use --protocol tcp or --protocol udp"
+        ))),
     }
 }
 

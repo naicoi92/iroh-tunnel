@@ -146,10 +146,10 @@ pub struct ServeQuickArgs {
     /// Service name.
     #[arg(short, long)]
     pub name: Option<String>,
-    /// Fixed TCP target socket address.
+    /// Fixed target socket address (TCP or UDP, per --protocol).
     #[arg(short, long)]
     pub target: Option<std::net::SocketAddr>,
-    /// Protocol (TCP only in quick mode).
+    /// Protocol: tcp (default) or udp.
     #[arg(short, long, default_value = "tcp")]
     pub protocol: String,
     /// Relay URL used by both peers.
@@ -167,13 +167,13 @@ pub struct AccessQuickArgs {
     /// Service name.
     #[arg(short, long)]
     pub name: Option<String>,
-    /// Local TCP listen socket address.
+    /// Local listen socket address (TCP or UDP, per --protocol).
     #[arg(short, long)]
     pub listen: Option<std::net::SocketAddr>,
     /// Serve NodeId (public identity, not authorization; protect the target service).
     #[arg(short = 'N', long)]
     pub node_id: Option<String>,
-    /// Protocol (TCP only in quick mode).
+    /// Protocol: tcp (default) or udp.
     #[arg(short, long, default_value = "tcp")]
     pub protocol: String,
     /// Relay URL used by both peers.
