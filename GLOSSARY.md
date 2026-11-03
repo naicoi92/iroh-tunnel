@@ -24,6 +24,10 @@ _Avoid_: Connection generation, epoch
 The period after a flow expires during which its upstream endpoint is not reused.
 _Avoid_: Cooldown, grace period
 
+**Flow cap**:
+The maximum number of flows a Serve admits, counted per service and per peer. A flow in quarantine still counts. A flow refused at a cap is never admitted.
+_Avoid_: Connection limit, quota
+
 **Datagram limit**:
 The largest UDP payload the tunnel can currently carry intact between an Access and a Serve. It can change during a session incarnation.
 _Avoid_: MTU, max packet size

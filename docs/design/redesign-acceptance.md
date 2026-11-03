@@ -458,6 +458,8 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Execution:** BLOCKED — #73 proposes principles (spec UDP-05: no fragmentation, no stream fallback, drop and count oversized, fail fast without datagram support) and awaits benchmark and owner approval; await #74/#78 resource decisions and measured bounds; UDP deferred.
 
+**#74 proposal (Proposed, pending owner approval on #74; spec UDP-06):** loopback cases to run in CI: (1) service flow cap, (2) per-peer flow cap, (3) idle expiry, quarantine, then reuse, (4) late reply to the quarantine sink is dropped and counted, (5) slow-consumer isolation, (6) datagram limit plus 1 dropped and counted, (7) no flow survives a new session incarnation, (8) bind or descriptor exhaustion refuses the flow without crashing, (9) interleaved replies are never cross-delivered. These do not change the BLOCKED status above, and direct/relay and per-platform runs stay with #78/#97. NOT RUN, recorded as known risks: a planned `tc netem` impairment scenario, limit shrink on path migration, and bounded memory over a long run (E3). Numeric defaults are untested estimates.
+
 <a id="udp-path-01"></a>
 ### Case UDP-PATH-01
 
