@@ -397,7 +397,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Source AC:** [88.AC1](#88-ac1); [88.CL2](#88-cl2). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #78 transport contract, real roles and UDP clients sharing one Access peer plus clients on two Access peers.
+**Prerequisites:** Transport contract in `udp-integration-contract.md`, real roles and UDP clients sharing one Access peer plus clients on two Access peers.
 
 **Action:** Send distinct opaque binary/empty/variable datagrams to fixed target; deliberately interleave replies, including equal local flow numbers across peers where observable.
 
@@ -431,7 +431,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Source AC:** [89.AC1](#89-ac1); [89.AC2](#89-ac2). Exact URLs/checkbox text in [source register](#source-ac-register).
 
-**Prerequisites:** Approved #71/#78 expiry/reconnect/source-filter/tuple-reuse policy and UDP run path.
+**Prerequisites:** Expiry, reconnect, source-filter and tuple-reuse policy in UDP-04, UDP-06 and `udp-integration-contract.md`, and the UDP run path.
 
 **Action:** Induce idle expiry/reconnect, delayed replies after OS tuple reuse and replies from another source endpoint.
 
@@ -1053,7 +1053,7 @@ Locators use the supplied complete issue snapshots (bodies, comments and native 
 | <a id="88-ac1"></a>88.AC1 | [#88 body, Acceptance criteria, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/88#acceptance-criteria) | Real clients receive correctly associated interleaved responses; delivered payload and datagram boundaries are unchanged. |
 | <a id="88-ac2"></a>88.AC2 | [#88 body, Acceptance criteria, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/88#acceptance-criteria) | Serve uses a dedicated upstream socket per active flow; shared Iroh connection is allowed and best-effort semantics are documented. |
 | <a id="88-cl1"></a>88.CL1 | [#88 clarification, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/88#issuecomment-6491343233) | Document and verify target-visible Serve-side source endpoint behavior, including possible NAT rewriting and stability only for the lifetime of the upstream socket; do not promise original client IP transparency. |
-| <a id="88-cl2"></a>88.CL2 | [#88 clarification, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/88#issuecomment-6491343233) | Verify interleaved clients across Access peers as well as clients sharing a peer, preserving opaque datagrams and response association. Expiry, filtering and tuple-reuse policy remain gated by #71/#73/#74/#78. |
+| <a id="88-cl2"></a>88.CL2 | [#88 clarification, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/88#issuecomment-6491343233) | Verify interleaved clients across Access peers as well as clients sharing a peer, preserving opaque datagrams and response association. Expiry, filtering and tuple-reuse policy follow UDP-04 and UDP-06 and `udp-integration-contract.md`. |
 | <a id="89-ac1"></a>89.AC1 | [#89 body, Acceptance criteria, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/89#acceptance-criteria) | Exercise expiry, reconnect, late packets, source filtering, oversized datagrams and resource exhaustion with observable outcomes. |
 | <a id="89-ac2"></a>89.AC2 | [#89 body, Acceptance criteria, checkbox 2](https://github.com/naicoi92/iroh-tunnel/issues/89#acceptance-criteria) | Verify direct and forced-relay paths and document tuple-reuse residual risks; do not claim absolute isolation. |
 | <a id="90-ac1"></a>90.AC1 | [#90 body, Acceptance criteria, checkbox 1](https://github.com/naicoi92/iroh-tunnel/issues/90#acceptance-criteria) | Real supported-platform service installation, start, stop, restart, status and uninstall use the selected absolute paths. |
