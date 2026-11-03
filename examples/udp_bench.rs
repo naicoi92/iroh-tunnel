@@ -9,7 +9,7 @@
 //! process (see the evidence file). Not shipped.
 //!
 //! ```text
-//! cargo run --release --example udp_bench --features test-utils -- \
+//! cargo run --release --example udp_bench --features test-utils --locked -- \
 //!     --path relay --transport datagram --payload limit --flows 10 --count 500
 //! ```
 
@@ -69,7 +69,7 @@ struct Args {
     pps: u32,
     /// Milliseconds without arrivals, after the senders finish, that end a run.
     /// Raise it above the injected one-way delay, or late datagrams count as lost.
-    #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u64).range(1..=3_600_000))]
     idle_end_ms: u64,
     /// Free-text label for the run (for example the injected network condition).
     #[arg(long, default_value = "")]
@@ -169,6 +169,8 @@ fn resolve_payload(spec: &str, limit: usize) -> Result<usize> {
     Ok(size)
 }
 
+/// Note: `ps` is forked every `RSS_SAMPLE_EVERY` during the measured window, which
+/// perturbs CPU and latency a little; treat process figures as indicators only.
 /// Runs [`sample_process`] on a blocking thread so `ps` never stalls a runtime worker
 /// while latency is being measured.
 async fn sample_process_blocking() -> Option<(u64, String)> {
@@ -306,7 +308,9 @@ async fn receive_streams(
 ) -> Arrivals {
     let mut readers = Vec::new();
     for _ in 0..flows {
-        let Ok(Ok(mut rx)) = tokio::time::timeout(idle_end * 5, conn.accept_uni()).await else {
+        let Ok(Ok(mut rx)) =
+            tokio::time::timeout(idle_end.saturating_mul(5), conn.accept_uni()).await
+        else {
             break;
         };
         let counters = Arc::clone(&counters);
@@ -409,7 +413,7 @@ async fn send_streams(
             }
             let _ = tx.finish();
             // The peer may never read (heavy loss); do not hang the run on it.
-            let _ = tokio::time::timeout(idle_end * 5, tx.stopped()).await;
+            let _ = tokio::time::timeout(idle_end.saturating_mul(5), tx.stopped()).await;
         }));
     }
     for task in tasks {
