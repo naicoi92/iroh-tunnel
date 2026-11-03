@@ -714,30 +714,6 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     shutdown::drain(&mut clients, deadline).await;
 }
 
-/// Client endpoints and the flow identifier of each, for one session
-/// incarnation. Identifiers only increase and are never reused (contract).
-#[derive(Default)]
-struct UdpFlows {
-    by_client: std::collections::HashMap<std::net::SocketAddr, crate::udp::FlowId>,
-    by_flow: std::collections::HashMap<crate::udp::FlowId, std::net::SocketAddr>,
-    next: u32,
-}
-
-impl UdpFlows {
-    /// The flow of `client`, creating it when this is its first datagram.
-    /// `None` once the 32-bit identifier space is exhausted.
-    fn flow_for(&mut self, client: std::net::SocketAddr) -> Option<crate::udp::FlowId> {
-        if let Some(flow) = self.by_client.get(&client) {
-            return Some(*flow);
-        }
-        let flow = crate::udp::FlowId(self.next);
-        self.next = self.next.checked_add(1)?;
-        self.by_client.insert(client, flow);
-        self.by_flow.insert(flow, client);
-        Some(flow)
-    }
-}
-
 /// Serve UDP clients of one service over QUIC DATAGRAMs (#88).
 ///
 /// Each client address is a flow (UDP-04). All flows share the service's one
@@ -754,14 +730,26 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
         }
     };
     tracing::info!(%listen_addr, "listening for local udp clients");
-    let flows = Arc::new(std::sync::Mutex::new(UdpFlows::default()));
+    let flows = Arc::new(std::sync::Mutex::new(crate::udp::ClientFlows::default()));
     let mut readers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     let mut current: Option<usize> = None;
     let mut buf = vec![0u8; 65535];
+    let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let (n, client) = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
+            _ = sweep.tick() => {
+                let ended = flows
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .expire(std::time::Instant::now(), crate::udp::IDLE_TIMEOUT);
+                if ended > 0 {
+                    tracing::debug!(svc = %dialer.svc_name, ended, "udp flows expired");
+                }
+                continue;
+            }
             Some(result) = readers.join_next(), if !readers.is_empty() => {
                 shutdown::observe(result);
                 continue;
@@ -786,7 +774,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             // A new connection is a new incarnation: no flow survives it.
             readers.abort_all();
             while readers.join_next().await.is_some() {}
-            *flows.lock().unwrap_or_else(|p| p.into_inner()) = UdpFlows::default();
+            *flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
             readers.spawn(relay_peer_replies(
                 conn.clone(),
                 socket.clone(),
@@ -805,7 +793,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
         let flow = flows
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .flow_for(client);
+            .touch(client, std::time::Instant::now());
         let Some(flow) = flow else {
             tracing::warn!(svc = %dialer.svc_name, "udp flow identifiers exhausted, dropping");
             continue;
@@ -822,7 +810,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 async fn relay_peer_replies(
     conn: iroh::endpoint::Connection,
     socket: Arc<UdpSocket>,
-    flows: Arc<std::sync::Mutex<UdpFlows>>,
+    flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
 ) {
     while let Ok(datagram) = conn.read_datagram().await {
         let Ok((flow, payload)) = crate::udp::decode(&datagram) else {
@@ -832,9 +820,7 @@ async fn relay_peer_replies(
         let client = flows
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .by_flow
-            .get(&flow)
-            .copied();
+            .client_of(flow, std::time::Instant::now());
         match client {
             Some(client) => {
                 let _ = socket.send_to(&payload, client).await;

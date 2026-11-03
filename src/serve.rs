@@ -763,6 +763,12 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
     }
 }
 
+/// Per flow: the upstream socket and the handle that ends its reply relay.
+type UdpUpstream = (Arc<UdpSocket>, tokio::task::AbortHandle);
+
+/// One peer connection's live UDP flows, shared with the reply relays.
+type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
+
 /// Carry one peer's UDP flows over QUIC DATAGRAMs (#88).
 ///
 /// Each flow gets its own connected upstream socket, so a reply is attributed
@@ -771,13 +777,28 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
 /// quarantine are not implemented yet (idle expiry follows in this issue,
 /// the rest in #89).
 async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
-    let mut flows: HashMap<crate::udp::FlowId, Arc<UdpSocket>> = HashMap::new();
+    use crate::udp::Admission;
+    let flows = UdpFlowTable::default();
     let mut readers = JoinSet::new();
-    let mut highest: Option<crate::udp::FlowId> = None;
+    let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let datagram = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
+            _ = sweep.tick() => {
+                let ended = flows
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .expire(std::time::Instant::now(), crate::udp::IDLE_TIMEOUT);
+                for (_, relay) in &ended {
+                    relay.abort();
+                }
+                if !ended.is_empty() {
+                    tracing::debug!(count = ended.len(), "udp upstream flows expired");
+                }
+                continue;
+            }
             Some(result) = readers.join_next(), if !readers.is_empty() => {
                 shutdown::observe(result);
                 continue;
@@ -794,26 +815,43 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
             tracing::debug!("dropping malformed udp datagram");
             continue;
         };
-        let upstream = match flows.get(&flow) {
-            Some(upstream) => upstream.clone(),
-            None => {
-                // A new flow needs a higher identifier than any seen: an id at
-                // or below the mark with no live flow is never rebound.
-                if highest.is_some_and(|mark| flow <= mark) {
-                    tracing::debug!(flow = flow.0, "dropping datagram for unknown udp flow");
-                    continue;
+        let now = std::time::Instant::now();
+        let admission = flows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .admit(flow, now);
+        let upstream = match admission {
+            Admission::Unknown => {
+                tracing::debug!(flow = flow.0, "dropping datagram for unknown udp flow");
+                continue;
+            }
+            Admission::Live => {
+                let table = flows.lock().unwrap_or_else(|p| p.into_inner());
+                match table.get(flow) {
+                    Some((socket, _)) => socket.clone(),
+                    None => continue,
                 }
-                highest = Some(flow);
-                let upstream = match open_upstream(&target.local_addr).await {
+            }
+            Admission::New => {
+                let socket = match open_upstream(&target.local_addr).await {
                     Ok(socket) => Arc::new(socket),
                     Err(error) => {
                         tracing::warn!(flow = flow.0, "cannot open udp upstream: {error}");
                         continue;
                     }
                 };
-                readers.spawn(relay_upstream_replies(conn.clone(), flow, upstream.clone()));
-                flows.insert(flow, upstream.clone());
-                upstream
+                let relay = readers.spawn(relay_upstream_replies(
+                    conn.clone(),
+                    flow,
+                    socket.clone(),
+                    flows.clone(),
+                ));
+                flows.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                    flow,
+                    (socket.clone(), relay),
+                    now,
+                );
+                socket
             }
         };
         if let Err(error) = upstream.send(&payload).await {
@@ -843,13 +881,19 @@ async fn open_upstream(local_addr: &str) -> Result<UdpSocket> {
 }
 
 /// Forward each reply on `upstream` to the peer as a datagram of `flow`.
+/// A reply counts as traffic for the flow's idle timer.
 async fn relay_upstream_replies(
     conn: Connection,
     flow: crate::udp::FlowId,
     upstream: Arc<UdpSocket>,
+    flows: UdpFlowTable,
 ) {
     let mut buf = vec![0u8; 65535];
     while let Ok(n) = upstream.recv(&mut buf).await {
+        flows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .refresh(flow, std::time::Instant::now());
         let Some(limit) = crate::udp::payload_limit(conn.max_datagram_size()) else {
             tracing::warn!(flow = flow.0, "datagrams unusable, dropping reply");
             continue;

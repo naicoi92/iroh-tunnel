@@ -11,6 +11,15 @@ use bytes::{BufMut, Bytes, BytesMut};
 /// Bytes of the flow identifier that prefix every tunnel datagram.
 pub const HEADER_LEN: usize = 4;
 
+/// How long a flow may stay silent in both directions before it ends.
+///
+/// Minimal lifecycle for #88: the flow ends and its upstream socket closes at
+/// once. Quarantine, caps and a configurable value follow in #89 (UDP-06).
+pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How often each side looks for idle flows.
+pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Identifier of one flow, assigned by Access within a session incarnation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlowId(pub u32);
@@ -48,9 +57,155 @@ pub fn payload_limit(max_datagram_size: Option<usize>) -> Option<usize> {
         .filter(|limit| *limit > 0)
 }
 
+/// Client endpoints and the flow of each, for one session incarnation.
+///
+/// Identifiers only increase and are never reused, so a datagram for an
+/// expired flow can never be mistaken for a new one (contract).
+#[derive(Default)]
+pub struct ClientFlows {
+    by_client: std::collections::HashMap<std::net::SocketAddr, FlowId>,
+    by_flow: std::collections::HashMap<FlowId, (std::net::SocketAddr, std::time::Instant)>,
+    next: u32,
+}
+
+impl ClientFlows {
+    /// The flow of `client`, created on its first datagram, and refresh its
+    /// idle timer. `None` once the 32-bit identifier space is exhausted.
+    pub fn touch(
+        &mut self,
+        client: std::net::SocketAddr,
+        now: std::time::Instant,
+    ) -> Option<FlowId> {
+        let flow = match self.by_client.get(&client) {
+            Some(flow) => *flow,
+            None => {
+                let flow = FlowId(self.next);
+                self.next = self.next.checked_add(1)?;
+                self.by_client.insert(client, flow);
+                flow
+            }
+        };
+        self.by_flow.insert(flow, (client, now));
+        Some(flow)
+    }
+
+    /// The client of `flow`, refreshing its idle timer; `None` if unknown or
+    /// already expired.
+    pub fn client_of(
+        &mut self,
+        flow: FlowId,
+        now: std::time::Instant,
+    ) -> Option<std::net::SocketAddr> {
+        let entry = self.by_flow.get_mut(&flow)?;
+        entry.1 = now;
+        Some(entry.0)
+    }
+
+    /// End every flow idle for at least `idle`; returns how many ended.
+    pub fn expire(&mut self, now: std::time::Instant, idle: std::time::Duration) -> usize {
+        let expired: Vec<FlowId> = self
+            .by_flow
+            .iter()
+            .filter(|(_, (_, seen))| now.duration_since(*seen) >= idle)
+            .map(|(flow, _)| *flow)
+            .collect();
+        for flow in &expired {
+            if let Some((client, _)) = self.by_flow.remove(flow) {
+                self.by_client.remove(&client);
+            }
+        }
+        expired.len()
+    }
+}
+
+/// Serve's live flows for one peer connection, holding one `T` (the upstream
+/// socket) per flow.
+///
+/// A flow is admitted only if its identifier is higher than every identifier
+/// already seen from this peer in this incarnation. An identifier at or below
+/// that mark with no live flow (expired or never admitted) is refused, so an
+/// expired flow is never rebound even if the two idle timers drift apart.
+pub struct PeerFlows<T> {
+    live: std::collections::HashMap<FlowId, (T, std::time::Instant)>,
+    highest: Option<FlowId>,
+}
+
+/// What Serve should do with a datagram for a flow.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// A live flow.
+    Live,
+    /// A new, admittable flow: the caller opens its upstream and `insert`s it.
+    New,
+    /// Not live and not admittable.
+    Unknown,
+}
+
+impl<T> Default for PeerFlows<T> {
+    fn default() -> Self {
+        Self {
+            live: std::collections::HashMap::new(),
+            highest: None,
+        }
+    }
+}
+
+impl<T> PeerFlows<T> {
+    /// Classify `flow`; a live flow also has its idle timer refreshed.
+    pub fn admit(&mut self, flow: FlowId, now: std::time::Instant) -> Admission {
+        if let Some(entry) = self.live.get_mut(&flow) {
+            entry.1 = now;
+            return Admission::Live;
+        }
+        if self.highest.is_some_and(|mark| flow <= mark) {
+            return Admission::Unknown;
+        }
+        Admission::New
+    }
+
+    /// Register the upstream of a flow that `admit` returned `New` for.
+    pub fn insert(&mut self, flow: FlowId, upstream: T, now: std::time::Instant) {
+        self.highest = Some(self.highest.map_or(flow, |mark| mark.max(flow)));
+        self.live.insert(flow, (upstream, now));
+    }
+
+    /// The upstream of a live flow.
+    pub fn get(&self, flow: FlowId) -> Option<&T> {
+        self.live.get(&flow).map(|(upstream, _)| upstream)
+    }
+
+    /// Refresh the idle timer of a live flow (a reply counts as traffic).
+    pub fn refresh(&mut self, flow: FlowId, now: std::time::Instant) {
+        if let Some(entry) = self.live.get_mut(&flow) {
+            entry.1 = now;
+        }
+    }
+
+    /// End every flow idle for at least `idle`, returning their upstreams so
+    /// the caller can close them.
+    pub fn expire(&mut self, now: std::time::Instant, idle: std::time::Duration) -> Vec<T> {
+        let expired: Vec<FlowId> = self
+            .live
+            .iter()
+            .filter(|(_, (_, seen))| now.duration_since(*seen) >= idle)
+            .map(|(flow, _)| *flow)
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|flow| self.live.remove(&flow).map(|(upstream, _)| upstream))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+    use std::time::{Duration, Instant};
+
+    fn client(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
 
     #[test]
     fn encode_then_decode_returns_flow_and_unchanged_payload() {
@@ -87,5 +242,99 @@ mod tests {
         assert_eq!(payload_limit(None), None);
         assert_eq!(payload_limit(Some(HEADER_LEN - 1)), None);
         assert_eq!(payload_limit(Some(HEADER_LEN)), None, "contract: 4 or less");
+    }
+
+    #[test]
+    fn a_client_keeps_its_flow_while_active() {
+        let t0 = Instant::now();
+        let mut flows = ClientFlows::default();
+        let first = flows.touch(client(1), t0).unwrap();
+        assert_eq!(
+            flows.touch(client(1), t0 + Duration::from_secs(30)),
+            Some(first)
+        );
+        assert_eq!(flows.expire(t0 + Duration::from_secs(80), IDLE_TIMEOUT), 0);
+    }
+
+    #[test]
+    fn traffic_in_either_direction_refreshes_the_idle_timer() {
+        let t0 = Instant::now();
+        let mut flows = ClientFlows::default();
+        let flow = flows.touch(client(1), t0).unwrap();
+        // A reply from the target at t0+50s refreshes it.
+        assert!(flows
+            .client_of(flow, t0 + Duration::from_secs(50))
+            .is_some());
+        assert_eq!(flows.expire(t0 + Duration::from_secs(100), IDLE_TIMEOUT), 0);
+        assert_eq!(flows.expire(t0 + Duration::from_secs(110), IDLE_TIMEOUT), 1);
+    }
+
+    #[test]
+    fn an_expired_flow_is_gone_and_its_identifier_is_never_reused() {
+        let t0 = Instant::now();
+        let mut flows = ClientFlows::default();
+        let old = flows.touch(client(1), t0).unwrap();
+        assert_eq!(flows.expire(t0 + IDLE_TIMEOUT, IDLE_TIMEOUT), 1);
+        assert_eq!(flows.client_of(old, t0 + IDLE_TIMEOUT), None);
+        let renewed = flows.touch(client(1), t0 + IDLE_TIMEOUT).unwrap();
+        assert!(
+            renewed > old,
+            "a returning client gets a new, higher flow id"
+        );
+    }
+
+    #[test]
+    fn identifier_exhaustion_is_reported_not_wrapped() {
+        let mut flows = ClientFlows {
+            next: u32::MAX,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        // The counter cannot advance past u32::MAX, so no identifier is issued.
+        assert_eq!(flows.touch(client(1), t0), None);
+    }
+
+    #[test]
+    fn serve_admits_only_increasing_identifiers() {
+        let t0 = Instant::now();
+        let mut flows: PeerFlows<&str> = PeerFlows::default();
+        assert_eq!(flows.admit(FlowId(5), t0), Admission::New);
+        flows.insert(FlowId(5), "five", t0);
+        assert_eq!(flows.admit(FlowId(5), t0), Admission::Live);
+        // Lower and equal-to-mark ids without a live flow are never admitted.
+        assert_eq!(flows.admit(FlowId(3), t0), Admission::Unknown);
+        assert_eq!(flows.admit(FlowId(6), t0), Admission::New);
+    }
+
+    #[test]
+    fn serve_never_rebinds_an_expired_identifier() {
+        let t0 = Instant::now();
+        let mut flows: PeerFlows<&str> = PeerFlows::default();
+        flows.insert(FlowId(1), "one", t0);
+        let closed = flows.expire(t0 + IDLE_TIMEOUT, IDLE_TIMEOUT);
+        assert_eq!(closed, vec!["one"]);
+        assert_eq!(flows.get(FlowId(1)), None);
+        // Access still sends id 1 because its own timer has not fired yet.
+        assert_eq!(
+            flows.admit(FlowId(1), t0 + IDLE_TIMEOUT),
+            Admission::Unknown
+        );
+    }
+
+    #[test]
+    fn a_reply_refreshes_serve_idle_timer() {
+        let t0 = Instant::now();
+        let mut flows: PeerFlows<&str> = PeerFlows::default();
+        flows.insert(FlowId(1), "one", t0);
+        flows.refresh(FlowId(1), t0 + Duration::from_secs(50));
+        assert!(flows
+            .expire(t0 + Duration::from_secs(100), IDLE_TIMEOUT)
+            .is_empty());
+        assert_eq!(
+            flows
+                .expire(t0 + Duration::from_secs(110), IDLE_TIMEOUT)
+                .len(),
+            1
+        );
     }
 }
