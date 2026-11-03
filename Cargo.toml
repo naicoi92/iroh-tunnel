@@ -64,6 +64,8 @@ sigstore-types = { version = "0.15", default-features = false }
 libc = "0.2"
 
 [dev-dependencies]
+# `Bytes` for Connection::send_datagram in the #73 benchmark harness.
+bytes = "1.12"
 tempfile = "3.27"
 # In-process relay server for the relay-auth integration tests.
 iroh = { version = "1.4.1", features = ["test-utils"] }
