@@ -29,5 +29,5 @@ The largest UDP payload the tunnel can currently carry intact between an Access 
 _Avoid_: MTU, max packet size
 
 **Oversized datagram**:
-A client UDP datagram larger than the current datagram limit. It is dropped and counted, never delivered in part.
+A client UDP datagram larger than the current datagram limit. It is never delivered in part.
 _Avoid_: Large packet, truncated datagram

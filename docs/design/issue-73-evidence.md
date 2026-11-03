@@ -4,7 +4,7 @@ Baseline `3900e2b` (main). Iroh locked at 1.4.1 (`Cargo.lock`); issue #72 still 
 
 **Status: no benchmark has been run. No transport is chosen.** Results below are empty on purpose; do not fill them with estimates.
 
-## Policy principles (proposed, owner-confirmed in discussion; see spec UDP-05)
+## Policy principles (proposed, pending owner approval on #73; see spec UDP-05)
 
 1. No fragmentation or reassembly in the first release.
 2. No fallback to reliable ordered streams, automatic or configured.
@@ -29,7 +29,7 @@ A candidate is excluded if any of these occurs in any scenario:
 - E1: a partial or corrupted datagram is delivered as complete;
 - E2: a datagram is delivered to a different flow than its origin (cross-delivery);
 - E3: memory, queue or handle use is not bounded under flow-count or payload stress;
-- E4: datagram boundaries are not preserved for delivered datagrams.
+- E4: datagram boundaries are not preserved for delivered datagrams. A truncated datagram delivered as complete is reported under E4 (length mismatch), not E1.
 
 Performance metrics are reported, not thresholded.
 

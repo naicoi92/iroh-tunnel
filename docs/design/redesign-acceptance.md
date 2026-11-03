@@ -450,7 +450,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Prerequisites:** Approved #73/#74/#78 transport, payload/resource/cleanup policy; instrumentation.
 
-**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected inject fragment loss/duplicates/malicious reassembly.
+**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected (the proposed UDP-05 principle excludes it unless the owner overrides it) inject fragment loss/duplicates/malicious reassembly.
 
 **Expected observable outcome:** Documented bounded size/admission/drop/cleanup behavior matches approved values; never present partial datagram as intact. No numeric bound, fragment scheme or drop policy approved by this catalog.
 
