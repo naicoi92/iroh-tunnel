@@ -123,8 +123,7 @@ port = {port}
         let mut buf = vec![0u8; 65535];
         loop {
             client.send_to(payload, self.access_addr).await?;
-            match tokio::time::timeout(Duration::from_millis(500), client.recv_from(&mut buf))
-                .await
+            match tokio::time::timeout(Duration::from_millis(500), client.recv_from(&mut buf)).await
             {
                 Ok(Ok((n, _))) => return Ok(buf[..n].to_vec()),
                 Ok(Err(error)) => return Err(error.into()),
