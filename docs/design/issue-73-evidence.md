@@ -78,7 +78,7 @@ Promote UDP-05 to Confirmed in the spec, add an ADR for the transport choice (ha
 
 Findings:
 
-- The datagram limit differs by path (1162 relay, 1414 direct on loopback), so the dynamic limit in UDP-05 principle 6 is necessary; a fixed value would waste direct capacity or break on relay.
+- The datagram limit read 1162 on the relay path and 1414 on the direct path in the probe. The self-check below shows that is not a per-path constant: a relay connection later read 1414 as well, so the first reading reflects the moment of measurement. Either way the limit is dynamic, which supports UDP-05 principle 6; a fixed value would be wrong at some point.
 - Oversize is refused synchronously by the sender, so drop-and-count (principle 3) needs no wire-level detection.
 - The direct path is not selected immediately after connect; the harness must wait for `is_ip() && is_selected()` and record the selected path per run.
 - Not yet observed: limit change on migration mid-session, loss behavior, queue drops (`datagram_send_buffer_space`).
