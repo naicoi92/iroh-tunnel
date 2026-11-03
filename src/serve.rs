@@ -773,9 +773,9 @@ type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
 ///
 /// Each flow gets its own connected upstream socket, so a reply is attributed
 /// to a flow by the socket it arrives on, never by inspecting the payload.
-/// Contract: `docs/design/udp-integration-contract.md`. Flow expiry, caps and
-/// quarantine are not implemented yet (idle expiry follows in this issue,
-/// the rest in #89).
+/// Contract: `docs/design/udp-integration-contract.md`. Idle flows expire after
+/// `udp::IDLE_TIMEOUT` and close at once. Caps, quarantine and counters are not
+/// implemented yet; they belong to #89.
 async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
     use crate::udp::Admission;
     let flows = UdpFlowTable::default();
@@ -833,7 +833,12 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                 }
             }
             Admission::New => {
-                let socket = match open_upstream(&target.local_addr).await {
+                let opened = tokio::select! {
+                    biased;
+                    _ = shutdown::stopped(&mut stop) => break,
+                    opened = open_upstream(&target.local_addr) => opened,
+                };
+                let socket = match opened {
                     Ok(socket) => Arc::new(socket),
                     Err(error) => {
                         tracing::warn!(flow = flow.0, "cannot open udp upstream: {error}");
@@ -880,6 +885,18 @@ async fn open_upstream(local_addr: &str) -> Result<UdpSocket> {
     Ok(socket)
 }
 
+/// Whether a receive error on a connected UDP socket only means a lost
+/// datagram (the target's ICMP answer), not a dead socket.
+fn is_transient_udp_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{
+        ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted, WouldBlock,
+    };
+    matches!(
+        error.kind(),
+        ConnectionRefused | ConnectionReset | ConnectionAborted | Interrupted | WouldBlock
+    )
+}
+
 /// Forward each reply on `upstream` to the peer as a datagram of `flow`.
 /// A reply counts as traffic for the flow's idle timer.
 async fn relay_upstream_replies(
@@ -889,7 +906,21 @@ async fn relay_upstream_replies(
     flows: UdpFlowTable,
 ) {
     let mut buf = vec![0u8; 65535];
-    while let Ok(n) = upstream.recv(&mut buf).await {
+    loop {
+        let n = match upstream.recv(&mut buf).await {
+            Ok(n) => n,
+            // A connected UDP socket reports an ICMP error from the target
+            // (for example port unreachable while the target is not up yet)
+            // on a later call. The datagram is lost; the flow stays.
+            Err(error) if is_transient_udp_error(&error) => {
+                tracing::debug!(flow = flow.0, "udp upstream receive failed: {error}");
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(flow = flow.0, "udp upstream receive ended: {error}");
+                break;
+            }
+        };
         flows
             .lock()
             .unwrap_or_else(|p| p.into_inner())

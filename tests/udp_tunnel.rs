@@ -25,7 +25,7 @@ struct UdpTunnel {
     access_addr: SocketAddr,
     stop: Vec<oneshot::Sender<()>>,
     roles: Vec<tokio::task::JoinHandle<Result<()>>>,
-    target: tokio::task::JoinHandle<()>,
+    target: Option<tokio::task::JoinHandle<()>>,
     /// Source endpoint of every datagram the target received, in order.
     target_sources: Arc<Mutex<Vec<SocketAddr>>>,
     relay_url: String,
@@ -36,15 +36,24 @@ struct UdpTunnel {
 
 impl UdpTunnel {
     async fn start() -> Result<Self> {
-        let cfg = tempfile::tempdir().context("config tempdir")?;
-        let (_map, relay_url, relay) = run_relay_server().await?;
-        let relay_url = relay_url.to_string();
-
         // The UDP target behind serve: echoes every datagram to its sender.
         let target_sock = UdpSocket::bind("127.0.0.1:0").await?;
         let target_addr = target_sock.local_addr()?;
         let target_sources = Arc::new(Mutex::new(Vec::new()));
         let target = tokio::spawn(udp_echo(target_sock, target_sources.clone()));
+        Self::start_with_target(target_addr, Some(target), target_sources).await
+    }
+
+    /// Start the tunnel in front of `target_addr`. `target` is the task that
+    /// serves it, if the caller already runs one.
+    async fn start_with_target(
+        target_addr: SocketAddr,
+        target: Option<tokio::task::JoinHandle<()>>,
+        target_sources: Arc<Mutex<Vec<SocketAddr>>>,
+    ) -> Result<Self> {
+        let cfg = tempfile::tempdir().context("config tempdir")?;
+        let (_map, relay_url, relay) = run_relay_server().await?;
+        let relay_url = relay_url.to_string();
 
         let serve_key = SecretKey::generate();
         let access_key = SecretKey::generate();
@@ -192,7 +201,9 @@ port = {port}
                 .context("role did not stop within 15s")??
                 .context("role returned an error")?;
         }
-        self.target.abort();
+        if let Some(target) = self.target.take() {
+            target.abort();
+        }
         Ok(())
     }
 }
@@ -297,6 +308,11 @@ async fn each_flow_has_its_own_stable_upstream_endpoint() -> Result<()> {
 
     tunnel.roundtrip(&a, b"a-0").await?;
     tunnel.roundtrip(&b, b"b-0").await?;
+    // `roundtrip` resends while connecting; let late duplicates reach the
+    // target before counting, or the a/b alternation below would be skewed.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drain(&a).await;
+    drain(&b).await;
     let before = tunnel.target_sources.lock().unwrap().len();
     for i in 0..3u8 {
         tunnel.roundtrip(&a, &[b'a', i]).await?;
@@ -370,5 +386,46 @@ async fn clients_on_two_access_peers_are_not_cross_delivered() -> Result<()> {
     assert_eq!(got_a, want_a, "client of the first peer got foreign data");
     assert_eq!(got_b, want_b, "client of the second peer got foreign data");
 
+    tunnel.shutdown().await
+}
+
+/// Contract: "Upstream send error on Serve: datagram dropped; the flow stays".
+/// A target that is not up yet makes the connected upstream socket report
+/// ICMP port-unreachable. That must not end the flow's reply path: once the
+/// target is up, the same client gets its reply on the same flow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flow_survives_its_target_being_down_at_first() -> Result<()> {
+    // Reserve the target's address, but leave nothing listening on it yet.
+    let reserved = UdpSocket::bind("127.0.0.1:0").await?;
+    let target_addr = reserved.local_addr()?;
+    drop(reserved);
+
+    let sources = Arc::new(Mutex::new(Vec::new()));
+    let tunnel = UdpTunnel::start_with_target(target_addr, None, sources.clone()).await?;
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+
+    // Keep sending while nothing listens: the flow is created and the kernel
+    // reports the refused port on its upstream socket.
+    for _ in 0..20 {
+        client.send_to(b"too-early", tunnel.access_addr).await?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // Now the target comes up on the same address.
+    let target = UdpSocket::bind(target_addr).await?;
+    let echo = tokio::spawn(udp_echo(target, sources));
+
+    let reply = tokio::time::timeout(
+        Duration::from_secs(20),
+        tunnel.roundtrip(&client, b"now-it-is-up"),
+    )
+    .await
+    .context("the flow never recovered after the target came up")??;
+    assert!(
+        reply == b"now-it-is-up" || reply == b"too-early",
+        "unexpected reply {reply:?}"
+    );
+
+    echo.abort();
     tunnel.shutdown().await
 }

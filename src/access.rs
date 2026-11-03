@@ -718,7 +718,8 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 ///
 /// Each client address is a flow (UDP-04). All flows share the service's one
 /// connection; when that connection is replaced the flows end with it
-/// (session incarnation). Expiry, caps and counters follow in #89.
+/// (session incarnation). Idle flows expire after `udp::IDLE_TIMEOUT`. Caps,
+/// counters and ending the incarnation on identifier exhaustion belong to #89.
 /// Contract: `docs/design/udp-integration-contract.md`.
 async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     let listen_addr = dialer.listen_addr.clone();
@@ -758,12 +759,23 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
                 Ok(received) => received,
                 Err(error) => {
                     tracing::warn!("udp recv error on {listen_addr}: {error}");
+                    // A persistent error must not spin the loop.
+                    tokio::select! {
+                        _ = shutdown::stopped(&mut stop) => break,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
                     continue;
                 }
             }
         };
         let deadline = tokio::time::Instant::now() + CLIENT_CONNECT_DEADLINE;
-        let conn = match dialer.get_or_dial(deadline).await {
+        // Dialing can take up to the client deadline; shutdown must not wait.
+        let dialed = tokio::select! {
+            biased;
+            _ = shutdown::stopped(&mut stop) => break,
+            dialed = dialer.get_or_dial(deadline) => dialed,
+        };
+        let conn = match dialed {
             Ok(conn) => conn,
             Err(error) => {
                 tracing::warn!(svc = %dialer.svc_name, "udp datagram dropped, no connection: {error}");
@@ -823,7 +835,9 @@ async fn relay_peer_replies(
             .client_of(flow, std::time::Instant::now());
         match client {
             Some(client) => {
-                let _ = socket.send_to(&payload, client).await;
+                if let Err(error) = socket.send_to(&payload, client).await {
+                    tracing::debug!(flow = flow.0, %client, "udp reply to client failed: {error}");
+                }
             }
             None => tracing::debug!(flow = flow.0, "dropping reply for unknown udp flow"),
         }
