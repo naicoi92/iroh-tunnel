@@ -30,8 +30,8 @@ use iroh::tls::CaTlsConfig;
 const ALPN: &[u8] = b"udp-bench/0";
 /// Header: flow id (u32), sequence (u32), send time in ns since run start (u64).
 const HEADER: usize = 16;
-/// A run ends when nothing arrives for this long after the sender finished.
-const IDLE_END: Duration = Duration::from_secs(2);
+/// Largest `--payload`; QUIC datagrams and this harness never need more.
+const MAX_PAYLOAD: usize = 65_535;
 const DIRECT_WAIT: Duration = Duration::from_secs(10);
 const RSS_SAMPLE_EVERY: Duration = Duration::from_millis(100);
 
@@ -59,14 +59,18 @@ struct Args {
     /// Total datagram size: a byte count, or `limit-1`, `limit`, `limit+1`.
     #[arg(long, default_value = "512")]
     payload: String,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     flows: u32,
     /// Messages per flow.
     #[arg(long, default_value_t = 200)]
     count: u32,
     /// Messages per second per flow.
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
     pps: u32,
+    /// Milliseconds without arrivals, after the senders finish, that end a run.
+    /// Raise it above the injected one-way delay, or late datagrams count as lost.
+    #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u64).range(1..))]
+    idle_end_ms: u64,
     /// Free-text label for the run (for example the injected network condition).
     #[arg(long, default_value = "")]
     note: String,
@@ -159,10 +163,19 @@ fn resolve_payload(spec: &str, limit: usize) -> Result<usize> {
             .parse()
             .with_context(|| format!("invalid --payload {n:?}"))?,
     };
-    if size < HEADER {
-        bail!("payload {size} is smaller than the {HEADER}-byte header");
+    if !(HEADER..=MAX_PAYLOAD).contains(&size) {
+        bail!("payload {size} must be between {HEADER} and {MAX_PAYLOAD} bytes");
     }
     Ok(size)
+}
+
+/// Runs [`sample_process`] on a blocking thread so `ps` never stalls a runtime worker
+/// while latency is being measured.
+async fn sample_process_blocking() -> Option<(u64, String)> {
+    tokio::task::spawn_blocking(sample_process)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Coarse process memory and CPU sample via `ps`; avoids `unsafe` and extra dependencies.
@@ -179,8 +192,10 @@ fn sample_process() -> Option<(u64, String)> {
 
 #[derive(Default)]
 struct Arrivals {
-    /// Latency in ns, in arrival order.
+    /// Latency in ns of every arrival, for percentiles.
     latencies: Vec<u64>,
+    /// Latency in ns per flow, in arrival order, for jitter.
+    per_flow: HashMap<u32, Vec<u64>>,
     /// Highest sequence seen per flow, for reorder and duplicate counting.
     highest: HashMap<u32, u32>,
     seen: HashMap<(u32, u32), u32>,
@@ -191,10 +206,13 @@ struct Arrivals {
 impl Arrivals {
     fn record(&mut self, flow: u32, seq: u32, latency_ns: u64) {
         self.latencies.push(latency_ns);
+        self.per_flow.entry(flow).or_default().push(latency_ns);
         let count = self.seen.entry((flow, seq)).or_insert(0);
         *count += 1;
         if *count > 1 {
+            // A duplicate is not also counted as reordered.
             self.duplicated += 1;
+            return;
         }
         let high = self.highest.entry(flow).or_insert(seq);
         if seq < *high {
@@ -203,12 +221,11 @@ impl Arrivals {
             *high = seq;
         }
     }
-}
 
-impl Arrivals {
     /// Folds another flow's arrivals in; per-flow `(flow, seq)` keys never overlap.
     fn merge(&mut self, other: Arrivals) {
         self.latencies.extend(other.latencies);
+        self.per_flow.extend(other.per_flow);
         self.seen.extend(other.seen);
         self.reordered += other.reordered;
         self.duplicated += other.duplicated;
@@ -223,12 +240,14 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
     sorted[idx]
 }
 
-fn jitter_ns(latencies: &[u64]) -> u64 {
-    if latencies.len() < 2 {
-        return 0;
-    }
-    let total: u64 = latencies.windows(2).map(|w| w[0].abs_diff(w[1])).sum();
-    total / (latencies.len() as u64 - 1)
+/// Mean absolute difference between consecutive arrivals of the same flow,
+/// averaged over all consecutive pairs of all flows.
+fn jitter_ns(per_flow: &HashMap<u32, Vec<u64>>) -> u64 {
+    let (total, pairs) = per_flow
+        .values()
+        .flat_map(|l| l.windows(2))
+        .fold((0u64, 0u64), |(t, n), w| (t + w[0].abs_diff(w[1]), n + 1));
+    total.checked_div(pairs).unwrap_or(0)
 }
 
 async fn receive_datagrams(
@@ -236,11 +255,12 @@ async fn receive_datagrams(
     size: usize,
     flows: u32,
     start: Instant,
+    idle_end: Duration,
     counters: Arc<Counters>,
 ) -> Arrivals {
     let mut arrivals = Arrivals::default();
     loop {
-        match tokio::time::timeout(IDLE_END, conn.read_datagram()).await {
+        match tokio::time::timeout(idle_end, conn.read_datagram()).await {
             Ok(Ok(data)) => {
                 let now = start.elapsed().as_nanos() as u64;
                 record_message(&data, size, flows, now, &counters, &mut arrivals);
@@ -281,11 +301,12 @@ async fn receive_streams(
     size: usize,
     flows: u32,
     start: Instant,
+    idle_end: Duration,
     counters: Arc<Counters>,
 ) -> Arrivals {
     let mut readers = Vec::new();
     for _ in 0..flows {
-        let Ok(Ok(mut rx)) = tokio::time::timeout(IDLE_END * 5, conn.accept_uni()).await else {
+        let Ok(Ok(mut rx)) = tokio::time::timeout(idle_end * 5, conn.accept_uni()).await else {
             break;
         };
         let counters = Arc::clone(&counters);
@@ -324,8 +345,8 @@ async fn send_datagrams(
     size: usize,
     start: Instant,
     counters: Arc<Counters>,
-) {
-    let tick = Duration::from_secs_f64(1.0 / f64::from(args.pps.max(1)));
+) -> Result<()> {
+    let tick = Duration::from_secs_f64(1.0 / f64::from(args.pps));
     let mut tasks = Vec::new();
     for flow in 0..args.flows {
         let conn = conn.clone();
@@ -346,9 +367,10 @@ async fn send_datagrams(
             }
         }));
     }
-    for t in tasks {
-        let _ = t.await;
+    for task in tasks {
+        task.await.context("sender task failed")?;
     }
+    Ok(())
 }
 
 async fn send_streams(
@@ -357,13 +379,14 @@ async fn send_streams(
     size: usize,
     start: Instant,
     counters: Arc<Counters>,
-) {
-    let tick = Duration::from_secs_f64(1.0 / f64::from(args.pps.max(1)));
+) -> Result<()> {
+    let tick = Duration::from_secs_f64(1.0 / f64::from(args.pps));
     let mut tasks = Vec::new();
     for flow in 0..args.flows {
         let conn = conn.clone();
         let counters = Arc::clone(&counters);
         let count = args.count;
+        let idle_end = Duration::from_millis(args.idle_end_ms);
         tasks.push(tokio::spawn(async move {
             let Ok(mut tx) = conn.open_uni().await else {
                 counters.refused_other.fetch_add(1, Ordering::Relaxed);
@@ -373,8 +396,10 @@ async fn send_streams(
             for seq in 0..count {
                 interval.tick().await;
                 let msg = encode(flow, seq, size, start.elapsed().as_nanos() as u64);
+                // Bounded by MAX_PAYLOAD, so the conversion cannot fail.
+                let len = u32::try_from(msg.len()).expect("payload bounded by MAX_PAYLOAD");
                 let mut frame = Vec::with_capacity(4 + msg.len());
-                frame.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&len.to_be_bytes());
                 frame.extend_from_slice(&msg);
                 if tx.write_all(&frame).await.is_ok() {
                     counters.sent.fetch_add(1, Ordering::Relaxed);
@@ -383,12 +408,14 @@ async fn send_streams(
                 }
             }
             let _ = tx.finish();
-            let _ = tx.stopped().await;
+            // The peer may never read (heavy loss); do not hang the run on it.
+            let _ = tokio::time::timeout(idle_end * 5, tx.stopped()).await;
         }));
     }
-    for t in tasks {
-        let _ = t.await;
+    for task in tasks {
+        task.await.context("sender task failed")?;
     }
+    Ok(())
 }
 
 #[tokio::main]
@@ -423,15 +450,16 @@ async fn main() -> Result<()> {
     };
     let path = selected_path(&conn);
 
+    let idle_end = Duration::from_millis(args.idle_end_ms);
     let counters = Arc::new(Counters::default());
     let start = Instant::now();
-    let rss_before = sample_process();
+    let rss_before = sample_process_blocking().await;
     let peak_rss = Arc::new(AtomicU64::new(0));
     let sampler = tokio::spawn({
         let peak = Arc::clone(&peak_rss);
         async move {
             loop {
-                if let Some((rss, _)) = sample_process() {
+                if let Some((rss, _)) = sample_process_blocking().await {
                     peak.fetch_max(rss, Ordering::Relaxed);
                 }
                 tokio::time::sleep(RSS_SAMPLE_EVERY).await;
@@ -445,6 +473,7 @@ async fn main() -> Result<()> {
             size,
             args.flows,
             start,
+            idle_end,
             Arc::clone(&counters),
         )),
         Transport::Stream => tokio::spawn(receive_streams(
@@ -452,15 +481,16 @@ async fn main() -> Result<()> {
             size,
             args.flows,
             start,
+            idle_end,
             Arc::clone(&counters),
         )),
     };
     match args.transport {
         Transport::Datagram => {
-            send_datagrams(conn.clone(), &args, size, start, Arc::clone(&counters)).await;
+            send_datagrams(conn.clone(), &args, size, start, Arc::clone(&counters)).await?;
         }
         Transport::Stream => {
-            send_streams(conn.clone(), &args, size, start, Arc::clone(&counters)).await;
+            send_streams(conn.clone(), &args, size, start, Arc::clone(&counters)).await?;
         }
     }
     counters.sender_done.store(true, Ordering::Relaxed);
@@ -469,7 +499,9 @@ async fn main() -> Result<()> {
     let limit_after = conn.max_datagram_size();
     let arrivals = receiver.await?;
     sampler.abort();
-    let rss_after = sample_process();
+    // Cancelled by the abort above; the join error is the expected outcome.
+    let _ = sampler.await;
+    let rss_after = sample_process_blocking().await;
 
     let mut sorted = arrivals.latencies.clone();
     sorted.sort_unstable();
@@ -506,12 +538,12 @@ async fn main() -> Result<()> {
             "p95": percentile(&sorted, 0.95) as f64 / 1e6,
             "p99": percentile(&sorted, 0.99) as f64 / 1e6,
             "max": sorted.last().copied().unwrap_or(0) as f64 / 1e6,
-            "jitter_mean_abs_delta": jitter_ns(&arrivals.latencies) as f64 / 1e6,
+            "jitter_mean_abs_delta": jitter_ns(&arrivals.per_flow) as f64 / 1e6,
         },
         "throughput_bytes_per_s": bytes as f64 / secs,
         "process": {
             "rss_kb_before": rss_before.as_ref().map(|s| s.0),
-            "rss_kb_peak": peak_rss.load(Ordering::Relaxed),
+            "rss_kb_peak": Some(peak_rss.load(Ordering::Relaxed)).filter(|v| *v > 0),
             "rss_kb_after": rss_after.as_ref().map(|s| s.0),
             "cpu_time_before": rss_before.map(|s| s.1),
             "cpu_time_after": rss_after.map(|s| s.1),

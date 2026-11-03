@@ -64,12 +64,15 @@ async fn run(relay_only: bool) -> Result<()> {
     let conn = access.connect(addr, ALPN).await?;
     if !relay_only {
         // Direct is not instant: wait for holepunching to select an IP path.
-        for _ in 0..100 {
-            if conn.paths().iter().any(|p| p.is_ip() && p.is_selected()) {
-                break;
-            }
+        let waited = std::time::Instant::now();
+        while !conn.paths().iter().any(|p| p.is_ip() && p.is_selected()) {
+            anyhow::ensure!(
+                waited.elapsed() < Duration::from_secs(10),
+                "direct path not selected within 10 s"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        println!("direct path selected after {:?}", waited.elapsed());
     }
     let limit = conn.max_datagram_size();
     println!(

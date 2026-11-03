@@ -107,15 +107,26 @@ Not covered, by design: loss, delay and congestion are injected outside the proc
 
 ### Harness self-check (not benchmark results)
 
-Loopback, one run each, only to show the harness works:
+Loopback, macOS, one run each, head after review fixes. Raw JSON of the four runs: `issue-73-harness-selfcheck.jsonl` (one object per line, in the order below). Smoke runs only: they show the harness works and decide nothing.
 
 | Run | Result |
 |---|---|
-| relay, datagram, payload = limit (1162), 4 flows × 100 | 400/400 received, no E-violations |
-| direct, datagram, payload = limit+1 (1415 vs limit 1414), 2 × 20 | 40 refused `TooLarge`, 0 sent, 0 delivered |
-| direct, datagram, payload = limit (1414), 10 × 100 | 1000/1000 received, no E-violations |
-| relay, stream, 512 B, 4 × 100 | 400/400 received |
+| relay, datagram, payload = limit (1162), 4 flows x 100 | 400/400 received, E1/E2/E4 = 0 |
+| direct, datagram, payload = limit+1 (1415 vs 1414), 2 x 20 | 40 refused `TooLarge`, 0 sent, 0 delivered |
+| direct, datagram, payload = limit (1414), 10 x 100 | 1000/1000 received, E1/E2/E4 = 0 |
+| relay, stream, 512 B, 4 x 100 | 400/400 received, E1/E2/E4 = 0 |
 
-Observation to investigate: the relay datagram limit was 1162 in one connection and 1288 in another. The limit is therefore not a constant per path kind, which supports the dynamic limit but needs the benchmark to record it per run.
+Observations:
 
-An earlier harness version hung when a sender sent nothing (all oversize); the receiver now stops when senders are done.
+- The datagram limit is not fixed within a connection. In the first run the path stayed on the relay, yet the limit read 1162 before and 1414 after the run (the stream run: 1288 to 1414). The limit grows while the connection warms up (path MTU discovery is the probable cause; not verified here). A payload chosen as `limit` at start can therefore sit below the limit later, and any fixed limit would be wrong in both directions. Benchmark runs must record the limit before and after, and should wait for it to settle or state that they did not.
+- In the probe, the direct path was selected 110 ms after connect on loopback. Real networks will take longer; the harness waits up to 10 s.
+- An earlier harness version hung when a sender sent nothing (all oversize); receivers now stop when senders are done.
+
+### Known limits of the harness
+
+- `lost` counts every datagram that did not arrive. `send_datagram` returning `Ok` can still drop locally when the send buffer is full, so local queue drops and network loss are not separated.
+- E3 is only sampled through process RSS (`ps`, Unix only, both endpoints in one process). It does not prove bounded memory.
+- Run end is decided by `--idle-end-ms` (default 2000). With injected delay near or above it, late datagrams are counted lost; raise it.
+- Reordering is counted per flow by sequence; a duplicate is counted only as duplicated.
+- Jitter is the mean absolute difference between consecutive arrivals of the same flow.
+- Loss, delay, congestion and mid-run path migration are not exercised: the current environment cannot inject network impairment. Those rows of the matrix stay NOT RUN and block the decision on #73.
