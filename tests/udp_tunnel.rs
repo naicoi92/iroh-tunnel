@@ -28,7 +28,9 @@ struct UdpTunnel {
     target: tokio::task::JoinHandle<()>,
     /// Source endpoint of every datagram the target received, in order.
     target_sources: Arc<Mutex<Vec<SocketAddr>>>,
-    _cfg: tempfile::TempDir,
+    relay_url: String,
+    serve_id: String,
+    cfg: tempfile::TempDir,
     _relay: Box<dyn std::any::Any>,
 }
 
@@ -116,9 +118,51 @@ port = {port}
             roles: vec![serve, access],
             target,
             target_sources,
-            _cfg: cfg,
+            relay_url,
+            serve_id: serve_key.public().to_string(),
+            cfg,
             _relay: Box::new(relay),
         })
+    }
+
+    /// Start a second Access peer (own identity) for the same service and
+    /// return the address its clients send to.
+    async fn add_access_peer(&mut self, tag: &str) -> Result<SocketAddr> {
+        let probe = UdpSocket::bind("127.0.0.1:0").await?;
+        let addr = probe.local_addr()?;
+        drop(probe);
+        let key = SecretKey::generate();
+        let path = self.cfg.path().join(format!("access-{tag}.toml"));
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[node]
+secret_key = "{key}"
+relay_urls = ["{relay}"]
+
+[[services]]
+name = "dns"
+node_id = "{serve_id}"
+protocol = "udp"
+host = "127.0.0.1"
+port = {port}
+"#,
+                key = encode_secret_key(&key),
+                relay = self.relay_url,
+                serve_id = self.serve_id,
+                port = addr.port(),
+            ),
+        )?;
+        let (tx, rx) = oneshot::channel::<()>();
+        self.stop.push(tx);
+        self.roles.push(tokio::spawn(async move {
+            iroh_tunnel::access::run_with_shutdown(&path, async move {
+                let _ = rx.await;
+            })
+            .await
+        }));
+        Ok(addr)
     }
 
     /// Send `payload` from `client` and wait for the reply, retrying the send
@@ -274,6 +318,57 @@ async fn each_flow_has_its_own_stable_upstream_endpoint() -> Result<()> {
         a_sources, b_sources,
         "each flow needs its own upstream socket"
     );
+
+    tunnel.shutdown().await
+}
+
+/// Like `UdpTunnel::roundtrip`, for a client of another Access peer.
+async fn roundtrip_via(access: SocketAddr, client: &UdpSocket, payload: &[u8]) -> Result<Vec<u8>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut buf = vec![0u8; 65535];
+    loop {
+        client.send_to(payload, access).await?;
+        match tokio::time::timeout(Duration::from_millis(500), client.recv_from(&mut buf)).await {
+            Ok(Ok((n, _))) => return Ok(buf[..n].to_vec()),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) if tokio::time::Instant::now() < deadline => continue,
+            Err(_) => anyhow::bail!("no reply through the tunnel within 30s"),
+        }
+    }
+}
+
+/// #88 clarification: clients on two Access peers sharing one Serve are never
+/// cross-delivered, even though both peers number their first flow 0 (flow
+/// identifiers are scoped to a peer's session, not global).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clients_on_two_access_peers_are_not_cross_delivered() -> Result<()> {
+    let mut tunnel = UdpTunnel::start().await?;
+    let second = tunnel.add_access_peer("second").await?;
+    let first = tunnel.access_addr;
+    let a = UdpSocket::bind("127.0.0.1:0").await?;
+    let b = UdpSocket::bind("127.0.0.1:0").await?;
+
+    roundtrip_via(first, &a, b"warm-a").await?;
+    roundtrip_via(second, &b, b"warm-b").await?;
+    drain(&a).await;
+    drain(&b).await;
+
+    for i in 0..5u8 {
+        a.send_to(&[b'a', i], first).await?;
+        b.send_to(&[b'b', i], second).await?;
+    }
+    let mut got_a = Vec::new();
+    let mut got_b = Vec::new();
+    for _ in 0..5 {
+        got_a.push(recv_one(&a).await?);
+        got_b.push(recv_one(&b).await?);
+    }
+    got_a.sort();
+    got_b.sort();
+    let want_a: Vec<Vec<u8>> = (0..5u8).map(|i| vec![b'a', i]).collect();
+    let want_b: Vec<Vec<u8>> = (0..5u8).map(|i| vec![b'b', i]).collect();
+    assert_eq!(got_a, want_a, "client of the first peer got foreign data");
+    assert_eq!(got_b, want_b, "client of the second peer got foreign data");
 
     tunnel.shutdown().await
 }
