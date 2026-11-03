@@ -405,7 +405,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Client/target packet payload/length/recipient traces, public peer IDs and path proof. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — UDP design/benchmark/implementation deferred; native #78 awaits #71/#73/#74 contract.
+**Execution:** BLOCKED — implementation pending #88; contract in `udp-integration-contract.md` (#78).
 
 <a id="udp-socket-01"></a>
 ### Case UDP-SOCKET-01
@@ -422,7 +422,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Socket/packet observations, actual selected connection strategy and exact documentation excerpts. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #78 transport/lifecycle contract unresolved and UDP work deferred; confirmed socket baseline not reopened.
+**Execution:** BLOCKED — implementation pending #88; contract in `udp-integration-contract.md` (#78); confirmed socket baseline not reopened.
 
 <a id="udp-lifecycle-01"></a>
 ### Case UDP-LIFECYCLE-01
@@ -439,7 +439,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved policy, old/new flow and socket trace, recipient observations and risk documentation. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — #71 decided lifecycle semantics (spec UDP-04: connected-socket source filtering, session-bound flows, quarantine); await #73/#74/#78 numeric values; UDP deferred.
+**Execution:** BLOCKED — #71 decided lifecycle semantics (spec UDP-04: connected-socket source filtering, session-bound flows, quarantine); numeric defaults set in UDP-06 (untested); implementation pending #89.
 
 <a id="udp-limit-01"></a>
 ### Case UDP-LIMIT-01
@@ -450,15 +450,15 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Prerequisites:** Approved #73/#74/#78 transport, payload/resource/cleanup policy; instrumentation.
 
-**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected (the proposed UDP-05 principle excludes it unless the owner overrides it) inject fragment loss/duplicates/malicious reassembly.
+**Action:** Send around measured size limit; exhaust flows/sockets/queues with churn/slow consumers; if fragmentation selected (UDP-05 excludes it unless the owner overrides it) inject fragment loss/duplicates/malicious reassembly.
 
 **Expected observable outcome:** Documented bounded size/admission/drop/cleanup behavior matches approved values; never present partial datagram as intact. No numeric bound, fragment scheme or drop policy approved by this catalog.
 
 **Evidence/platform:** Approved limits, delivered/drop counters, memory/handles/queues and cleanup observations. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — #73 proposes principles (spec UDP-05: no fragmentation, no stream fallback, drop and count oversized, fail fast without datagram support) and awaits benchmark and owner approval; await #74/#78 resource decisions and measured bounds; UDP deferred.
+**Execution:** BLOCKED — policy decided (UDP-05, UDP-06; contract in `udp-integration-contract.md`); implementation pending #89. Defaults are untested estimates.
 
-**#74 proposal (Proposed, pending owner approval on #74; spec UDP-06):** loopback cases to run in CI: (1) service flow cap, (2) per-peer flow cap, (3) idle expiry, quarantine, then reuse, (4) late reply to the quarantine sink is dropped and counted, (5) slow-consumer isolation, (6) datagram limit plus 1 dropped and counted, (7) no flow survives a new session incarnation, (8) bind or descriptor exhaustion refuses the flow without crashing, (9) interleaved replies are never cross-delivered. These do not change the BLOCKED status above, and direct/relay and per-platform runs stay with #78/#97. NOT RUN, recorded as known risks: a planned `tc netem` impairment scenario, limit shrink on path migration, and bounded memory over a long run (E3). Numeric defaults are untested estimates.
+**#74 decision (Confirmed, spec UDP-06; defaults untested):** loopback cases to run in CI: (1) service flow cap, (2) per-peer flow cap, (3) idle expiry, quarantine, then reuse, (4) late reply to the quarantine sink is dropped and counted, (5) slow-consumer isolation, (6) datagram limit plus 1 dropped and counted, (7) no flow survives a new session incarnation, (8) bind or descriptor exhaustion refuses the flow without crashing, (9) interleaved replies are never cross-delivered. These do not change the BLOCKED status above, and direct/relay and per-platform runs stay with #78/#97. NOT RUN, recorded as known risks: a planned `tc netem` impairment scenario, limit shrink on path migration, and bounded memory over a long run (E3). Numeric defaults are untested estimates.
 
 <a id="udp-path-01"></a>
 ### Case UDP-PATH-01
@@ -475,7 +475,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Path telemetry/packet evidence, impairment commands and raw benchmark data. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — UDP deferred; #71/#73/#74/#78 and selected-version #101 evidence required for final run.
+**Execution:** BLOCKED — needs an impairment-capable direct and forced-relay environment and the implementation (#88, #89); the policy is decided.
 
 <a id="sm-scope-01"></a>
 ### Case SM-SCOPE-01
