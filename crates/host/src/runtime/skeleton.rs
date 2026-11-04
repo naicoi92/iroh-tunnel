@@ -139,10 +139,8 @@ where
 /// owned shutdown, with the role's run-loop supplied as a parameter.
 ///
 /// This is the single definition site of the orchestration; the plain
-/// [`run_with_shutdown`] wraps it with the engine's stock role loop, and
-/// the serve role's state-dir injection seam
-/// (`serve::run_with_shutdown_with_state_dir`) wraps it with a closure that
-/// carries the injected dir — neither duplicates the skeleton.
+/// `run_foreground` and `testing::run_unowned` both reach it through
+/// [`run_role`] — neither duplicates the skeleton.
 ///
 /// Production callers wrap this with [`shutdown::wait_for_signal`]; tests
 /// inject a `oneshot::Receiver` so the role can be driven without sending
@@ -293,6 +291,64 @@ mod tests {
             assert!(
                 leftovers.is_empty(),
                 "no status file may exist: {leftovers:?}"
+            );
+        });
+        println!("IROH_CHILD_BODY_RAN {NAME}");
+    }
+
+    /// A stop requested before the role is ready exits cleanly: the run
+    /// returns `Ok`, the claim is released and no status file is left. Child
+    /// process with an isolated `HOME`, like the ready-hook test above.
+    #[test]
+    fn stop_before_ready_releases_claim_and_leaves_no_status_file() {
+        const CHILD_MARKER: &str = "IROH_TUNNEL_STOP_BEFORE_READY_CHILD";
+        const NAME: &str =
+            "runtime::skeleton::tests::stop_before_ready_releases_claim_and_leaves_no_status_file";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env(CHILD_MARKER, "1")
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "child failed:\n{stdout}\n{stderr}");
+            assert!(
+                stdout.contains(&format!("IROH_CHILD_BODY_RAN {NAME}")),
+                "child did not run the test body (0 tests matched?):\n{stdout}\n{stderr}"
+            );
+            return;
+        }
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let claim = crate::ownership::claim(Role::Serve).unwrap();
+            let on_ready: iroh_tunnel_engine::OnReady = Box::new(|_| Ok(()));
+            let hooks = file_status_hooks::<ServeStrategy>(on_ready, Some(state_dir.path()));
+            run_config::<ServeStrategy, _, _>(
+                crate::config::ServeConfig::default(),
+                Some(claim),
+                RunContext::new(),
+                Some(state_dir.path()),
+                hooks,
+                |ep, settings, ctx, hooks| {
+                    ServeStrategy::run(ep, settings, std::future::ready(()), ctx, hooks)
+                },
+            )
+            .await
+            .expect("a stop before ready is a clean exit");
+
+            let leftovers: Vec<_> = std::fs::read_dir(state_dir.path()).unwrap().collect();
+            assert!(
+                leftovers.is_empty(),
+                "no status file may exist: {leftovers:?}"
+            );
+            assert!(
+                crate::ownership::claim(Role::Serve).is_ok(),
+                "claim must be released after the stop"
             );
         });
         println!("IROH_CHILD_BODY_RAN {NAME}");

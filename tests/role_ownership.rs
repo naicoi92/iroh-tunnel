@@ -357,53 +357,6 @@ async fn graceful_stop_removes_the_owner_record_but_keeps_the_lock_file() -> Res
     Ok(())
 }
 
-/// Review Focus 5: a stop that lands after the role is claimed but before
-/// `NodeId:` leaves no owner record or status file and does not block a
-/// restart.
-#[tokio::test]
-#[ignore = "no deterministic startup hold: endpoint bind does not wait for the relay, so an unreachable relay cannot keep startup before `NodeId:`; no test-utils seam exists (controller ruling R1 forbids a new one)"]
-async fn stop_before_ready_releases_claim_and_leaves_no_status_file() -> Result<()> {
-    let (relay, _server) = relay().await?;
-    let world = World::new()?;
-    let (key, _) = write_key(world.root.path(), "k.key")?;
-    let state = world.state("early");
-    let dir = world.home().join(".local/state/iroh-tunnel");
-    // Unreachable relay: startup is not expected to complete on its own.
-    let mut process = spawn(
-        world.command(SERVE, None, &state),
-        &serve_args("https://10.255.255.1:4433", &key),
-    )?;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !dir.join("serve.owner.json").exists() {
-        anyhow::ensure!(Instant::now() < deadline, "role never claimed its scope");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    anyhow::ensure!(
-        !state.join("serve-status.json").exists(),
-        "role was already ready"
-    );
-    let pid = process.0.id().to_string();
-    assert!(Command::new("kill")
-        .args(["-TERM", &pid])
-        .status()?
-        .success());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        if let Some(status) = process.0.try_wait()? {
-            break status;
-        }
-        anyhow::ensure!(Instant::now() < deadline, "role did not stop on SIGTERM");
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    assert_eq!(status.code(), Some(0));
-    assert!(!state.join("serve-status.json").exists(), "status left");
-    assert!(!dir.join("serve.owner.json").exists(), "owner record left");
-
-    // A second start is not refused and reaches running.
-    let _again = start_serve(&world, SERVE, None, &relay, &key, &world.state("again"))?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn kill_nine_leftover_neither_blocks_restart_nor_reads_as_live() -> Result<()> {
     let (relay, _server) = relay().await?;
