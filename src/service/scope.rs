@@ -6,8 +6,6 @@
 //!   the intended arguments and absolute paths. The process never elevates
 //!   itself and never falls back to a user service.
 
-use std::io::{BufRead, Write};
-
 use anyhow::Result;
 
 use super::ServiceScope;
@@ -118,39 +116,6 @@ pub fn decide_install_scope(requested: Option<ServiceScope>, env: Environment) -
     }
 }
 
-/// Decide the install scope, prompting when [`decide_install_scope`] asks.
-///
-/// # Errors
-///
-/// [`CliError::Config`] when the prompt gets no answer or an unrecognised one:
-/// the scope is never guessed.
-pub fn choose_install_scope(
-    requested: Option<ServiceScope>,
-    env: Environment,
-    input: &mut impl BufRead,
-    prompt: &mut impl Write,
-) -> Result<ServiceScope> {
-    match decide_install_scope(requested, env) {
-        ScopeDecision::Chosen(scope) => Ok(scope),
-        ScopeDecision::NeedsChoice => {
-            write!(
-                prompt,
-                "Install as a `user` service (no privileges, runs for your account) \
-                 or a `system` service (needs sudo/root)? [user]: "
-            )?;
-            prompt.flush()?;
-            let mut answer = String::new();
-            if input.read_line(&mut answer)? == 0 {
-                return Err(CliError::Config(
-                    "no answer to the scope prompt; pass --user or --system".into(),
-                )
-                .into());
-            }
-            parse_scope_answer(&answer)
-        }
-    }
-}
-
 /// Map a scope-prompt answer to a scope; empty means user.
 ///
 /// # Errors
@@ -208,26 +173,11 @@ fn shell_quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     const USER_AT_TTY: Environment = Environment {
         elevated: false,
         can_answer: true,
     };
-
-    fn choose(
-        requested: Option<ServiceScope>,
-        env: Environment,
-        answer: &str,
-    ) -> Result<ServiceScope> {
-        let mut prompt = Vec::new();
-        choose_install_scope(
-            requested,
-            env,
-            &mut Cursor::new(answer.to_owned()),
-            &mut prompt,
-        )
-    }
 
     #[test]
     fn install_scope_needs_choice_when_caller_can_answer() {
@@ -275,44 +225,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_scope_is_never_overridden_or_prompted() {
-        let env = USER_AT_TTY;
-        assert_eq!(
-            choose(Some(ServiceScope::System), env, "").unwrap(),
-            ServiceScope::System
-        );
-        assert_eq!(
-            choose(Some(ServiceScope::User), env, "").unwrap(),
-            ServiceScope::User
-        );
-    }
-
-    #[test]
-    fn elevated_defaults_to_system_without_a_prompt() {
-        let env = Environment {
-            elevated: true,
-            can_answer: true,
-        };
-        let mut prompt = Vec::new();
-        let scope =
-            choose_install_scope(None, env, &mut Cursor::new(String::new()), &mut prompt).unwrap();
-        assert_eq!(scope, ServiceScope::System);
-        assert!(prompt.is_empty(), "elevated install must not prompt");
-    }
-
-    #[test]
-    fn interactive_user_is_offered_both_scopes() {
-        let mut prompt = Vec::new();
-        let scope = choose_install_scope(
-            None,
-            USER_AT_TTY,
-            &mut Cursor::new("system\n".to_owned()),
-            &mut prompt,
-        )
-        .unwrap();
-        let text = String::from_utf8(prompt).unwrap();
-        assert_eq!(scope, ServiceScope::System);
-        assert!(text.contains("user") && text.contains("system"), "{text}");
+    fn explicit_scope_is_never_overridden_or_asked() {
+        for scope in [ServiceScope::System, ServiceScope::User] {
+            assert_eq!(
+                decide_install_scope(Some(scope), USER_AT_TTY),
+                ScopeDecision::Chosen(scope)
+            );
+        }
     }
 
     #[test]
@@ -324,32 +243,17 @@ mod tests {
             ("s\n", ServiceScope::System),
             (" SYSTEM \n", ServiceScope::System),
         ] {
-            assert_eq!(
-                choose(None, USER_AT_TTY, answer).unwrap(),
-                expected,
-                "{answer:?}"
-            );
+            assert_eq!(parse_scope_answer(answer).unwrap(), expected, "{answer:?}");
         }
     }
 
     #[test]
-    fn unknown_or_missing_answer_is_an_error_not_a_guess() {
-        for answer in ["maybe\n", ""] {
-            let err = choose(None, USER_AT_TTY, answer).unwrap_err();
-            assert!(
-                matches!(err.downcast_ref::<CliError>(), Some(CliError::Config(_))),
-                "{answer:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn non_interactive_unprivileged_gets_the_user_scope() {
-        let env = Environment {
-            elevated: false,
-            can_answer: false,
-        };
-        assert_eq!(choose(None, env, "").unwrap(), ServiceScope::User);
+    fn unknown_answer_is_a_config_error_not_a_guess() {
+        let err = parse_scope_answer("maybe\n").unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<CliError>(),
+            Some(CliError::Config(_))
+        ));
     }
 
     #[test]

@@ -7,16 +7,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::{
-    AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ScopeArgs, ServeCli, ServiceAction,
-};
+use crate::cli::{AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ServeCli};
 use crate::config_cmd;
 use crate::error::CliError;
 use crate::shutdown;
 use crate::status::{self, StatusRole};
 use crate::status_cmd;
 use crate::update;
-use crate::{access, cli, serve, service};
+use crate::{access, cli, serve};
 use anyhow::Context as _;
 use clap::Parser;
 
@@ -291,7 +289,7 @@ async fn dispatch_role_cmd(
             ))
             .into())
         }
-        RoleCmd::Service { action } => dispatch_service(role, action),
+        RoleCmd::Service { action } => crate::cli_service::dispatch(status_role, action),
     }
 }
 
@@ -308,23 +306,6 @@ fn role_named(name: &str) -> anyhow::Result<StatusRole> {
         "access" => Ok(StatusRole::Access),
         other => anyhow::bail!("unknown role {other:?}"),
     }
-}
-
-/// Make `path` absolute for embedding in a system service file.
-///
-/// Installed services run with a different working directory, so a relative
-/// `--config` path must be resolved against the current CWD before it is
-/// written into the unit/plist. Falls back to joining the CWD if the path
-/// can't be canonicalized (e.g. it doesn't exist yet).
-fn absolutize_config_path(path: &Path) -> anyhow::Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    if let Ok(abs) = std::fs::canonicalize(path) {
-        return Ok(abs);
-    }
-    let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    Ok(cwd.join(path))
 }
 
 fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()> {
@@ -345,234 +326,6 @@ fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()>
         ConfigAction::Edit { config } => config_cmd::edit_cli(role, config.as_deref()),
         ConfigAction::Path { config } => config_cmd::path(role, config.as_deref()),
     }
-}
-
-/// A service call for the CLI: native output goes straight to the terminal and
-/// notes are printed as they happen.
-fn cli_service_call(notes: &mut dyn FnMut(&service::ServiceNote)) -> service::ServiceCall<'_> {
-    service::ServiceCall {
-        output: service::OutputMode::Inherit,
-        notes,
-    }
-}
-
-fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
-    use service::scope::{self, Environment};
-    use service::ServiceScope;
-
-    let env = Environment::detect();
-    let explicit = |args: &ScopeArgs| match (args.user, args.system) {
-        (_, true) => Some(ServiceScope::System),
-        (true, _) => Some(ServiceScope::User),
-        _ => None,
-    };
-    let flag = |scope: ServiceScope| match scope {
-        ServiceScope::System => "--system",
-        ServiceScope::User => "--user",
-    };
-    // Verbs on an existing service: no prompt, and the scope follows privilege
-    // when it is not given.
-    let existing = |verb: &str, args: &ScopeArgs| -> anyhow::Result<ServiceScope> {
-        let scope = explicit(args).unwrap_or_else(|| scope::default_scope(env.elevated));
-        scope::ensure_supported(scope)?;
-        let rerun = ["iroh-tunnel", role, "service", verb, flag(scope)].map(str::to_owned);
-        scope::ensure_privilege(scope, env.elevated, &rerun)?;
-        Ok(scope)
-    };
-    match action {
-        ServiceAction::Install { config, scope } => {
-            // Windows has only the user scope, so there is nothing to ask.
-            let requested = explicit(&scope).or(cfg!(windows).then_some(ServiceScope::User));
-            let scope = scope::choose_install_scope(
-                requested,
-                env,
-                &mut std::io::stdin().lock(),
-                &mut std::io::stderr(),
-            )?;
-            scope::ensure_supported(scope)?;
-            if scope == ServiceScope::System {
-                return install_system(role, config, env);
-            }
-            // Persist absolute paths: the installed service runs with a
-            // different CWD and home, so nothing may stay relative (SM-02).
-            let config = absolutize_config_path(&resolve_config_path(role, config)?)?;
-            let state = pinned_state_dir()?;
-            let rerun: Vec<String> = [
-                "iroh-tunnel",
-                role,
-                "service",
-                "install",
-                flag(scope),
-                "--config",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .chain([config.to_string_lossy().into_owned()])
-            .collect();
-            scope::ensure_privilege(scope, env.elevated, &rerun)?;
-            check_installable_config(role, &config)?;
-            service::install(
-                role,
-                scope,
-                &config,
-                &state,
-                None,
-                &mut cli_service_call(&mut crate::render::print_service_note),
-            )
-        }
-        ServiceAction::Uninstall { scope } => service::uninstall(
-            role,
-            existing("uninstall", &scope)?,
-            &mut cli_service_call(&mut crate::render::print_service_note),
-        ),
-        ServiceAction::Start { scope } => {
-            let scope = existing("start", &scope)?;
-            // Refuse here too: the unit would otherwise start and exit
-            // after systemd/launchd already reported success (RO-03).
-            crate::ownership::ensure_not_running(role_named(role)?)?;
-            service::start(
-                role,
-                scope,
-                &mut cli_service_call(&mut crate::render::print_service_note),
-            )
-        }
-        ServiceAction::Stop { scope } => service::stop(
-            role,
-            existing("stop", &scope)?,
-            &mut cli_service_call(&mut crate::render::print_service_note),
-        ),
-        ServiceAction::Restart { scope } => service::restart(
-            role,
-            existing("restart", &scope)?,
-            &mut cli_service_call(&mut crate::render::print_service_note),
-        ),
-        ServiceAction::Status { scope } => service::status(
-            role,
-            existing("status", &scope)?,
-            &mut cli_service_call(&mut crate::render::print_service_note),
-        )
-        .map(|_| ()),
-    }
-}
-
-/// Install a system service for the invoking user's files (SM-01, SM-02,
-/// SM-04). Unprivileged callers are refused with rerun guidance; an elevated
-/// caller must name a real user, never root's own home.
-#[cfg(unix)]
-fn install_system(
-    role: &str,
-    config: Option<PathBuf>,
-    env: service::scope::Environment,
-) -> anyhow::Result<()> {
-    use service::{system, trust, ServiceScope};
-
-    if !env.elevated {
-        // Same guidance as before: absolute path, no elevation, no fallback.
-        let config = absolutize_config_path(&resolve_config_path(role, config)?)?;
-        let rerun: Vec<String> = [
-            "iroh-tunnel",
-            role,
-            "service",
-            "install",
-            "--system",
-            "--config",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .chain([config.to_string_lossy().into_owned()])
-        .collect();
-        return service::scope::ensure_privilege(ServiceScope::System, false, &rerun);
-    }
-
-    let sudo_user = std::env::var("SUDO_USER").ok();
-    let state_override = std::env::var_os("IROH_TUNNEL_STATE_DIR")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from);
-    let config_abs = config.as_deref().map(absolutize_config_path).transpose()?;
-    let mut input = std::io::stdin().lock();
-    let mut prompt = std::io::stderr();
-    let target = system::resolve_target(
-        &system::Request {
-            role,
-            config: config_abs.as_deref(),
-            state: state_override.as_deref(),
-            sudo_user: sudo_user.as_deref(),
-            interactive: env.can_answer,
-        },
-        &mut input,
-        &mut prompt,
-    )?;
-    // Fail closed before registering anything root would later refuse to run.
-    trust::verify_dir(&target.state, target.account.uid)?;
-    let text = trust::read_verified(&target.config, target.account.uid)?;
-    check_installable_text(role, &text, &target.config)?;
-    system::confirm_retarget(
-        service::existing_registration(role, ServiceScope::System).as_deref(),
-        &target,
-        env.can_answer,
-        &mut input,
-        &mut prompt,
-    )?;
-    service::install(
-        role,
-        ServiceScope::System,
-        &target.config,
-        &target.state,
-        Some(&target.pin()),
-        &mut cli_service_call(&mut crate::render::print_service_note),
-    )
-}
-
-#[cfg(not(unix))]
-fn install_system(
-    _role: &str,
-    _config: Option<PathBuf>,
-    _env: service::scope::Environment,
-) -> anyhow::Result<()> {
-    service::scope::ensure_supported(service::ServiceScope::System)
-}
-
-/// The state directory the installed service will write to, as an absolute
-/// path: `IROH_TUNNEL_STATE_DIR` when set, otherwise the platform default.
-fn pinned_state_dir() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os("IROH_TUNNEL_STATE_DIR").filter(|d| !d.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => crate::paths::default_state_dir()?,
-    };
-    std::path::absolute(&dir)
-        .with_context(|| format!("cannot make state directory {} absolute", dir.display()))
-}
-
-/// Refuse to register a service that could only fail at start: the pinned
-/// config must exist and be valid for the role.
-fn check_installable_config(role: &str, config: &Path) -> anyhow::Result<()> {
-    let loaded = match role {
-        "serve" => crate::config::ServeConfig::load(config).map(drop),
-        _ => crate::config::AccessConfig::load(config).map(drop),
-    };
-    installable(role, config, loaded)
-}
-
-/// [`check_installable_config`] for text already read from a verified handle.
-#[cfg(unix)]
-fn check_installable_text(role: &str, text: &str, config: &Path) -> anyhow::Result<()> {
-    use crate::config::RoleDoc;
-    let loaded = match role {
-        "serve" => crate::config::ServeConfig::from_toml(text, config).map(drop),
-        _ => crate::config::AccessConfig::from_toml(text, config).map(drop),
-    };
-    installable(role, config, loaded)
-}
-
-fn installable(role: &str, config: &Path, loaded: anyhow::Result<()>) -> anyhow::Result<()> {
-    loaded.map_err(|e| {
-        CliError::Config(format!(
-            "cannot install the service: {e:#}. Create or fix the config first \
-             (`iroh-tunnel {role} config keygen --config {path}`), or pass --config",
-            path = config.display()
-        ))
-        .into()
-    })
 }
 
 /// Read the persistent secret key supplied with `-k/--key-file`.

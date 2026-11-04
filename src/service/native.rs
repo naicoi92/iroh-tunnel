@@ -10,6 +10,8 @@ use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 
+use super::AppliedEffect;
+
 /// How a native command's output is delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -118,17 +120,36 @@ pub(crate) type Runner<'a> = dyn FnMut(&mut Command, OutputMode) -> io::Result<N
 pub(crate) struct Native<'a> {
     mode: OutputMode,
     runner: &'a mut Runner<'a>,
+    applied: Vec<AppliedEffect>,
+    outputs: Vec<NativeOutput>,
 }
 
 impl<'a> Native<'a> {
     pub(crate) fn new(mode: OutputMode, runner: &'a mut Runner<'a>) -> Self {
-        Self { mode, runner }
+        Self {
+            mode,
+            runner,
+            applied: Vec::new(),
+            outputs: Vec::new(),
+        }
     }
 
     /// Run `command` in the caller's mode: inherited for the CLI, captured
-    /// otherwise.
+    /// otherwise. The output is also kept for the operation's report.
     pub(crate) fn run(&mut self, command: &mut Command) -> io::Result<NativeOutput> {
-        (self.runner)(command, self.mode)
+        let output = (self.runner)(command, self.mode)?;
+        self.outputs.push(output.clone());
+        Ok(output)
+    }
+
+    /// Record that a change reached the host, at the point it happened.
+    pub(crate) fn applied(&mut self, effect: AppliedEffect) {
+        self.applied.push(effect);
+    }
+
+    /// Hand back the effects and command outputs recorded so far.
+    pub(crate) fn finish(self) -> (Vec<AppliedEffect>, Vec<NativeOutput>) {
+        (self.applied, self.outputs)
     }
 
     /// Run `command` and always capture, whatever the caller's mode. For

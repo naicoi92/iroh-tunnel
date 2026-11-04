@@ -6,7 +6,8 @@
 
 use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::pin::Pin;
-use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
+use super::AppliedEffect;
+use super::{instance_suffix, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -141,19 +142,21 @@ pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> 
     super::read_registration(&unit_path(role, scope).ok()?)
 }
 
+#[allow(clippy::too_many_arguments)] // one registration's inputs
 pub(super) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
     scope: ServiceScope,
+    binary: &Path,
     config: &Path,
     state: &Path,
     pin: Option<&Pin>,
 ) -> Result<()> {
-    let binary = resolve_binary()?;
-    let unit = format_unit_with(role, &binary, config, state, &RestartPolicy::DEFAULT, pin);
+    let unit = format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT, pin);
     let path = unit_path(role, scope)?;
     write_registration(&path, &unit)?;
+    native.applied(AppliedEffect::RegistrationWritten(path.clone()));
 
     enable_and_start(native, notes, scope, &unit_name(role), &path)
 }
@@ -168,9 +171,11 @@ fn enable_and_start(
 ) -> Result<()> {
     run_systemctl(native, scope, &["daemon-reload"])?;
     run_systemctl(native, scope, &["enable", name])?;
+    native.applied(AppliedEffect::Enabled);
     // `restart`, not `enable --now`: a re-install over a running unit must pick
     // up the new registration instead of leaving the old process running.
     run_systemctl(native, scope, &["restart", name])?;
+    native.applied(AppliedEffect::Started);
     notes(&ServiceNote::Installed {
         name: name.to_owned(),
         at: InstalledAt::Path(path.to_owned()),
@@ -187,11 +192,16 @@ pub(super) fn uninstall(
     let name = unit_name(role);
     let path = unit_path(role, scope)?;
     // Best-effort stop/disable: the unit may not be loaded yet.
-    let _ = run_systemctl(native, scope, &["stop", &name]);
-    let _ = run_systemctl(native, scope, &["disable", &name]);
+    if run_systemctl(native, scope, &["stop", &name]).is_ok() {
+        native.applied(AppliedEffect::Stopped);
+    }
+    if run_systemctl(native, scope, &["disable", &name]).is_ok() {
+        native.applied(AppliedEffect::Disabled);
+    }
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("failed to remove {}", path.display()))?;
+        native.applied(AppliedEffect::RegistrationRemoved(path));
     }
     // Refresh systemd's view of the now-removed unit. A failure here leaves
     // stale state, so surface it rather than reporting success silently.
@@ -201,7 +211,9 @@ pub(super) fn uninstall(
 }
 
 pub(super) fn start(native: &mut Native, role: &str, scope: ServiceScope) -> Result<()> {
-    run_systemctl(native, scope, &["start", &unit_name(role)])
+    run_systemctl(native, scope, &["start", &unit_name(role)])?;
+    native.applied(AppliedEffect::Started);
+    Ok(())
 }
 
 pub(super) fn stop(
@@ -210,7 +222,9 @@ pub(super) fn stop(
     role: &str,
     scope: ServiceScope,
 ) -> Result<()> {
-    run_systemctl(native, scope, &["stop", &unit_name(role)])
+    run_systemctl(native, scope, &["stop", &unit_name(role)])?;
+    native.applied(AppliedEffect::Stopped);
+    Ok(())
 }
 
 pub(super) fn restart(
@@ -219,7 +233,9 @@ pub(super) fn restart(
     role: &str,
     scope: ServiceScope,
 ) -> Result<()> {
-    run_systemctl(native, scope, &["restart", &unit_name(role)])
+    run_systemctl(native, scope, &["restart", &unit_name(role)])?;
+    native.applied(AppliedEffect::Started);
+    Ok(())
 }
 
 pub(super) fn status(

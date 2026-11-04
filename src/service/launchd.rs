@@ -16,7 +16,8 @@
 
 use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::pin::Pin;
-use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
+use super::AppliedEffect;
+use super::{instance_suffix, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -163,19 +164,21 @@ pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> 
     super::read_registration(&plist_path(role, scope).ok()?)
 }
 
+#[allow(clippy::too_many_arguments)] // one registration's inputs
 pub(super) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
     scope: ServiceScope,
+    binary: &Path,
     config: &Path,
     state: &Path,
     pin: Option<&Pin>,
 ) -> Result<()> {
-    let binary = resolve_binary()?;
-    let plist = format_plist_with(role, &binary, config, state, &RestartPolicy::DEFAULT, pin);
+    let plist = format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT, pin);
     let path = plist_path(role, scope)?;
     write_registration(&path, &plist)?;
+    native.applied(AppliedEffect::RegistrationWritten(path.clone()));
     load(native, notes, role, scope, &path)?;
     notes(&ServiceNote::Installed {
         name: label(role),
@@ -216,6 +219,9 @@ fn load(
         });
         return Err(e).context("failed to load service into launchd");
     }
+    // `bootstrap` loads the job and RunAtLoad starts it.
+    native.applied(AppliedEffect::Enabled);
+    native.applied(AppliedEffect::Started);
     Ok(())
 }
 
@@ -227,10 +233,14 @@ pub(super) fn uninstall(
 ) -> Result<()> {
     let path = plist_path(role, scope)?;
     // Best-effort bootout: the job may not be loaded.
-    let _ = run_launchctl(native, &["bootout", &service_target(role, scope)]);
+    if run_launchctl(native, &["bootout", &service_target(role, scope)]).is_ok() {
+        native.applied(AppliedEffect::Stopped);
+        native.applied(AppliedEffect::Disabled);
+    }
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("failed to remove {}", path.display()))?;
+        native.applied(AppliedEffect::RegistrationRemoved(path));
     }
     notes(&ServiceNote::Uninstalled { name: label(role) });
     Ok(())
@@ -239,7 +249,9 @@ pub(super) fn uninstall(
 pub(super) fn start(native: &mut Native, role: &str, scope: ServiceScope) -> Result<()> {
     // `kickstart` starts the job now if stopped, or restarts it if running.
     run_launchctl(native, &["kickstart", &service_target(role, scope)])
-        .with_context(|| not_loaded_hint(role, scope))
+        .with_context(|| not_loaded_hint(role, scope))?;
+    native.applied(AppliedEffect::Started);
+    Ok(())
 }
 
 pub(super) fn stop(
@@ -264,6 +276,7 @@ pub(super) fn stop(
         .output(std::process::Command::new("launchctl").args(["kill", "SIGTERM", &target]))
         .with_context(|| format!("failed to run launchctl kill SIGTERM {target}"))?;
     if output.success() {
+        native.applied(AppliedEffect::Stopped);
         return Ok(());
     }
     // exit code 3 = "No process to signal" → already stopped, not an error.
@@ -307,7 +320,9 @@ pub(super) fn restart(
     // running (it only satisfies the "run now" condition), so a plain
     // `kickstart` would silently fail to restart a live service.
     run_launchctl(native, &["kickstart", "-k", &service_target(role, scope)])
-        .with_context(|| not_loaded_hint(role, scope))
+        .with_context(|| not_loaded_hint(role, scope))?;
+    native.applied(AppliedEffect::Started);
+    Ok(())
 }
 
 /// Hint shown when `kickstart`/`kill` fail: either the service was never

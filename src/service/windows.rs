@@ -18,7 +18,8 @@ use anyhow::{Context, Result};
 
 use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::task_xml::{encode_utf16_le, format_task_xml, task_action};
-use super::{instance_suffix, resolve_binary, RestartPolicy, ServiceScope};
+use super::AppliedEffect;
+use super::{instance_suffix, RestartPolicy, ServiceScope};
 use crate::error::CliError;
 
 /// Task name, one per role (plus the test-only instance suffix).
@@ -126,13 +127,13 @@ pub(super) fn install(
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
     scope: ServiceScope,
+    binary: &Path,
     config: &Path,
     state: &Path,
 ) -> Result<()> {
     debug_assert_eq!(scope, ServiceScope::User, "system scope is refused earlier");
-    let binary = resolve_binary()?;
     ensure_default_state(state)?;
-    let action = task_action(role, &binary, config)?;
+    let action = task_action(role, binary, config)?;
     let xml = format_task_xml(
         role,
         &current_user(native)?,
@@ -147,8 +148,10 @@ pub(super) fn install(
     // /F replaces an existing task, so re-install is idempotent.
     schtasks_ok(native, &["/Create", "/TN", &name, "/XML", &path, "/F"])
         .map_err(|e| denied_or(e, "registering the scheduled task"))?;
+    native.applied(AppliedEffect::Enabled);
     schtasks_ok(native, &["/Run", "/TN", &name])
         .context("task registered but could not be started")?;
+    native.applied(AppliedEffect::Started);
     notes(&ServiceNote::Installed {
         name,
         at: InstalledAt::WindowsTask,
@@ -217,8 +220,11 @@ pub(super) fn uninstall(
     if is_installed(native, role)? {
         // A running instance would keep going after its task is deleted. A
         // failed /End only means nothing was running; /Delete reports the rest.
-        let _ = schtasks(native, &["/End", "/TN", &name]);
+        if schtasks(native, &["/End", "/TN", &name]).is_ok_and(|o| o.success()) {
+            native.applied(AppliedEffect::Stopped);
+        }
         schtasks_ok(native, &["/Delete", "/TN", &name, "/F"])?;
+        native.applied(AppliedEffect::Disabled);
     }
     notes(&ServiceNote::Uninstalled { name });
     Ok(())
@@ -227,6 +233,7 @@ pub(super) fn uninstall(
 pub(super) fn start(native: &mut Native, role: &str, _scope: ServiceScope) -> Result<()> {
     require_installed(native, role)?;
     schtasks_ok(native, &["/Run", "/TN", &task_name(role)])?;
+    native.applied(AppliedEffect::Started);
     Ok(())
 }
 
@@ -240,6 +247,7 @@ pub(super) fn stop(
     let name = task_name(role);
     let output = schtasks(native, &["/End", "/TN", &name])?;
     if output.success() {
+        native.applied(AppliedEffect::Stopped);
         return Ok(());
     }
     // `/End` on a task with no running instance fails; like the other

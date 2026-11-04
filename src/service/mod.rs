@@ -9,13 +9,14 @@
 //! backend is a per-user Task Scheduler task that runs in the logged-in
 //! session (user scope only; SM-04, issue #92).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::error::CliError;
 #[allow(unused_imports)] // unused on targets without a service backend
 use native::{system_runner, Native};
+pub use scope::Environment;
 
 pub mod account;
 #[cfg(target_os = "linux")]
@@ -24,7 +25,13 @@ mod busybox;
 mod launchd;
 mod native;
 pub use native::{InstalledAt, NativeOutput, OutputMode, ServiceCall, ServiceNote};
+mod ops;
+pub use ops::{
+    install, restart, start, stop, uninstall, AppliedEffect, InstallNeed, InstallOutcome,
+    InstallRequest, ServiceFailure, ServiceReport,
+};
 pub mod pin;
+pub use pin::{Pin, RetargetConsent};
 pub mod scope;
 #[cfg(unix)]
 pub mod system;
@@ -117,54 +124,6 @@ fn with_native<T>(
     f(&mut native, &mut *call.notes)
 }
 
-/// `service install`: write the unit/plist/init-script, enable, and start.
-///
-/// `config` and `state` must be absolute: they are pinned into the
-/// registration so the service never depends on its own working directory or
-/// home (SM-02).
-///
-/// `pin` is recorded in a system registration so the root service trusts only
-/// that user's files (SM-04); it is `None` for a user service.
-pub fn install(
-    role: &str,
-    scope: ServiceScope,
-    config: &Path,
-    state: &Path,
-    pin: Option<&pin::Pin>,
-    call: &mut ServiceCall,
-) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            with_native(call, |n, notes| {
-                systemd::install(n, notes, role, scope, config, state, pin)
-            })
-        } else {
-            with_native(call, |n, notes| {
-                busybox::install(n, notes, role, scope, config, state, pin)
-            })
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        with_native(call, |n, notes| {
-            launchd::install(n, notes, role, scope, config, state, pin)
-        })
-    }
-    #[cfg(windows)]
-    {
-        let _ = pin;
-        with_native(call, |n, notes| {
-            windows::install(n, notes, role, scope, config, state)
-        })
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (role, scope, config, state, pin, call);
-        unsupported()
-    }
-}
-
 /// The text of the currently installed system registration, if any: where a
 /// previous install's pin is read from to detect a retarget (SM-02).
 pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
@@ -188,109 +147,20 @@ pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> 
     }
 }
 
-/// `service uninstall`: stop, disable, and remove the unit/plist/init-script.
-pub fn uninstall(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            with_native(call, |n, notes| systemd::uninstall(n, notes, role, scope))
-        } else {
-            with_native(call, |n, notes| busybox::uninstall(n, notes, role, scope))
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        with_native(call, |n, notes| launchd::uninstall(n, notes, role, scope))
-    }
-    #[cfg(windows)]
-    {
-        with_native(call, |n, notes| windows::uninstall(n, notes, role, scope))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (role, scope, call);
-        unsupported()
-    }
-}
-
-/// `service start`.
-pub fn start(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            with_native(call, |n, _| systemd::start(n, role, scope))
-        } else {
-            with_native(call, |n, _| busybox::start(n, role, scope))
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        with_native(call, |n, _| launchd::start(n, role, scope))
-    }
-    #[cfg(windows)]
-    {
-        with_native(call, |n, _| windows::start(n, role, scope))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (role, scope, call);
-        unsupported()
-    }
-}
-
-/// `service stop`.
-pub fn stop(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            with_native(call, |n, notes| systemd::stop(n, notes, role, scope))
-        } else {
-            with_native(call, |n, notes| busybox::stop(n, notes, role, scope))
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        with_native(call, |n, notes| launchd::stop(n, notes, role, scope))
-    }
-    #[cfg(windows)]
-    {
-        with_native(call, |n, notes| windows::stop(n, notes, role, scope))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (role, scope, call);
-        unsupported()
-    }
-}
-
-/// `service restart`.
-pub fn restart(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            with_native(call, |n, notes| systemd::restart(n, notes, role, scope))
-        } else {
-            with_native(call, |n, notes| busybox::restart(n, notes, role, scope))
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        with_native(call, |n, notes| launchd::restart(n, notes, role, scope))
-    }
-    #[cfg(windows)]
-    {
-        with_native(call, |n, notes| windows::restart(n, notes, role, scope))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (role, scope, call);
-        unsupported()
-    }
-}
-
 /// `service status`: running/stopped (+ pid when available), shown by the
 /// native tool (inherited) or returned in the [`NativeOutput`] (captured).
-pub fn status(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<NativeOutput> {
+pub fn status(
+    role: crate::status::Role,
+    scope: ServiceScope,
+    env: Environment,
+    call: &mut ServiceCall,
+) -> Result<NativeOutput, ServiceFailure> {
+    ops::check_verb_policy("status", role, scope, env).map_err(ServiceFailure::before_effects)?;
+    let role = role.name();
+    status_backend(role, scope, call).map_err(ServiceFailure::before_effects)
+}
+
+fn status_backend(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<NativeOutput> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
@@ -419,41 +289,19 @@ fn unsupported<T>() -> Result<T> {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Resolve the iroh-tunnel binary path (shared across platforms).
-// ---------------------------------------------------------------------------
-
-/// Locate the `iroh-tunnel` executable to put in the unit/plist `ExecStart`.
-///
-/// Prefer `which` (so a system install is used); fall back to the current
-/// executable so `cargo run -- service install` works during development.
-#[allow(dead_code)] // unused on targets without a service backend
-pub(super) fn resolve_binary() -> Result<PathBuf> {
-    if let Ok(p) = which::which("iroh-tunnel") {
-        return Ok(p);
-    }
-    let current = std::env::current_exe().context("failed to resolve current executable")?;
-    Ok(current)
-}
-
 // Shared unit test covering the cross-platform ServiceScope + dispatch API
 // shape, so the module is exercised on every platform (not just the host's).
 #[cfg(test)]
 mod tests {
+    use super::ops::{install_via, verb_via, Verb};
     use super::*;
+    use crate::error::CliError;
+    use std::path::PathBuf;
 
     #[test]
     fn scope_variants_exist() {
         // Compile + equality smoke test for the public enum.
         assert_ne!(ServiceScope::System, ServiceScope::User);
-    }
-
-    #[test]
-    fn resolve_binary_returns_a_path() {
-        // In tests the current exe is always resolvable, so the fallback path
-        // is exercised at minimum.
-        let p = resolve_binary().expect("resolve_binary should not fail in tests");
-        assert!(p.is_absolute(), "binary path should be absolute");
     }
 
     #[test]
@@ -464,6 +312,277 @@ mod tests {
         let p = RestartPolicy::DEFAULT;
         assert!(p.on_failure, "default policy must restart on failure");
         assert_eq!(p.delay_secs, 5, "default policy must keep the 5s backoff");
+    }
+
+    // ---- operations with policy (Task 14) --------------------------------
+
+    use crate::service::native::fake::{Event, Events, FakeRunner};
+    use crate::status::Role;
+
+    fn tunnel_exe() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\opt\x\iroh-tunnel.exe")
+        } else {
+            PathBuf::from("/opt/x/iroh-tunnel")
+        }
+    }
+
+    fn request(scope: Option<ServiceScope>) -> InstallRequest {
+        InstallRequest {
+            role: Role::Serve,
+            scope,
+            config: None,
+            tunnel_executable: tunnel_exe(),
+            sudo_user: None,
+            invoking_user: None,
+            state_dir_override: None,
+            retarget: None,
+        }
+    }
+
+    const CAN_ANSWER: Environment = Environment {
+        elevated: false,
+        can_answer: true,
+    };
+    const BATCH: Environment = Environment {
+        elevated: false,
+        can_answer: false,
+    };
+
+    /// Run `install` against a fake runner; returns the result and the events.
+    fn run_install(
+        req: &InstallRequest,
+        env: Environment,
+        responses: Vec<NativeOutput>,
+    ) -> (Result<InstallOutcome, ServiceFailure>, Vec<Event>) {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, responses);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut notes = crate::service::native::fake::note_sink(&events);
+        let mut call = ServiceCall::capture(&mut notes);
+        let result = install_via(req, env, &mut call, &mut runner);
+        let log = events.borrow().clone();
+        (result, log)
+    }
+
+    fn commands(log: &[Event]) -> Vec<&Event> {
+        log.iter()
+            .filter(|e| matches!(e, Event::Call { .. }))
+            .collect()
+    }
+
+    /// Re-run the named test in a child process whose `HOME` is a fresh
+    /// directory, because registration paths and role locks are keyed by
+    /// `HOME` and this process is multi-threaded.
+    fn in_isolated_home(name: &str, body: impl FnOnce(&Path)) {
+        const CHILD_MARKER: &str = "IROH_TUNNEL_SERVICE_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env(CHILD_MARKER, "1")
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        body(&PathBuf::from(std::env::var_os("HOME").unwrap()));
+    }
+
+    fn write_valid_config(dir: &Path) -> PathBuf {
+        let path = dir.join("serve.toml");
+        std::fs::write(
+            &path,
+            "[node]\nrelay_urls = []\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_without_scope_returns_scope_choice_need() {
+        let (result, log) = run_install(&request(None), CAN_ANSWER, vec![]);
+        assert!(matches!(
+            result,
+            Ok(InstallOutcome::Needs(InstallNeed::ScopeChoice))
+        ));
+        assert!(commands(&log).is_empty(), "{log:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unprivileged_system_install_is_refused_with_guidance() {
+        let mut req = request(Some(ServiceScope::System));
+        req.config = Some(PathBuf::from("/tmp/iroh-tunnel-test/serve.toml"));
+        let (result, log) = run_install(&req, BATCH, vec![]);
+        let err = anyhow::Error::from(result.expect_err("must be refused"));
+        let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("expected Permission, got {err:?}");
+        };
+        assert!(msg.contains("sudo"), "{msg}");
+        assert!(msg.contains("serve service install --system"), "{msg}");
+        assert!(msg.contains("/tmp/iroh-tunnel-test/serve.toml"), "{msg}");
+        assert!(commands(&log).is_empty(), "{log:?}");
+    }
+
+    #[test]
+    fn relative_tunnel_executable_is_rejected() {
+        let mut req = request(Some(ServiceScope::User));
+        req.tunnel_executable = PathBuf::from("iroh-tunnel");
+        let (result, log) = run_install(&req, BATCH, vec![]);
+        let err = anyhow::Error::from(result.expect_err("must be rejected"));
+        assert!(
+            matches!(err.downcast_ref::<CliError>(), Some(CliError::Service(_))),
+            "{err:?}"
+        );
+        assert!(commands(&log).is_empty(), "{log:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_renders_supplied_tunnel_executable() {
+        const NAME: &str = "service::tests::install_renders_supplied_tunnel_executable";
+        in_isolated_home(NAME, |home| {
+            #[cfg(target_os = "linux")]
+            if !linux_is_systemd() {
+                return; // the BusyBox backend needs real root
+            }
+            let config = write_valid_config(home);
+            let mut req = request(Some(ServiceScope::User));
+            req.config = Some(config);
+            req.state_dir_override = Some(home.join("state"));
+            let (result, _log) = run_install(&req, BATCH, vec![]);
+            let Ok(InstallOutcome::Installed(report)) = result else {
+                panic!("install failed");
+            };
+            let Some(AppliedEffect::RegistrationWritten(path)) = report.applied.first() else {
+                panic!("no registration written: {:?}", report.applied);
+            };
+            let body = std::fs::read_to_string(path).unwrap();
+            assert!(body.contains("/opt/x/iroh-tunnel"), "{body}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_install_reports_written_registration() {
+        const NAME: &str = "service::tests::partial_install_reports_written_registration";
+        in_isolated_home(NAME, |home| {
+            #[cfg(target_os = "linux")]
+            if !linux_is_systemd() {
+                return;
+            }
+            let config = write_valid_config(home);
+            let mut req = request(Some(ServiceScope::User));
+            req.config = Some(config);
+            req.state_dir_override = Some(home.join("state"));
+            // Linux: daemon-reload ok, `enable` fails. macOS: `bootout` ok,
+            // `bootstrap` fails.
+            let responses = if cfg!(target_os = "linux") {
+                vec![
+                    crate::service::native::fake::output(0, "", ""),
+                    crate::service::native::fake::output(1, "", "boom"),
+                ]
+            } else {
+                vec![
+                    crate::service::native::fake::output(0, "", ""),
+                    crate::service::native::fake::output(5, "", "boom"),
+                ]
+            };
+            let (result, log) = run_install(&req, BATCH, responses);
+            let failure = result.expect_err("the manager step must fail");
+            assert!(
+                matches!(
+                    failure.applied.as_slice(),
+                    [AppliedEffect::RegistrationWritten(_)]
+                ),
+                "{:?}",
+                failure.applied
+            );
+            let programs: Vec<String> = commands(&log).iter().map(|e| format!("{e:?}")).collect();
+            assert!(
+                !programs
+                    .iter()
+                    .any(|c| c.contains("\"stop\"") || c.contains("\"disable\"")),
+                "no rollback command may run: {programs:?}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_is_refused_before_manager_when_role_runs() {
+        const NAME: &str = "service::tests::start_is_refused_before_manager_when_role_runs";
+        in_isolated_home(NAME, |_| {
+            let _claim = crate::ownership::claim(Role::Serve).unwrap();
+            let events = Events::default();
+            let mut fake = FakeRunner::new(&events, vec![]);
+            let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+            let mut notes = crate::service::native::fake::note_sink(&events);
+            let mut call = ServiceCall::capture(&mut notes);
+            let result = verb_via(
+                Verb::Start,
+                Role::Serve,
+                ServiceScope::User,
+                BATCH,
+                &mut call,
+                &mut runner,
+            );
+            let err = anyhow::Error::from(result.expect_err("must be refused"));
+            assert!(
+                matches!(err.downcast_ref::<CliError>(), Some(CliError::Conflict(_))),
+                "{err:?}"
+            );
+            assert!(commands(&events.borrow()).is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_install_at_decision_changes_nothing() {
+        const NAME: &str = "service::tests::abandoned_install_at_decision_changes_nothing";
+        in_isolated_home(NAME, |home| {
+            let config = write_valid_config(home);
+            let before = std::fs::read(&config).unwrap();
+            let registration_before = existing_registration("serve", ServiceScope::System);
+            let env = Environment {
+                elevated: true,
+                can_answer: true,
+            };
+            let (result, log) = run_install(&request(Some(ServiceScope::System)), env, vec![]);
+            assert!(matches!(
+                result,
+                Ok(InstallOutcome::Needs(InstallNeed::InvokingUser))
+            ));
+            assert!(commands(&log).is_empty(), "{log:?}");
+            assert_eq!(std::fs::read(&config).unwrap(), before);
+            assert_eq!(
+                existing_registration("serve", ServiceScope::System),
+                registration_before
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_scope_is_service_error() {
+        let env = Environment {
+            elevated: true,
+            can_answer: false,
+        };
+        let (result, _) = run_install(&request(Some(ServiceScope::System)), env, vec![]);
+        let err = anyhow::Error::from(result.expect_err("must be refused"));
+        let Some(CliError::Service(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("expected Service, got {err:?}");
+        };
+        assert!(msg.contains("--user"), "{msg}");
     }
 
     // Compile-only guard: on Linux the runtime probe must exist and be bool.

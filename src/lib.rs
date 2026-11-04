@@ -13,6 +13,7 @@
 pub mod access;
 pub mod app;
 pub mod cli;
+pub(crate) mod cli_service;
 pub mod config;
 pub mod config_cmd;
 pub(crate) mod config_store;

@@ -22,7 +22,8 @@
 
 use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::pin::Pin;
-use super::{resolve_binary, write_registration, ServiceScope};
+use super::AppliedEffect;
+use super::{write_registration, ServiceScope};
 use crate::error::CliError;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -161,6 +162,14 @@ fn require_root() -> Result<()> {
     Ok(())
 }
 
+/// The note a user-scope request earns on BusyBox: there is only the
+/// system-wide script.
+fn busybox_scope_note(role: &str, scope: ServiceScope) -> Option<ServiceNote> {
+    (scope == ServiceScope::User).then(|| ServiceNote::BusyboxSystemWide {
+        script: script_path(role),
+    })
+}
+
 /// Run the installed init script with `verb` (start/stop/restart), bailing on a
 /// non-zero exit. The script's shebang + executable bit let us invoke it
 /// directly (same path busybox init uses on boot).
@@ -185,31 +194,33 @@ pub fn existing_registration(role: &str) -> Option<String> {
     super::read_registration(&script_path(role))
 }
 
+#[allow(clippy::too_many_arguments)] // one registration's inputs
 pub(super) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
     scope: ServiceScope,
+    binary: &Path,
     config: &Path,
     state: &Path,
     pin: Option<&Pin>,
 ) -> Result<()> {
     require_root()?;
-    if scope == ServiceScope::User {
-        notes(&ServiceNote::BusyboxSystemWide {
-            script: script_path(role),
-        });
+    if let Some(note) = busybox_scope_note(role, scope) {
+        notes(&note);
     }
-    let binary = resolve_binary()?;
-    let script = format_script(role, &binary, config, state, pin);
+    let script = format_script(role, binary, config, state, pin);
     let path = script_path(role);
     write_registration(&path, &script)?;
+    native.applied(AppliedEffect::RegistrationWritten(path.clone()));
     set_executable(&path)?;
+    native.applied(AppliedEffect::Enabled);
     // Start now. A start failure is surfaced, but the script is installed, so
     // the service will come up on the next boot regardless.
     // `restart`, not `start`: a re-install over a running service must pick up
     // the new registration instead of leaving the old process on the old pin.
     run_script(native, role, "restart")?;
+    native.applied(AppliedEffect::Started);
     notes(&ServiceNote::Installed {
         name: script_name(role),
         at: InstalledAt::Path(path),
@@ -224,11 +235,15 @@ pub(super) fn uninstall(
     _scope: ServiceScope,
 ) -> Result<()> {
     require_root()?;
-    let _ = run_script(native, role, "stop"); // best-effort: the service may not be running
+    // best-effort: the service may not be running
+    if run_script(native, role, "stop").is_ok() {
+        native.applied(AppliedEffect::Stopped);
+    }
     let path = script_path(role);
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("failed to remove {}", path.display()))?;
+        native.applied(AppliedEffect::RegistrationRemoved(path));
     }
     notes(&ServiceNote::Uninstalled {
         name: script_name(role),
@@ -238,7 +253,9 @@ pub(super) fn uninstall(
 
 pub(super) fn start(native: &mut Native, role: &str, _scope: ServiceScope) -> Result<()> {
     require_root()?;
-    run_script(native, role, "start")
+    run_script(native, role, "start")?;
+    native.applied(AppliedEffect::Started);
+    Ok(())
 }
 
 pub(super) fn stop(
@@ -248,7 +265,9 @@ pub(super) fn stop(
     _scope: ServiceScope,
 ) -> Result<()> {
     require_root()?;
-    run_script(native, role, "stop")
+    run_script(native, role, "stop")?;
+    native.applied(AppliedEffect::Stopped);
+    Ok(())
 }
 
 pub(super) fn restart(
@@ -258,7 +277,9 @@ pub(super) fn restart(
     _scope: ServiceScope,
 ) -> Result<()> {
     require_root()?;
-    run_script(native, role, "restart")
+    run_script(native, role, "restart")?;
+    native.applied(AppliedEffect::Started);
+    Ok(())
 }
 
 pub(super) fn status(
@@ -279,6 +300,17 @@ pub(super) fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn busybox_user_scope_request_emits_system_wide_note() {
+        assert_eq!(
+            busybox_scope_note("serve", ServiceScope::User),
+            Some(ServiceNote::BusyboxSystemWide {
+                script: script_path("serve")
+            })
+        );
+        assert_eq!(busybox_scope_note("serve", ServiceScope::System), None);
+    }
 
     #[test]
     fn script_name_has_boot_order_prefix() {

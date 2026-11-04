@@ -61,6 +61,16 @@ impl Pin {
     }
 }
 
+/// Consent to retarget, valid only against the registration it was given for.
+///
+/// DEVIATION (needs controller decision): `previous` is `Option<Pin>` so that
+/// consent can be given for a legacy unpinned registration (`None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetargetConsent {
+    pub previous: Option<Pin>,
+    pub proposed: Pin,
+}
+
 /// Escape to `[A-Za-z0-9/._]`; everything else, including `-` (illegal as `--`
 /// in an XML comment) and whitespace, becomes `%XX` per byte.
 fn escape(path: &Path) -> String {
