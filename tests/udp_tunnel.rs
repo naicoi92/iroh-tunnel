@@ -110,6 +110,17 @@ impl UdpTunnel {
         target_sources: Arc<Mutex<Vec<SocketAddr>>>,
         serve_extra: &str,
     ) -> Result<Self> {
+        Self::start_with(target_addr, target, target_sources, serve_extra, "").await
+    }
+
+    /// Start with extra lines in both the serve and the access service table.
+    async fn start_with(
+        target_addr: SocketAddr,
+        target: Option<tokio::task::JoinHandle<()>>,
+        target_sources: Arc<Mutex<Vec<SocketAddr>>>,
+        serve_extra: &str,
+        access_extra: &str,
+    ) -> Result<Self> {
         // Opt-in diagnostics: RUST_LOG=iroh_tunnel=debug shows both roles.
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -161,6 +172,7 @@ node_id = "{serve_id}"
 protocol = "udp"
 host = "127.0.0.1"
 port = {port}
+{access_extra}
 "#,
                 key = encode_secret_key(&access_key),
                 serve_id = serve_key.public(),
@@ -842,5 +854,51 @@ async fn a_flooding_flow_does_not_stop_another_flow() -> Result<()> {
         assert!(reply == [b'c', i] || reply.len() == 512 || reply == b"hello");
     }
     let _ = flood.await;
+    tunnel.shutdown().await
+}
+
+/// UDP-06 Access cap: Access holds at most `max_flows` flows per service. A
+/// new client over the cap is dropped at Access, counted as `cap`, and never
+/// reaches Serve; flows already running are not evicted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_refuses_new_clients_over_its_own_cap() -> Result<()> {
+    let sources = Arc::new(Mutex::new(Vec::new()));
+    let target_sock = UdpSocket::bind("127.0.0.1:0").await?;
+    let target_addr = target_sock.local_addr()?;
+    let echo = tokio::spawn(udp_echo(target_sock, sources.clone()));
+    let tunnel =
+        UdpTunnel::start_with(target_addr, None, sources.clone(), "", "max_flows = 2").await?;
+    let a = UdpSocket::bind("127.0.0.1:0").await?;
+    let b = UdpSocket::bind("127.0.0.1:0").await?;
+    let c = UdpSocket::bind("127.0.0.1:0").await?;
+
+    tunnel.roundtrip(&a, b"a-1").await?;
+    tunnel.roundtrip(&b, b"b-1").await?;
+    drain(&a).await;
+    drain(&b).await;
+    let reached = sources.lock().unwrap().len();
+
+    for _ in 0..3 {
+        c.send_to(b"c-1", tunnel.access_addr).await?;
+    }
+    assert!(
+        try_recv(&c, Duration::from_secs(2)).await?.is_none(),
+        "a client over the Access cap must not be served"
+    );
+    assert_eq!(
+        sources.lock().unwrap().len(),
+        reached,
+        "a refused client must not reach the target"
+    );
+    assert_eq!(tunnel.roundtrip(&a, b"a-2").await?, b"a-2");
+
+    let access = UdpTunnel::status_when(tunnel.access_state.path(), "access-status.json", |s| {
+        let udp = &s["services"][0]["udp"];
+        udp["drops"]["cap"].as_u64() >= Some(3) && udp["active_flows"] == 2
+    })
+    .await?;
+    assert_eq!(access["services"][0]["udp"]["active_flows"], 2);
+
+    echo.abort();
     tunnel.shutdown().await
 }

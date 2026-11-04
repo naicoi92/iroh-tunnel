@@ -729,7 +729,8 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     use crate::udp::DropReason;
     let stats = dialer.udp_stats.clone();
-    let idle = dialer.udp_limits.idle_timeout;
+    let limits = dialer.udp_limits;
+    let idle = limits.idle_timeout;
     let listen_addr = dialer.listen_addr.clone();
     let socket = match UdpSocket::bind(&listen_addr).await {
         Ok(socket) => Arc::new(socket),
@@ -823,14 +824,31 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             tracing::warn!(svc = %dialer.svc_name, size = n, limit, "dropping oversize udp datagram");
             continue;
         }
-        let flow = flows
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .touch(client, std::time::Instant::now());
-        let Some(flow) = flow else {
-            stats.record_drop(DropReason::Cap);
-            tracing::warn!(svc = %dialer.svc_name, "udp flow identifiers exhausted, dropping");
-            continue;
+        let flow = flows.lock().unwrap_or_else(|p| p.into_inner()).touch(
+            client,
+            std::time::Instant::now(),
+            limits.max_flows,
+        );
+        let flow = match flow {
+            Ok(flow) => flow,
+            Err(crate::udp::Refused::Cap) => {
+                // Over the Access cap: drop before it costs Serve anything.
+                stats.record_drop(DropReason::Cap);
+                tracing::debug!(svc = %dialer.svc_name, %client, "udp flow refused: access flow cap reached");
+                continue;
+            }
+            Err(crate::udp::Refused::Exhausted) => {
+                // Identifiers are never reused within an incarnation, so the
+                // only way on is a new one: drop the connection, and the next
+                // datagram dials afresh with a clean flow table (contract).
+                stats.record_drop(DropReason::Cap);
+                tracing::warn!(
+                    svc = %dialer.svc_name,
+                    "udp flow identifiers exhausted, ending the session incarnation"
+                );
+                dialer.invalidate(&conn).await;
+                continue;
+            }
         };
         stats.set_active_flows(flows.lock().unwrap_or_else(|p| p.into_inner()).len());
         if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {

@@ -310,25 +310,41 @@ pub struct ClientFlows {
     next: u32,
 }
 
+/// Why Access could not give a client a flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// The service already holds `max_flows` flows. Nothing running is evicted.
+    Cap,
+    /// Every 32-bit flow identifier of this incarnation is spent. The caller
+    /// must end the incarnation; identifiers are never reused inside it.
+    Exhausted,
+}
+
 impl ClientFlows {
     /// The flow of `client`, created on its first datagram, and refresh its
-    /// idle timer. `None` once the 32-bit identifier space is exhausted.
+    /// idle timer. A client that already has a flow is never refused; a new
+    /// one is refused at `max_flows` live flows ([`Refused::Cap`]) or once the
+    /// identifier space is spent ([`Refused::Exhausted`]).
     pub fn touch(
         &mut self,
         client: std::net::SocketAddr,
         now: std::time::Instant,
-    ) -> Option<FlowId> {
+        max_flows: usize,
+    ) -> Result<FlowId, Refused> {
         let flow = match self.by_client.get(&client) {
             Some(flow) => *flow,
             None => {
+                if self.by_flow.len() >= max_flows {
+                    return Err(Refused::Cap);
+                }
                 let flow = FlowId(self.next);
-                self.next = self.next.checked_add(1)?;
+                self.next = self.next.checked_add(1).ok_or(Refused::Exhausted)?;
                 self.by_client.insert(client, flow);
                 flow
             }
         };
         self.by_flow.insert(flow, (client, now));
-        Some(flow)
+        Ok(flow)
     }
 
     /// The client of `flow`, refreshing its idle timer; `None` if unknown or
@@ -526,10 +542,10 @@ mod tests {
     fn a_client_keeps_its_flow_while_active() {
         let t0 = Instant::now();
         let mut flows = ClientFlows::default();
-        let first = flows.touch(client(1), t0).unwrap();
+        let first = flows.touch(client(1), t0, usize::MAX).unwrap();
         assert_eq!(
-            flows.touch(client(1), t0 + Duration::from_secs(30)),
-            Some(first)
+            flows.touch(client(1), t0 + Duration::from_secs(30), usize::MAX),
+            Ok(first)
         );
         assert_eq!(flows.expire(t0 + Duration::from_secs(80), IDLE_TIMEOUT), 0);
     }
@@ -538,7 +554,7 @@ mod tests {
     fn traffic_in_either_direction_refreshes_the_idle_timer() {
         let t0 = Instant::now();
         let mut flows = ClientFlows::default();
-        let flow = flows.touch(client(1), t0).unwrap();
+        let flow = flows.touch(client(1), t0, usize::MAX).unwrap();
         // A reply from the target at t0+50s refreshes it.
         assert!(flows
             .client_of(flow, t0 + Duration::from_secs(50))
@@ -551,14 +567,38 @@ mod tests {
     fn an_expired_flow_is_gone_and_its_identifier_is_never_reused() {
         let t0 = Instant::now();
         let mut flows = ClientFlows::default();
-        let old = flows.touch(client(1), t0).unwrap();
+        let old = flows.touch(client(1), t0, usize::MAX).unwrap();
         assert_eq!(flows.expire(t0 + IDLE_TIMEOUT, IDLE_TIMEOUT), 1);
         assert_eq!(flows.client_of(old, t0 + IDLE_TIMEOUT), None);
-        let renewed = flows.touch(client(1), t0 + IDLE_TIMEOUT).unwrap();
+        let renewed = flows
+            .touch(client(1), t0 + IDLE_TIMEOUT, usize::MAX)
+            .unwrap();
         assert!(
             renewed > old,
             "a returning client gets a new, higher flow id"
         );
+    }
+
+    #[test]
+    fn a_new_client_is_refused_at_the_cap_but_a_known_client_is_not() {
+        let t0 = Instant::now();
+        let mut flows = ClientFlows::default();
+        let a = flows.touch(client(1), t0, 2).unwrap();
+        flows.touch(client(2), t0, 2).unwrap();
+        assert_eq!(flows.touch(client(3), t0, 2), Err(Refused::Cap));
+        // Existing flows keep working, and keep their identifier.
+        assert_eq!(flows.touch(client(1), t0, 2), Ok(a));
+        assert_eq!(flows.len(), 2);
+    }
+
+    #[test]
+    fn an_expired_flow_frees_its_slot_under_the_cap() {
+        let t0 = Instant::now();
+        let mut flows = ClientFlows::default();
+        flows.touch(client(1), t0, 1).unwrap();
+        assert_eq!(flows.touch(client(2), t0, 1), Err(Refused::Cap));
+        assert_eq!(flows.expire(t0 + IDLE_TIMEOUT, IDLE_TIMEOUT), 1);
+        assert!(flows.touch(client(2), t0 + IDLE_TIMEOUT, 1).is_ok());
     }
 
     #[test]
@@ -568,8 +608,12 @@ mod tests {
             ..Default::default()
         };
         let t0 = Instant::now();
-        // The counter cannot advance past u32::MAX, so no identifier is issued.
-        assert_eq!(flows.touch(client(1), t0), None);
+        // The counter cannot advance past u32::MAX, so no identifier is issued
+        // and the caller must end the incarnation.
+        assert_eq!(
+            flows.touch(client(1), t0, usize::MAX),
+            Err(Refused::Exhausted)
+        );
     }
 
     #[test]
