@@ -65,17 +65,30 @@ explaining why.
 
 | Path                       | Purpose                                                |
 |----------------------------|--------------------------------------------------------|
-| `src/cli.rs`               | clap CLI surface (`<role> <command>`)                  |
-| `src/serve.rs`             | serve role: publish local services into Iroh           |
-| `src/access.rs`            | access role: dial a remote node_id to a local port     |
-| `src/role_run.rs`          | shared run skeleton: retry/backoff dial, disconnect watcher |
-| `src/pipe.rs`              | byte-copy pipes between Iroh streams and local sockets |
-| `src/endpoint.rs`          | Iroh endpoint construction + transport tuning          |
-| `src/proto.rs`             | ALPN protocol constants (`iroh-tunnel/{name}`)         |
-| `src/config.rs`, `src/config_cmd.rs` | config model + `config` subcommands           |
-| `src/service/`             | service backends: `systemd`, `launchd`, BusyBox/SysV init |
-| `src/conn_path.rs`          | peer connection-path reports for status files           |
-| `src/status.rs`            | atomic `serve-status.json` writer                      |
+| `src/main.rs`              | `iroh-tunnel` binary entry point                       |
+| `src/bin_serve.rs`, `src/bin_access.rs` | role-specific binary entry points         |
+| `src/app.rs`               | command dispatch from parsed CLI to the host crate     |
+| `src/cli.rs`, `src/cli_service.rs` | clap CLI surface (`<role> <command>`)          |
+| `src/config_cmd.rs`        | `config` subcommands (CLI wrapper over host config)    |
+| `src/status_cmd.rs`        | `status` subcommand                                    |
+| `src/render.rs`            | terminal rendering and prompts                         |
+| `src/lifecycle.rs`         | signal handling and process lifecycle                  |
+| `crates/host/src/config/`  | config model, load/save, `config` operations           |
+| `crates/host/src/service/` | service backends: `systemd`, `launchd`, BusyBox/SysV init |
+| `crates/host/src/status/`  | atomic `serve-status.json` writer and readers          |
+| `crates/host/src/update/`  | self-update                                            |
+| `crates/host/src/runtime/` | foreground orchestration of the role loops             |
+| `crates/host/src/paths/`   | config, state and status path resolution               |
+| `crates/host/src/ownership.rs` | file ownership handling                            |
+| `crates/engine/src/serve/` | serve role: publish local services into Iroh           |
+| `crates/engine/src/access/` | access role: dial a remote node_id to a local port    |
+| `crates/engine/src/runtime/` | dial retry/backoff (`connect_with_retry`), disconnect watcher |
+| `crates/engine/src/endpoint/` | Iroh endpoint construction + transport tuning       |
+| `crates/engine/src/tcp.rs`, `crates/engine/src/udp/` | TCP and UDP tunnel pipes        |
+| `crates/engine/src/conn_path/` | peer connection-path reports                       |
+| `crates/engine/src/observation/` | typed observations emitted by the engine         |
+| `crates/engine/src/settings.rs` | engine settings                                   |
+| `crates/engine/src/proto.rs` | ALPN protocol constants (`iroh-tunnel/{name}`)       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |
 | `packaging/`               | nFPM config, Homebrew cask, `verify-dist.sh` checks    |
