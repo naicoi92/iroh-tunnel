@@ -55,7 +55,7 @@ Suggested short options, subject to consistency and conflict checks: `-n` name, 
 
 ## Deferred decisions and verification gates
 
-- Benchmark UDP transport and payload limits using Iroh 1.4.1 before choosing QUIC DATAGRAM framing or fragmentation. Preserve the agreed best-effort contract; see [UDP transport research](../research/udp-transport.md).
+- Benchmark UDP transport and payload limits using Iroh 1.4.1 before choosing QUIC DATAGRAM framing or fragmentation. Preserve the agreed best-effort contract.
 - Define exact platform matrix from release configuration and verify Windows execution and service lifecycle on suitable CI runners, including ARM64 limitations.
 - Specify update rollback, verification trust rotation, package-manager behavior, platform privilege handling, and precise CLI arguments before implementation.
 - The [target architecture dossier](target-diagrams.html) maps redesign requirements to system context, component boundaries, runtime, protocol, storage, service, operating-system, distribution, and security views. The [capability and logic dossier](capability-logic.html) records diagram selection, inputs, branches, outcomes and deferred decisions for each capability. Exact ports, crate boundaries and the deferred topics above remain open. The separate [interactive overview](system-overview.html) is a simplified sketch, not the full architecture.
