@@ -59,8 +59,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          # The test must match the commit that was released.
-          ref: ${{ inputs.tag }}
+          # The harness (tests/release_smoke.rs) comes from the dispatched ref,
+          # so a harness fix does not need a new release tag. The executables
+          # under test come only from the tag's release-set; the tag's commit
+          # is resolved and recorded below.
 
       - uses: actions/download-artifact@v4
         with:
@@ -101,7 +103,10 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: release-smoke
+          # A fresh key per run: restoring an earlier run's target directory
+          # made the arm64 leg fail with "can't find crate for `iroh`" (run
+          # 41786010540). Build time is worth a result that can be trusted.
+          cache-key: release-smoke-${{ github.run_id }}-${{ matrix.id }}
 
       - name: Forward TCP and UDP through the packaged executables
         shell: bash
@@ -111,9 +116,12 @@ jobs:
           RELEASE_SMOKE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          # The commit that was checked out (the tag), not the dispatch ref.
-          RELEASE_SMOKE_SOURCE_SHA="$(git rev-parse HEAD)"
-          export RELEASE_SMOKE_SOURCE_SHA
+          # The commit the executables were built from (the tag), not the
+          # dispatch ref that supplies the harness.
+          git fetch --no-tags --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
+          RELEASE_SMOKE_SOURCE_SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          RELEASE_SMOKE_HARNESS_SHA="$(git rev-parse HEAD)"
+          export RELEASE_SMOKE_SOURCE_SHA RELEASE_SMOKE_HARNESS_SHA
           export RELEASE_SMOKE_VERSION="${TAG#v}"
           cargo test --locked --test release_smoke -- --ignored --nocapture
 

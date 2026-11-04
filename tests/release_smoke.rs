@@ -33,7 +33,7 @@ const ATTEMPTS: usize = 3;
 const REQUEST: &[u8] = b"release-smoke request \x00\xff";
 const RESPONSE: &[u8] = b"release-smoke response \xff\x00";
 
-struct Process(Child);
+struct Process(Child, PathBuf);
 impl Drop for Process {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -104,20 +104,37 @@ fn spawn(
 ) -> Result<Process> {
     commands.push(format!("{} {}", exe.display(), args.join(" ")));
     let out = std::fs::File::create(log)?;
-    let child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(args)
         .env("HOME", home)
-        .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home)
-        .env("APPDATA", home)
-        .env("LOCALAPPDATA", home)
         .env("IROH_TUNNEL_STATE_DIR", home)
-        .env("RUST_LOG", "iroh_tunnel=info")
+        .env("RUST_LOG", "iroh_tunnel=info");
+    // Windows resolves its default folders through the profile (the
+    // LocalAppData known folder). Pointing USERPROFILE/APPDATA/LOCALAPPDATA at
+    // a temp directory made the packaged executable fail with "could not
+    // resolve the LocalAppData folder" (run 41785531176), so the real profile
+    // is kept there; roles still write only status files into the state dir.
+    let child = command
         .stdout(out.try_clone()?)
         .stderr(out)
         .spawn()
         .with_context(|| format!("spawn {}", exe.display()))?;
-    Ok(Process(child))
+    Ok(Process(child, log.to_path_buf()))
+}
+
+/// The last lines of a role's log, so a failed start explains itself in the
+/// evidence instead of only an exit code.
+fn log_tail(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines[lines.len().saturating_sub(12)..].join(" | ");
+    if tail.is_empty() {
+        "(empty)".into()
+    } else {
+        tail
+    }
 }
 
 async fn wait_for<T>(
@@ -131,7 +148,10 @@ async fn wait_for<T>(
             return Ok(value);
         }
         if let Some(exit) = process.0.try_wait()? {
-            anyhow::bail!("{what}: process exited early: {exit}");
+            anyhow::bail!(
+                "{what}: process exited early: {exit}; log tail: {}",
+                log_tail(&process.1)
+            );
         }
         anyhow::ensure!(Instant::now() < deadline, "{what}: timed out");
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -355,6 +375,7 @@ fn context(executables: &[serde_json::Value]) -> serde_json::Value {
         "user": user,
         "elevated": elevated,
         "source_sha": std::env::var("RELEASE_SMOKE_SOURCE_SHA").ok(),
+        "harness_sha": std::env::var("RELEASE_SMOKE_HARNESS_SHA").ok(),
         "tag": std::env::var("RELEASE_SMOKE_TAG").ok(),
         "cargo_lock_sha256": sha256_file(&lock).ok(),
         "archive_sha256": std::env::var("RELEASE_SMOKE_ARCHIVES")
