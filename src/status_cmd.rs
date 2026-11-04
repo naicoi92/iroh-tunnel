@@ -15,31 +15,151 @@
 //! path (see README §Exit codes).
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
 
-use crate::ownership::{self, Liveness, Owner, Tier};
+use crate::ownership;
+pub use crate::ownership::{Liveness, OwnerRecord, Tier};
 use crate::status::{
-    AccessStatusFile, StatusFile, StatusPayload, StatusRole, StatusWriter, TransportStatus,
+    AccessStatusFile, Role, StatusFile, StatusPayload, StatusRole, StatusWriter, TransportStatus,
 };
 
-/// Entry point for `iroh-tunnel <role> status [--json]`.
+/// The classified, read-only state of one role's status: where the file
+/// lives, whether the role is running, and what the file held.
+#[derive(Debug)]
+pub struct RoleStatus {
+    pub role: Role,
+    pub path: PathBuf,
+    pub liveness: Liveness,
+    pub snapshot: Snapshot,
+}
+
+/// What reading the status file found.
+#[derive(Debug)]
+pub enum Snapshot {
+    /// No file at the status path.
+    Absent,
+    /// A file that parsed as the role's typed payload; `raw` is its
+    /// verbatim contents.
+    Present { raw: String, payload: StatusPayload },
+    /// A file that exists but does not parse.
+    Invalid(anyhow::Error),
+}
+
+/// How the snapshot relates to the role's ownership lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Freshness {
+    /// Role running and the snapshot was written by its recorded owner.
+    Current,
+    /// Role running, but no snapshot is readable at this path.
+    LiveWithoutSnapshot,
+    /// No snapshot and the role is not running.
+    AbsentNotRunning,
+    /// The snapshot file exists but could not be parsed.
+    Unreadable,
+    /// The snapshot is left over from another pid; `live_pid` is the current
+    /// owner, `None` when the role is not running.
+    StalePid { live_pid: Option<u32> },
+    /// Role running but its owner record is missing, so the snapshot cannot
+    /// be verified.
+    OwnerUnknown,
+}
+
+impl RoleStatus {
+    /// Judge the snapshot against the role's ownership locks (AC-RO-03,
+    /// AC-RO-05, AC-RO-06).
+    ///
+    /// A pid is never proof of life: a crash leaves the file behind and the
+    /// OS may hand the pid to an unrelated process. The kernel lock held by
+    /// the running role is the only liveness signal, on every platform.
+    pub fn freshness(&self) -> Freshness {
+        match (&self.snapshot, &self.liveness) {
+            (Snapshot::Invalid(_), _) => Freshness::Unreadable,
+            (Snapshot::Absent, Liveness::NotRunning) => Freshness::AbsentNotRunning,
+            (Snapshot::Absent, Liveness::Running { .. }) => Freshness::LiveWithoutSnapshot,
+            (Snapshot::Present { .. }, Liveness::NotRunning) => {
+                Freshness::StalePid { live_pid: None }
+            }
+            (Snapshot::Present { payload, .. }, Liveness::Running { owner, .. }) => match owner {
+                Some(owner) if owner.pid != snapshot_pid(payload) => Freshness::StalePid {
+                    live_pid: Some(owner.pid),
+                },
+                Some(_) => Freshness::Current,
+                None => Freshness::OwnerUnknown,
+            },
+        }
+    }
+}
+
+fn snapshot_pid(payload: &StatusPayload) -> u32 {
+    match payload {
+        StatusPayload::Serve(file) => file.pid,
+        StatusPayload::Access(file) => file.pid,
+    }
+}
+
+fn snapshot_started_at(payload: &StatusPayload) -> u64 {
+    match payload {
+        StatusPayload::Serve(file) => file.started_at,
+        StatusPayload::Access(file) => file.started_at,
+    }
+}
+
+/// Read and classify a role's status without creating anything.
 ///
-pub fn run(role: StatusRole, json: bool) -> Result<()> {
-    let writer = StatusWriter::new(role);
-    let path = writer.path()?;
+/// # Errors
+///
+/// Only path resolution, the ownership probe, and non-"not found" read
+/// errors. A missing file is [`Snapshot::Absent`]; an unparseable one is
+/// [`Snapshot::Invalid`].
+pub fn read_role_status(role: Role) -> Result<RoleStatus> {
+    let path = StatusWriter::new(role).path()?;
     let liveness = ownership::probe(role)?;
-    let body = match std::fs::read_to_string(&path) {
-        Ok(body) => body,
+    read_role_status_at(role, path, liveness)
+}
+
+fn read_role_status_at(role: Role, path: PathBuf, liveness: Liveness) -> Result<RoleStatus> {
+    let snapshot = match std::fs::read_to_string(&path) {
+        Ok(raw) => match parse_payload(role, &raw, &path) {
+            Ok(payload) => Snapshot::Present { raw, payload },
+            Err(e) => Snapshot::Invalid(e),
+        },
         // A missing file is "not running", not a hard IO failure the
-        // operator must debug — one plain sentence with the path it looked
-        // at. Any OTHER read error (permissions, a directory squatting on
-        // the path, …) is a real failure and propagates with its cause:
-        // misdiagnosing those as "stopped" would hide the actual problem.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Liveness::Running { tier, owner } = &liveness {
+        // operator must debug. Any OTHER read error (permissions, a
+        // directory squatting on the path, ...) is a real failure and
+        // propagates with its cause.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Snapshot::Absent,
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("failed to read status file: {}", path.display())));
+        }
+    };
+    Ok(RoleStatus {
+        role,
+        path,
+        liveness,
+        snapshot,
+    })
+}
+
+fn parse_payload(role: Role, body: &str, path: &Path) -> Result<StatusPayload> {
+    Ok(match role {
+        Role::Serve => StatusPayload::Serve(parse_status_file(body, path)?),
+        Role::Access => StatusPayload::Access(parse_status_file(body, path)?),
+    })
+}
+
+/// Entry point for `iroh-tunnel <role> status [--json]`.
+pub fn run(role: StatusRole, json: bool) -> Result<()> {
+    let status = read_role_status(role)?;
+    let path = &status.path;
+    let freshness = status.freshness();
+    match status.snapshot {
+        Snapshot::Invalid(e) => Err(e),
+        Snapshot::Absent => {
+            if let Liveness::Running { tier, owner } = &status.liveness {
                 if json {
                     // Keep `--json` machine-readable: report the live owner.
                     let value = serde_json::json!({
@@ -51,46 +171,33 @@ pub fn run(role: StatusRole, json: bool) -> Result<()> {
                     });
                     return print_line(&value.to_string());
                 }
-                return print_line(&describe_running(role, *tier, owner.as_ref(), &path));
+                return print_line(&describe_running(role, *tier, owner.as_ref(), path));
             }
-            return Err(anyhow!(
+            Err(anyhow!(
                 "{} is not running (no {} found at {})",
                 role.name(),
-                writer.file_name(),
+                StatusWriter::new(role).file_name(),
                 path.display()
-            ));
+            ))
         }
-        Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("failed to read status file: {}", path.display())));
+        Snapshot::Present { raw, payload } => {
+            // A graceful shutdown removes the file, but a crash or `kill -9`
+            // leaves it behind — stale, yet often still useful. Warn on
+            // stderr, keep printing on stdout.
+            warn_for_freshness(role, &freshness, &payload);
+            if json {
+                // Verbatim file contents, not a re-serialization: anything
+                // piping this command must get byte-identical JSON to
+                // reading the file.
+                return print_line(&raw);
+            }
+            let table = match &payload {
+                StatusPayload::Serve(file) => render_serve_status(file),
+                StatusPayload::Access(file) => render_access_status(file),
+            };
+            print_line(&table)
         }
-    };
-    // Parse ONCE into the role-typed payload; the liveness warning and the
-    // renderer both read the same value — no double-parse drift between
-    // the two.
-    let payload = match role {
-        StatusRole::Serve => StatusPayload::Serve(parse_status_file(&body, &path)?),
-        StatusRole::Access => StatusPayload::Access(parse_status_file(&body, &path)?),
-    };
-    let (pid, started_at) = match &payload {
-        StatusPayload::Serve(file) => (file.pid, file.started_at),
-        StatusPayload::Access(file) => (file.pid, file.started_at),
-    };
-    // A graceful shutdown removes the file, but a crash or `kill -9` leaves
-    // it behind — stale, yet often still useful (last-known state). Warn on
-    // stderr, keep printing on stdout.
-    warn_unless_live(role, &liveness, pid, started_at);
-    if json {
-        // Verbatim file contents, not a re-serialization: anything piping
-        // this command must get byte-identical JSON to reading the file.
-        // Already validated through the typed parse above.
-        return print_line(&body);
     }
-    let table = match &payload {
-        StatusPayload::Serve(file) => render_serve_status(file),
-        StatusPayload::Access(file) => render_access_status(file),
-    };
-    print_line(&table)
 }
 
 /// Write one line to stdout, tolerating a closed pipe.
@@ -107,38 +214,42 @@ fn print_line(line: &str) -> Result<()> {
     }
 }
 
-/// Judge the snapshot against the role's ownership locks (AC-RO-03, AC-RO-05,
-/// AC-RO-06).
-///
-/// A pid is never proof of life: a crash leaves the file behind and the OS
-/// may hand the pid to an unrelated process. The kernel lock held by the
-/// running role is the only liveness signal, on every platform.
-fn warn_unless_live(role: StatusRole, liveness: &Liveness, pid: u32, started_at: u64) {
-    match liveness {
-        Liveness::NotRunning => eprintln!(
+/// Print the stale-snapshot warning for `freshness`, if any.
+fn warn_for_freshness(role: StatusRole, freshness: &Freshness, payload: &StatusPayload) {
+    let pid = snapshot_pid(payload);
+    let started_at = snapshot_started_at(payload);
+    match freshness {
+        Freshness::StalePid { live_pid: None } => eprintln!(
             "warning: {} is not running; this snapshot (pid {pid}) is stale, showing the last \
              snapshot from epoch {started_at}",
             role.name()
         ),
-        Liveness::Running {
-            owner: Some(owner), ..
-        } if owner.pid != pid => eprintln!(
-            "warning: {} is running as pid {}, but this snapshot was written by pid {pid} \
+        Freshness::StalePid {
+            live_pid: Some(live),
+        } => eprintln!(
+            "warning: {} is running as pid {live}, but this snapshot was written by pid {pid} \
              and is stale; showing the last snapshot from epoch {started_at}",
-            role.name(),
-            owner.pid
+            role.name()
         ),
-        Liveness::Running { owner: None, .. } => eprintln!(
+        Freshness::OwnerUnknown => eprintln!(
             "warning: {} is running but its owner record is missing, so this snapshot (pid {pid}) \
              cannot be verified as current; showing the last snapshot from epoch {started_at}",
             role.name()
         ),
-        Liveness::Running { .. } => {}
+        Freshness::Current
+        | Freshness::LiveWithoutSnapshot
+        | Freshness::AbsentNotRunning
+        | Freshness::Unreadable => {}
     }
 }
 
 /// One line naming the live owner when no snapshot is readable here.
-fn describe_running(role: StatusRole, tier: Tier, owner: Option<&Owner>, path: &Path) -> String {
+fn describe_running(
+    role: StatusRole,
+    tier: Tier,
+    owner: Option<&OwnerRecord>,
+    path: &Path,
+) -> String {
     format!(
         "{} is running for {} ({}); no status snapshot at {} (it may use another state directory)",
         role.name(),
@@ -482,5 +593,48 @@ services: none";
         assert_eq!(short_peer_id(SERVE_PEER), "1aa27080…");
         // Shorter ids are kept whole, with the ellipsis marking truncation.
         assert_eq!(short_peer_id("peer456"), "peer456…");
+    }
+
+    fn serve_file_json(pid: u32) -> String {
+        let mut file = sample_serve();
+        file.pid = pid;
+        serde_json::to_string(&file).unwrap()
+    }
+
+    #[test]
+    fn read_status_absent_and_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve-status.json");
+        let status = read_role_status_at(Role::Serve, path, Liveness::NotRunning).unwrap();
+        assert!(matches!(status.snapshot, Snapshot::Absent));
+        assert_eq!(status.freshness(), Freshness::AbsentNotRunning);
+    }
+
+    #[test]
+    fn read_status_stale_pid_includes_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve-status.json");
+        std::fs::write(&path, serve_file_json(4_000_000)).unwrap();
+        let status = read_role_status_at(Role::Serve, path, Liveness::NotRunning).unwrap();
+        assert!(matches!(status.snapshot, Snapshot::Present { .. }));
+        assert_eq!(status.freshness(), Freshness::StalePid { live_pid: None });
+    }
+
+    #[test]
+    fn read_status_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve-status.json");
+        read_role_status_at(Role::Serve, path, Liveness::NotRunning).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn read_status_invalid_file_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve-status.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let status = read_role_status_at(Role::Serve, path, Liveness::NotRunning).unwrap();
+        assert!(matches!(status.snapshot, Snapshot::Invalid(_)));
+        assert_eq!(status.freshness(), Freshness::Unreadable);
     }
 }

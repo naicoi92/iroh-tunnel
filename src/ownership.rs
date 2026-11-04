@@ -53,27 +53,30 @@ const OTHERS_READ: u32 = 0o004;
 
 /// Who is recorded as running a role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Owner {
-    pub(crate) role: String,
-    pub(crate) pid: u32,
+pub struct OwnerRecord {
+    pub role: String,
+    pub pid: u32,
     /// Public node id (never the secret key); `None` until the endpoint's
     /// identity is known.
-    pub(crate) node_id: Option<String>,
-    pub(crate) started_at: u64,
+    pub node_id: Option<String>,
+    pub started_at: u64,
 }
 
 /// Where a running owner was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tier {
+pub enum Tier {
     User,
     Machine,
 }
 
 /// Result of probing a role for a live owner.
 #[derive(Debug)]
-pub(crate) enum Liveness {
+pub enum Liveness {
     NotRunning,
-    Running { tier: Tier, owner: Option<Owner> },
+    Running {
+        tier: Tier,
+        owner: Option<OwnerRecord>,
+    },
 }
 
 fn conflict(msg: String) -> anyhow::Error {
@@ -229,13 +232,13 @@ fn try_lock(file: File, kind: LockKind) -> Result<Lock> {
     }
 }
 
-fn read_owner(dir: &Path, role: StatusRole) -> Option<Owner> {
+fn read_owner(dir: &Path, role: StatusRole) -> Option<OwnerRecord> {
     let body = std::fs::read_to_string(dir.join(owner_name(role))).ok()?;
     serde_json::from_str(&body).ok()
 }
 
 fn write_owner(dir: &Path, role: StatusRole, node_id: Option<&str>) {
-    let owner = Owner {
+    let owner = OwnerRecord {
         role: role.name().to_string(),
         pid: std::process::id(),
         node_id: node_id.map(str::to_string),
@@ -260,9 +263,9 @@ fn write_owner(dir: &Path, role: StatusRole, node_id: Option<&str>) {
 }
 
 /// Human description of a recorded owner: pid, plus public node id when known.
-pub(crate) fn describe_owner(owner: Option<&Owner>) -> String {
+pub(crate) fn describe_owner(owner: Option<&OwnerRecord>) -> String {
     match owner {
-        Some(Owner {
+        Some(OwnerRecord {
             pid,
             node_id: Some(id),
             ..
@@ -274,7 +277,7 @@ pub(crate) fn describe_owner(owner: Option<&Owner>) -> String {
 
 impl Tier {
     /// Who holds the role at this tier, for messages.
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tier::User => "this user",
             Tier::Machine => "the system service or another machine-wide process",
@@ -283,7 +286,7 @@ impl Tier {
 }
 
 /// The refusal for a start that finds `role` already running at `scope`.
-fn already_running(role: StatusRole, scope: &str, owner: Option<&Owner>) -> anyhow::Error {
+fn already_running(role: StatusRole, scope: &str, owner: Option<&OwnerRecord>) -> anyhow::Error {
     conflict(format!(
         "{} is already running ({scope}; {}); {}",
         role.name(),
