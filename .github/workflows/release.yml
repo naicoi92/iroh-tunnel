@@ -65,7 +65,7 @@ jobs:
   # it runs release.yml itself (not a reusable workflow), so the certificate
   # identity is exactly
   #   https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/<tag>
-  # which is what the updater pins (src/update.rs, #95).
+  # which is what the updater pins (crates/host/src/update/, #95).
   sign:
     name: checksums + keyless signature
     needs: [gate, build, package]
