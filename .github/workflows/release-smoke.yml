@@ -1,0 +1,121 @@
+# Smoke test of the PACKAGED release executables on every supported runner
+# (#97, RELEASE-MATRIX-01). It takes the signed `release-set` that one
+# `release.yml` run produced, verifies each archive against checksums.txt,
+# extracts the three role executables the way a user would, and forwards real
+# TCP and UDP bytes through them (tests/release_smoke.rs). Each runner uploads
+# an evidence file naming the digests, OS, architecture and commands.
+#
+#   gh workflow run release-smoke.yml -f release_run_id=<release.yml run id> -f tag=v0.4.3-rc.3
+#
+# Cargo's own test binaries are NOT used: they disable relay TLS verification.
+# Production executables accept only https relays, so the pair meets through
+# the public n0 relays and the run needs Internet access. The forced-relay
+# proof is in tests/udp_tunnel.rs; this workflow records the path kinds the
+# status files report.
+#
+# Not covered here: signature verification (release.yml `verify`), installers,
+# packages and `update` (windows-update-e2e.yml, snapshot.yml).
+
+name: release-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Run id of the release.yml run whose release-set is tested.
+        required: true
+      tag:
+        description: Tag of that run (vX.Y.Z or vX.Y.Z-rc.N).
+        required: true
+
+concurrency:
+  group: release-smoke-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.id }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: linux-amd64,       runner: ubuntu-22.04,     suffix: linux-amd64.tar.gz }
+          - { id: linux-arm64,       runner: ubuntu-22.04-arm, suffix: linux-arm64.tar.gz }
+          - { id: linux-amd64-musl,  runner: ubuntu-latest,    suffix: linux-amd64-musl.tar.gz }
+          - { id: linux-arm64-musl,  runner: ubuntu-24.04-arm, suffix: linux-arm64-musl.tar.gz }
+          - { id: darwin-arm64,      runner: macos-15,         suffix: darwin-arm64.tar.gz }
+          - { id: windows-amd64,     runner: windows-latest,   suffix: windows-amd64.zip }
+          - { id: windows-arm64,     runner: windows-11-arm,   suffix: windows-arm64.zip }
+    env:
+      TAG: ${{ inputs.tag }}
+      SUFFIX: ${{ matrix.suffix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # The test must match the commit that was released.
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-set
+          path: release-set/
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Check and extract the role archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          sums=checksums.txt
+          case "$SUFFIX" in darwin-*) sums=checksums-darwin.txt ;; esac
+          mkdir -p bin
+          for role in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
+            file="${role}-${version}-${SUFFIX}"
+            want=$(awk -v f="$file" '$2 == f {print $1}' "release-set/$sums")
+            [ -n "$want" ] || { echo "$file is not listed in $sums" >&2; exit 1; }
+            if command -v sha256sum >/dev/null 2>&1; then
+              got=$(sha256sum "release-set/$file" | awk '{print $1}')
+            else
+              got=$(shasum -a 256 "release-set/$file" | awk '{print $1}')
+            fi
+            [ "$got" = "$want" ] || { echo "$file digest mismatch: $got != $want" >&2; exit 1; }
+            echo "ok: $file sha256:$got"
+            case "$file" in
+              *.zip) 7z x -y "-obin/tmp-$role" "release-set/$file" >/dev/null
+                     cp "bin/tmp-$role/$role.exe" bin/ ;;
+              *)     tar -xzf "release-set/$file" -C bin "$role" ;;
+            esac
+          done
+          ls -l bin
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: release-smoke
+
+      - name: Forward TCP and UDP through the packaged executables
+        shell: bash
+        env:
+          RELEASE_SMOKE_BIN_DIR: ${{ github.workspace }}/bin
+          RELEASE_SMOKE_EVIDENCE: ${{ github.workspace }}/smoke-evidence-${{ matrix.id }}.json
+          RELEASE_SMOKE_TAG: ${{ inputs.tag }}
+          RELEASE_SMOKE_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          export RELEASE_SMOKE_VERSION="${TAG#v}"
+          cargo test --locked --test release_smoke -- --ignored --nocapture
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-evidence-${{ matrix.id }}
+          path: smoke-evidence-${{ matrix.id }}.json
+          if-no-files-found: warn
+          retention-days: 90
