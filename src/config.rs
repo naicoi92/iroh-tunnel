@@ -118,6 +118,17 @@ impl NodeConfig {
     }
 }
 
+/// Largest `idle_timeout` accepted, in seconds (one day).
+const MAX_UDP_IDLE_TIMEOUT_SECS: u64 = 86_400;
+/// Largest `max_flows` / `max_flows_per_peer` accepted. Each flow holds a
+/// socket, so this is far above any descriptor limit; it only rejects absurd
+/// values before they reach an allocator.
+const MAX_UDP_FLOWS: usize = 1_000_000;
+/// Largest `queue_depth` accepted. A bounded channel panics when asked for a
+/// huge capacity, so the value is checked here, where a config error is
+/// reported, instead of inside a connection task.
+const MAX_UDP_QUEUE_DEPTH: usize = 65_536;
+
 /// Optional UDP resource settings on a service table (UDP-06).
 ///
 /// Every field is optional; absent fields use the defaults in
@@ -182,20 +193,43 @@ impl UdpSettings {
             }
             return Ok(());
         }
-        for (field, value) in [
-            ("idle_timeout", self.idle_timeout.map(|v| v as usize)),
-            ("max_flows", self.max_flows),
-            ("max_flows_per_peer", self.max_flows_per_peer),
-            ("queue_depth", self.queue_depth),
+        for (field, value, max) in [
+            ("idle_timeout", self.idle_timeout, MAX_UDP_IDLE_TIMEOUT_SECS),
+            (
+                "max_flows",
+                self.max_flows.map(|v| v as u64),
+                MAX_UDP_FLOWS as u64,
+            ),
+            (
+                "max_flows_per_peer",
+                self.max_flows_per_peer.map(|v| v as u64),
+                MAX_UDP_FLOWS as u64,
+            ),
+            (
+                "queue_depth",
+                self.queue_depth.map(|v| v as u64),
+                MAX_UDP_QUEUE_DEPTH as u64,
+            ),
         ] {
-            if value == Some(0) {
-                anyhow::bail!("service '{service}': invalid {field} 0: must be >= 1");
+            match value {
+                Some(0) => anyhow::bail!("service '{service}': invalid {field} 0: must be >= 1"),
+                Some(v) if v > max => {
+                    anyhow::bail!("service '{service}': invalid {field} {v}: must be <= {max}")
+                }
+                _ => {}
             }
         }
-        if !per_peer_allowed && self.max_flows_per_peer.is_some() {
-            anyhow::bail!(
-                "service '{service}': max_flows_per_peer is not valid on an access service"
-            );
+        if !per_peer_allowed {
+            // Access has no peers to cap and no per-flow queue: it forwards
+            // each datagram straight to the connection.
+            for (field, set) in [
+                ("max_flows_per_peer", self.max_flows_per_peer.is_some()),
+                ("queue_depth", self.queue_depth.is_some()),
+            ] {
+                if set {
+                    anyhow::bail!("service '{service}': {field} is not valid on an access service");
+                }
+            }
         }
         // Only an explicit contradiction is an error; a default per-peer cap
         // above an explicit `max_flows` is clamped by `resolve`.
@@ -602,6 +636,28 @@ mod tests {
     }
 
     #[test]
+    fn absurdly_large_udp_limits_are_rejected_not_passed_to_an_allocator() {
+        for (field, value) in [
+            ("queue_depth", "9000000000000000000"),
+            ("queue_depth", "65537"),
+            ("max_flows", "1000001"),
+            ("idle_timeout", "86401"),
+        ] {
+            let f = tmpfile("serve.toml", &format!("{UDP_SERVE}{field} = {value}\n"));
+            let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+            assert!(err.contains(field), "{field}={value}: {err}");
+        }
+        let f = tmpfile("serve.toml", &format!("{UDP_SERVE}queue_depth = 65536\n"));
+        assert_eq!(
+            ServeConfig::load(f.path()).unwrap().services[0]
+                .udp
+                .resolve()
+                .queue_depth,
+            65_536
+        );
+    }
+
+    #[test]
     fn a_small_service_cap_alone_clamps_the_default_per_peer_cap() {
         let f = tmpfile("serve.toml", &format!("{UDP_SERVE}max_flows = 10\n"));
         let limits = ServeConfig::load(f.path()).unwrap().services[0]
@@ -621,19 +677,20 @@ mod tests {
     }
 
     #[test]
-    fn access_takes_idle_timeout_cap_and_queue_but_no_per_peer_cap() {
+    fn access_takes_idle_timeout_and_cap_but_no_per_peer_cap_or_queue() {
         let node = "0".repeat(64);
         let base = format!(
             "[[services]]\nname = \"dns\"\nnode_id = \"{node}\"\nprotocol = \"udp\"\nport = 53\n"
         );
-        let ok = tmpfile(
-            "access.toml",
-            &format!("{base}max_flows = 7\nqueue_depth = 3\n"),
-        );
+        let ok = tmpfile("access.toml", &format!("{base}max_flows = 7\n"));
         let limits = AccessConfig::load(ok.path()).unwrap().services[0]
             .udp
             .resolve();
-        assert_eq!((limits.max_flows, limits.queue_depth), (7, 3));
+        assert_eq!(limits.max_flows, 7);
+
+        let queue = tmpfile("access.toml", &format!("{base}queue_depth = 3\n"));
+        let err = format!("{:#}", AccessConfig::load(queue.path()).unwrap_err());
+        assert!(err.contains("queue_depth"), "{err}");
 
         let bad = tmpfile("access.toml", &format!("{base}max_flows_per_peer = 2\n"));
         let err = format!("{:#}", AccessConfig::load(bad.path()).unwrap_err());

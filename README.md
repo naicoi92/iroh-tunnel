@@ -409,11 +409,15 @@ What to expect:
   counted, and no running flow is evicted. Each flow has its own queue of 64
   datagrams, and a full queue drops the newest, so one slow target cannot stall
   other flows. An idle flow's socket is kept open for 30 seconds before it is
-  released, so a late reply cannot reach a new client; that time counts against
-  the caps. All of these values are untested estimates.
+  released, which makes it unlikely that a late reply reaches a new client;
+  that time counts against the caps. It is not isolation: once the socket is
+  released the operating system may hand the same local port to a later flow,
+  and a reply that is still in flight could then arrive there. All of these
+  values are untested estimates.
 - **Tuning.** The service table accepts optional `idle_timeout` (seconds),
-  `max_flows`, `max_flows_per_peer` (Serve only) and `queue_depth`, on a UDP
-  service only:
+  `max_flows`, `max_flows_per_peer` (Serve only) and `queue_depth` (Serve only),
+  on a UDP service only. Zero and absurdly large values are rejected when the
+  config loads:
 
   ```toml
   [[services]]

@@ -31,26 +31,26 @@ Single reference for implementation issues #88 and #89. It consolidates decision
 | Datagram shorter than the 4-byte header | Dropped by the receiver | Counter `malformed` |
 | Identifier not admittable or not live (see above), on either side | Dropped | Counter `unknown_flow` |
 | Upstream send error on Serve | Datagram dropped; the flow stays | Counter `upstream_error` |
-| Datagrams unusable on the connection | Session fails at setup with a clear error | Error at setup |
+| Datagrams unusable on the connection | **Not implemented as specified.** The spec says the session fails at setup with a clear error. Today each datagram is dropped and counted as `limit_shrink`, so a peer that never supports datagrams drops everything with no error | Counter `limit_shrink`, warning log. Open work: a setup check |
 | Limit shrinks mid-session | Affected datagrams dropped individually | Counter `limit_shrink`, rate-limited log |
 | Service or per-peer cap reached | Serve refuses the flow and drops the datagram; no existing flow is evicted | Counter `cap` |
 | Serve refused a flow | Access keeps the flow until idle expiry. Later datagrams of that identifier are dropped as `unknown_flow`, never admitted mid-flow. No refusal signal is sent on the wire | Counter `unknown_flow` |
-| Per-flow queue full | Newest datagram dropped | Counter `queue_full` |
+| Per-flow queue full (Serve only; Access forwards straight to the connection) | Newest datagram dropped | Counter `queue_full` |
 | Reply from a source other than the target | Dropped by the operating system, because the upstream socket is connected | Counter `foreign_source` exists but is not incremented: the drop happens below the tunnel and is not observable |
 | Idle expiry | Flow ends; upstream socket stays open as a sink for the quarantine period, then closes | Late replies counted as `quarantine_reply` |
 | Peer lost or reconnect | All flows end with the incarnation; quarantined sockets remain as sinks only | No flow survives |
-| Flow identifiers exhausted | Access evicts the connection; the next datagram dials afresh with an empty flow table, so all flows end | Counter `cap`, warning log |
+| Flow identifiers exhausted | Access evicts the connection; the next datagram dials afresh with an empty flow table, so all flows end | Counter `cap` (shared with the cap rows; the warning log says identifiers ran out) |
 | Connection lost | Access evicts the dead connection on the first send error; the next datagram dials afresh | None; forwarding resumes |
 | Bind or descriptor exhaustion | Flow refused, process keeps running | Counter `cap` (shared with the cap rows; the log line names the cause) |
 | Access cap reached | Access drops the new client's datagram before it reaches Serve; known clients and running flows are untouched | Counter `cap` on the Access status |
 
 Counter names here are the contract names; the spec's prose names (queue full, limit shrink) map to `queue_full` and `limit_shrink`. Quarantined sockets are reported as a count separate from active flows.
 
-Residual risk: after quarantine, a late reply on a reused tuple may reach a new flow. The tunnel documents this and does not claim absolute isolation (UDP-04).
+Residual risk: after quarantine, a late reply on a reused tuple may reach a new flow. The tunnel documents this and does not claim absolute isolation (UDP-04). The per-peer cap counts a peer's live flows only; quarantined sockets count against the service cap.
 
 ## Defaults (untested estimates)
 
-Idle timeout 60 s (`idle_timeout`, seconds); quarantine 30 s (fixed constant); 256 flows per service (`max_flows`); 64 flows per peer (`max_flows_per_peer`, Serve only); 64 datagrams queued per flow (`queue_depth`). All four fields are optional on a UDP service table and rejected on a TCP service. A per-peer cap above an explicit service cap is rejected. Changing a value does not change the contract. Every value is an untested estimate.
+Idle timeout 60 s (`idle_timeout`, seconds); quarantine 30 s (fixed constant); 256 flows per service (`max_flows`); 64 flows per peer (`max_flows_per_peer`, Serve only); 64 datagrams queued per flow (`queue_depth`). All four fields are optional on a UDP service table and rejected on a TCP service. `max_flows_per_peer` and `queue_depth` are Serve only. Values are bounded when the config loads: `idle_timeout` up to 86400 s, `max_flows` and `max_flows_per_peer` up to 1,000,000, `queue_depth` up to 65,536. A per-peer cap above an explicit service cap is rejected. Changing a value does not change the contract. Every value is an untested estimate.
 
 ## Left to implementation
 

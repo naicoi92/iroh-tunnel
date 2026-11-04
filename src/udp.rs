@@ -11,10 +11,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 /// Bytes of the flow identifier that prefix every tunnel datagram.
 pub const HEADER_LEN: usize = 4;
 
-/// How long a flow may stay silent in both directions before it ends.
-///
-/// Minimal lifecycle for #88: the flow ends and its upstream socket closes at
-/// once. Quarantine, caps and a configurable value follow in #89 (UDP-06).
+/// Default time a flow may stay silent in both directions before it ends
+/// (`idle_timeout` overrides it per service). Serve then quarantines the
+/// flow's upstream socket for [`QUARANTINE`]. An untested estimate (UDP-06).
 pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Default flows one service may hold (Serve: per service; Access: per
@@ -32,14 +31,26 @@ pub const DEFAULT_QUEUE_DEPTH: usize = 64;
 /// table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropReason {
+    /// Larger than the connection's current payload limit.
     Oversize,
+    /// Shorter than the flow header.
     Malformed,
+    /// For a flow that is not live and cannot be admitted.
     UnknownFlow,
+    /// The upstream socket could not send, or its writer had ended.
     UpstreamError,
+    /// A flow cap was hit, flow identifiers ran out, or no socket could be
+    /// opened. The log line names which.
     Cap,
+    /// The flow's queue was full.
     QueueFull,
+    /// Datagrams became unusable on the connection.
     LimitShrink,
+    /// A late reply reached a quarantined socket.
     QuarantineReply,
+    /// Reserved: never recorded. Serve's upstream sockets are connected, so
+    /// the operating system drops a reply from any other source before the
+    /// tunnel can see it.
     ForeignSource,
 }
 

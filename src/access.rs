@@ -723,8 +723,9 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 ///
 /// Each client address is a flow (UDP-04). All flows share the service's one
 /// connection; when that connection is replaced the flows end with it
-/// (session incarnation). Idle flows expire after `udp::IDLE_TIMEOUT`. Caps,
-/// counters and ending the incarnation on identifier exhaustion belong to #89.
+/// (session incarnation). Idle flows expire after the service's idle timeout.
+/// New clients are refused at `max_flows`, and spent flow identifiers end the
+/// incarnation by evicting the connection.
 /// Contract: `docs/design/udp-integration-contract.md`.
 async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     use crate::udp::DropReason;
