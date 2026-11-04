@@ -232,9 +232,11 @@ impl ServeStrategy {
         let accept_ep = ep.clone();
         let accept_peers = peers.clone();
         let (stop, stop_rx) = shutdown::channel();
+        let sinks = Arc::new(shutdown::QuarantineSinks::default());
+        let accept_sinks = sinks.clone();
         let mut accept = JoinSet::new();
         accept.spawn(async move {
-            accept_loop(&accept_ep, targets, accept_peers, stop_rx).await;
+            accept_loop(&accept_ep, targets, accept_peers, accept_sinks, stop_rx).await;
         });
 
         // Graceful-cleanup inputs captured BEFORE `status` moves into the
@@ -269,6 +271,9 @@ impl ServeStrategy {
         // The accept supervisor seals handshakes and connection admission;
         // its connection children seal stream admission and join pipe leaves.
         shutdown::join(&mut accept).await;
+        // Quarantine sinks outlive their connections but not the role.
+        let drain_deadline = (*stop.borrow()).unwrap_or_else(tokio::time::Instant::now);
+        sinks.shutdown(drain_deadline).await;
         // Signal the flush task to stop (dropping the sender alone would
         // also close the channel, but only at scope end — far too late).
         let _ = stop_tx.send(());
@@ -576,6 +581,7 @@ async fn accept_loop(
     ep: &iroh::Endpoint,
     targets: HashMap<Vec<u8>, ServiceTarget>,
     peers: PeerTracker,
+    sinks: Arc<shutdown::QuarantineSinks>,
     mut stop: shutdown::Stop,
 ) {
     let mut connections = JoinSet::new();
@@ -656,6 +662,7 @@ async fn accept_loop(
         ));
         let conn_peers = peers.clone();
         let conn_stop = stop.clone();
+        let conn_sinks = sinks.clone();
 
         connections.spawn(async move {
             // Track the peer for the status file's `connections` array for
@@ -663,7 +670,7 @@ async fn accept_loop(
             // untracks on drop — normal return or panic unwind alike — so
             // the refcount can never leak.
             let _tracked = conn_peers.track(remote_id, &name);
-            handle_connection(&conn, target, conn_stop).await;
+            handle_connection(&conn, target, &conn_sinks, conn_stop).await;
         });
     }
     // Supervisors are not aborted: each joins its own stream children using
@@ -706,9 +713,14 @@ where
 }
 
 /// Own stream admission and pipe tasks for one multiplexed connection.
-async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
+async fn handle_connection(
+    conn: &Connection,
+    target: ServiceTarget,
+    sinks: &shutdown::QuarantineSinks,
+    mut stop: shutdown::Stop,
+) {
     if target.protocol == Protocol::Udp {
-        return handle_udp_connection(conn, target, stop).await;
+        return handle_udp_connection(conn, target, sinks, stop).await;
     }
     let mut streams = JoinSet::new();
     let mut stream_no: u64 = 0;
@@ -806,7 +818,12 @@ type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
 /// Contract: `docs/udp-integration-contract.md`. Flows are capped per
 /// peer and per service, expire after the service's idle timeout, and their
 /// sockets are then quarantined as sinks; each flow has a bounded queue.
-async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
+async fn handle_udp_connection(
+    conn: &Connection,
+    target: ServiceTarget,
+    sinks: &shutdown::QuarantineSinks,
+    mut stop: shutdown::Stop,
+) {
     use crate::udp::{Admission, DropReason};
     let stats = target.udp_stats.clone();
     let limits = target.udp_limits;
@@ -828,7 +845,7 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                     tracing::debug!(count = ended.len(), "udp upstream flows expired");
                 }
                 for upstream in ended {
-                    quarantine(upstream, &stats, &stop);
+                    quarantine(upstream, &stats, &stop, sinks);
                 }
                 continue;
             }
@@ -954,7 +971,7 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
     // like any expired flow: they outlive the incarnation as sinks only.
     let ended = flows.lock().unwrap_or_else(|p| p.into_inner()).drain_all();
     for upstream in ended {
-        quarantine(upstream, &stats, &stop);
+        quarantine(upstream, &stats, &stop, sinks);
     }
     readers.abort_all();
     shutdown::join(&mut readers).await;
@@ -965,9 +982,14 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
 /// that the OS would otherwise give the same local port.
 ///
 /// The socket keeps its slot against the caps until the sink closes. The sink
-/// runs detached: it must outlive the connection, and it ends early on
-/// shutdown.
-fn quarantine(upstream: UdpUpstream, stats: &Arc<crate::udp::UdpStats>, stop: &shutdown::Stop) {
+/// is owned by the role run's `sinks`: it outlives the connection, ends early
+/// on shutdown, and is joined or aborted within the stop deadline.
+fn quarantine(
+    upstream: UdpUpstream,
+    stats: &Arc<crate::udp::UdpStats>,
+    stop: &shutdown::Stop,
+    sinks: &shutdown::QuarantineSinks,
+) {
     let UdpUpstream {
         socket,
         relay,
@@ -983,7 +1005,7 @@ fn quarantine(upstream: UdpUpstream, stats: &Arc<crate::udp::UdpStats>, stop: &s
     let slot = QuarantineSlot(stats.clone());
     let stats = stats.clone();
     let mut stop = stop.clone();
-    tokio::spawn(async move {
+    sinks.spawn(async move {
         // Released on every exit path, even if this task is aborted.
         let _slot = slot;
         let deadline = tokio::time::Instant::now() + crate::udp::QUARANTINE;
@@ -1363,5 +1385,82 @@ mod tests {
 
         let _ = stop_tx.send(());
         role.await.unwrap().unwrap();
+    }
+
+    async fn quarantined_upstream(
+        stats: &Arc<crate::udp::UdpStats>,
+        stop: &shutdown::Stop,
+        sinks: &shutdown::QuarantineSinks,
+    ) {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let idle = || tokio::spawn(std::future::pending::<()>()).abort_handle();
+        let (queue, _rx) = crate::udp::FlowQueue::new(1);
+        let upstream = UdpUpstream {
+            socket,
+            queue,
+            relay: idle(),
+            writer: idle(),
+        };
+        quarantine(upstream, stats, stop, sinks);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quarantine_sinks_are_joined_on_role_stop() {
+        let stats = Arc::new(crate::udp::UdpStats::default());
+        let sinks = shutdown::QuarantineSinks::default();
+        let (stop, mut stop_rx) = shutdown::channel();
+        let before = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        for _ in 0..3 {
+            quarantined_upstream(&stats, &stop_rx, &sinks).await;
+        }
+        assert_eq!(stats.snapshot().quarantined_flows, 3);
+        shutdown::begin(&stop, &shutdown::RunContext::new());
+        let deadline = shutdown::stopped(&mut stop_rx).await;
+        sinks.shutdown(deadline).await;
+        tokio::task::yield_now().await;
+        let after = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        assert_eq!(after, before);
+        assert_eq!(stats.snapshot().quarantined_flows, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_quarantine_sink_releases_its_slot() {
+        let stats = Arc::new(crate::udp::UdpStats::default());
+        let sinks = shutdown::QuarantineSinks::default();
+        stats.quarantine_started();
+        let slot = QuarantineSlot(stats.clone());
+        // Same exit as the real sink on a non-transient recv error: break.
+        sinks.spawn(async move {
+            let _slot = slot;
+            panic!("sink failed");
+        });
+        tokio::task::yield_now().await;
+        sinks.reap();
+        assert_eq!(stats.snapshot().quarantined_flows, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quarantine_sink_outlives_its_connection() {
+        let stats = Arc::new(crate::udp::UdpStats::default());
+        let sinks = shutdown::QuarantineSinks::default();
+        let (_stop, stop_rx) = shutdown::channel();
+        {
+            let mut connection = JoinSet::new();
+            connection.spawn(async {
+                std::future::pending::<()>().await;
+            });
+            quarantined_upstream(&stats, &stop_rx, &sinks).await;
+            drop(connection);
+        }
+        tokio::time::sleep(crate::udp::QUARANTINE / 2).await;
+        sinks.reap();
+        assert_eq!(stats.snapshot().quarantined_flows, 1);
+        tokio::time::sleep(crate::udp::QUARANTINE).await;
+        sinks.reap();
+        assert_eq!(stats.snapshot().quarantined_flows, 0);
     }
 }

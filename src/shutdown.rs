@@ -120,6 +120,42 @@ pub(crate) async fn join(tasks: &mut JoinSet<()>) {
     }
 }
 
+/// Quarantine sinks owned for one role run.
+///
+/// A sink outlives its connection (it holds a socket for `QUARANTINE`) but not
+/// the role: finished sinks are reaped while the role runs, and `shutdown`
+/// joins the rest, aborting at the drain deadline.
+#[derive(Default)]
+pub(crate) struct QuarantineSinks {
+    // Never held across an await.
+    tasks: std::sync::Mutex<JoinSet<()>>,
+}
+
+impl QuarantineSinks {
+    pub(crate) fn spawn(&self, sink: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.reap();
+        self.lock().spawn(sink);
+    }
+
+    /// Observe sinks that have already finished, without waiting.
+    pub(crate) fn reap(&self) {
+        let mut tasks = self.lock();
+        while let Some(result) = tasks.try_join_next() {
+            observe(result);
+        }
+    }
+
+    /// Join every sink, aborting those still running at `deadline`.
+    pub(crate) async fn shutdown(&self, deadline: Instant) {
+        let mut tasks = std::mem::take(&mut *self.lock());
+        drain(&mut tasks, deadline).await;
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, JoinSet<()>> {
+        self.tasks.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
 /// Extra time past the drain deadline (endpoint close, status cleanup) before
 /// a stuck shutdown is abandoned by [`forced_exit`]. Technical implementation
 /// default, not configurable.
