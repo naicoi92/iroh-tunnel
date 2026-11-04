@@ -439,7 +439,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved policy, old/new flow and socket trace, recipient observations and risk documentation. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — #71 decided lifecycle semantics (spec UDP-04: connected-socket source filtering, session-bound flows, quarantine); numeric defaults set in UDP-06 (untested); implementation pending #89.
+**Execution:** PARTIAL (#89) — `tests/udp_tunnel.rs`: expiry then quarantine then release of the slot (runs the real 30 s), a late reply to the sink is dropped and counted, the target going down at first does not end a flow's reply path, forwarding resumes after Serve restarts. Source filtering is by the connected socket and is not counted on this platform. Tuple reuse after quarantine stays a documented residual risk. Not run: Linux and Windows by hand, and real delay or loss.
 
 <a id="udp-limit-01"></a>
 ### Case UDP-LIMIT-01
@@ -456,9 +456,9 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved limits, delivered/drop counters, memory/handles/queues and cleanup observations. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — policy decided (UDP-05, UDP-06; contract in `udp-integration-contract.md`); implementation pending #89. Defaults are untested estimates.
+**Execution:** PARTIAL (#89) — covered end to end in `tests/udp_tunnel.rs`: service cap, per-peer cap, Access cap, the quarantine slot, status counters and the datagram limit, and an oversize client datagram dropped and counted. Unit tests only: the bounded per-flow queue (`queue_full` is not forced end to end), flow-identifier exhaustion (2^32 flows cannot be driven). No test at all: bind or descriptor exhaustion, `limit_shrink`, `foreign_source`. Defaults are untested estimates.
 
-**#74 decision (Confirmed, spec UDP-06; defaults untested):** loopback cases to run in CI: (1) service flow cap, (2) per-peer flow cap, (3) idle expiry, quarantine, then reuse, (4) late reply to the quarantine sink is dropped and counted, (5) slow-consumer isolation, (6) datagram limit plus 1 dropped and counted, (7) no flow survives a new session incarnation, (8) bind or descriptor exhaustion refuses the flow without crashing, (9) interleaved replies are never cross-delivered. These do not change the BLOCKED status above, and direct/relay and per-platform runs stay with #78/#97. NOT RUN, recorded as known risks: a planned `tc netem` impairment scenario, limit shrink on path migration, and bounded memory over a long run (E3). Numeric defaults are untested estimates.
+**#74 decision (Confirmed, spec UDP-06; defaults untested). #89 evidence per case:** (1) service cap, (2) per-peer cap, (3) quarantine then release and (4) the late-reply sink are end to end; (5) slow-consumer isolation is a unit test of the bounded queue plus an end-to-end flood that does not stall another flow; (6) oversize is end to end with a 4000-byte datagram, not exactly the limit plus 1; (7) the redial after a restart is end to end, the flow-table reset is not asserted directly; (8) bind or descriptor exhaustion has no test; (9) is from #88. The loopback cases to run in CI were: (1) service flow cap, (2) per-peer flow cap, (3) idle expiry, quarantine, then reuse, (4) late reply to the quarantine sink is dropped and counted, (5) slow-consumer isolation, (6) datagram limit plus 1 dropped and counted, (7) no flow survives a new session incarnation, (8) bind or descriptor exhaustion refuses the flow without crashing, (9) interleaved replies are never cross-delivered. These do not change the BLOCKED status above, and direct/relay and per-platform runs stay with #78/#97. NOT RUN, recorded as known risks: a planned `tc netem` impairment scenario, limit shrink on path migration, and bounded memory over a long run (E3). Numeric defaults are untested estimates.
 
 <a id="udp-path-01"></a>
 ### Case UDP-PATH-01
@@ -475,7 +475,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Path telemetry/packet evidence, impairment commands and raw benchmark data. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — needs an impairment-capable direct and forced-relay environment and the implementation (#88, #89); the policy is decided.
+**Execution:** PARTIAL (#89) — `udp_round_trips_on_a_relay_only_path_and_on_a_direct_path` runs the same UDP round trip on a forced-relay path (endpoints built without IP transports) and on a direct path, and checks the Access status reports the matching transport kinds. Loopback with an in-process relay only. Not run: loss, delay, congestion, path migration, real networks, and the Linux/macOS/Windows matrix beyond CI.
 
 <a id="sm-scope-01"></a>
 ### Case SM-SCOPE-01
