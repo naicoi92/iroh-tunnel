@@ -902,3 +902,79 @@ async fn access_refuses_new_clients_over_its_own_cap() -> Result<()> {
     echo.abort();
     tunnel.shutdown().await
 }
+
+/// Transports the Access status file reports for the first service.
+fn access_transports(status: &serde_json::Value) -> Vec<(String, bool)> {
+    status["services"][0]["transports"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|t| {
+                    (
+                        t["kind"].as_str().unwrap_or_default().to_owned(),
+                        t["active"].as_bool().unwrap_or(false),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// #89 path evidence: the same UDP round trip works on a relay-only path and
+/// on a direct path, and the status file shows which one was used.
+///
+/// Relay-only is forced by building the endpoints without IP transports
+/// (test-utils seam); direct is the default on loopback once hole punching
+/// finishes. One sequential test because the seam is process-global. This is
+/// loopback with an in-process relay: it proves the code runs on both path
+/// kinds, not how either performs on a real network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_round_trips_on_a_relay_only_path_and_on_a_direct_path() -> Result<()> {
+    // Phase 1: relay only.
+    // `start` only spawns the roles; they build their endpoints a moment
+    // later. Keep the switch on until the first round trip has proved both
+    // endpoints exist, then turn it off so phase 2 gets default endpoints.
+    iroh_tunnel::endpoint::set_relay_only_for_tests(true);
+    let relay_only = UdpTunnel::start().await?;
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    let first = relay_only.roundtrip(&client, b"over-relay").await;
+    iroh_tunnel::endpoint::set_relay_only_for_tests(false);
+    assert_eq!(first?, b"over-relay");
+    let status =
+        UdpTunnel::status_when(relay_only.access_state.path(), "access-status.json", |s| {
+            !access_transports(s).is_empty()
+        })
+        .await?;
+    let transports = access_transports(&status);
+    assert!(
+        transports.iter().all(|(kind, _)| kind == "relay"),
+        "a relay-only endpoint must not report a direct path: {transports:?}"
+    );
+    assert!(
+        transports.iter().any(|(_, active)| *active),
+        "{transports:?}"
+    );
+    relay_only.shutdown().await?;
+
+    // Phase 2: default endpoints; wait for hole punching to select a direct path.
+    let direct = UdpTunnel::start().await?;
+    assert_eq!(direct.roundtrip(&client, b"warm").await?, b"warm");
+    UdpTunnel::status_within(
+        direct.access_state.path(),
+        "access-status.json",
+        Duration::from_secs(60),
+        |s| {
+            access_transports(s)
+                .iter()
+                .any(|(kind, active)| kind == "direct" && *active)
+        },
+    )
+    .await
+    .context("loopback never selected a direct path")?;
+    drain(&client).await;
+    assert_eq!(
+        direct.roundtrip(&client, b"over-direct").await?,
+        b"over-direct"
+    );
+    direct.shutdown().await
+}

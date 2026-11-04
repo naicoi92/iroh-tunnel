@@ -25,6 +25,20 @@ use iroh::{RelayMap, RelayUrl};
 
 use std::time::Duration;
 
+/// Test-only switch: build endpoints without IP transports, so every path is a
+/// relay path. Compiled only under `test-utils`; production never reads it.
+#[cfg(feature = "test-utils")]
+static TEST_RELAY_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Force (or stop forcing) relay-only endpoints for roles started afterwards.
+///
+/// Process-global: use it from one sequential test, and reset it before the
+/// test ends. Endpoints already built are unaffected.
+#[cfg(feature = "test-utils")]
+pub fn set_relay_only_for_tests(on: bool) {
+    TEST_RELAY_ONLY.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// The n0 default relay URLs (use1-1, usw1-1, euc1-1, aps1-1).
 ///
 /// Relays are optional in iroh-tunnel config: when a user does not configure
@@ -109,6 +123,9 @@ async fn create_endpoint_with_key(
     #[cfg(feature = "test-utils")]
     {
         builder = builder.ca_tls_config(CaTlsConfig::insecure_skip_verify());
+        if TEST_RELAY_ONLY.load(std::sync::atomic::Ordering::SeqCst) {
+            builder = builder.clear_ip_transports();
+        }
     }
 
     // Empty ALPN list is fine for access (outbound only); serve registers every
