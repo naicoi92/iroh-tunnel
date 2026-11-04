@@ -464,13 +464,79 @@ fn redact_secrets(doc: &mut DocumentMut) {
     }
 }
 
-/// `config edit`: open the config in `$EDITOR`, then validate and save it.
+/// `config edit` (CLI): open the config in `$EDITOR`, then validate and save it.
 ///
-/// The editor works on a private copy next to the config. The result is
-/// applied only if the live file is unchanged since the copy was taken and the
-/// edited document is valid; otherwise the live file is left as it was and the
-/// edited text is kept in `<config>.rejected` (owner-only) so it is not lost.
-pub fn edit(role: Role, config: Option<&Path>) -> Result<()> {
+/// The editor runs without any lock held; see [`prepare_edit`] and
+/// [`EditAttempt::commit`] for the rules applied to the result.
+pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
+    let attempt = prepare_edit(role, config)?;
+    edit::edit_file(attempt.scratch_path()).map_err(anyhow::Error::from)?;
+    match attempt.commit()? {
+        EditOutcome::Unchanged => {
+            println!("No changes.");
+            Ok(())
+        }
+        EditOutcome::Saved { path } => {
+            println!("Saved {}.", path.display());
+            Ok(())
+        }
+        EditOutcome::Rejected { message, .. } => Err(CliError::Config(message).into()),
+    }
+}
+
+/// Why an edit was not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditRejection {
+    /// The live file changed after the scratch copy was taken.
+    Conflict,
+    /// The edited text failed parsing or validation.
+    Invalid,
+}
+
+/// Result of [`EditAttempt::commit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditOutcome {
+    Unchanged,
+    Saved {
+        path: PathBuf,
+    },
+    Rejected {
+        reason: EditRejection,
+        /// `<config>.rejected` when the edited text was kept there.
+        sidecar: Option<PathBuf>,
+        message: String,
+    },
+}
+
+/// A private scratch copy of the config, ready to be edited by any editor.
+///
+/// Dropping it removes the scratch file. No lock is held while it exists.
+pub struct EditAttempt {
+    role: Role,
+    path: PathBuf,
+    scratch: PathBuf,
+    original: Option<String>,
+}
+
+impl std::fmt::Debug for EditAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditAttempt")
+            .field("role", &self.role)
+            .field("path", &self.path)
+            .field("scratch", &self.scratch)
+            .field("original", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for EditAttempt {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.scratch);
+    }
+}
+
+/// Copy the config to a scratch file next to it for editing.
+pub fn prepare_edit(role: Role, config: Option<&Path>) -> Result<EditAttempt> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     let original = read_optional(&path)?;
     let original_text = original.clone().unwrap_or_default();
@@ -478,44 +544,68 @@ pub fn edit(role: Role, config: Option<&Path>) -> Result<()> {
     crate::config_store::ensure_parent(&path)?;
     let scratch = scratch_path(&path);
     write_atomic(&scratch, original_text.as_bytes())?;
-    let edited = edit::edit_file(&scratch)
-        .map_err(anyhow::Error::from)
-        .and_then(|()| {
-            std::fs::read_to_string(&scratch)
-                .with_context(|| format!("failed to read edited copy: {}", scratch.display()))
-        });
-    let _ = std::fs::remove_file(&scratch);
-    let edited = edited?;
+    Ok(EditAttempt {
+        role,
+        path,
+        scratch,
+        original,
+    })
+}
 
-    if edited == original_text {
-        println!("No changes.");
-        return Ok(());
+impl EditAttempt {
+    /// The file the editor should modify.
+    pub fn scratch_path(&self) -> &Path {
+        &self.scratch
     }
 
-    let _lock = ConfigLock::acquire(&path)?;
-    if read_optional(&path)? != original {
-        let kept = keep_rejected(&path, &edited);
-        return Err(CliError::Config(format!(
-            "{} changed while it was being edited; your edit was not saved{kept}. \
-             Re-apply it to the current file",
-            path.display()
-        ))
-        .into());
-    }
-    let checked = parse_doc(&edited, &path).and_then(|mut doc| {
-        strip_retired_fields(&mut doc);
-        validate_role_doc(role, &doc.to_string(), &path)?;
-        Ok(doc)
-    });
-    match checked {
-        Ok(doc) => {
-            write_atomic(&path, doc.to_string().as_bytes())?;
-            println!("Saved {}.", path.display());
-            Ok(())
+    /// Apply the edited scratch copy.
+    ///
+    /// It is applied only if the live file is unchanged since the copy was
+    /// taken and the edited document is valid; otherwise the live file is left
+    /// as it was and the edited text is kept in `<config>.rejected`
+    /// (owner-only) so it is not lost.
+    pub fn commit(self) -> Result<EditOutcome> {
+        let edited = std::fs::read_to_string(&self.scratch)
+            .with_context(|| format!("failed to read edited copy: {}", self.scratch.display()));
+        let _ = std::fs::remove_file(&self.scratch);
+        let edited = edited?;
+        let path = &self.path;
+
+        if edited == self.original.as_deref().unwrap_or_default() {
+            return Ok(EditOutcome::Unchanged);
         }
-        Err(e) => {
-            let kept = keep_rejected(&path, &edited);
-            Err(CliError::Config(format!("{e:#}; the file was not changed{kept}")).into())
+
+        let _lock = ConfigLock::acquire(path)?;
+        if read_optional(path)? != self.original {
+            let (sidecar, kept) = keep_rejected(path, &edited);
+            return Ok(EditOutcome::Rejected {
+                reason: EditRejection::Conflict,
+                sidecar,
+                message: format!(
+                    "{} changed while it was being edited; your edit was not saved{kept}. \
+                     Re-apply it to the current file",
+                    path.display()
+                ),
+            });
+        }
+        let checked = parse_doc(&edited, path).and_then(|mut doc| {
+            strip_retired_fields(&mut doc);
+            validate_role_doc(self.role, &doc.to_string(), path)?;
+            Ok(doc)
+        });
+        match checked {
+            Ok(doc) => {
+                write_atomic(path, doc.to_string().as_bytes())?;
+                Ok(EditOutcome::Saved { path: path.clone() })
+            }
+            Err(e) => {
+                let (sidecar, kept) = keep_rejected(path, &edited);
+                Ok(EditOutcome::Rejected {
+                    reason: EditRejection::Invalid,
+                    sidecar,
+                    message: format!("{e:#}; the file was not changed{kept}"),
+                })
+            }
         }
     }
 }
@@ -529,13 +619,16 @@ fn scratch_path(path: &Path) -> PathBuf {
 
 /// Keep the rejected edit in `<config>.rejected` and describe where, for the
 /// error message. A failure to keep it is reported instead of hidden.
-fn keep_rejected(path: &Path, edited: &str) -> String {
+fn keep_rejected(path: &Path, edited: &str) -> (Option<PathBuf>, String) {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".rejected");
     let sidecar = path.with_file_name(name);
     match write_atomic(&sidecar, edited.as_bytes()) {
-        Ok(()) => format!("; your text is in {}", sidecar.display()),
-        Err(e) => format!("; could not keep your text ({e:#})"),
+        Ok(()) => {
+            let kept = format!("; your text is in {}", sidecar.display());
+            (Some(sidecar), kept)
+        }
+        Err(e) => (None, format!("; could not keep your text ({e:#})")),
     }
 }
 
@@ -671,6 +764,83 @@ fn validate_role_doc(role: Role, content: &str, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const VALID_SERVE: &str =
+        "[[services]]\nname = \"web\"\nprotocol = \"tcp\"\nhost = \"127.0.0.1\"\nport = 8080\n";
+
+    #[test]
+    fn edit_commit_rejects_concurrent_change_and_keeps_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        std::fs::write(&path, "# original\n").unwrap();
+        let attempt = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        std::fs::write(&path, "# concurrent\n").unwrap();
+        std::fs::write(attempt.scratch_path(), VALID_SERVE).unwrap();
+        match attempt.commit().unwrap() {
+            EditOutcome::Rejected {
+                reason: EditRejection::Conflict,
+                sidecar: Some(p),
+                message,
+            } => {
+                assert_eq!(std::fs::read_to_string(&p).unwrap(), VALID_SERVE);
+                assert!(message.contains("changed while it was being edited"));
+                assert!(message.contains(&p.display().to_string()));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# concurrent\n");
+    }
+
+    #[test]
+    fn edit_commit_rejects_invalid_text_and_names_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        std::fs::write(&path, "# original\n").unwrap();
+        let attempt = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        std::fs::write(attempt.scratch_path(), "not = [valid").unwrap();
+        match attempt.commit().unwrap() {
+            EditOutcome::Rejected {
+                reason: EditRejection::Invalid,
+                sidecar: Some(p),
+                message,
+            } => {
+                assert!(message.contains(&p.display().to_string()));
+                assert!(message.contains("the file was not changed"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# original\n");
+    }
+
+    #[test]
+    fn dropped_edit_attempt_removes_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        std::fs::write(&path, "# original\n").unwrap();
+        let attempt = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        let scratch = attempt.scratch_path().to_path_buf();
+        assert!(scratch.exists());
+        drop(attempt);
+        assert!(!scratch.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# original\n");
+    }
+
+    #[test]
+    fn edit_of_missing_config_conflicts_if_created_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        let attempt = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        std::fs::write(&path, "# created\n").unwrap();
+        std::fs::write(attempt.scratch_path(), VALID_SERVE).unwrap();
+        assert!(matches!(
+            attempt.commit().unwrap(),
+            EditOutcome::Rejected {
+                reason: EditRejection::Conflict,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# created\n");
+    }
 
     fn add_web(config: &Path) -> AddService {
         AddService {

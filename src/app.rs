@@ -278,7 +278,7 @@ fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()>
         ConfigAction::Remove { config, name } => config_cmd::remove(role, config.as_deref(), &name),
         ConfigAction::List { config } => config_cmd::list(role, config.as_deref()),
         ConfigAction::Show { config, reveal } => config_cmd::show(role, config.as_deref(), reveal),
-        ConfigAction::Edit { config } => config_cmd::edit(role, config.as_deref()),
+        ConfigAction::Edit { config } => config_cmd::edit_cli(role, config.as_deref()),
         ConfigAction::Path { config } => config_cmd::path(role, config.as_deref()),
     }
 }
