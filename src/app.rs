@@ -112,7 +112,7 @@ async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyho
         Role::Serve { .. } => StatusRole::Serve,
         Role::Access { .. } => StatusRole::Access,
         Role::Update(args) => {
-            return update::run(args.clone(), "iroh-tunnel", env!("APP_VERSION")).await;
+            return run_update_cli(args, "iroh-tunnel").await;
         }
     };
     match cli.role {
@@ -179,6 +179,70 @@ async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyho
     }
 }
 
+/// `update`: map the CLI options to a request, resolve the running
+/// executable, honour its owner, then print the outcome.
+async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Result<()> {
+    let request = update::UpdateRequest {
+        to: args.to.clone(),
+        verification: if args.insecure {
+            update::Verification::Insecure
+        } else {
+            update::Verification::Verified
+        },
+        overwrite: if args.yes {
+            update::OverwritePolicy::ReplacePackageOwned
+        } else {
+            update::OverwritePolicy::RespectOwner
+        },
+    };
+    let target = update::current_target()?;
+    let install_path = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("cannot locate the running executable")?;
+    let base_url =
+        std::env::var(update::BASE_URL_ENV).unwrap_or_else(|_| update::DEFAULT_BASE_URL.to_owned());
+    let ctx = update::UpdateContext {
+        base_url,
+        exe_name,
+        target,
+        current_version: env!("APP_VERSION"),
+        owner: crate::update_owner::detect(&install_path),
+        install_path,
+        verifier: &update::SigstoreVerifier::release(),
+    };
+    match update::check_owner(&ctx, request.overwrite) {
+        update::OwnerDecision::Delegate {
+            guidance,
+            overridable,
+        } => {
+            println!("{guidance}");
+            if overridable {
+                println!("to replace the file anyway, run again with --yes");
+            }
+            return Ok(());
+        }
+        update::OwnerDecision::Proceed {
+            overriding_package: true,
+        } => eprintln!(
+            "warning: replacing {} although it is managed by a package manager; \
+             the package database will no longer match the file",
+            ctx.install_path.display()
+        ),
+        update::OwnerDecision::Proceed {
+            overriding_package: false,
+        } => {}
+    }
+    if request.verification == update::Verification::Insecure {
+        eprintln!(
+            "warning: --insecure skips signature and checksum verification; \
+             you accept responsibility for the installed file"
+        );
+    }
+    let outcome = update::update(&request, &ctx).await?;
+    print!("{}", crate::render::render_update(&outcome, exe_name));
+    Ok(())
+}
+
 /// Parse a quick-mode `--protocol` value.
 fn quick_protocol(role: &str, value: &str) -> Result<crate::config::Protocol, CliError> {
     match value {
@@ -213,7 +277,7 @@ async fn dispatch_role_cmd(
         RoleCmd::Update(args) => match packaging {
             Packaging::Standalone => {
                 let exe = format!("iroh-tunnel-{role}");
-                update::run(args, &exe, env!("APP_VERSION")).await
+                run_update_cli(&args, &exe).await
             }
             Packaging::AllInOne => Err(CliError::Config(
                 "update acts on the invoked executable; run `iroh-tunnel update`".into(),

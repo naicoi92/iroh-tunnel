@@ -211,6 +211,26 @@ pub(crate) fn print_ready() -> OnReady {
     })
 }
 
+/// Render the outcome of `update` as the stdout text the CLI printed before
+/// outcomes were typed. `exe_name` is the executable that was asked to update.
+pub(crate) fn render_update(outcome: &crate::update::UpdateOutcome, exe_name: &str) -> String {
+    use crate::update::UpdateOutcome;
+    match outcome {
+        UpdateOutcome::AlreadyCurrent { version } => {
+            format!("{exe_name} is already at {version}\n")
+        }
+        UpdateOutcome::NewerThanLatest { current, latest } => format!(
+            "{exe_name} {current} is newer than the latest release {latest}; nothing to do \
+             (use --to {latest} to install it anyway)\n"
+        ),
+        UpdateOutcome::Updated { path, from, to } => format!(
+            "updated {} from {from} to {to}\n\
+             restart any running tunnel to use the new version (it was not stopped)\n",
+            path.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

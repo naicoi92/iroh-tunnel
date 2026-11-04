@@ -17,8 +17,9 @@ mod common;
 
 use anyhow::{Context, Result};
 use common::release_server::ReleaseServer;
-use iroh_tunnel::cli::UpdateArgs;
-use iroh_tunnel::update::{update, SignatureVerifier, UpdateContext};
+use iroh_tunnel::update::{
+    update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
+};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -258,7 +259,7 @@ fn in_process(
     server: &ReleaseServer,
     verifier: &dyn SignatureVerifier,
     install: &Path,
-    args: &UpdateArgs,
+    args: &UpdateRequest,
 ) -> Result<()> {
     let ctx = UpdateContext {
         base_url: server.url.clone(),
@@ -269,14 +270,20 @@ fn in_process(
         verifier,
         owner: iroh_tunnel::update_owner::Owner::Standalone,
     };
-    tokio::runtime::Runtime::new()?.block_on(update(args, &ctx))
+    tokio::runtime::Runtime::new()?
+        .block_on(update(args, &ctx))
+        .map(|_| ())
 }
 
-fn args(to: Option<&str>, insecure: bool) -> UpdateArgs {
-    UpdateArgs {
+fn args(to: Option<&str>, insecure: bool) -> UpdateRequest {
+    UpdateRequest {
         to: to.map(str::to_owned),
-        insecure,
-        yes: false,
+        verification: if insecure {
+            Verification::Insecure
+        } else {
+            Verification::Verified
+        },
+        overwrite: OverwritePolicy::RespectOwner,
     }
 }
 

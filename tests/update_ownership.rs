@@ -10,8 +10,10 @@ mod common;
 
 use anyhow::Result;
 use common::release_server::ReleaseServer;
-use iroh_tunnel::cli::UpdateArgs;
-use iroh_tunnel::update::{update, SignatureVerifier, UpdateContext};
+use iroh_tunnel::update::{
+    check_owner, update, OverwritePolicy, OwnerDecision, SignatureVerifier, UpdateContext,
+    UpdateRequest, Verification,
+};
 use iroh_tunnel::update_owner::Owner;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
@@ -94,12 +96,28 @@ fn run(f: &Fixture, owner: Owner, insecure: bool, yes: bool) -> Result<()> {
         verifier: &Accept,
         owner,
     };
-    let args = UpdateArgs {
+    let req = UpdateRequest {
         to: None,
-        insecure,
-        yes,
+        verification: if insecure {
+            Verification::Insecure
+        } else {
+            Verification::Verified
+        },
+        overwrite: if yes {
+            OverwritePolicy::ReplacePackageOwned
+        } else {
+            OverwritePolicy::RespectOwner
+        },
     };
-    tokio::runtime::Runtime::new()?.block_on(update(&args, &ctx))
+    // The updater does not check ownership; the CLI wrapper does, in this order.
+    if matches!(
+        check_owner(&ctx, req.overwrite),
+        OwnerDecision::Delegate { .. }
+    ) {
+        return Ok(());
+    }
+    tokio::runtime::Runtime::new()?.block_on(update(&req, &ctx))?;
+    Ok(())
 }
 
 fn deb() -> Owner {

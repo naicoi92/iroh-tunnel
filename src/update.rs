@@ -14,13 +14,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context as _};
 use sha2::{Digest as _, Sha256};
 
-use crate::cli::UpdateArgs;
 use crate::error::CliError;
-use crate::update_owner::{self, Owner};
+use crate::update_owner::Owner;
 
 /// Release location; overridable for tests and mirrors (same variable as `install.sh`).
-const DEFAULT_BASE_URL: &str = "https://github.com/naicoi92/iroh-tunnel/releases";
-const BASE_URL_ENV: &str = "IROH_TUNNEL_BASE_URL";
+pub const DEFAULT_BASE_URL: &str = "https://github.com/naicoi92/iroh-tunnel/releases";
+pub const BASE_URL_ENV: &str = "IROH_TUNNEL_BASE_URL";
 /// Upper bounds on downloaded/extracted data (RS-09).
 const MAX_CHECKSUMS_BYTES: usize = 1 << 20;
 const MAX_ARCHIVE_BYTES: usize = 256 << 20;
@@ -123,44 +122,110 @@ pub struct UpdateContext<'a> {
     pub owner: Owner,
 }
 
-/// Entry point of the `update` command for the executable `exe_name`.
-///
-/// # Errors
-/// Fails on unsupported platforms, network or verification errors and
-/// replacement errors; the installed executable is unchanged in every case.
-pub async fn run(args: UpdateArgs, exe_name: &str, current_version: &str) -> anyhow::Result<()> {
-    let target = current_target()?;
-    let install_path = std::env::current_exe()
-        .and_then(|p| p.canonicalize())
-        .context("cannot locate the running executable")?;
-    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
-    let ctx = UpdateContext {
-        base_url,
-        exe_name,
-        target,
-        current_version,
-        owner: update_owner::detect(&install_path),
-        install_path,
-        verifier: &SigstoreVerifier::release(),
-    };
-    update(&args, &ctx).await
+/// Whether the downloaded release is verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verification {
+    /// Signature and checksum are verified (default).
+    Verified,
+    /// Signature and checksum verification is skipped (`--insecure`).
+    Insecure,
 }
 
-/// Core of `update`, with the environment injected.
+/// What to do with a file a package manager owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverwritePolicy {
+    /// Delegate to the owner (default).
+    RespectOwner,
+    /// Replace a package-owned file anyway (`--yes`); never applies to containers.
+    ReplacePackageOwned,
+}
+
+/// What the operator asked `update` to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateRequest {
+    /// Release to install, e.g. `0.4.2`; `None` is the latest stable.
+    pub to: Option<String>,
+    /// Whether the release is verified.
+    pub verification: Verification,
+    /// Ownership policy, consulted by [`check_owner`].
+    pub overwrite: OverwritePolicy,
+}
+
+/// Whether `update` may replace the installed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerDecision {
+    /// Replace the file; `overriding_package` when a package-owned file is replaced anyway.
+    Proceed {
+        /// The file is owned by a package manager and the operator overrode it.
+        overriding_package: bool,
+    },
+    /// Update through the owner instead; nothing is replaced.
+    Delegate {
+        /// Instructions naming the owner's update command.
+        guidance: String,
+        /// Whether `ReplacePackageOwned` would have allowed replacing the file.
+        overridable: bool,
+    },
+}
+
+/// Result of a completed `update`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    /// The requested or latest release is already installed.
+    AlreadyCurrent {
+        /// The installed version.
+        version: String,
+    },
+    /// `latest` is older than the installed version and no `--to` was given.
+    NewerThanLatest {
+        /// The installed version.
+        current: String,
+        /// The latest published version.
+        latest: String,
+    },
+    /// The executable was replaced.
+    Updated {
+        /// The replaced file.
+        path: PathBuf,
+        /// Previous version.
+        from: String,
+        /// Installed version.
+        to: String,
+    },
+}
+
+/// Apply the ownership policy (#96): a file owned by a package manager or a
+/// container image is updated through its owner. A package-owned file can
+/// still be replaced with [`OverwritePolicy::ReplacePackageOwned`]; a
+/// container image never is.
+#[must_use]
+pub fn check_owner(ctx: &UpdateContext<'_>, overwrite: OverwritePolicy) -> OwnerDecision {
+    let Some(guidance) = ctx.owner.guidance(ctx.exe_name) else {
+        return OwnerDecision::Proceed {
+            overriding_package: false,
+        };
+    };
+    let overridable = ctx.owner.overwrite_allowed_with_confirmation();
+    if overridable && overwrite == OverwritePolicy::ReplacePackageOwned {
+        return OwnerDecision::Proceed {
+            overriding_package: true,
+        };
+    }
+    OwnerDecision::Delegate {
+        guidance,
+        overridable,
+    }
+}
+
+/// Core of `update`, with the environment injected. Does not check ownership
+/// (see [`check_owner`]) and prints nothing.
 ///
 /// # Errors
-/// See [`run`].
-pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Result<()> {
-    if !owner_allows_update(args, ctx)? {
-        return Ok(());
-    }
-    let requested = args.to.as_deref().map(parse_version).transpose()?;
-    if args.insecure {
-        eprintln!(
-            "warning: --insecure skips signature and checksum verification; \
-             you accept responsibility for the installed file"
-        );
-    }
+/// Fails on network or verification errors and replacement errors; the
+/// installed executable is unchanged in every case.
+pub async fn update(req: &UpdateRequest, ctx: &UpdateContext<'_>) -> anyhow::Result<UpdateOutcome> {
+    let insecure = req.verification == Verification::Insecure;
+    let requested = req.to.as_deref().map(parse_version).transpose()?;
     let client = http_client()?;
     let release_url = match &requested {
         Some(v) => format!("{}/download/v{v}", ctx.base_url.trim_end_matches('/')),
@@ -168,7 +233,7 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
     };
     let checksums_name = checksums_name(ctx.target);
     // An unverified install of a named version needs no checksums file at all.
-    let skip_checksums = args.insecure && requested.is_some();
+    let skip_checksums = insecure && requested.is_some();
     let checksums = if skip_checksums {
         String::new()
     } else {
@@ -179,7 +244,7 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
         )
         .await
         .with_context(|| format!("cannot fetch {checksums_name}"))?;
-        if !args.insecure {
+        if !insecure {
             let bundle = fetch(
                 &client,
                 &format!("{release_url}/{checksums_name}.sigstore.json"),
@@ -199,21 +264,18 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
         None => latest_version(&checksums, ctx.exe_name, ctx.target)?,
     };
     if version == ctx.current_version {
-        println!("{} is already at {version}", ctx.exe_name);
-        return Ok(());
+        return Ok(UpdateOutcome::AlreadyCurrent { version });
     }
     if !explicit && is_older(&version, ctx.current_version) {
-        println!(
-            "{} {} is newer than the latest release {version}; nothing to do \
-             (use --to {version} to install it anyway)",
-            ctx.exe_name, ctx.current_version
-        );
-        return Ok(());
+        return Ok(UpdateOutcome::NewerThanLatest {
+            current: ctx.current_version.to_owned(),
+            latest: version,
+        });
     }
 
     let archive_name = archive_name(ctx.exe_name, &version, ctx.target);
     let want = expected_sum(&checksums, &archive_name);
-    if want.is_none() && !args.insecure {
+    if want.is_none() && !insecure {
         bail!("release {version} does not publish {archive_name}");
     }
     let archive = fetch(
@@ -223,7 +285,7 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
     )
     .await
     .with_context(|| format!("cannot download {archive_name}"))?;
-    if !args.insecure {
+    if !insecure {
         let got = hex(&Sha256::digest(&archive));
         if want != Some(got.as_str()) {
             bail!(
@@ -246,40 +308,11 @@ pub async fn update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Resul
         .context("replacement task failed")?
         .map_err(classify_replace_error)?;
 
-    println!(
-        "updated {} from {} to {version}",
-        ctx.install_path.display(),
-        ctx.current_version
-    );
-    println!("restart any running tunnel to use the new version (it was not stopped)");
-    Ok(())
-}
-
-/// Apply the ownership policy (#96): a file owned by a package manager or a
-/// container image is updated through its owner. Returns `false` when the
-/// guidance was printed and nothing must be replaced.
-///
-/// A package-owned file can still be replaced with `--yes`; a container image
-/// never is.
-fn owner_allows_update(args: &UpdateArgs, ctx: &UpdateContext<'_>) -> anyhow::Result<bool> {
-    let Some(guidance) = ctx.owner.guidance(ctx.exe_name) else {
-        return Ok(true);
-    };
-    if !ctx.owner.overwrite_allowed_with_confirmation() {
-        println!("{guidance}");
-        return Ok(false);
-    }
-    if args.yes {
-        eprintln!(
-            "warning: replacing {} although it is managed by a package manager; \
-             the package database will no longer match the file",
-            ctx.install_path.display()
-        );
-        return Ok(true);
-    }
-    println!("{guidance}");
-    println!("to replace the file anyway, run again with --yes");
-    Ok(false)
+    Ok(UpdateOutcome::Updated {
+        path: ctx.install_path.clone(),
+        from: ctx.current_version.to_owned(),
+        to: version,
+    })
 }
 
 /// Accepts `1.2.3` or `v1.2.3` (plus pre-release/build suffix); the result is
@@ -334,7 +367,10 @@ fn is_older(version: &str, current: &str) -> bool {
 }
 
 /// Platform id matching the release asset names (`install.sh` `detect_target`).
-fn current_target() -> anyhow::Result<&'static str> {
+///
+/// # Errors
+/// Fails when no release is published for this platform.
+pub fn current_target() -> anyhow::Result<&'static str> {
     let target = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "darwin-arm64"
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
@@ -589,8 +625,134 @@ pub fn replace_executable(target: &Path, contents: &[u8]) -> anyhow::Result<()> 
 }
 
 #[cfg(test)]
+#[path = "../tests/common/release_server.rs"]
+mod release_server;
+
+#[cfg(test)]
 mod tests {
+    use super::release_server;
     use super::*;
+
+    struct AcceptAll;
+    impl SignatureVerifier for AcceptAll {
+        fn verify(&self, _: &[u8], _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn ctx_with<'a>(
+        owner: Owner,
+        install_path: PathBuf,
+        verifier: &'a dyn SignatureVerifier,
+    ) -> UpdateContext<'a> {
+        UpdateContext {
+            base_url: "http://127.0.0.1:9".to_owned(),
+            exe_name: "iroh-tunnel-serve",
+            target: "linux-amd64",
+            current_version: "0.0.1",
+            install_path,
+            verifier,
+            owner,
+        }
+    }
+
+    #[test]
+    fn package_owned_target_returns_delegation() {
+        let deb = || Owner::LinuxPackage {
+            package: "iroh-tunnel-serve".to_owned(),
+        };
+        let ctx = ctx_with(deb(), PathBuf::from("/usr/bin/x"), &AcceptAll);
+        assert!(matches!(
+            check_owner(&ctx, OverwritePolicy::RespectOwner),
+            OwnerDecision::Delegate {
+                overridable: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            check_owner(&ctx, OverwritePolicy::ReplacePackageOwned),
+            OwnerDecision::Proceed {
+                overriding_package: true
+            }
+        );
+        let ctx = ctx_with(Owner::Container, PathBuf::from("/x"), &AcceptAll);
+        for policy in [
+            OverwritePolicy::RespectOwner,
+            OverwritePolicy::ReplacePackageOwned,
+        ] {
+            assert!(matches!(
+                check_owner(&ctx, policy),
+                OwnerDecision::Delegate {
+                    overridable: false,
+                    ..
+                }
+            ));
+        }
+        let ctx = ctx_with(Owner::Standalone, PathBuf::from("/x"), &AcceptAll);
+        assert_eq!(
+            check_owner(&ctx, OverwritePolicy::RespectOwner),
+            OwnerDecision::Proceed {
+                overriding_package: false
+            }
+        );
+    }
+
+    #[test]
+    fn update_uses_supplied_install_path() {
+        let releases = tempfile::tempdir().unwrap();
+        let dir = releases.path().join("9.9.9");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "iroh-tunnel-serve-9.9.9-linux-amd64.tar.gz";
+        let mut tar_bytes = Vec::new();
+        {
+            let gz = flate2::write::GzEncoder::new(&mut tar_bytes, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(gz);
+            let body = b"NEW";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "iroh-tunnel-serve", &body[..])
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        std::fs::write(dir.join(name), &tar_bytes).unwrap();
+        std::fs::write(
+            dir.join("checksums.txt"),
+            format!("{}  {name}\n", hex(&Sha256::digest(&tar_bytes))),
+        )
+        .unwrap();
+        std::fs::write(dir.join("checksums.txt.sigstore.json"), "{}").unwrap();
+        let server =
+            release_server::ReleaseServer::start(releases.path().to_owned(), "9.9.9").unwrap();
+
+        let install_dir = tempfile::tempdir().unwrap();
+        let install = install_dir.path().join("iroh-tunnel-serve");
+        std::fs::write(&install, b"OLD").unwrap();
+        let mut ctx = ctx_with(Owner::Standalone, install.clone(), &AcceptAll);
+        ctx.base_url = server.url.clone();
+        let req = UpdateRequest {
+            to: None,
+            verification: Verification::Verified,
+            overwrite: OverwritePolicy::RespectOwner,
+        };
+
+        let outcome = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(update(&req, &ctx))
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            UpdateOutcome::Updated {
+                path: install.clone(),
+                from: "0.0.1".to_owned(),
+                to: "9.9.9".to_owned(),
+            }
+        );
+        assert_eq!(std::fs::read(&install).unwrap(), b"NEW");
+    }
 
     #[test]
     fn replaces_executable_content_and_keeps_no_staging_file() {

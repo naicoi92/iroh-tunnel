@@ -11,8 +11,9 @@ mod common;
 
 use anyhow::Result;
 use common::release_server::ReleaseServer;
-use iroh_tunnel::cli::UpdateArgs;
-use iroh_tunnel::update::{update, SignatureVerifier, UpdateContext};
+use iroh_tunnel::update::{
+    update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
+};
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
 use std::path::Path;
@@ -69,12 +70,13 @@ fn run_update(server: &ReleaseServer, target: &str, install: &Path) -> Result<()
         verifier: &Accept,
         owner: iroh_tunnel::update_owner::Owner::Standalone,
     };
-    let args = UpdateArgs {
+    let req = UpdateRequest {
         to: None,
-        insecure: false,
-        yes: false,
+        verification: Verification::Verified,
+        overwrite: OverwritePolicy::RespectOwner,
     };
-    tokio::runtime::Runtime::new()?.block_on(update(&args, &ctx))
+    tokio::runtime::Runtime::new()?.block_on(update(&req, &ctx))?;
+    Ok(())
 }
 
 fn installed(dir: &Path, contents: &[u8]) -> Result<std::path::PathBuf> {
