@@ -69,7 +69,7 @@ pub struct AccessConfig {
     pub services: Vec<AccessService>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct NodeConfig {
     #[serde(default)]
     pub secret_key: String,
@@ -95,6 +95,25 @@ pub struct NodeConfig {
     /// flow-control blocked until another stream closes.
     #[serde(default)]
     pub max_concurrent_streams: Option<u32>,
+}
+
+/// Secret values never reach `Debug` output (RS-10). An empty `secret_key` is
+/// not a secret and prints as `""`, so an unset key stays visible.
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const REDACTED: &str = "[redacted]";
+        let secret_key = if self.secret_key.is_empty() {
+            ""
+        } else {
+            REDACTED
+        };
+        f.debug_struct("NodeConfig")
+            .field("secret_key", &secret_key)
+            .field("relay_urls", &self.relay_urls)
+            .field("relay_token", &self.relay_token.as_ref().map(|_| REDACTED))
+            .field("max_concurrent_streams", &self.max_concurrent_streams)
+            .finish()
+    }
 }
 
 impl NodeConfig {
@@ -330,8 +349,16 @@ pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
     where
         Self: Sized,
     {
-        let cfg: Self = toml::from_str(content)
-            .with_context(|| format!("failed to parse config: {}", path.display()))?;
+        // `toml` errors quote the offending source line, which can hold a
+        // secret; report the message and line only (RS-10).
+        let cfg: Self = toml::from_str(content).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse config: {}{}: {}",
+                path.display(),
+                crate::config_store::describe_location(content, e.span()),
+                e.message()
+            )
+        })?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -1058,6 +1085,47 @@ max_concurrent_streams = 0
                 format!("{err:#}").contains("max_concurrent_streams"),
                 "{role}: {err:#}"
             );
+        }
+    }
+
+    const SECRET_KEY_TEXT: &str = "c2VjcmV0LWtleS1mb3ItcmVkYWN0aW9uLXRlc3Q";
+    const RELAY_TOKEN_TEXT: &str = "relay-token-for-redaction-test";
+
+    #[test]
+    fn config_debug_redacts_secret_key() {
+        let f = tmpfile(
+            "serve.toml",
+            &format!(
+                "[node]\nsecret_key = \"{SECRET_KEY_TEXT}\"\nrelay_urls = [\"https://relay.example\"]\nrelay_token = \"{RELAY_TOKEN_TEXT}\"\nmax_concurrent_streams = 7\n"
+            ),
+        );
+        let cfg = ServeConfig::load(f.path()).unwrap();
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains(SECRET_KEY_TEXT), "{shown}");
+        assert!(!shown.contains(RELAY_TOKEN_TEXT), "{shown}");
+        assert!(shown.contains("[redacted]"), "{shown}");
+        assert!(shown.contains("https://relay.example"), "{shown}");
+        assert!(shown.contains("max_concurrent_streams: Some(7)"), "{shown}");
+        let node = format!("{:?}", cfg.node);
+        assert!(node.contains("relay_token: Some(\"[redacted]\")"), "{node}");
+        assert!(node.contains("secret_key: \"[redacted]\""), "{node}");
+        let empty = format!("{:?}", NodeConfig::default());
+        assert!(empty.contains("secret_key: \"\""), "{empty}");
+        assert!(empty.contains("relay_token: None"), "{empty}");
+        let access: AccessConfig =
+            toml::from_str(&format!("[node]\nsecret_key = \"{SECRET_KEY_TEXT}\"\n")).unwrap();
+        assert!(!format!("{access:?}").contains(SECRET_KEY_TEXT));
+    }
+
+    #[test]
+    fn error_chain_never_contains_secret_line() {
+        let f = tmpfile(
+            "serve.toml",
+            &format!("[node]\nsecret_key = \"{SECRET_KEY_TEXT}\" oops\n"),
+        );
+        let e = ServeConfig::load(f.path()).unwrap_err();
+        for text in [format!("{e:#}"), format!("{e:?}")] {
+            assert!(!text.contains(SECRET_KEY_TEXT), "{text}");
         }
     }
 }
