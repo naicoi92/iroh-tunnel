@@ -184,14 +184,15 @@ async fn session(
                             let _ = socket.send_to(RESPONSE, from).await;
                         }
                         Ok(_) => {}
-                        // Windows reports an earlier reply's ICMP error here.
-                        Err(_) => {}
+                        // Windows reports an earlier reply's ICMP error here;
+                        // pause so a persistent error cannot spin.
+                        Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
                     }
                 }
             })
         }
     };
-    let _abort = scopeguard(fixture);
+    let _abort = Abort(fixture);
 
     let (serve_exe, mut serve_args) = bins.command(form, "serve");
     serve_args.extend([
@@ -321,8 +322,55 @@ impl Drop for Abort {
         self.0.abort();
     }
 }
-fn scopeguard(handle: tokio::task::JoinHandle<()>) -> Abort {
-    Abort(handle)
+
+/// Facts that bind the evidence to what was tested.
+fn context(executables: &[serde_json::Value]) -> serde_json::Value {
+    let lock = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
+    // Elevation is checked by the platform's own tool; absent means unknown.
+    let elevated = if cfg!(windows) {
+        Command::new("net")
+            .arg("session")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .ok()
+    } else {
+        Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+    };
+    serde_json::json!({
+        "timestamp_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "user": user,
+        "elevated": elevated,
+        "source_sha": std::env::var("RELEASE_SMOKE_SOURCE_SHA").ok(),
+        "tag": std::env::var("RELEASE_SMOKE_TAG").ok(),
+        "cargo_lock_sha256": sha256_file(&lock).ok(),
+        "archive_sha256": std::env::var("RELEASE_SMOKE_ARCHIVES")
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()),
+        "relay": "public n0 default relays",
+        "executables": executables,
+    })
+}
+
+fn write_evidence(evidence: &serde_json::Value) -> Result<()> {
+    let text = serde_json::to_string_pretty(evidence)?;
+    if let Some(path) = std::env::var_os("RELEASE_SMOKE_EVIDENCE") {
+        std::fs::write(path, &text)?;
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -357,6 +405,12 @@ async fn packaged_binaries_forward_tcp_and_udp_through_public_relay() -> Result<
         }));
     }
 
+    let mut evidence = context(&executables);
+    // Written after every session so a crash or a job timeout still leaves a
+    // record of what ran; `complete` flips only when all sessions finished.
+    evidence["complete"] = false.into();
+    evidence["results"] = serde_json::json!([]);
+    write_evidence(&evidence)?;
     let mut results = Vec::new();
     let mut failed = Vec::new();
     for form in [Form::AllInOne, Form::Standalone] {
@@ -390,23 +444,14 @@ async fn packaged_binaries_forward_tcp_and_udp_through_public_relay() -> Result<
                 "error": error,
                 "commands": commands,
             }));
+            evidence["results"] = results.clone().into();
+            write_evidence(&evidence)?;
         }
     }
+    evidence["complete"] = true.into();
+    write_evidence(&evidence)?;
+    println!("{}", serde_json::to_string_pretty(&evidence)?);
 
-    let evidence = serde_json::json!({
-        "os": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-        "source_sha": std::env::var("RELEASE_SMOKE_SOURCE_SHA").ok(),
-        "tag": std::env::var("RELEASE_SMOKE_TAG").ok(),
-        "relay": "public n0 default relays",
-        "executables": executables,
-        "results": results,
-    });
-    let text = serde_json::to_string_pretty(&evidence)?;
-    println!("{text}");
-    if let Some(path) = std::env::var_os("RELEASE_SMOKE_EVIDENCE") {
-        std::fs::write(path, &text)?;
-    }
     anyhow::ensure!(failed.is_empty(), "failed sessions: {failed:?}");
     Ok(())
 }
