@@ -49,7 +49,7 @@ Owner: `src/config.rs`, `src/config_store.rs`, `src/config_cmd.rs`, `src/status_
 - [x] 4.8 Preserve composite install/uninstall semantics, start ownership refusal before manager call, partial-effects reporting with no rollback, no stop-on-drop. Traces FIM-14, FIM-15 (both), FIM-24 (both).
 - [x] 4.9 Extract role-status read returning raw body, typed snapshot, liveness/owner data and freshness condition, with no side effects; CLI keeps tables, warnings and raw `--json`. Traces FIM-20 (both), FIM-21, FIM-22.
 - [x] 4.10 Replace `UpdateArgs` with explicit update inputs (target executable, version, overwrite, insecure) and outcomes; preserve verification, delegation, atomic replacement and user-agent; no service restart. Traces FIM-13, FIM-25, FIM-26, `self-update`. Platform: all; Windows zip replacement windows-native.
-- [ ] 4.11 Ensure config/service operations are synchronous, run under `spawn_blocking` from the CLI, and create no runtime. Traces FIM-23, FIM-24.
+- [x] 4.11 Ensure config/service operations are synchronous, run under `spawn_blocking` from the CLI, and create no runtime. Traces FIM-23, FIM-24.
 
 ## 5. Extract `iroh-tunnel-engine` (Migration step 3)
 
