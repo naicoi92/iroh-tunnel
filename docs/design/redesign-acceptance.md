@@ -235,7 +235,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Source/destination hashes, permission metadata, public IDs, commands/race timing. Platform: macOS real filesystem/permissions.
 
-**Execution:** BLOCKED — Exact legacy path verification and migration synchronization evidence remain open (#84, #98); no-overwrite outcome already confirmed.
+**Execution:** IMPLEMENTED (#84, closed) — evidence in `issue-84-evidence.md`. UNVERIFIED: a real older macOS install (the legacy path comes from the `dirs` crate used by v0.1.0–v0.4.2), Windows beyond the CI job, legacy symlink/dir validation (limits listed there). Final-artifact run NOT_RUN.
 
 <a id="cfg-error-01"></a>
 ### Case CFG-ERROR-01
@@ -337,7 +337,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Race timing/process outcomes, paths, user/scope and simultaneous byte exchanges. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** Mechanism decided in #87.
+**Execution:** IMPLEMENTED (#87, closed) — `tests/role_ownership.rs`; no evidence file is committed under `docs/design`. Final-artifact run NOT_RUN.
 
 <a id="own-identity-01"></a>
 ### Case OWN-IDENTITY-01
@@ -354,7 +354,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Public IDs only, role/process results, redaction scan and real OS permission evidence. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** Mechanism decided in #87.
+**Execution:** IMPLEMENTED (#87, closed) — `tests/role_ownership.rs`; no evidence file is committed under `docs/design`. Final-artifact run NOT_RUN.
 
 <a id="own-status-01"></a>
 ### Case OWN-STATUS-01
@@ -371,7 +371,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Status output, process/user identity and state path correlation. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** Mechanism decided in #87.
+**Execution:** IMPLEMENTED (#87, closed) — `tests/access_status_file.rs`, `tests/role_ownership.rs`; no evidence file is committed under `docs/design`. Final-artifact run NOT_RUN.
 
 <a id="own-recovery-01"></a>
 ### Case OWN-RECOVERY-01
@@ -388,7 +388,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved policy link, process/event trace, state ownership and permission diffs. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** Mechanism decided in #87.
+**Execution:** IMPLEMENTED (#87, closed) — `tests/role_ownership.rs`; no evidence file is committed under `docs/design`. Final-artifact run NOT_RUN.
 
 <a id="udp-data-01"></a>
 ### Case UDP-DATA-01
@@ -509,7 +509,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** OS service registration/account, path/identity evidence and byte/status/lifecycle transcripts. Platform: Applicable Linux/macOS user service managers; Windows via SM-WINDOWS-01.
 
-**Execution:** BLOCKED — Native #90 blockers #84/#87 unresolved; Windows mechanism separately gated by #79/#92.
+**Execution:** IMPLEMENTED (#90, closed) — `issue-90-evidence.md`. UNVERIFIED: Linux systemd `--user` and BusyBox on a real host (template unit tests only); Windows is covered by SM-WINDOWS-01. Final-artifact run NOT_RUN.
 
 <a id="sm-permission-01"></a>
 ### Case SM-PERMISSION-01
@@ -543,7 +543,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Prompt transcript, selected paths and registration/file diff. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #91 blockers #79/#84/#87 unresolved for privileged service composition.
+**Execution:** IMPLEMENTED (#91, closed) — `issue-91-evidence.md`. UNVERIFIED: a real root run for systemd system scope and macOS LaunchDaemon (template unit tests only). Final-artifact run NOT_RUN.
 
 <a id="sm-path-01"></a>
 ### Case SM-PATH-01
@@ -560,7 +560,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Real registration/runtime account/paths, public IDs and byte transcript. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #79 privileged service trust/account policy plus #84/#87 dependencies.
+**Execution:** IMPLEMENTED (#91, closed) — `issue-91-evidence.md`. Real runs: Linux/BusyBox only; the check is a runtime walk and was not fuzzed under a concurrent attacker. Final-artifact run NOT_RUN.
 
 <a id="sm-retarget-01"></a>
 ### Case SM-RETARGET-01
@@ -577,7 +577,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Prompt transcript, registration delta, hashes/ownership for both users. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #91 #79/#84/#87 dependencies unresolved; approved trust/user resolution needed.
+**Execution:** IMPLEMENTED (#91, closed) — `issue-91-evidence.md`. Retarget prompt exercised without a real root run. Final-artifact run NOT_RUN.
 
 <a id="sm-unknown-01"></a>
 ### Case SM-UNKNOWN-01
@@ -594,7 +594,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Prompt/errors, account/path resolution and absence of unintended registration. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #79 trusted user identification and privileged account policy.
+**Execution:** IMPLEMENTED (#91, closed) — `issue-91-evidence.md`. Registrations from before the pin are treated as unknown owner and confirmed before retarget. Final-artifact run NOT_RUN.
 
 <a id="sm-edit-01"></a>
 ### Case SM-EDIT-01
@@ -611,7 +611,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Edit/restart commands, actual service result, errors and account/permission diffs. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Confirmed workflow; actual privileged adapter depends on #79 threat-model/account decisions.
+**Execution:** IMPLEMENTED (#91, closed) — `issue-91-evidence.md`; the elevated edit path was not run as real root. Final-artifact run NOT_RUN.
 
 <a id="sm-trust-01"></a>
 ### Case SM-TRUST-01
@@ -628,7 +628,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Policy link, attack transcripts and actual OS privileges/ACL/path effects. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** Await #79 ownership, symlink/integrity and TOCTOU policy (SM-04 is Confirmed); the system service runtime account is root/Administrator (RO-03).
+**Execution:** IMPLEMENTED (#91, closed) — `issue-91-evidence.md`; the system service runtime account is root/Administrator (RO-03). `TrustedDir` split deferred; race not fuzzed. Final-artifact run NOT_RUN.
 
 <a id="sm-windows-01"></a>
 ### Case SM-WINDOWS-01
@@ -645,7 +645,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Registration, login/account/architecture, bytes and lifecycle/errors. Platform: Real Windows x64 and ARM64 where available.
 
-**Execution:** BLOCKED — Await #79 Windows mechanism (SM-04 confirms a Task Scheduler user task) and #84/#87 dependencies; implement only the SM-04 Task Scheduler mechanism.
+**Execution:** IMPLEMENTED (#92, closed) — `issue-92-evidence.md`, `windows-service-e2e` green on windows-latest (x64) and windows-11-arm (ARM64). UNVERIFIED: 32-bit x86, Windows Server, older Windows 10; the privileged-account limits listed in the evidence. Final-artifact run NOT_RUN.
 
 <a id="install-default-01"></a>
 ### Case INSTALL-DEFAULT-01
@@ -730,7 +730,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Version selection, commands/resolved artifact IDs, before/after all-binary hashes and usable role run. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #95 #80/#82 dependencies; replacement/alias policy and final signed #100 producer artifacts required.
+**Execution:** IMPLEMENTED (#95, closed) — `issue-95-evidence.md`, `issue-80-update-recovery-evidence.md`; signed inputs from `issue-100-evidence.md`. UNVERIFIED: Windows (zip, locked running executable: `windows-update-e2e`) and native Linux on the final artifacts. Final-artifact run NOT_RUN.
 
 <a id="update-verify-01"></a>
 ### Case UPDATE-VERIFY-01
@@ -747,7 +747,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Immutable source/signing artifact IDs, verifier/update outputs, old-binary hashes and post-failure role bytes. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Native #80 trust/replacement decisions and #100 real producer evidence not complete; fixtures alone cannot close final gate.
+**Execution:** IMPLEMENTED (#95, #100, closed) — `SigstoreVerifier` against the signed `v0.4.3-rc.2` draft (`issue-100-evidence.md`, wrong identity, changed payload, missing material rejected). The rc.2 set predates UDP: STALE for the final gate; rerun on `v0.4.3-rc.3`. Final-artifact run NOT_RUN.
 
 <a id="update-bypass-01"></a>
 ### Case UPDATE-BYPASS-01
@@ -764,7 +764,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Explicit command/warning, approved scope link and resulting artifact/hash. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Await #95 implementation and #100 signed artifacts. The #80 policy is decided.
+**Execution:** IMPLEMENTED (#95, closed) — `issue-95-evidence.md` (`-i` / `--insecure` unchanged). Windows and native Linux not run on final artifacts. Final-artifact run NOT_RUN.
 
 <a id="update-running-01"></a>
 ### Case UPDATE-RUNNING-01
@@ -798,7 +798,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Approved policy, OS filesystem behavior, old/new hashes, running process and recovery transcript. Platform: Actual supported OS, including Windows locked running executable.
 
-**Execution:** BLOCKED — Await #95 implementation. The #80 policy is decided; rotation is deferred (DIST-03).
+**Execution:** IMPLEMENTED (#95, closed) — `issue-80-update-recovery-evidence.md`, `issue-95-evidence.md`; rotation deferred (DIST-03). Windows locked-executable recovery runs in `windows-update-e2e`; final artifacts not run. Final-artifact run NOT_RUN.
 
 <a id="package-update-01"></a>
 ### Case PACKAGE-UPDATE-01
@@ -815,7 +815,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Entry commands/output, package DB/version, before/after hashes for every binary and real target bytes. Platform: Actual supported package managers/platforms.
 
-**Execution:** BLOCKED — Unresolved package detection/alias/partial-failure choices (#96 clarification checkbox 2); #94 packages required.
+**Execution:** IMPLEMENTED (#96, closed) — `issue-96-evidence.md`. Detection is path- and variable-based, not a package-database query. UNVERIFIED: amd64 and riscv64 packages (Docker ran natively on arm64 only), Windows and Homebrew on real systems. Final-artifact run NOT_RUN.
 
 <a id="image-update-01"></a>
 ### Case IMAGE-UPDATE-01
@@ -849,7 +849,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Migration instructions/transcript, package DB and all-binary hashes before/after, role bytes. Platform: Actual legacy package managers/platforms.
 
-**Execution:** BLOCKED — Await #96 unresolved detection, alias and partial-failure policy; real legacy package fixture required.
+**Execution:** IMPLEMENTED (#96, closed) — `issue-96-evidence.md`. UNVERIFIED: a real legacy package fixture on each architecture; Homebrew is path unit tests only. Final-artifact run NOT_RUN.
 
 <a id="cfg-lifecycle-01"></a>
 ### Case CFG-LIFECYCLE-01
@@ -968,7 +968,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Per-case immutable evidence matrix and composition commands, versions/digests, privilege and observed results. Platform: Linux x86_64/aarch64 glibc; x86_64/aarch64/riscv64 musl; macOS aarch64; released Linux packages and amd64/arm64 images; Windows x64/ARM64.
 
-**Execution:** BLOCKED — Native #97 blockers #84–#96 plus #99/#100/#101 remain open (not #83); full runtime matrix and UDP evidence absent.
+**Execution:** IN PROGRESS — all native blockers of #97 are closed. The harness is merged (#153): `tests/release_smoke.rs` and `.github/workflows/release-smoke.yml` run the packaged executables (all-in-one and standalone, TCP and UDP, public n0 relays) on linux x64/arm64 (glibc and musl), macOS arm64 and Windows x64/ARM64, check each archive against the signed checksums, and write an evidence file per runner plus a coverage summary. Passed locally on macOS arm64 only (release build). NOT RUN on any runner: it needs the release set of a tag, and the candidate tag `v0.4.3-rc.3` (version bump merged in #154) has not been cut. UNVERIFIED by design: riscv64 archives (no hosted runner), macOS x64 (no archive), aliases and short options on the packaged files, a forced-relay path, loss/delay/migration, installers, packages, images and `update` on the final artifacts.
 
 <a id="release-gate-01"></a>
 ### Case RELEASE-GATE-01
@@ -985,7 +985,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Signed-off coverage/evidence matrix, actual results and missing coverage, decision/review artifacts; no approval inferred from planning counts. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — Full release evidence and all native #97 blockers #84–#96, #99/#100/#101 unresolved; this documentation change is planning only.
+**Execution:** NOT_RUN — blockers are closed, but the gate needs the final-artifact evidence of RELEASE-MATRIX-01 and the regression cases above on one tag, bound to commit, lockfile and artifact digests. No such run exists; evidence from the earlier `v0.4.3-rc.2` predates UDP and is stale.
 
 <a id="source-ac-register"></a>
 ## Exact source AC register
