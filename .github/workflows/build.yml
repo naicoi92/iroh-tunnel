@@ -54,7 +54,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF#refs/tags/v}"
           else
-            version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)-dev"
+            version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name=="iroh-tunnel") | .version')-dev"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 

@@ -44,6 +44,7 @@ jobs:
           filters: |
             code:
               - 'src/**'
+              - 'crates/**'
               - 'tests/**'
               - 'examples/**'
               - 'Cargo.toml'

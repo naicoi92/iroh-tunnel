@@ -9,6 +9,8 @@ on:
   pull_request:
     paths:
       - "src/update.rs"
+      - "crates/host/**"
+      - "crates/engine/**"
       - "tests/update_zip_windows.rs"
       - ".github/workflows/windows-update-e2e.yml"
 

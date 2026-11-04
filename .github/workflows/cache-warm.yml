@@ -15,6 +15,7 @@ on:
     branches: [main]
     paths:
       - "Cargo.toml"
+      - "crates/*/Cargo.toml"
       - "Cargo.lock"
       - ".github/actions/setup-rust/**"
       - ".github/workflows/checks.yml"
