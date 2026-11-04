@@ -18,6 +18,11 @@ use iroh::SecretKey;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::engine::settings::{
+    AccessServiceSettings, AccessSettings, NodeSettings, RelayToken, ServeServiceSettings,
+    ServeSettings,
+};
+
 // Service names are lowercased dns-label-like identifiers (ALPN-safe).
 fn name_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -169,31 +174,18 @@ pub struct UdpSettings {
     pub queue_depth: Option<usize>,
 }
 
-/// [`UdpSettings`] with every default applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UdpLimits {
-    pub idle_timeout: std::time::Duration,
-    pub max_flows: usize,
-    pub max_flows_per_peer: usize,
-    pub queue_depth: usize,
-}
+pub use crate::engine::settings::UdpLimits;
 
 impl UdpSettings {
     /// The effective limits, with the UDP-06 defaults for absent fields. A
     /// per-peer cap never exceeds the service cap.
     pub fn resolve(&self) -> UdpLimits {
-        let max_flows = self.max_flows.unwrap_or(crate::udp::DEFAULT_MAX_FLOWS);
-        UdpLimits {
-            idle_timeout: self
-                .idle_timeout
-                .map_or(crate::udp::IDLE_TIMEOUT, std::time::Duration::from_secs),
-            max_flows,
-            max_flows_per_peer: self
-                .max_flows_per_peer
-                .unwrap_or(crate::udp::DEFAULT_MAX_FLOWS_PER_PEER)
-                .min(max_flows),
-            queue_depth: self.queue_depth.unwrap_or(crate::udp::DEFAULT_QUEUE_DEPTH),
-        }
+        UdpLimits::from_overrides(
+            self.idle_timeout.map(std::time::Duration::from_secs),
+            self.max_flows,
+            self.max_flows_per_peer,
+            self.queue_depth,
+        )
     }
 
     fn is_unset(&self) -> bool {
@@ -266,6 +258,7 @@ impl UdpSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServeService {
     pub name: String,
+    #[serde(with = "protocol_serde")]
     pub protocol: Protocol,
     #[serde(default = "default_host")]
     pub host: String,
@@ -280,6 +273,7 @@ pub struct ServeService {
 pub struct AccessService {
     pub name: String,
     pub node_id: String,
+    #[serde(with = "protocol_serde")]
     pub protocol: Protocol,
     #[serde(default = "default_host")]
     pub host: String,
@@ -301,11 +295,24 @@ pub struct AccessService {
     pub udp: UdpSettings,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    Tcp,
-    Udp,
+pub use crate::engine::settings::Protocol;
+
+/// Serde form of the engine [`Protocol`]: lowercase `"tcp"` / `"udp"`.
+mod protocol_serde {
+    use super::Protocol;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(p: &Protocol, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(p.as_str())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Protocol, D::Error> {
+        match String::deserialize(d)?.as_str() {
+            "tcp" => Ok(Protocol::Tcp),
+            "udp" => Ok(Protocol::Udp),
+            other => Err(serde::de::Error::unknown_variant(other, &["tcp", "udp"])),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +443,70 @@ impl AccessConfig {
     pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
         RoleDoc::resolve_and_save_key(self, path)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Engine settings mapping
+// ---------------------------------------------------------------------------
+
+impl NodeConfig {
+    /// Engine node settings: resolves `secret_key` (an empty key stays
+    /// `None`, i.e. ephemeral) and wraps `relay_token` in a redacting type.
+    fn node_settings(&self) -> Result<NodeSettings> {
+        let secret_key = if self.secret_key.is_empty() {
+            None
+        } else {
+            Some(resolve_secret_key(&self.secret_key)?.0)
+        };
+        Ok(NodeSettings {
+            secret_key,
+            relay_urls: self.relay_urls.clone(),
+            relay_token: self.relay_token.clone().map(RelayToken::new),
+            max_concurrent_streams: self.max_concurrent_streams,
+        })
+    }
+}
+
+/// Map a serve document to engine settings, resolving its secret key.
+///
+/// Fails like [`resolve_secret_key`] does, before anything binds.
+pub fn serve_settings(cfg: &ServeConfig) -> Result<ServeSettings> {
+    Ok(ServeSettings {
+        node: cfg.node.node_settings()?,
+        services: cfg
+            .services
+            .iter()
+            .map(|svc| ServeServiceSettings {
+                name: svc.name.clone(),
+                protocol: svc.protocol,
+                host: svc.host.clone(),
+                port: svc.port,
+                udp: svc.udp.resolve(),
+            })
+            .collect(),
+    })
+}
+
+/// Map an access document to engine settings, resolving its secret key.
+///
+/// Fails like [`resolve_secret_key`] does, before anything binds.
+pub fn access_settings(cfg: &AccessConfig) -> Result<AccessSettings> {
+    Ok(AccessSettings {
+        node: cfg.node.node_settings()?,
+        services: cfg
+            .services
+            .iter()
+            .map(|svc| AccessServiceSettings {
+                name: svc.name.clone(),
+                node_id: svc.node_id.clone(),
+                protocol: svc.protocol,
+                host: svc.host.clone(),
+                port: svc.port,
+                relay_urls: svc.relay_urls.clone(),
+                udp: svc.udp.resolve(),
+            })
+            .collect(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,5 +1198,28 @@ max_concurrent_streams = 0
         for text in [format!("{e:#}"), format!("{e:?}")] {
             assert!(!text.contains(SECRET_KEY_TEXT), "{text}");
         }
+    }
+
+    #[test]
+    fn serve_settings_resolves_key_wraps_token_and_applies_udp_defaults() {
+        let key = SecretKey::generate();
+        let cfg: ServeConfig = toml::from_str(&format!(
+            "[node]\nsecret_key = \"{}\"\nrelay_token = \"tok\"\n\n[[services]]\nname = \"dns\"\nprotocol = \"udp\"\nport = 53\nmax_flows = 8\n",
+            encode_secret_key(&key)
+        ))
+        .unwrap();
+        let settings = serve_settings(&cfg).unwrap();
+        assert_eq!(settings.node.secret_key.unwrap().public(), key.public());
+        assert_eq!(settings.node.relay_token.unwrap().expose(), "tok");
+        assert_eq!(settings.services[0].protocol, Protocol::Udp);
+        assert_eq!(settings.services[0].udp.max_flows, 8);
+    }
+
+    #[test]
+    fn settings_mapping_rejects_an_invalid_secret_key_before_bind() {
+        let mut cfg = AccessConfig::default();
+        cfg.node.secret_key = "not!valid!base64!!".to_string();
+        let err = access_settings(&cfg).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid secret_key"));
     }
 }

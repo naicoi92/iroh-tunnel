@@ -17,15 +17,13 @@ pub(crate) mod cli_service;
 pub mod config;
 pub mod config_cmd;
 pub(crate) mod config_store;
-pub mod conn_path;
-pub mod endpoint;
+pub mod engine;
 pub mod error;
-pub mod observation;
 pub(crate) mod ownership;
 pub mod paths;
-pub mod pipe;
-pub mod proto;
-pub mod ready;
+// Old-path re-exports so tests and downstream callers keep compiling until
+// the engine becomes its own crate (Task 19b/20).
+pub use crate::engine::{conn_path, endpoint, observation, pipe, proto, ready, udp};
 pub(crate) mod render;
 /// `pub(crate)` — internal seam between serve/access, not a public extension
 /// point. See `src/role_run.rs` module docs.
@@ -35,6 +33,5 @@ pub mod service;
 pub mod shutdown;
 pub mod status;
 pub mod status_cmd;
-pub mod udp;
 pub mod update;
 pub mod update_owner;

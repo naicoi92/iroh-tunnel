@@ -3,7 +3,7 @@
 //! Role code builds these plain values from live state and hands them to an
 //! injected [`StatusSink`]; it never touches the status-file schema. The
 //! host side maps an observation to the status-file JSON (see
-//! [`crate::status`]) and writes it. Observations carry no timestamp, so
+//! the host status module) and writes it. Observations carry no timestamp, so
 //! `PartialEq` decides "changed since the last save" on rendered content only.
 
 use std::future::Future;
@@ -11,7 +11,7 @@ use std::pin::Pin;
 
 use std::time::Duration;
 
-use crate::ready::OnReady;
+use crate::engine::ready::OnReady;
 
 /// How often each role's status flush task re-renders its observation.
 ///

@@ -122,13 +122,13 @@ where
 /// How long a completed pipe waits for the peer to acknowledge final stream
 /// bytes. Technical implementation default, not configurable.
 ///
-/// Kept below [`crate::shutdown::DRAIN_GRACE`] so that during shutdown a pipe
+/// Kept below [`crate::engine::shutdown::DRAIN_GRACE`] so that during shutdown a pipe
 /// that completes early in the drain still gets its full acknowledgement wait
 /// before the drain deadline aborts the task; a longer value would be moot.
 pub(crate) const DELIVERY_ACK_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 const _: () = assert!(
-    DELIVERY_ACK_GRACE.as_millis() < crate::shutdown::DRAIN_GRACE.as_millis(),
+    DELIVERY_ACK_GRACE.as_millis() < crate::engine::shutdown::DRAIN_GRACE.as_millis(),
     "the delivery acknowledgement wait must fit inside the shutdown drain grace"
 );
 

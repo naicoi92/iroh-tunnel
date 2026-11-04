@@ -28,7 +28,7 @@
 use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointId, TransportAddr};
 
-use crate::observation::{PeerPathObservation, TransportKind, TransportObservation};
+use crate::engine::observation::{PeerPathObservation, TransportKind, TransportObservation};
 
 /// Snapshot the current connection path of `peer` on `ep`.
 ///

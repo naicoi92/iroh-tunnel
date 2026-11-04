@@ -7,7 +7,6 @@ use crate::ready::ReadyReport;
 use crate::status::Role;
 
 use crate::ready::{OnReady, ReadyServices};
-use crate::role_run::protocol_str;
 use crate::service::{InstalledAt, ServiceNote};
 
 /// The stream a rendered line belongs on.
@@ -93,7 +92,7 @@ pub(crate) fn render_ready(report: &ReadyReport) -> String {
                 out.push_str(&format!(
                     "Serving: {} {}://{}\n",
                     svc.name,
-                    protocol_str(svc.protocol),
+                    svc.protocol.as_str(),
                     svc.local_addr
                 ));
             }
@@ -110,7 +109,7 @@ pub(crate) fn render_ready(report: &ReadyReport) -> String {
                     svc.name,
                     svc.listen_addr,
                     svc.peer_display,
-                    protocol_str(svc.protocol),
+                    svc.protocol.as_str(),
                     svc.listen_addr
                 ));
             }

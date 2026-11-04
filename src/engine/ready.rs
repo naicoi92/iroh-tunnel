@@ -2,9 +2,9 @@
 //!
 //! A role reports readiness once, after its endpoint is bound and its
 //! identity is published, and before it admits any forwarding. Callers
-//! decide how to present it (the CLI renders text; see `crate::render`).
+//! decide how to present it (the CLI renders text; see the host renderer).
 
-use crate::config::Protocol;
+use crate::engine::settings::Protocol;
 
 /// Hook a role calls once it is ready. An `Err` aborts the start: the
 /// endpoint is closed and the error is returned from the run.

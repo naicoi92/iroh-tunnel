@@ -1,8 +1,7 @@
-//! Iroh [`Endpoint`] construction from a [`NodeConfig`].
+//! Iroh [`Endpoint`] construction from engine settings.
 //!
 //! Implements T-05. Two roles:
-//! - **serve**: persistent [`SecretKey`] resolved from config (and persisted
-//!   back if freshly generated).
+//! - **serve**: persistent [`SecretKey`] resolved by the host.
 //! - **access**: ephemeral key, never persisted.
 //!
 //! Multi-relay: if `relay_urls` is non-empty, the first URL is the home relay
@@ -25,19 +24,10 @@ use iroh::{RelayMap, RelayUrl};
 
 use std::time::Duration;
 
-/// Test-only switch: build endpoints without IP transports, so every path is a
-/// relay path. Compiled only under `test-utils`; production never reads it.
+/// Old name of [`crate::engine::testing::set_relay_only`], kept for tests
+/// until they are rewired.
 #[cfg(feature = "test-utils")]
-static TEST_RELAY_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Force (or stop forcing) relay-only endpoints for roles started afterwards.
-///
-/// Process-global: use it from one sequential test, and reset it before the
-/// test ends. Endpoints already built are unaffected.
-#[cfg(feature = "test-utils")]
-pub fn set_relay_only_for_tests(on: bool) {
-    TEST_RELAY_ONLY.store(on, std::sync::atomic::Ordering::SeqCst);
-}
+pub use crate::engine::testing::set_relay_only as set_relay_only_for_tests;
 
 /// The n0 default relay URLs (use1-1, usw1-1, euc1-1, aps1-1).
 ///
@@ -58,64 +48,60 @@ pub fn n0_default_relay_urls() -> Vec<RelayUrl> {
     iroh::defaults::prod::default_relay_map().urls::<Vec<_>>()
 }
 
-use crate::config::{self, NodeConfig};
+use crate::engine::proto;
+use crate::engine::settings::{AccessSettings, NodeSettings, RelayToken, ServeSettings};
 
 /// Build an [`Endpoint`] for the **serve** role.
 ///
-/// The secret key is resolved from `node.secret_key`; if it was empty a fresh
-/// one is generated and the caller is expected to persist it (the config layer
-/// handles that via [`config::ServeConfig::resolve_and_save_key`]).
+/// The secret key is `s.node.secret_key` (the host resolves and persists it);
+/// `None` binds an ephemeral key.
 ///
-/// `alpns` are the service ALPNs this endpoint will accept incoming streams on.
-/// In iroh 1.0 ALPNs are registered on the endpoint at build time (not filtered
-/// per-`accept`), so the serve handler collects every service's ALPN up front
-pub async fn create_serve_endpoint(node: &NodeConfig, alpns: &[Vec<u8>]) -> Result<Endpoint> {
-    // resolve_secret_key returns (key, needs_save); serve callers persist via
-    // ServeConfig::resolve_and_save_key, so the boolean is ignored here.
-    let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
-    create_endpoint_with_key(key, node, &node.relay_urls, alpns).await
+/// Every service's ALPN is registered up front: in iroh 1.0 ALPNs are
+/// registered on the endpoint at build time (not filtered per-`accept`).
+pub async fn bind_serve(s: &ServeSettings) -> Result<Endpoint> {
+    let alpns: Vec<Vec<u8>> = s
+        .services
+        .iter()
+        .map(|svc| proto::alpn_for(&svc.name))
+        .collect();
+    create_endpoint_with_key(&s.node, &s.node.relay_urls, &alpns).await
 }
 
 /// Build an [`Endpoint`] for the **access** role.
 ///
-/// Resolves the secret key from `node.secret_key`; if it was empty a fresh one
-/// is generated and the caller is expected to persist it (the config layer
-/// handles that via [`config::AccessConfig::resolve_and_save_key`]), so the
-/// access NodeId is stable across restarts. Access only dials out, so no ALPNs
-/// are registered.
-///
-/// `extra_relay_urls` carries the per-service relay overrides (issue #54):
-/// the endpoint must be connected to the UNION of node + service relays so
+/// Access only dials out, so no ALPNs are registered. The endpoint is
+/// connected to the UNION of node + per-service relay URLs (issue #54) so
 /// every service's dial has a live relay transport for its URLs (a relay only
 /// carries traffic for peers connected to it). Per-service dials still attach
-/// only that service's own URLs — see [`access::ServiceDialer`].
-pub async fn create_access_endpoint(
-    node: &NodeConfig,
-    extra_relay_urls: &[String],
-) -> Result<Endpoint> {
-    let (key, _needs_save) = config::resolve_secret_key(&node.secret_key)?;
-    let mut relays = node.relay_urls.clone();
-    for url in extra_relay_urls {
-        if !relays.contains(url) {
-            relays.push(url.clone());
+/// only that service's own URLs.
+pub async fn bind_access(s: &AccessSettings) -> Result<Endpoint> {
+    let mut relays = s.node.relay_urls.clone();
+    for svc in &s.services {
+        for url in &svc.relay_urls {
+            if !relays.contains(url) {
+                relays.push(url.clone());
+            }
         }
     }
-    create_endpoint_with_key(key, node, &relays, &[]).await
+    create_endpoint_with_key(&s.node, &relays, &[]).await
 }
 
 async fn create_endpoint_with_key(
-    key: iroh::SecretKey,
-    node: &NodeConfig,
+    node: &NodeSettings,
     relay_urls: &[String],
     alpns: &[Vec<u8>],
 ) -> Result<Endpoint> {
+    let key = node
+        .secret_key
+        .clone()
+        .unwrap_or_else(iroh::SecretKey::generate);
     let mut builder = Endpoint::builder(Minimal)
         .secret_key(key)
         .transport_config(transport_config(node.max_concurrent_streams));
 
     builder = builder.relay_mode(relay_mode_from_urls(
         relay_urls,
-        node.relay_token.as_deref(),
+        node.relay_token.as_ref().map(RelayToken::expose),
     )?);
 
     // Tests run the endpoint against an in-process relay with a self-signed
@@ -123,7 +109,7 @@ async fn create_endpoint_with_key(
     #[cfg(feature = "test-utils")]
     {
         builder = builder.ca_tls_config(CaTlsConfig::insecure_skip_verify());
-        if TEST_RELAY_ONLY.load(std::sync::atomic::Ordering::SeqCst) {
+        if crate::engine::testing::relay_only() {
             builder = builder.clear_ip_transports();
         }
     }
@@ -175,7 +161,7 @@ fn transport_config(max_streams: Option<u32>) -> QuicTransportConfig {
 ///   peer; iroh advertises the home relay in the endpoint info).
 ///
 /// `relay_token` (when Some) is applied to every relay in the map — see
-/// [`NodeConfig::relay_token`] for the single-token semantics.
+/// [`NodeSettings::relay_token`] for the single-token semantics.
 fn relay_mode_from_urls(relay_urls: &[String], relay_token: Option<&str>) -> Result<RelayMode> {
     if relay_urls.is_empty() {
         if relay_token.is_some() {
@@ -351,8 +337,7 @@ mod tests {
     #[tokio::test]
     async fn access_endpoint_binds_and_has_node_id() {
         // ephemeral key, default (n0) relays
-        let node = NodeConfig::default();
-        let ep = create_access_endpoint(&node, &[]).await.unwrap();
+        let ep = bind_access(&AccessSettings::default()).await.unwrap();
         let id = node_id_string(&ep);
         // iroh 1.0's PublicKey Display is lowercase hex (32 bytes => 64 chars).
         // (Parsing accepts both hex and base32, but Display emits hex.)
@@ -362,17 +347,15 @@ mod tests {
 
     #[tokio::test]
     async fn serve_endpoint_with_same_key_has_same_node_id() {
-        let (key, _) = config::resolve_secret_key("").unwrap();
-        let enc = config::encode_secret_key(&key);
-        let node = NodeConfig {
-            secret_key: enc,
-            relay_urls: vec![],
-            max_concurrent_streams: None,
-            relay_token: None,
+        let key = iroh::SecretKey::generate();
+        let settings = ServeSettings {
+            node: NodeSettings {
+                secret_key: Some(key.clone()),
+                ..Default::default()
+            },
+            services: Vec::new(),
         };
-        let ep = create_serve_endpoint(&node, &[b"iroh-tunnel/db".to_vec()])
-            .await
-            .unwrap();
+        let ep = bind_serve(&settings).await.unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());
     }
 
@@ -380,15 +363,15 @@ mod tests {
     async fn access_endpoint_with_same_key_has_same_node_id() {
         // A pinned access secret_key must yield a stable NodeId across endpoints
         // (the whole point of pinning access identity).
-        let (key, _) = config::resolve_secret_key("").unwrap();
-        let enc = config::encode_secret_key(&key);
-        let node = NodeConfig {
-            secret_key: enc,
-            relay_urls: vec![],
-            max_concurrent_streams: None,
-            relay_token: None,
+        let key = iroh::SecretKey::generate();
+        let settings = AccessSettings {
+            node: NodeSettings {
+                secret_key: Some(key.clone()),
+                ..Default::default()
+            },
+            services: Vec::new(),
         };
-        let ep = create_access_endpoint(&node, &[]).await.unwrap();
+        let ep = bind_access(&settings).await.unwrap();
         assert_eq!(node_id_string(&ep), key.public().to_string());
     }
 
