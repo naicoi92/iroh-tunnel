@@ -97,6 +97,21 @@ explaining why.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
 
+## Workspace layout and Rust API migration
+
+The repository is a Cargo workspace of three packages; dependencies point one
+way, root → host → engine:
+
+- `iroh-tunnel` (root): clap CLI, prompts, rendering, signals, the three
+  binaries and a minimal `[lib]`. Depends on `iroh-tunnel-host` only.
+- `iroh-tunnel-host` (`crates/host`): config, status, ownership, service
+  management, updating and the foreground runtime. Never prints or exits.
+- `iroh-tunnel-engine` (`crates/engine`): endpoints, role loops, tunnels, UDP
+  and typed observations. Knows nothing about files, services or signals.
+
+Old `iroh_tunnel::<module>::<item>` paths and the old-to-new source layout are
+mapped in [openspec/changes/refactor-codebase/migration-map.md](openspec/changes/refactor-codebase/migration-map.md).
+
 ## Compatibility rules
 
 - There is deliberately **no protocol negotiation**: the ALPN is
