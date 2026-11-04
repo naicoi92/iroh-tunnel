@@ -68,10 +68,11 @@ explaining why.
 | `src/main.rs`              | `iroh-tunnel` binary entry point                       |
 | `src/bin_serve.rs`, `src/bin_access.rs` | role-specific binary entry points         |
 | `src/app.rs`               | command dispatch from parsed CLI to the host crate     |
-| `src/cli.rs`, `src/cli_service.rs` | clap CLI surface (`<role> <command>`)          |
+| `src/cli.rs`               | clap CLI surface (`<role> <command>`)                  |
+| `src/cli_service.rs`       | `service` subcommands: prompts and retry loop over host service ops |
 | `src/config_cmd.rs`        | `config` subcommands (CLI wrapper over host config)    |
 | `src/status_cmd.rs`        | `status` subcommand                                    |
-| `src/render.rs`            | terminal rendering and prompts                         |
+| `src/render.rs`            | terminal rendering of host outcomes                    |
 | `src/lifecycle.rs`         | signal handling and process lifecycle                  |
 | `crates/host/src/config/`  | config model, load/save, `config` operations           |
 | `crates/host/src/service/` | service backends: `systemd`, `launchd`, BusyBox/SysV init |
@@ -79,7 +80,7 @@ explaining why.
 | `crates/host/src/update/`  | self-update                                            |
 | `crates/host/src/runtime/` | foreground orchestration of the role loops             |
 | `crates/host/src/paths/`   | config, state and status path resolution               |
-| `crates/host/src/ownership.rs` | file ownership handling                            |
+| `crates/host/src/ownership.rs` | single-running-role locks and owner records        |
 | `crates/engine/src/serve/` | serve role: publish local services into Iroh           |
 | `crates/engine/src/access/` | access role: dial a remote node_id to a local port    |
 | `crates/engine/src/runtime/` | dial retry/backoff (`connect_with_retry`), disconnect watcher |
