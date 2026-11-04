@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use toml_edit::DocumentMut;
 
-use crate::config::{resolve_secret_key, RoleDoc};
-use crate::error::CliError;
+use crate::host::config::{resolve_secret_key, RoleDoc};
+use crate::host::error::CliError;
 
 /// How long a writer waits for another writer before giving up.
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);

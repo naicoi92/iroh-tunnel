@@ -1,4 +1,4 @@
-//! Host orchestration shared by the serve and access role `run` paths.
+//! Host runtime: orchestration shared by the serve and access role `run` paths.
 //!
 //! claim → load config + persist key → publish identity → map to engine
 //! settings → bind → engine role loop → remove own status file → release the
@@ -7,31 +7,35 @@
 //! status-file mapping and cleanup). The per-role differences sit behind the
 //! [`RoleStrategy`] trait.
 //!
-//! Everything here is `pub(crate)` — these are internal seams between two
-//! modules of this crate, not a public extension point.
+//! The public entry points are [`run_foreground`], [`run_quick_serve`],
+//! [`run_quick_access`] and [`remove_own_status_file_for_exit`]; the
+//! strategy machinery stays `pub(crate)`. Terminal and signal concerns are
+//! the caller's: it supplies the readiness hook and the shutdown future.
 
 use std::future::Future;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::config::RoleDoc;
-use crate::ownership::RoleClaim;
-/// Role identity and writer: the host side picks the writer by role; the
-/// engine never sees them.
-pub(crate) use crate::status::{StatusRole, StatusWriter};
+use crate::host::config::{AccessConfig, RoleDoc, ServeConfig};
+use crate::host::ownership::RoleClaim;
+use crate::host::status::{Role, StatusPayload, StatusWriter};
 
-use iroh_tunnel_engine::settings::NodeSettings;
-use iroh_tunnel_engine::{RoleHooks, RunCompletion, RunContext, StatusSink};
+use iroh_tunnel_engine::observation::{AccessObservation, ServeObservation};
+use iroh_tunnel_engine::settings::{AccessSettings, NodeSettings, ServeSettings};
+use iroh_tunnel_engine::{
+    self as engine, OnReady, RoleHooks, RunCompletion, RunContext, StatusSink,
+};
 
 /// Whether a run enforces role ownership (RO-01..RO-03).
 ///
-/// Production entry points enforce it; the library seams that tests drive
-/// in-process (`run_with_shutdown*`) do not, so several in-process roles of
-/// one kind can share a test binary. Real-process tests cover enforcement.
+/// Production entry points enforce it; `testing::run_unowned` (test-utils)
+/// does not, so several in-process roles of one kind can share a test
+/// binary. Real-process tests cover enforcement.
 #[derive(Clone, Copy)]
 pub(crate) enum Ownership {
-    Enforced(StatusRole),
+    Enforced(Role),
+    #[cfg(feature = "test-utils")]
     Unenforced,
 }
 
@@ -39,7 +43,8 @@ impl Ownership {
     /// Take the role's locks, refusing while the role already runs.
     pub(crate) fn claim(self) -> Result<Option<RoleClaim>> {
         match self {
-            Self::Enforced(role) => crate::ownership::claim(role).map(Some),
+            Self::Enforced(role) => crate::host::ownership::claim(role).map(Some),
+            #[cfg(feature = "test-utils")]
             Self::Unenforced => Ok(None),
         }
     }
@@ -54,26 +59,26 @@ pub(crate) async fn finish_run(
     state_dir: Option<&Path>,
 ) -> Result<()> {
     if completion.status_quiesced {
-        crate::status::remove_own_status_file(writer, state_dir).await;
+        crate::host::status::remove_own_status_file(writer, state_dir).await;
     }
     completion.result
 }
 
 /// Hooks whose status sink writes the role's status file via
-/// [`crate::status::StatusWriter::save_with_state_dir`] (`None` = env
+/// [`crate::host::status::StatusWriter::save_with_state_dir`] (`None` = env
 /// default dir). The save runs on the blocking pool (the atomic save fsyncs;
 /// RS-07) and is awaited to completion by the flush loop, never detached.
 pub(crate) fn file_status_hooks<S: RoleStrategy>(
-    on_ready: iroh_tunnel_engine::OnReady,
+    on_ready: OnReady,
     state_dir: Option<&Path>,
 ) -> RoleHooks<S::Observation>
 where
-    for<'a> crate::status::StatusPayload: From<&'a S::Observation>,
+    for<'a> crate::host::status::StatusPayload: From<&'a S::Observation>,
 {
     let state_dir = state_dir.map(Path::to_path_buf);
     let writer = S::STATUS_WRITER;
     let status = StatusSink::new(move |observation: S::Observation| {
-        let payload = crate::status::StatusPayload::from(&observation);
+        let payload = crate::host::status::StatusPayload::from(&observation);
         let state_dir = state_dir.clone();
         Box::pin(async move {
             let path = tokio::task::spawn_blocking(move || {
@@ -91,6 +96,217 @@ where
     }
 }
 
+/// Run `role` from the config file at `config` until `shutdown` resolves.
+///
+/// Order: claim the role → load the config and persist its key (blocking
+/// pool) → publish the configured identity → bind → publish an ephemeral
+/// identity → engine role loop → remove the role's own status file only if
+/// the status writer quiesced → release the claim. `on_ready` receives the
+/// startup report; its error aborts the start. Dropping the future cancels
+/// the run (owned tasks and the endpoint are dropped with it).
+///
+/// # Errors
+///
+/// [`crate::host::error::CliError`]-classified config, ownership and iroh
+/// failures, or whatever `on_ready` returned.
+pub async fn run_foreground(
+    role: Role,
+    config: &Path,
+    ctx: RunContext,
+    on_ready: OnReady,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    run_role(
+        role,
+        config,
+        Ownership::Enforced(role),
+        ctx,
+        None,
+        on_ready,
+        shutdown,
+    )
+    .await
+}
+
+/// Run an in-memory quick serve configuration without persisting its
+/// identity, until `shutdown` resolves. Claims the serve role like
+/// [`run_foreground`]; never writes a config.
+///
+/// # Errors
+///
+/// [`crate::host::error::CliError::Config`] when `cfg` is invalid, plus the
+/// failures of [`run_foreground`].
+pub async fn run_quick_serve(
+    cfg: ServeConfig,
+    ctx: RunContext,
+    on_ready: OnReady,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    run_quick::<ServeStrategy>(cfg, Role::Serve, "serve", ctx, on_ready, shutdown).await
+}
+
+/// Access counterpart of [`run_quick_serve`].
+///
+/// # Errors
+///
+/// As [`run_quick_serve`], for the access role.
+pub async fn run_quick_access(
+    cfg: AccessConfig,
+    ctx: RunContext,
+    on_ready: OnReady,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    run_quick::<AccessStrategy>(cfg, Role::Access, "access", ctx, on_ready, shutdown).await
+}
+
+async fn run_quick<S: RoleStrategy>(
+    cfg: S::Config,
+    role: Role,
+    label: &str,
+    ctx: RunContext,
+    on_ready: OnReady,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()>
+where
+    for<'a> StatusPayload: From<&'a S::Observation>,
+{
+    cfg.validate()
+        .map_err(|e| crate::host::error::CliError::Config(format!("{label} quick mode: {e}")))?;
+    let claim = Some(crate::host::ownership::claim(role)?);
+    run_config::<S, _, _>(
+        cfg,
+        claim,
+        ctx,
+        None,
+        file_status_hooks::<S>(on_ready, None),
+        |ep, settings, ctx, hooks| S::run(ep, settings, shutdown, ctx, hooks),
+    )
+    .await
+}
+
+/// Run `role` with the given ownership policy and optional injected state
+/// directory; shared by [`run_foreground`] and `testing::run_unowned`.
+pub(crate) async fn run_role(
+    role: Role,
+    config: &Path,
+    ownership: Ownership,
+    ctx: RunContext,
+    state_dir: Option<&Path>,
+    on_ready: OnReady,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    match role {
+        Role::Serve => {
+            run_with_state_dir::<ServeStrategy>(
+                config, ownership, ctx, state_dir, on_ready, shutdown,
+            )
+            .await
+        }
+        Role::Access => {
+            run_with_state_dir::<AccessStrategy>(
+                config, ownership, ctx, state_dir, on_ready, shutdown,
+            )
+            .await
+        }
+    }
+}
+
+async fn run_with_state_dir<S: RoleStrategy>(
+    config: &Path,
+    ownership: Ownership,
+    ctx: RunContext,
+    state_dir: Option<&Path>,
+    on_ready: OnReady,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()>
+where
+    for<'a> StatusPayload: From<&'a S::Observation>,
+{
+    run_skeleton::<S, _, _>(
+        config,
+        ownership,
+        ctx,
+        state_dir,
+        file_status_hooks::<S>(on_ready, state_dir),
+        |ep, settings, ctx, hooks| S::run(ep, settings, shutdown, ctx, hooks),
+    )
+    .await
+}
+
+/// Blocking removal of `role`'s own status file for the forced-exit path,
+/// where the async runtime no longer drives cleanup. Pid-checked, so a file
+/// another process owns is left alone.
+pub fn remove_own_status_file_for_exit(role: Role) {
+    crate::host::status::remove_own_status_file_for_exit(role);
+}
+
+/// Serve-role implementation of [`RoleStrategy`]: maps the config to engine
+/// settings and delegates binding and the role loop to the engine.
+pub(crate) struct ServeStrategy;
+
+impl RoleStrategy for ServeStrategy {
+    const STATUS_WRITER: StatusWriter = StatusWriter::serve();
+
+    type Config = ServeConfig;
+    type Settings = ServeSettings;
+    type Observation = ServeObservation;
+
+    fn settings(cfg: &Self::Config) -> Result<Self::Settings> {
+        crate::host::config::serve_settings(cfg)
+    }
+
+    fn node(settings: &Self::Settings) -> &NodeSettings {
+        &settings.node
+    }
+
+    async fn bind(settings: &Self::Settings) -> Result<iroh::Endpoint> {
+        engine::bind_serve(settings).await
+    }
+
+    fn run(
+        ep: iroh::Endpoint,
+        settings: Self::Settings,
+        shutdown: impl Future<Output = ()>,
+        ctx: RunContext,
+        hooks: RoleHooks<Self::Observation>,
+    ) -> impl Future<Output = RunCompletion> {
+        engine::run_serve(ep, settings, ctx, hooks, shutdown)
+    }
+}
+
+/// Access-role implementation of [`RoleStrategy`].
+pub(crate) struct AccessStrategy;
+
+impl RoleStrategy for AccessStrategy {
+    const STATUS_WRITER: StatusWriter = StatusWriter::access();
+
+    type Config = AccessConfig;
+    type Settings = AccessSettings;
+    type Observation = AccessObservation;
+
+    fn settings(cfg: &Self::Config) -> Result<Self::Settings> {
+        crate::host::config::access_settings(cfg)
+    }
+
+    fn node(settings: &Self::Settings) -> &NodeSettings {
+        &settings.node
+    }
+
+    async fn bind(settings: &Self::Settings) -> Result<iroh::Endpoint> {
+        engine::bind_access(settings).await
+    }
+
+    fn run(
+        ep: iroh::Endpoint,
+        settings: Self::Settings,
+        shutdown: impl Future<Output = ()>,
+        ctx: RunContext,
+        hooks: RoleHooks<Self::Observation>,
+    ) -> impl Future<Output = RunCompletion> {
+        engine::run_access(ep, settings, ctx, hooks, shutdown)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RoleStrategy trait + shared run skeleton
 // ---------------------------------------------------------------------------
@@ -105,10 +321,10 @@ where
 ///
 /// The associated type [`RoleStrategy::Config`] is the role's TOML document
 /// (`ServeConfig` / `AccessConfig`); it must load+validate+persist its own
-/// key via the [`crate::config::RoleDoc`] trait.
+/// key via the [`crate::host::config::RoleDoc`] trait.
 pub(crate) trait RoleStrategy {
     /// The TOML config document this role loads.
-    type Config: crate::config::RoleDoc + Send + 'static;
+    type Config: crate::host::config::RoleDoc + Send + 'static;
 
     /// The engine settings this role runs with.
     type Settings: Send + 'static;
@@ -183,7 +399,7 @@ where
     // (RS-07). It is awaited to completion, never detached.
     let path = config_path.to_path_buf();
     let cfg = tokio::task::spawn_blocking(move || -> Result<S::Config> {
-        let mut cfg = crate::service::load_config::<S::Config>(&path)?;
+        let mut cfg = crate::host::service::load_config::<S::Config>(&path)?;
         cfg.resolve_and_save_key(&path)?;
         Ok(cfg)
     })
@@ -241,25 +457,6 @@ where
     result
 }
 
-/// Drive a role end-to-end with the engine's stock role loop.
-pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
-    config_path: &Path,
-    ownership: Ownership,
-    ctx: RunContext,
-    hooks: RoleHooks<S::Observation>,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
-    run_skeleton::<S, _, _>(
-        config_path,
-        ownership,
-        ctx,
-        None,
-        hooks,
-        |ep, settings, ctx, hooks| S::run(ep, settings, shutdown, ctx, hooks),
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,7 +468,8 @@ mod tests {
     #[test]
     fn ready_hook_failure_closes_endpoint_and_releases_claim() {
         const CHILD_MARKER: &str = "IROH_TUNNEL_READY_HOOK_CHILD";
-        const NAME: &str = "role_run::tests::ready_hook_failure_closes_endpoint_and_releases_claim";
+        const NAME: &str =
+            "host::runtime::tests::ready_hook_failure_closes_endpoint_and_releases_claim";
         if std::env::var_os(CHILD_MARKER).is_none() {
             let home = tempfile::tempdir().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -293,32 +491,25 @@ mod tests {
         let state_dir = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let claim = crate::ownership::claim(StatusRole::Serve).unwrap();
+            let claim = crate::host::ownership::claim(Role::Serve).unwrap();
             let on_ready: iroh_tunnel_engine::OnReady =
                 Box::new(|_| Err(anyhow::anyhow!("ready hook refused")));
-            let hooks =
-                file_status_hooks::<crate::serve::ServeStrategy>(on_ready, Some(state_dir.path()));
-            let error = run_config::<crate::serve::ServeStrategy, _, _>(
-                crate::config::ServeConfig::default(),
+            let hooks = file_status_hooks::<ServeStrategy>(on_ready, Some(state_dir.path()));
+            let error = run_config::<ServeStrategy, _, _>(
+                crate::host::config::ServeConfig::default(),
                 Some(claim),
                 RunContext::new(),
                 Some(state_dir.path()),
                 hooks,
                 |ep, settings, ctx, hooks| {
-                    crate::serve::ServeStrategy::run(
-                        ep,
-                        settings,
-                        std::future::pending::<()>(),
-                        ctx,
-                        hooks,
-                    )
+                    ServeStrategy::run(ep, settings, std::future::pending::<()>(), ctx, hooks)
                 },
             )
             .await
             .unwrap_err();
             assert_eq!(error.to_string(), "ready hook refused");
 
-            let reclaimed = crate::ownership::claim(StatusRole::Serve);
+            let reclaimed = crate::host::ownership::claim(Role::Serve);
             assert!(
                 reclaimed.is_ok(),
                 "claim must be released after the failure"
@@ -333,7 +524,7 @@ mod tests {
     }
 
     fn write_own_serve_status(dir: &Path) -> std::path::PathBuf {
-        let status = crate::status::StatusFile {
+        let status = crate::host::status::StatusFile {
             node_id: "node".into(),
             home_relay: None,
             pid: std::process::id(),
@@ -341,8 +532,8 @@ mod tests {
             services: Vec::new(),
             connections: Vec::new(),
         };
-        crate::status::StatusWriter::serve()
-            .save_to(dir, &crate::status::StatusPayload::Serve(status))
+        crate::host::status::StatusWriter::serve()
+            .save_to(dir, &crate::host::status::StatusPayload::Serve(status))
             .unwrap()
     }
 
@@ -350,7 +541,7 @@ mod tests {
     async fn status_file_kept_when_flush_join_times_out() {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_own_serve_status(tmp.path());
-        let writer = crate::status::StatusWriter::serve();
+        let writer = crate::host::status::StatusWriter::serve();
 
         let unquiesced = RunCompletion {
             result: Ok(()),

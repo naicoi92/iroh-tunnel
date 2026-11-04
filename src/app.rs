@@ -7,30 +7,48 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::cli;
 use crate::cli::{AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ServeCli};
 use crate::config_cmd;
-use crate::error::CliError;
-use crate::shutdown;
-use crate::status::{self, StatusRole};
+use crate::host::config_ops;
+use crate::host::error::CliError;
+use crate::host::runtime;
+use crate::host::status::Role as StatusRole;
+use crate::host::update;
+use crate::host::RunContext;
+use crate::lifecycle;
 use crate::status_cmd;
-use crate::update;
-use crate::{access, cli, serve};
 use anyhow::Context as _;
 use clap::Parser;
 
 /// Entry point of the all-in-one `iroh-tunnel` (`it`) binary.
 pub fn main_all_in_one() -> ! {
+    install_migration_notice();
     execute(Cli::parse(), Packaging::AllInOne)
 }
 
 /// Entry point of the standalone `iroh-tunnel-serve` (`its`) binary.
 pub fn main_serve() -> ! {
+    install_migration_notice();
     execute(ServeCli::parse().into_cli(), Packaging::Standalone)
 }
 
 /// Entry point of the standalone `iroh-tunnel-access` (`ita`) binary.
 pub fn main_access() -> ! {
+    install_migration_notice();
     execute(AccessCli::parse().into_cli(), Packaging::Standalone)
+}
+
+/// Show the operator the macOS legacy-configuration copy on stderr; the host
+/// only reports it through this observer. Runs before any path resolution.
+fn install_migration_notice() {
+    crate::host::paths::set_migration_notice(|legacy, dest| {
+        eprintln!(
+            "migrated configuration {} -> {} (original kept)",
+            legacy.display(),
+            dest.display()
+        );
+    });
 }
 
 /// Which executable is running. Service units run `<exe> <role> run`, which
@@ -66,11 +84,11 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     // and the endpoint are cancelled before the process status is decided.
     // One drain context per invocation. Management commands never begin a
     // drain, so `forced_exit` stays pending and installs no signal handler.
-    let ctx = shutdown::RunContext::new();
+    let ctx = RunContext::new();
     let outcome = rt.block_on(async {
         tokio::select! {
             result = run(parsed, packaging, ctx.clone()) => Ok(result),
-            forced = shutdown::forced_exit(&ctx) => Err(forced),
+            forced = lifecycle::forced_exit(&ctx) => Err(forced),
         }
     });
     let outcome = match outcome {
@@ -80,7 +98,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
             // CHANGELOG). Own-state cleanup is still attempted here.
             eprintln!("error: shutdown abandoned ({forced:?}), exiting");
             if let Some(role) = status_role {
-                status::remove_own_status_file_for_exit(role);
+                runtime::remove_own_status_file_for_exit(role);
             }
             std::process::exit(forced.exit_code());
         }
@@ -102,7 +120,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     }
 }
 
-async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyhow::Result<()> {
+async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<()> {
     // The typed role tag comes from ONE match on the CLI enum; the dispatch
     // string is derived from it — an invalid role is unrepresentable, and
     // the two can never disagree.
@@ -124,13 +142,13 @@ async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyho
                 CliError::Config("serve quick mode: --target IP:PORT is required".into())
             })?;
             let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = crate::config::ServeConfig {
-                node: crate::config::NodeConfig {
+            let cfg = crate::host::config::ServeConfig {
+                node: crate::host::config::NodeConfig {
                     secret_key,
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
-                services: vec![crate::config::ServeService {
+                services: vec![crate::host::config::ServeService {
                     name: quick.name.ok_or_else(|| {
                         CliError::Config("serve quick mode: --name is required".into())
                     })?,
@@ -140,7 +158,13 @@ async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyho
                     udp: Default::default(),
                 }],
             };
-            serve::run_quick(cfg, ctx).await
+            runtime::run_quick_serve(
+                cfg,
+                ctx,
+                crate::render::print_ready(),
+                lifecycle::wait_for_signal(),
+            )
+            .await
         }
         Role::Access { quick, cmd: None } => {
             let protocol = quick_protocol("access", &quick.protocol)?;
@@ -154,13 +178,13 @@ async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyho
                 CliError::Config(format!("access quick mode: invalid --node-id: {e}"))
             })?;
             let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = crate::config::AccessConfig {
-                node: crate::config::NodeConfig {
+            let cfg = crate::host::config::AccessConfig {
+                node: crate::host::config::NodeConfig {
                     secret_key,
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
-                services: vec![crate::config::AccessService {
+                services: vec![crate::host::config::AccessService {
                     name: quick.name.ok_or_else(|| {
                         CliError::Config("access quick mode: --name is required".into())
                     })?,
@@ -172,7 +196,13 @@ async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyho
                     udp: Default::default(),
                 }],
             };
-            access::run_quick(cfg, ctx).await
+            runtime::run_quick_access(
+                cfg,
+                ctx,
+                crate::render::print_ready(),
+                lifecycle::wait_for_signal(),
+            )
+            .await
         }
     }
 }
@@ -204,7 +234,7 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
         exe_name,
         target,
         current_version: env!("APP_VERSION"),
-        owner: crate::update_owner::detect(&install_path),
+        owner: crate::host::update_owner::detect(&install_path),
         install_path,
         verifier: &update::SigstoreVerifier::release(),
     };
@@ -242,10 +272,10 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
 }
 
 /// Parse a quick-mode `--protocol` value.
-fn quick_protocol(role: &str, value: &str) -> Result<crate::config::Protocol, CliError> {
+fn quick_protocol(role: &str, value: &str) -> Result<crate::host::config::Protocol, CliError> {
     match value {
-        "tcp" => Ok(crate::config::Protocol::Tcp),
-        "udp" => Ok(crate::config::Protocol::Udp),
+        "tcp" => Ok(crate::host::config::Protocol::Tcp),
+        "udp" => Ok(crate::host::config::Protocol::Udp),
         other => Err(CliError::Config(format!(
             "{role} quick mode supports tcp or udp protocol, got '{other}'; use --protocol tcp or --protocol udp"
         ))),
@@ -256,19 +286,23 @@ async fn dispatch_role_cmd(
     status_role: StatusRole,
     cmd: RoleCmd,
     packaging: Packaging,
-    ctx: shutdown::RunContext,
+    ctx: RunContext,
 ) -> anyhow::Result<()> {
     let role = status_role.name();
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
-            config_cmd::require_existing(status_role, &path)?;
+            config_ops::require_existing(status_role, &path)?;
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
-            match status_role {
-                StatusRole::Serve => serve::run(&path, ctx).await,
-                StatusRole::Access => access::run(&path, ctx).await,
-            }
+            runtime::run_foreground(
+                status_role,
+                &path,
+                ctx,
+                crate::render::print_ready(),
+                lifecycle::wait_for_signal(),
+            )
+            .await
         }
         // Host operations are synchronous (and may prompt on stdin), so they
         // run on blocking workers, never on a runtime thread (RS-07).
@@ -308,9 +342,9 @@ async fn dispatch_role_cmd(
 }
 
 /// Resolve the config path: explicit `--config` wins, otherwise the
-/// platform default from [`config_cmd::resolve_config_path`].
+/// platform default from [`config_ops::resolve_config_path`].
 fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    config_cmd::resolve_config_path(role_named(role)?, config.as_deref())
+    config_ops::resolve_config_path(role_named(role)?, config.as_deref())
 }
 
 /// The typed role for a CLI role name.
@@ -361,7 +395,7 @@ fn read_key_file(path: Option<&Path>) -> anyhow::Result<String> {
             CliError::Config(format!("--key-file {}: file is empty", path.display())).into(),
         );
     }
-    crate::config::resolve_secret_key(key).map_err(|_| {
+    crate::host::config::resolve_secret_key(key).map_err(|_| {
         CliError::Config(format!(
             "--key-file {}: not a valid base64 32-byte secret key",
             path.display()

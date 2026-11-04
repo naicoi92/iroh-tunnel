@@ -2,35 +2,19 @@
 //!
 //! The crate is shaped as a library + binary pair so that integration tests
 //! (under `tests/`) can drive the serve/access roles end-to-end without
-//! spawning a subprocess. The binary in [`main.rs`](../main.rs) is a thin
-//! wrapper around [`serve::run`] / [`access::run`].
-//!
-//! Most modules carry `#![allow(dead_code)]` because the single-crate layout
-//! would otherwise flag every symbol as unused by the binary alone. Exposing
-//! them via the library target makes that suppression accurate: they ARE used,
-//! by integration tests and by future downstream consumers.
+//! spawning a subprocess. File-, OS- and process-bound operations live in the
+//! [`host`] module (see its docs); the root keeps only the CLI around it.
 
-pub mod access;
 pub mod app;
 pub mod cli;
 pub(crate) mod cli_service;
-pub mod config;
 pub mod config_cmd;
-pub(crate) mod config_store;
-pub mod error;
-pub(crate) mod ownership;
-pub mod paths;
-// Old-path re-exports so tests and downstream callers keep compiling until
-// the engine becomes its own crate (Task 19b/20).
-pub use iroh_tunnel_engine::{conn_path, endpoint, observation, udp};
+pub mod host;
+pub(crate) mod lifecycle;
 pub(crate) mod render;
-/// `pub(crate)` — internal seam between serve/access, not a public extension
-/// point. See `src/role_run.rs` module docs.
-pub(crate) mod role_run;
-pub mod serve;
-pub mod service;
-pub mod shutdown;
-pub mod status;
 pub mod status_cmd;
-pub mod update;
-pub mod update_owner;
+
+// Old-path re-exports so tests and downstream callers keep compiling until
+// the host and engine are their own crates (Task 20b rewires the tests).
+pub use host::{config, error, paths, service, status, update, update_owner};
+pub use iroh_tunnel_engine::{access, conn_path, endpoint, observation, udp};

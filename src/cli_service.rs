@@ -1,5 +1,5 @@
 //! CLI glue for `service` commands: builds requests, answers the structured
-//! needs of [`crate::service`] with prompts, and prints notes.
+//! needs of [`crate::host::service`] with prompts, and prints notes.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -7,13 +7,13 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 
 use crate::cli::{ScopeArgs, ServiceAction};
-use crate::error::CliError;
-use crate::render::print_service_note;
-use crate::service::scope::{self, Environment};
-use crate::service::{
+use crate::host::error::CliError;
+use crate::host::service::scope::{self, Environment};
+use crate::host::service::{
     self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, ServiceCall, ServiceScope,
 };
-use crate::status::Role;
+use crate::host::status::Role;
+use crate::render::print_service_note;
 
 /// The `iroh-tunnel` executable to register: the one on `PATH` (so a system
 /// install is used), else the running executable so `cargo run -- service
@@ -27,6 +27,28 @@ pub(crate) fn resolve_tunnel_executable() -> anyhow::Result<PathBuf> {
         || which::which("iroh-tunnel").ok(),
         || std::env::current_exe().context("failed to resolve current executable"),
     )
+}
+
+/// Probe the running process for the install-time scope decision.
+pub(crate) fn detect_environment() -> Environment {
+    Environment {
+        elevated: scope::is_elevated(),
+        can_answer: is_interactive(),
+    }
+}
+
+/// Whether a person can answer a prompt (stdin is a terminal).
+#[cfg(feature = "test-utils")]
+pub(crate) fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    // Integration tests have no terminal; this stands in for one.
+    std::env::var_os("IROH_TUNNEL_TEST_INTERACTIVE").is_some() || std::io::stdin().is_terminal()
+}
+
+#[cfg(not(feature = "test-utils"))]
+pub(crate) fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 fn resolve_tunnel_executable_with(
@@ -59,7 +81,7 @@ fn explicit_scope(args: &ScopeArgs) -> Option<ServiceScope> {
 /// Run one `service` action: map flags to a request, answer the needs the
 /// operation reports, and print notes and native output.
 pub(crate) fn dispatch(role: Role, action: ServiceAction) -> anyhow::Result<()> {
-    let env = Environment::detect();
+    let env = detect_environment();
     // Verbs on an existing service: no prompt, and the scope follows privilege
     // when it is not given.
     let existing = |args: &ScopeArgs| {

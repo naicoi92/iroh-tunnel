@@ -187,9 +187,10 @@ port = {port}
         let serve = {
             let state = serve_state.path().to_path_buf();
             tokio::spawn(async move {
-                iroh_tunnel::serve::run_with_shutdown_with_state_dir(
-                    &state,
+                iroh_tunnel::host::testing::run_unowned(
+                    iroh_tunnel::host::status::Role::Serve,
                     &serve_cfg,
+                    Some(&state),
                     async move {
                         let _ = serve_rx.await;
                     },
@@ -200,9 +201,10 @@ port = {port}
         let access = {
             let state = access_state.path().to_path_buf();
             tokio::spawn(async move {
-                iroh_tunnel::access::run_with_shutdown_with_state_dir(
-                    &state,
+                iroh_tunnel::host::testing::run_unowned(
+                    iroh_tunnel::host::status::Role::Access,
                     &access_cfg,
+                    Some(&state),
                     async move {
                         let _ = access_rx.await;
                     },
@@ -256,9 +258,14 @@ port = {port}
         let (tx, rx) = oneshot::channel::<()>();
         self.stop.push(tx);
         self.roles.push(tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown(&path, async move {
-                let _ = rx.await;
-            })
+            iroh_tunnel::host::testing::run_unowned(
+                iroh_tunnel::host::status::Role::Access,
+                &path,
+                None,
+                async move {
+                    let _ = rx.await;
+                },
+            )
             .await
         }));
         Ok(addr)
@@ -321,9 +328,14 @@ port = {port}
         self.roles.insert(
             0,
             tokio::spawn(async move {
-                iroh_tunnel::serve::run_with_shutdown_with_state_dir(&state, &path, async move {
-                    let _ = rx.await;
-                })
+                iroh_tunnel::host::testing::run_unowned(
+                    iroh_tunnel::host::status::Role::Serve,
+                    &path,
+                    Some(&state),
+                    async move {
+                        let _ = rx.await;
+                    },
+                )
                 .await
             }),
         );

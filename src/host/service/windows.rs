@@ -20,7 +20,7 @@ use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::task_xml::{encode_utf16_le, format_task_xml, task_action};
 use super::AppliedEffect;
 use super::{instance_suffix, RestartPolicy, ServiceScope};
-use crate::error::CliError;
+use crate::host::error::CliError;
 
 /// Task name, one per role (plus the test-only instance suffix).
 fn task_name(role: &str) -> String {
@@ -107,7 +107,7 @@ fn require_installed(native: &mut Native, role: &str) -> Result<()> {
 /// binary in a shell to set one would make `schtasks /End` kill only the
 /// wrapper. Refusing keeps stop reliable and the pinned paths honest.
 fn ensure_default_state(state: &Path) -> Result<()> {
-    let default = crate::paths::default_state_dir()?;
+    let default = crate::host::paths::default_state_dir()?;
     // Windows paths are case-insensitive and accept either separator.
     let normal = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
     if normal(state) == normal(&default) {
@@ -299,12 +299,14 @@ pub(super) fn status(
 ) -> Result<NativeOutput> {
     require_installed(native, role)?;
     // The role lock, not the localised task text, says whether it runs.
-    match crate::ownership::probe(status_role(role)?)? {
-        crate::ownership::Liveness::Running { owner, .. } => notes(&ServiceNote::RoleRunning {
-            role: role.to_owned(),
-            owner: crate::ownership::describe_owner(owner.as_ref()),
-        }),
-        crate::ownership::Liveness::NotRunning => notes(&ServiceNote::RoleNotRunning {
+    match crate::host::ownership::probe(status_role(role)?)? {
+        crate::host::ownership::Liveness::Running { owner, .. } => {
+            notes(&ServiceNote::RoleRunning {
+                role: role.to_owned(),
+                owner: crate::host::ownership::describe_owner(owner.as_ref()),
+            })
+        }
+        crate::host::ownership::Liveness::NotRunning => notes(&ServiceNote::RoleNotRunning {
             role: role.to_owned(),
         }),
     }
@@ -316,10 +318,10 @@ pub(super) fn status(
     Ok(output)
 }
 
-fn status_role(role: &str) -> Result<crate::status::StatusRole> {
+fn status_role(role: &str) -> Result<crate::host::status::Role> {
     match role {
-        "serve" => Ok(crate::status::StatusRole::Serve),
-        "access" => Ok(crate::status::StatusRole::Access),
+        "serve" => Ok(crate::host::status::Role::Serve),
+        "access" => Ok(crate::host::status::Role::Access),
         other => Err(CliError::Config(format!("unknown role {other:?}")).into()),
     }
 }
@@ -328,7 +330,7 @@ fn status_role(role: &str) -> Result<crate::status::StatusRole> {
 /// text is localised, so the lock is the locale-independent source of truth.
 fn task_is_running(role: &str) -> Result<bool> {
     Ok(matches!(
-        crate::ownership::probe(status_role(role)?)?,
-        crate::ownership::Liveness::Running { .. }
+        crate::host::ownership::probe(status_role(role)?)?,
+        crate::host::ownership::Liveness::Running { .. }
     ))
 }

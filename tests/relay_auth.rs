@@ -304,18 +304,28 @@ multiplex = true
     let serve_handle = {
         let path = serve_cfg_path.clone();
         tokio::spawn(async move {
-            iroh_tunnel::serve::run_with_shutdown(&path, async move {
-                let _ = serve_rx.await;
-            })
+            iroh_tunnel::host::testing::run_unowned(
+                iroh_tunnel::host::status::Role::Serve,
+                &path,
+                None,
+                async move {
+                    let _ = serve_rx.await;
+                },
+            )
             .await
         })
     };
     let access_handle = {
         let path = access_cfg_path.clone();
         tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown(&path, async move {
-                let _ = access_rx.await;
-            })
+            iroh_tunnel::host::testing::run_unowned(
+                iroh_tunnel::host::status::Role::Access,
+                &path,
+                None,
+                async move {
+                    let _ = access_rx.await;
+                },
+            )
             .await
         })
     };

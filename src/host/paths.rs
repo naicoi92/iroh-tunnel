@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::error::CliError;
+use crate::host::error::CliError;
 
 const APP_DIR: &str = "iroh-tunnel";
 
@@ -135,12 +135,35 @@ fn migrate_legacy(legacy: &Path, dest: &Path) -> Result<()> {
         Err(e) => return Err(migration_failed(legacy, dest, &e)),
     }
     copy_no_overwrite(legacy, dest).map_err(|e| migration_failed(legacy, dest, &e))?;
-    eprintln!(
-        "migrated configuration {} -> {} (original kept)",
-        legacy.display(),
-        dest.display()
-    );
+    notify_migrated(legacy, dest);
     Ok(())
+}
+
+/// Observer told about a completed macOS legacy-configuration copy.
+///
+/// A CLI or other frontend installs one with [`set_migration_notice`] to show
+/// the operator `legacy` and `dest`; the host itself never prints.
+pub type MigrationNotice = fn(legacy: &Path, dest: &Path);
+
+static MIGRATION_NOTICE: std::sync::OnceLock<MigrationNotice> = std::sync::OnceLock::new();
+
+/// Install the observer for completed legacy-configuration copies, once.
+///
+/// Write-once: a second call is ignored. Without an observer the host logs
+/// the copy at `info` level (`migrated configuration (original kept)`).
+pub fn set_migration_notice(notice: MigrationNotice) {
+    let _ = MIGRATION_NOTICE.set(notice);
+}
+
+fn notify_migrated(legacy: &Path, dest: &Path) {
+    match MIGRATION_NOTICE.get() {
+        Some(notice) => notice(legacy, dest),
+        None => tracing::info!(
+            legacy = %legacy.display(),
+            dest = %dest.display(),
+            "migrated configuration (original kept)"
+        ),
+    }
 }
 
 fn migration_failed(legacy: &Path, dest: &Path, e: &std::io::Error) -> anyhow::Error {

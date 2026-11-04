@@ -9,7 +9,7 @@
 use anyhow::Result;
 
 use super::ServiceScope;
-use crate::error::CliError;
+use crate::host::error::CliError;
 
 /// What the install-time scope decision depends on, injected so the policy is
 /// a pure function of its inputs.
@@ -19,16 +19,6 @@ pub struct Environment {
     pub elevated: bool,
     /// Standard input is a terminal that can answer the scope prompt.
     pub can_answer: bool,
-}
-
-impl Environment {
-    /// Probe the running process.
-    pub fn detect() -> Self {
-        Self {
-            elevated: is_elevated(),
-            can_answer: is_interactive(),
-        }
-    }
 }
 
 /// Whether the process runs with root privileges. Always `false` on targets
@@ -42,20 +32,6 @@ pub fn is_elevated() -> bool {
 #[cfg(not(unix))]
 pub fn is_elevated() -> bool {
     false
-}
-
-/// Whether a person can answer a prompt (stdin is a terminal).
-#[cfg(feature = "test-utils")]
-pub(crate) fn is_interactive() -> bool {
-    use std::io::IsTerminal;
-    // Integration tests have no terminal; this stands in for one.
-    std::env::var_os("IROH_TUNNEL_TEST_INTERACTIVE").is_some() || std::io::stdin().is_terminal()
-}
-
-#[cfg(not(feature = "test-utils"))]
-pub(crate) fn is_interactive() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal()
 }
 
 /// Refuse a scope this platform has no backend for.

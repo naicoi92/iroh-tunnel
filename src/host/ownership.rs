@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::error::CliError;
-use crate::status::StatusRole;
+use crate::host::error::CliError;
+use crate::host::status::Role;
 
 /// Test-only stand-in for the root-owned machine lock directory.
 #[cfg(feature = "test-utils")]
@@ -90,13 +90,13 @@ fn conflict(msg: String) -> anyhow::Error {
 fn user_dir() -> Result<PathBuf> {
     match std::env::var_os("HOME").map(PathBuf::from) {
         Some(home) if home.is_absolute() => Ok(home.join(".local/state/iroh-tunnel")),
-        _ => crate::paths::default_state_dir(),
+        _ => crate::host::paths::default_state_dir(),
     }
 }
 
 #[cfg(not(all(windows, feature = "test-utils")))]
 fn user_dir() -> Result<PathBuf> {
-    crate::paths::default_state_dir()
+    crate::host::paths::default_state_dir()
 }
 
 #[cfg(feature = "test-utils")]
@@ -121,18 +121,18 @@ fn machine_dir() -> Option<PathBuf> {
     }
 }
 
-fn lock_name(role: StatusRole) -> String {
+fn lock_name(role: Role) -> String {
     format!("{}.lock", role.name())
 }
 
-fn owner_name(role: StatusRole) -> String {
+fn owner_name(role: Role) -> String {
     format!("{}.owner.json", role.name())
 }
 
-fn other_role(role: StatusRole) -> StatusRole {
+fn other_role(role: Role) -> Role {
     match role {
-        StatusRole::Serve => StatusRole::Access,
-        StatusRole::Access => StatusRole::Serve,
+        Role::Serve => Role::Access,
+        Role::Access => Role::Serve,
     }
 }
 
@@ -232,12 +232,12 @@ fn try_lock(file: File, kind: LockKind) -> Result<Lock> {
     }
 }
 
-fn read_owner(dir: &Path, role: StatusRole) -> Option<OwnerRecord> {
+fn read_owner(dir: &Path, role: Role) -> Option<OwnerRecord> {
     let body = std::fs::read_to_string(dir.join(owner_name(role))).ok()?;
     serde_json::from_str(&body).ok()
 }
 
-fn write_owner(dir: &Path, role: StatusRole, node_id: Option<&str>) {
+fn write_owner(dir: &Path, role: Role, node_id: Option<&str>) {
     let owner = OwnerRecord {
         role: role.name().to_string(),
         pid: std::process::id(),
@@ -286,7 +286,7 @@ impl Tier {
 }
 
 /// The refusal for a start that finds `role` already running at `scope`.
-fn already_running(role: StatusRole, scope: &str, owner: Option<&OwnerRecord>) -> anyhow::Error {
+fn already_running(role: Role, scope: &str, owner: Option<&OwnerRecord>) -> anyhow::Error {
     conflict(format!(
         "{} is already running ({scope}; {}); {}",
         role.name(),
@@ -295,7 +295,7 @@ fn already_running(role: StatusRole, scope: &str, owner: Option<&OwnerRecord>) -
     ))
 }
 
-fn stop_hint(role: StatusRole) -> String {
+fn stop_hint(role: Role) -> String {
     let name = role.name();
     format!(
         "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop` for a service); \
@@ -306,7 +306,7 @@ fn stop_hint(role: StatusRole) -> String {
 /// The locks one running role holds. Dropping releases them.
 #[derive(Debug)]
 pub(crate) struct RoleClaim {
-    role: StatusRole,
+    role: Role,
     user_dir: PathBuf,
     /// Present when this process holds the machine tier exclusively.
     machine_dir: Option<PathBuf>,
@@ -320,7 +320,7 @@ pub(crate) struct RoleClaim {
 /// [`CliError::Conflict`] when the role already runs (any start mode, any
 /// executable); [`CliError::Config`] when the user state directory cannot be
 /// resolved; other I/O errors with the failing path.
-pub(crate) fn claim(role: StatusRole) -> Result<RoleClaim> {
+pub(crate) fn claim(role: Role) -> Result<RoleClaim> {
     let user_dir = user_dir()?;
     create_dir(&user_dir, 0o700)
         .with_context(|| format!("cannot create state directory {}", user_dir.display()))?;
@@ -380,7 +380,7 @@ enum MachineClaim {
     Absent,
 }
 
-fn claim_machine(role: StatusRole, dir: &Path) -> Result<MachineClaim> {
+fn claim_machine(role: Role, dir: &Path) -> Result<MachineClaim> {
     let path = dir.join(lock_name(role));
     // Elevated side: able to create the directory and write the lock. Only
     // "no permission" means "not elevated"; any other failure is real.
@@ -481,7 +481,7 @@ impl RoleClaim {
 /// # Errors
 ///
 /// I/O errors other than "no such lock" when opening or testing a lock.
-pub(crate) fn probe(role: StatusRole) -> Result<Liveness> {
+pub(crate) fn probe(role: Role) -> Result<Liveness> {
     Ok(probe_tiers(role)?
         .into_iter()
         .next()
@@ -489,7 +489,7 @@ pub(crate) fn probe(role: StatusRole) -> Result<Liveness> {
 }
 
 /// Every tier at which `role` is running (user first), empty when none.
-fn probe_tiers(role: StatusRole) -> Result<Vec<Liveness>> {
+fn probe_tiers(role: Role) -> Result<Vec<Liveness>> {
     let mut running = Vec::new();
     let user_dir = user_dir()?;
     if lock_is_held(&user_dir.join(lock_name(role)), false)? {
@@ -553,7 +553,7 @@ fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
 /// # Errors
 ///
 /// [`CliError::Conflict`] when a process of the role is detected.
-pub(crate) fn ensure_not_running(role: StatusRole) -> Result<()> {
+pub(crate) fn ensure_not_running(role: Role) -> Result<()> {
     match probe(role)? {
         Liveness::NotRunning => Ok(()),
         Liveness::Running { tier, owner } => {
@@ -568,14 +568,14 @@ mod tests {
 
     #[test]
     fn roles_are_each_others_counterpart() {
-        assert_eq!(other_role(StatusRole::Serve), StatusRole::Access);
-        assert_eq!(other_role(StatusRole::Access), StatusRole::Serve);
+        assert_eq!(other_role(Role::Serve), Role::Access);
+        assert_eq!(other_role(Role::Access), Role::Serve);
     }
 
     #[test]
     fn lock_and_owner_names_are_role_scoped() {
-        assert_eq!(lock_name(StatusRole::Serve), "serve.lock");
-        assert_eq!(owner_name(StatusRole::Access), "access.owner.json");
+        assert_eq!(lock_name(Role::Serve), "serve.lock");
+        assert_eq!(owner_name(Role::Access), "access.owner.json");
     }
 
     #[test]
@@ -602,8 +602,8 @@ mod tests {
     #[test]
     fn owner_record_round_trips_without_secret_material() {
         let dir = tempfile::tempdir().unwrap();
-        write_owner(dir.path(), StatusRole::Serve, Some("abc"));
-        let owner = read_owner(dir.path(), StatusRole::Serve).unwrap();
+        write_owner(dir.path(), Role::Serve, Some("abc"));
+        let owner = read_owner(dir.path(), Role::Serve).unwrap();
         assert_eq!(owner.pid, std::process::id());
         assert_eq!(owner.node_id.as_deref(), Some("abc"));
         let raw = std::fs::read_to_string(dir.path().join("serve.owner.json")).unwrap();

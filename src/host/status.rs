@@ -12,7 +12,7 @@
 //! ## Path
 //!
 //! `<state dir>/<role>-status.json`, where the state dir is
-//! [`crate::paths::default_state_dir`] (`~/.local/state/iroh-tunnel` on
+//! [`crate::host::paths::default_state_dir`] (`~/.local/state/iroh-tunnel` on
 //! macOS/Linux, ignoring XDG; `LocalAppData/iroh-tunnel/state` on Windows).
 //! The file names are role-scoped (`serve-status.json`, renamed from
 //! `status.json` in 0.4.0; `access-status.json` since the #59 work) so both
@@ -358,10 +358,10 @@ pub enum StatusPayload {
 
 impl StatusPayload {
     /// The role whose schema this payload carries.
-    pub fn role(&self) -> StatusRole {
+    pub fn role(&self) -> Role {
         match self {
-            StatusPayload::Serve(_) => StatusRole::Serve,
-            StatusPayload::Access(_) => StatusRole::Access,
+            StatusPayload::Serve(_) => Role::Serve,
+            StatusPayload::Access(_) => Role::Access,
         }
     }
 }
@@ -376,9 +376,6 @@ pub enum Role {
     Serve,
     Access,
 }
-
-/// Former name of [`Role`]; removed in Task 20.
-pub type StatusRole = Role;
 
 impl Role {
     /// File name of this role's status file.
@@ -405,7 +402,7 @@ impl Role {
 /// injected-state-dir testing seam. Role differences reduce to the file
 /// name via [`StatusWriter::serve`] / [`StatusWriter::access`].
 #[derive(Debug, Clone, Copy)]
-pub struct StatusWriter(StatusRole);
+pub struct StatusWriter(Role);
 
 /// Monotonic per-process counter making each save's temp file name unique
 /// (see [`StatusWriter::save_to`]).
@@ -413,22 +410,22 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl StatusWriter {
     /// Writer targeting `role`'s status file.
-    pub const fn new(role: StatusRole) -> Self {
+    pub const fn new(role: Role) -> Self {
         Self(role)
     }
 
     /// Writer for the serve role (`serve-status.json`).
     pub const fn serve() -> Self {
-        Self(StatusRole::Serve)
+        Self(Role::Serve)
     }
 
     /// Writer for the access role (`access-status.json`, issue #59).
     pub const fn access() -> Self {
-        Self(StatusRole::Access)
+        Self(Role::Access)
     }
 
     /// The role this writer targets.
-    pub fn role(&self) -> StatusRole {
+    pub fn role(&self) -> Role {
         self.0
     }
 
@@ -466,7 +463,7 @@ impl StatusWriter {
             })?;
             return Ok(dir.join(self.file_name()));
         }
-        Ok(crate::paths::default_state_dir()?.join(self.file_name()))
+        Ok(crate::host::paths::default_state_dir()?.join(self.file_name()))
     }
 
     /// Write `value` under the env-aware default path for this role.
@@ -554,16 +551,22 @@ impl StatusWriter {
         // Under a system service root writes into a user-owned directory:
         // go through a verified handle instead of paths (SM-04).
         #[cfg(unix)]
-        if let Some(uid) = crate::service::trust::trusted_uid_from_env()? {
+        if let Some(uid) = crate::host::service::trust::trusted_uid_from_env()? {
             let temp = format!(
                 "{}.tmp.{}.{}",
                 self.file_name(),
                 std::process::id(),
                 TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             );
-            crate::service::trust::publish(dir, uid, self.file_name(), &temp, content.as_bytes())?;
+            crate::host::service::trust::publish(
+                dir,
+                uid,
+                self.file_name(),
+                &temp,
+                content.as_bytes(),
+            )?;
             // Best-effort, like the path-based branch below.
-            let _ = crate::service::trust::remove_in(dir, uid, LEGACY_STATUS_FILE_NAME);
+            let _ = crate::host::service::trust::remove_in(dir, uid, LEGACY_STATUS_FILE_NAME);
             return Ok(path);
         }
         std::fs::create_dir_all(dir)
@@ -643,7 +646,7 @@ pub(crate) async fn remove_own_status_file(writer: StatusWriter, state_dir: Opti
 /// Blocking twin of [`remove_own_status_file`] for the forced-exit path in
 /// `src/main.rs`, where the async runtime is no longer driving cleanup.
 /// Resolves the env-aware default directory, like a normal graceful stop.
-pub fn remove_own_status_file_for_exit(role: StatusRole) {
+pub fn remove_own_status_file_for_exit(role: Role) {
     remove_own_status_file_blocking(StatusWriter::new(role), None);
 }
 
@@ -652,8 +655,8 @@ fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path
         return;
     };
     #[cfg(unix)]
-    if let Ok(Some(uid)) = crate::service::trust::trusted_uid_from_env() {
-        use crate::service::trust::{read_in, remove_in};
+    if let Ok(Some(uid)) = crate::host::service::trust::trusted_uid_from_env() {
+        use crate::host::service::trust::{read_in, remove_in};
         let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
         else {
             return;
@@ -932,8 +935,8 @@ mod tests {
     fn writer_selects_the_role_scoped_file_name() {
         assert_eq!(StatusWriter::serve().file_name(), "serve-status.json");
         assert_eq!(StatusWriter::access().file_name(), "access-status.json");
-        assert_eq!(StatusWriter::serve().role(), StatusRole::Serve);
-        assert_eq!(StatusWriter::access().role(), StatusRole::Access);
+        assert_eq!(StatusWriter::serve().role(), Role::Serve);
+        assert_eq!(StatusWriter::access().role(), Role::Access);
     }
 
     #[test]
@@ -1168,7 +1171,7 @@ mod tests {
         assert_eq!(empty, unset);
         assert_eq!(
             unset,
-            crate::paths::default_state_dir()
+            crate::host::paths::default_state_dir()
                 .unwrap()
                 .join("serve-status.json")
         );

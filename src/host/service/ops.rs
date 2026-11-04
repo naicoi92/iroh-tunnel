@@ -15,8 +15,8 @@ use super::native::{Native, NativeOutput, Runner, ServiceCall, ServiceNote};
 use super::pin::{Pin, RetargetConsent};
 use super::scope::{self, Environment, ScopeDecision};
 use super::ServiceScope;
-use crate::error::CliError;
-use crate::status::Role;
+use crate::host::error::CliError;
+use crate::host::status::Role;
 
 #[allow(unused_imports)] // unused on targets without a service backend
 use super::native::system_runner;
@@ -96,8 +96,8 @@ pub enum Registration {
 #[derive(Debug)]
 pub struct ServiceStatusReport {
     pub registration: Fact<Registration>,
-    pub liveness: Fact<crate::ownership::Liveness>,
-    pub owner: Fact<crate::ownership::OwnerRecord>,
+    pub liveness: Fact<crate::host::ownership::Liveness>,
+    pub owner: Fact<crate::host::ownership::OwnerRecord>,
     pub native: Option<NativeOutput>,
 }
 
@@ -273,15 +273,15 @@ pub(super) fn status_via(
     runner: &mut Runner<'_>,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
     check_verb_policy("status", role, scope, env).map_err(ServiceFailure::before_effects)?;
-    let liveness = crate::ownership::probe(role);
+    let liveness = crate::host::ownership::probe(role);
     let owner = match &liveness {
-        Ok(crate::ownership::Liveness::Running {
+        Ok(crate::host::ownership::Liveness::Running {
             owner: Some(owner), ..
         }) => Fact::Known(owner.clone()),
-        Ok(crate::ownership::Liveness::Running { owner: None, .. }) => {
+        Ok(crate::host::ownership::Liveness::Running { owner: None, .. }) => {
             Fact::Unavailable("the owner record is missing or unreadable".to_owned())
         }
-        Ok(crate::ownership::Liveness::NotRunning) => {
+        Ok(crate::host::ownership::Liveness::NotRunning) => {
             Fact::Unavailable(format!("{} is not running", role.name()))
         }
         Err(error) => Fact::Unavailable(error.to_string()),
@@ -397,7 +397,7 @@ pub(super) fn verb_via(
             if matches!(verb, Verb::Start) {
                 // Refuse before the manager: the unit would otherwise start and
                 // exit after systemd/launchd already reported success (RO-03).
-                crate::ownership::ensure_not_running(role)?;
+                crate::host::ownership::ensure_not_running(role)?;
             }
             Ok(())
         })
@@ -459,7 +459,7 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
     }
     // Persist absolute paths: the installed service runs with a different CWD
     // and home, so nothing may stay relative (SM-02).
-    let config = absolutize_config_path(&crate::config_cmd::resolve_config_path(
+    let config = absolutize_config_path(&crate::host::config_ops::resolve_config_path(
         role,
         req.config.as_deref(),
     )?)?;
@@ -501,7 +501,7 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
     let role = req.role;
     if !env.elevated {
         // Same guidance as before: absolute path, no elevation, no fallback.
-        let config = absolutize_config_path(&crate::config_cmd::resolve_config_path(
+        let config = absolutize_config_path(&crate::host::config_ops::resolve_config_path(
             role,
             req.config.as_deref(),
         )?)?;
@@ -575,7 +575,7 @@ fn absolutize_config_path(path: &Path) -> Result<PathBuf> {
 fn pinned_state_dir(state_dir_override: Option<&Path>) -> Result<PathBuf> {
     let dir = match state_dir_override.filter(|d| !d.as_os_str().is_empty()) {
         Some(dir) => dir.to_path_buf(),
-        None => crate::paths::default_state_dir()?,
+        None => crate::host::paths::default_state_dir()?,
     };
     std::path::absolute(&dir)
         .with_context(|| format!("cannot make state directory {} absolute", dir.display()))
@@ -585,8 +585,8 @@ fn pinned_state_dir(state_dir_override: Option<&Path>) -> Result<PathBuf> {
 /// config must exist and be valid for the role.
 fn check_installable_config(role: Role, config: &Path) -> Result<()> {
     let loaded = match role {
-        Role::Serve => crate::config::ServeConfig::load(config).map(drop),
-        Role::Access => crate::config::AccessConfig::load(config).map(drop),
+        Role::Serve => crate::host::config::ServeConfig::load(config).map(drop),
+        Role::Access => crate::host::config::AccessConfig::load(config).map(drop),
     };
     installable(role, config, loaded)
 }
@@ -594,10 +594,10 @@ fn check_installable_config(role: Role, config: &Path) -> Result<()> {
 /// [`check_installable_config`] for text already read from a verified handle.
 #[cfg(unix)]
 fn check_installable_text(role: Role, text: &str, config: &Path) -> Result<()> {
-    use crate::config::RoleDoc;
+    use crate::host::config::RoleDoc;
     let loaded = match role {
-        Role::Serve => crate::config::ServeConfig::from_toml(text, config).map(drop),
-        Role::Access => crate::config::AccessConfig::from_toml(text, config).map(drop),
+        Role::Serve => crate::host::config::ServeConfig::from_toml(text, config).map(drop),
+        Role::Access => crate::host::config::AccessConfig::from_toml(text, config).map(drop),
     };
     installable(role, config, loaded)
 }

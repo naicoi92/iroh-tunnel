@@ -173,6 +173,71 @@ fn engine_sources_have_no_exit_signal_or_print() {
     );
 }
 
+fn host_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    rust_files(&Path::new(ROOT).join("src/host"), &mut files);
+    files.sort();
+    files
+}
+
+/// 20a: the in-package `src/host/` module reaches nothing in the root
+/// package, so Task 20b can move it verbatim into `crates/host`.
+#[test]
+fn host_module_has_no_outward_crate_paths() {
+    let mut offenders = Vec::new();
+    for file in host_files() {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            let mut rest = line;
+            while let Some(i) = rest.find("crate::") {
+                rest = &rest[i + "crate::".len()..];
+                if !rest.starts_with("host::") {
+                    offenders.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "paths outside crate::host:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn host_module_has_no_terminal_io() {
+    let forbidden = [
+        concat!("process", "::exit"),
+        concat!("tokio", "::signal"),
+        concat!("print", "ln!"),
+        concat!("eprint", "ln!"),
+        concat!("print", "!"),
+        concat!("eprint", "!"),
+        concat!("std::io::", "stdin"),
+    ];
+    let mut offenders = Vec::new();
+    for file in host_files() {
+        if file_name(&file) == "testing.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (n, line) in non_test_lines(&text) {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if forbidden.iter().any(|f| line.contains(f)) {
+                offenders.push(format!("{}:{n}: {}", file.display(), line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "forbidden terminal I/O:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn udp_decision_model_lives_in_engine() {
     let text: String = engine_files()
