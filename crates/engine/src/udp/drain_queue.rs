@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 /// Run one flow's writer: hand each queued datagram to `sink` in order, until
-/// every [`FlowQueue`] handle is dropped.
+/// every `FlowQueue` handle is dropped.
 ///
 /// `sink` may wait (a slow target); only this flow's queue backs up behind it.
 pub async fn drain_queue<F, Fut>(mut rx: tokio::sync::mpsc::Receiver<Bytes>, mut sink: F)

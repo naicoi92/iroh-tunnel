@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Runtime engine: endpoint binding, role loops, tunnels and their typed
 //! settings/observations. Everything here is host-agnostic: the engine never
 //! touches files, OS services, signals, `process::exit` or stdout/stderr.

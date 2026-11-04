@@ -868,6 +868,7 @@ async fn open_client_stream(
 const PATH_POLL_INTERVAL_SECS: u64 = 5;
 
 #[cfg(feature = "test-utils")]
+/// Interval between connection-path polls of the Access role.
 pub const PATH_POLL_INTERVAL: Duration = Duration::from_secs(PATH_POLL_INTERVAL_SECS);
 
 /// Private twin of the [`PATH_POLL_INTERVAL`] definition above for builds

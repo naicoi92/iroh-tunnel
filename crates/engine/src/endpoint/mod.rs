@@ -1,12 +1,12 @@
-//! Iroh [`Endpoint`] construction from engine settings.
+//! Iroh `Endpoint` construction from engine settings.
 //!
 //! Implements T-05. Two roles:
-//! - **serve**: persistent [`SecretKey`] resolved by the host.
+//! - **serve**: persistent `SecretKey` resolved by the host.
 //! - **access**: ephemeral key, never persisted.
 //!
 //! Multi-relay: if `relay_urls` is non-empty, the first URL is the home relay
 //! (advertised to peers) and the rest are failover candidates. An empty list
-//! falls back to the n0 default relay map via [`RelayMode::Default`].
+//! falls back to the n0 default relay map via `RelayMode::Default`.
 //!
 //! Based on Page 05 v3 §6 (relay & discovery). Note: iroh 1.0 changed the
 //! endpoint builder API vs. earlier drafts — see the API notes below.

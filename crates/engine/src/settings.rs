@@ -12,7 +12,9 @@ use crate::udp;
 /// Tunnel protocol of a service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
+    /// TCP stream tunnel.
     Tcp,
+    /// UDP datagram tunnel.
     Udp,
 }
 
@@ -31,6 +33,7 @@ impl Protocol {
 pub struct RelayToken(String);
 
 impl RelayToken {
+    /// Wrap the raw token text.
     pub fn new(token: String) -> Self {
         Self(token)
     }
@@ -52,8 +55,11 @@ impl std::fmt::Debug for RelayToken {
 pub struct NodeSettings {
     /// `None` binds with a freshly generated ephemeral key.
     pub secret_key: Option<SecretKey>,
+    /// Relay server URLs; empty uses the iroh defaults.
     pub relay_urls: Vec<String>,
+    /// Relay auth token; `Debug` redacts it.
     pub relay_token: Option<RelayToken>,
+    /// Cap on concurrent streams per connection (count); `None` keeps the default.
     pub max_concurrent_streams: Option<u32>,
 }
 
@@ -72,9 +78,13 @@ impl std::fmt::Debug for NodeSettings {
 /// UDP resource limits with every default applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UdpLimits {
+    /// Idle time after which a Flow is closed.
     pub idle_timeout: Duration,
+    /// Flow cap per service (count).
     pub max_flows: usize,
+    /// Flow cap per remote peer (count); never exceeds `max_flows`.
     pub max_flows_per_peer: usize,
+    /// Per-Flow datagram queue depth (count).
     pub queue_depth: usize,
 }
 
@@ -108,37 +118,52 @@ impl Default for UdpLimits {
 /// One published serve service.
 #[derive(Debug, Clone)]
 pub struct ServeServiceSettings {
+    /// Service name.
     pub name: String,
+    /// Tunnel protocol.
     pub protocol: Protocol,
+    /// Local host the service forwards to.
     pub host: String,
+    /// Local port the service forwards to.
     pub port: u16,
+    /// UDP resource limits; ignored for TCP.
     pub udp: UdpLimits,
 }
 
 /// Everything the serve role needs to bind and run.
 #[derive(Debug, Clone, Default)]
 pub struct ServeSettings {
+    /// Node-level endpoint settings.
     pub node: NodeSettings,
+    /// Published services.
     pub services: Vec<ServeServiceSettings>,
 }
 
 /// One exposed access service.
 #[derive(Debug, Clone)]
 pub struct AccessServiceSettings {
+    /// Service name.
     pub name: String,
     /// Raw serve-peer id; parsed at the existing runtime stage.
     pub node_id: String,
+    /// Tunnel protocol.
     pub protocol: Protocol,
+    /// Local host to listen on.
     pub host: String,
+    /// Local port to listen on.
     pub port: u16,
+    /// Per-service relay URLs overriding the node relays; empty keeps them.
     pub relay_urls: Vec<String>,
+    /// UDP resource limits; ignored for TCP.
     pub udp: UdpLimits,
 }
 
 /// Everything the access role needs to bind and run.
 #[derive(Debug, Clone, Default)]
 pub struct AccessSettings {
+    /// Node-level endpoint settings.
     pub node: NodeSettings,
+    /// Exposed services.
     pub services: Vec<AccessServiceSettings>,
 }
 

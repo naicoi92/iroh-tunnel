@@ -9,15 +9,15 @@
 //!
 //! - [`peer_path_report`] — the async query against a live [`iroh::Endpoint`]
 //!   (`Endpoint::remote_info` snapshot + `Endpoint::bound_sockets`).
-//! - [`classify_transport`] / [`sort_transports`] / [`diff_transports`] /
-//!   [`poller_step`] — pure mappers, unit-testable without an endpoint.
+//! - `classify_transport` / `sort_transports` / `diff_transports` /
+//!   `poller_step` — pure mappers, unit-testable without an endpoint.
 //!
 //! ## Semantics
 //!
 //! iroh negotiates relay and direct paths concurrently, so the transport list
 //! is a *list with usage*, not a single mode: a peer can be direct-only (hole
 //! punching failed), relay-only, or have both active at once (direct known and
-//! reachable, relay kept as fallback). [`TransportObservation::active`] mirrors
+//! reachable, relay kept as fallback). `TransportObservation::active` mirrors
 //! iroh's own `TransportAddrUsage` snapshot at query time.
 //!
 //! `local_bound_addrs` are the endpoint's local UDP socket *candidates* (one

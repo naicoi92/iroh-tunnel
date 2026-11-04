@@ -8,7 +8,7 @@ use crate::shutdown::stopped;
 /// Per-invocation record of the first drain deadline.
 ///
 /// `app::execute` creates one per run and shares clones with the role run
-/// future and [`forced_exit`], so the CLI boundary measures its watchdog from
+/// future and `forced_exit`, so the CLI boundary measures its watchdog from
 /// the same drain the role started, without any process-global state. Clones
 /// share one channel; dropping all clones just leaves the deadline unset.
 /// Nothing here spawns a task or installs a signal handler.
@@ -29,7 +29,7 @@ impl RunContext {
 
     /// Resolve with the deadline of the first drain started in this context.
     ///
-    /// Pending until [`begin`] publishes; cancel-safe (dropping the future
+    /// Pending until `begin` publishes; cancel-safe (dropping the future
     /// only drops its subscription).
     pub async fn drain_deadline(&self) -> Instant {
         let mut rx = self.0.subscribe();

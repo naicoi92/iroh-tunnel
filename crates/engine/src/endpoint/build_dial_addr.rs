@@ -1,12 +1,12 @@
 use iroh::RelayUrl;
 
-/// Build the [`EndpointAddr`] to dial `node_id` through `relay_urls`.
+/// Build the `EndpointAddr` to dial `node_id` through `relay_urls`.
 ///
-/// Each URL in `relay_urls` is attached via [`EndpointAddr::with_relay_url`]
+/// Each URL in `relay_urls` is attached via `EndpointAddr::with_relay_url`
 /// so iroh can try each in turn. With no relay URLs and no address-lookup
 /// service (the `Minimal` preset registers none), iroh returns "No
 /// addressing information available" — so callers must pass a non-empty
-/// list (the access role does this by routing through [`resolve_relay_urls`]
+/// list (the access role does this by routing through `resolve_relay_urls`
 /// which falls back to the n0 defaults).
 ///
 /// Lifted out of `access::handle_local_connection` so `iroh::EndpointAddr`

@@ -5,7 +5,7 @@ use super::n0_default_relay_urls::n0_default_relay_urls;
 
 /// Resolve the relay URLs to dial peers through, from the config form.
 ///
-/// This is the access-side counterpart to [`relay_mode_from_urls`]: where the
+/// This is the access-side counterpart to `relay_mode_from_urls`: where the
 /// latter decides how *this* endpoint uses relays for itself, this one
 /// decides which relay URLs to attach to a *dialed peer's* `EndpointAddr`.
 ///
