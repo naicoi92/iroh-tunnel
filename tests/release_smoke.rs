@@ -371,6 +371,7 @@ fn context(executables: &[serde_json::Value]) -> serde_json::Value {
         "user": user,
         "elevated": elevated,
         "source_sha": std::env::var("RELEASE_SMOKE_SOURCE_SHA").ok(),
+        "harness_sha": std::env::var("RELEASE_SMOKE_HARNESS_SHA").ok(),
         "tag": std::env::var("RELEASE_SMOKE_TAG").ok(),
         "cargo_lock_sha256": sha256_file(&lock).ok(),
         "archive_sha256": std::env::var("RELEASE_SMOKE_ARCHIVES")
