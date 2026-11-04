@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
+use tokio::task::JoinHandle;
 
 use crate::config::{Protocol, RoleDoc};
 use crate::ownership::RoleClaim;
@@ -39,6 +40,83 @@ impl Ownership {
             Self::Unenforced => Ok(None),
         }
     }
+}
+
+/// How long a role waits for its status flush task to stop at shutdown.
+const STATUS_FLUSH_JOIN_BOUND: Duration = Duration::from_secs(5);
+
+/// What a role's run loop reports to the run owner.
+///
+/// `status_quiesced` is `true` only when the status flush task joined within
+/// [`STATUS_FLUSH_JOIN_BOUND`] and returned `Ok`, or when no flush task ever
+/// ran. Only then may the run owner remove the status file: an unquiesced
+/// writer may still have a save in flight that would recreate it.
+pub(crate) struct RunCompletion {
+    pub result: Result<()>,
+    pub status_quiesced: bool,
+}
+
+impl RunCompletion {
+    /// Completion of a loop body that yields `Ok(status_quiesced)`. A body
+    /// that failed before starting a flush task has no writer to wait for.
+    pub(crate) fn from_body(body: Result<bool>) -> Self {
+        match body {
+            Ok(status_quiesced) => Self {
+                result: Ok(()),
+                status_quiesced,
+            },
+            Err(error) => Self {
+                result: Err(error),
+                status_quiesced: true,
+            },
+        }
+    }
+}
+
+/// Stop a status flush task cooperatively and join it within
+/// [`STATUS_FLUSH_JOIN_BOUND`]; returns whether it quiesced.
+///
+/// Aborting would not cancel an in-flight `spawn_blocking` save
+/// (write+fsync+rename runs to completion on the blocking pool and could
+/// recreate the file AFTER a cleanup removal). The task exits only at an
+/// await point and every save is awaited inside its loop, so a successful
+/// join proves none of its saves is still running. On a pathological stall
+/// the join is abandoned and the caller must keep the status file.
+pub(crate) async fn stop_flush(
+    stop_tx: tokio::sync::oneshot::Sender<()>,
+    mut flush: JoinHandle<()>,
+) -> bool {
+    // Dropping the sender alone would also close the channel, but only at
+    // scope end — far too late.
+    let _ = stop_tx.send(());
+    let flush_abort = flush.abort_handle();
+    match tokio::time::timeout(STATUS_FLUSH_JOIN_BOUND, &mut flush).await {
+        Ok(result) => {
+            let clean = result.is_ok();
+            crate::shutdown::observe(result);
+            clean
+        }
+        Err(_) => {
+            tracing::warn!("status flush task did not stop within 5s; keeping status file");
+            flush_abort.abort();
+            crate::shutdown::observe(flush.await);
+            false
+        }
+    }
+}
+
+/// Finish a run: remove `writer`'s status file (only while it still belongs
+/// to this process) when the writer quiesced, then yield the run result.
+/// `state_dir` is the directory the run wrote to (`None` = env default).
+pub(crate) async fn finish_run(
+    completion: RunCompletion,
+    writer: crate::status::StatusWriter,
+    state_dir: Option<&Path>,
+) -> Result<()> {
+    if completion.status_quiesced {
+        crate::status::remove_own_status_file(writer, state_dir).await;
+    }
+    completion.result
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +264,9 @@ pub(crate) trait RoleStrategy {
     /// The TOML config document this role loads.
     type Config: crate::config::RoleDoc + Send + 'static;
 
+    /// The role's status file writer.
+    const STATUS_WRITER: crate::status::StatusWriter;
+
     /// Build the iroh endpoint for this role (serve registers ALPNs, access
     /// dials out only).
     fn build_endpoint(
@@ -200,13 +281,15 @@ pub(crate) trait RoleStrategy {
     ///
     /// The loop owns the endpoint and all descendant tasks. On `shutdown`, it
     /// seals admission, drains established pipes within one bounded deadline,
-    /// joins/aborts remaining work and closes endpoint/status before returning.
+    /// joins/aborts remaining work and closes the endpoint before returning.
+    /// The returned [`RunCompletion`] tells the run owner whether the status
+    /// writer quiesced; the owner, not the role, removes the status file.
     fn run_loop(
         ep: iroh::Endpoint,
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
         ctx: crate::shutdown::RunContext,
-    ) -> impl std::future::Future<Output = Result<()>>;
+    ) -> impl std::future::Future<Output = RunCompletion>;
 }
 
 /// Drive a role end-to-end: load → resolve key → endpoint → print → loop →
@@ -230,12 +313,13 @@ pub(crate) async fn run_skeleton<S, F, Fut>(
     config_path: &Path,
     ownership: Ownership,
     ctx: crate::shutdown::RunContext,
+    state_dir: Option<&Path>,
     run_loop: F,
 ) -> Result<()>
 where
     S: RoleStrategy,
     F: FnOnce(iroh::Endpoint, S::Config, crate::shutdown::RunContext) -> Fut,
-    Fut: Future<Output = Result<()>>,
+    Fut: Future<Output = RunCompletion>,
 {
     // Claim the role before touching the config: a refused start must not
     // generate or persist a key.
@@ -253,7 +337,7 @@ where
     .await
     .context("config load task failed")??;
 
-    run_config::<S, _, _>(cfg, claim, ctx, run_loop).await
+    run_config::<S, _, _>(cfg, claim, ctx, state_dir, run_loop).await
 }
 
 /// Build the endpoint and run the role while holding `claim`.
@@ -265,12 +349,13 @@ pub(crate) async fn run_config<S, F, Fut>(
     mut cfg: S::Config,
     claim: Option<RoleClaim>,
     ctx: crate::shutdown::RunContext,
+    state_dir: Option<&Path>,
     run_loop: F,
 ) -> Result<()>
 where
     S: RoleStrategy,
     F: FnOnce(iroh::Endpoint, S::Config, crate::shutdown::RunContext) -> Fut,
-    Fut: Future<Output = Result<()>>,
+    Fut: Future<Output = RunCompletion>,
 {
     // A configured key is known before binding, so a duplicate identity is
     // rejected without touching the relay; an ephemeral key only exists
@@ -305,8 +390,10 @@ where
     S::print_services(&cfg);
 
     tracing::info!("endpoint ready");
-    // The role owns admission, drain, task joins and endpoint/status cleanup.
-    let result = run_loop(ep, cfg, ctx).await;
+    // The role owns admission, drain, task joins and endpoint close; this
+    // owner removes the status file once the writer has quiesced.
+    let completion = run_loop(ep, cfg, ctx).await;
+    let result = finish_run(completion, S::STATUS_WRITER, state_dir).await;
     // Held to here so the role stays owned until it has fully stopped.
     drop(claim);
     result
@@ -319,7 +406,7 @@ pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
     ctx: crate::shutdown::RunContext,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    run_skeleton::<S, _, _>(config_path, ownership, ctx, |ep, cfg, ctx| {
+    run_skeleton::<S, _, _>(config_path, ownership, ctx, None, |ep, cfg, ctx| {
         S::run_loop(ep, cfg, shutdown, ctx)
     })
     .await
@@ -408,5 +495,44 @@ mod tests {
         .expect("connect_with_retry must return by itself at the deadline");
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    fn write_own_serve_status(dir: &Path) -> std::path::PathBuf {
+        let status = crate::status::StatusFile {
+            node_id: "node".into(),
+            home_relay: None,
+            pid: std::process::id(),
+            started_at: 0,
+            services: Vec::new(),
+            connections: Vec::new(),
+        };
+        crate::status::StatusWriter::serve()
+            .save_to(dir, &crate::status::StatusPayload::Serve(status))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn status_file_kept_when_flush_join_times_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = write_own_serve_status(tmp.path());
+        let writer = crate::status::StatusWriter::serve();
+
+        let unquiesced = RunCompletion {
+            result: Ok(()),
+            status_quiesced: false,
+        };
+        finish_run(unquiesced, writer, Some(tmp.path()))
+            .await
+            .unwrap();
+        assert!(file.exists(), "unquiesced writer: file must be kept");
+
+        let quiesced = RunCompletion {
+            result: Ok(()),
+            status_quiesced: true,
+        };
+        finish_run(quiesced, writer, Some(tmp.path()))
+            .await
+            .unwrap();
+        assert!(!file.exists(), "quiesced writer: own file is removed");
     }
 }

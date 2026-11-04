@@ -73,7 +73,7 @@ pub async fn run_quick(cfg: AccessConfig, ctx: crate::shutdown::RunContext) -> R
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("access quick mode: {e}")))?;
     let claim = Some(crate::ownership::claim(crate::status::StatusRole::Access)?);
-    crate::role_run::run_config::<AccessStrategy, _, _>(cfg, claim, ctx, |ep, cfg, ctx| {
+    crate::role_run::run_config::<AccessStrategy, _, _>(cfg, claim, ctx, None, |ep, cfg, ctx| {
         AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx)
     })
     .await
@@ -113,11 +113,13 @@ pub async fn run_with_shutdown_with_state_dir(
     config_path: &Path,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    let state_dir = Some(state_dir.to_path_buf());
+    let state_dir_path = state_dir.to_path_buf();
+    let state_dir = Some(state_dir_path.clone());
     crate::role_run::run_skeleton::<AccessStrategy, _, _>(
         config_path,
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
+        Some(&state_dir_path),
         |ep, cfg, ctx| AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir, ctx),
     )
     .await
@@ -131,6 +133,8 @@ pub async fn run_with_shutdown_with_state_dir(
 pub(crate) struct AccessStrategy;
 
 impl RoleStrategy for AccessStrategy {
+    const STATUS_WRITER: crate::status::StatusWriter = crate::status::StatusWriter::access();
+
     type Config = AccessConfig;
 
     async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
@@ -205,7 +209,7 @@ impl RoleStrategy for AccessStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
         ctx: crate::shutdown::RunContext,
-    ) -> Result<()> {
+    ) -> crate::role_run::RunCompletion {
         Self::run_loop_with_state_dir(ep, cfg, shutdown, None, ctx).await
     }
 }
@@ -219,7 +223,20 @@ impl AccessStrategy {
         shutdown: impl Future<Output = ()>,
         state_dir: Option<PathBuf>,
         ctx: crate::shutdown::RunContext,
-    ) -> Result<()> {
+    ) -> crate::role_run::RunCompletion {
+        crate::role_run::RunCompletion::from_body(
+            Self::run_loop_body(ep, cfg, shutdown, state_dir, ctx).await,
+        )
+    }
+
+    /// The loop proper; `Ok(true)` means the status writer quiesced.
+    async fn run_loop_body(
+        ep: iroh::Endpoint,
+        cfg: AccessConfig,
+        shutdown: impl Future<Output = ()>,
+        state_dir: Option<PathBuf>,
+        ctx: crate::shutdown::RunContext,
+    ) -> Result<bool> {
         // Resolve the node-level relays once (the per-service fallback) and
         // parse every service's node_id before spawning listeners, so a bad
         // config fails fast. Each service resolves its own effective relay
@@ -298,14 +315,11 @@ impl AccessStrategy {
             }
         };
 
-        // Graceful-cleanup inputs captured BEFORE `status` moves into the
-        // flush task: the state-dir choice (the ownership-checked removal
-        // resolves its own path from it) and the cooperative stop channel.
-        let cleanup_state_dir = status.state_dir.clone();
+        // Cooperative stop channel for the flush task.
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 
         tracing::info!("access endpoint ready, listening for local clients");
-        let mut flush = tokio::spawn(access_status_flush_loop(
+        let flush = tokio::spawn(access_status_flush_loop(
             status,
             dialers.clone(),
             seeded,
@@ -332,50 +346,13 @@ impl AccessStrategy {
         for dialer in &dialers {
             dialer.stop_auxiliary_tasks().await;
         }
-        // Signal the flush task to stop (dropping the sender alone would
-        // also close the channel, but only at scope end — far too late).
-        let _ = stop_tx.send(());
-        // Stop the flush task COOPERATIVELY and JOIN it: aborting would not
-        // cancel an in-flight spawn_blocking save (write+fsync+rename runs
-        // to completion on the blocking pool and could recreate the file
-        // AFTER the cleanup removal). The task exits only at an await
-        // point and every save is awaited inside its loop — a successful
-        // join therefore proves none of its saves is still running. On a
-        // pathological stall (>5 s for one fsync) the join is abandoned
-        // and the removal is SKIPPED: a possibly-stale file (surfaced by
-        // the reader-side pid warning) beats a resurrection race that
-        // cannot be won once the save is in-flight.
-        let flush_abort = flush.abort_handle();
-        let flush_stopped = match tokio::time::timeout(Duration::from_secs(5), &mut flush).await {
-            Ok(result) => {
-                let clean = result.is_ok();
-                shutdown::observe(result);
-                clean
-            }
-            Err(_) => {
-                tracing::warn!("status flush task did not stop within 5s; keeping status file");
-                flush_abort.abort();
-                shutdown::observe(flush.await);
-                false
-            }
-        };
+        // Stop the flush task and bound its join; the run owner removes the
+        // status file only when this reports the writer quiesced.
+        let status_quiesced = crate::role_run::stop_flush(stop_tx, flush).await;
         // Test-utils seam: simulate a shutdown stuck in the endpoint close.
         shutdown::test_hang_point().await;
         ep.close().await;
-        // Remove the status file only after a clean join AND only if it
-        // still belongs to THIS process (its `pid` field decides — two
-        // instances can share a state dir, and an idle peer would not
-        // recreate its own file after a blind removal). A crash never runs
-        // this path; the reader-side pid-liveness warning covers the stale
-        // file it leaves behind.
-        if flush_stopped {
-            crate::status::remove_own_status_file(
-                StatusWriter::access(),
-                cleanup_state_dir.as_deref(),
-            )
-            .await;
-        }
-        Ok(())
+        Ok(status_quiesced)
     }
 }
 
