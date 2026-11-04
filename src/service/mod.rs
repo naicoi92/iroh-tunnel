@@ -617,6 +617,84 @@ mod tests {
         });
     }
 
+    // ---- blocking execution model (Task 18) -------------------------------
+
+    fn blocking_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn ok_output(program: String) -> NativeOutput {
+        let mut out = crate::service::native::fake::output(0, "", "");
+        out.program = program;
+        out
+    }
+
+    #[test]
+    fn service_operation_runs_inside_spawn_blocking() {
+        let report = blocking_runtime().block_on(async {
+            tokio::task::spawn_blocking(|| {
+                let mut runner = |c: &mut std::process::Command, _| {
+                    Ok(ok_output(c.get_program().to_string_lossy().into_owned()))
+                };
+                let mut notes = |_: &ServiceNote| {};
+                let mut call = ServiceCall::capture(&mut notes);
+                ops::status_via(
+                    Role::Serve,
+                    ServiceScope::User,
+                    BATCH,
+                    &mut call,
+                    &mut runner,
+                )
+            })
+            .await
+        });
+        assert!(report.expect("no panic on the blocking worker").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_awaiter_does_not_stop_service() {
+        const NAME: &str = "service::tests::dropped_awaiter_does_not_stop_service";
+        in_isolated_home(NAME, |_| {
+            use std::sync::{Arc, Mutex};
+            let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+            let recorded = Arc::clone(&calls);
+            blocking_runtime().block_on(async {
+                let handle = tokio::task::spawn_blocking(move || {
+                    let mut runner = |c: &mut std::process::Command, _| {
+                        let args: Vec<String> = c
+                            .get_args()
+                            .map(|a| a.to_string_lossy().into_owned())
+                            .collect();
+                        recorded.lock().unwrap().push(args.join(" "));
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        Ok(ok_output(String::new()))
+                    };
+                    let mut notes = |_: &ServiceNote| {};
+                    let mut call = ServiceCall::capture(&mut notes);
+                    ops::verb_via(
+                        Verb::Start,
+                        Role::Serve,
+                        ServiceScope::User,
+                        BATCH,
+                        &mut call,
+                        &mut runner,
+                    )
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                drop(handle);
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            });
+            let calls = calls.lock().unwrap().clone();
+            assert_eq!(calls.len(), 1, "{calls:?}");
+            assert!(calls[0].contains("start"), "{calls:?}");
+        });
+    }
+
     // Compile-only guard: on Linux the runtime probe must exist and be bool.
     #[cfg(target_os = "linux")]
     #[test]

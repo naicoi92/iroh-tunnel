@@ -270,8 +270,18 @@ async fn dispatch_role_cmd(
                 StatusRole::Access => access::run(&path, ctx).await,
             }
         }
-        RoleCmd::Config { action } => dispatch_config(status_role, action),
-        RoleCmd::Status { json } => status_cmd::run(status_role, json),
+        // Host operations are synchronous (and may prompt on stdin), so they
+        // run on blocking workers, never on a runtime thread (RS-07).
+        RoleCmd::Config { action } => {
+            tokio::task::spawn_blocking(move || dispatch_config(status_role, action))
+                .await
+                .context("config command task failed")?
+        }
+        RoleCmd::Status { json } => {
+            tokio::task::spawn_blocking(move || status_cmd::run(status_role, json))
+                .await
+                .context("status command task failed")?
+        }
         RoleCmd::Update(args) => match packaging {
             Packaging::Standalone => {
                 let exe = format!("iroh-tunnel-{role}");
@@ -289,7 +299,11 @@ async fn dispatch_role_cmd(
             ))
             .into())
         }
-        RoleCmd::Service { action } => crate::cli_service::dispatch(status_role, action),
+        RoleCmd::Service { action } => {
+            tokio::task::spawn_blocking(move || crate::cli_service::dispatch(status_role, action))
+                .await
+                .context("service command task failed")?
+        }
     }
 }
 
