@@ -404,8 +404,41 @@ What to expect:
   dropped, never fragmented or sent in part. The limit depends on the path
   (about 1.1 KiB on a relay path in measurements) and can change during a
   session.
-- **No resource limits yet.** Flow counts, queues and expiry quarantine are not
-  bounded. Do not expose a UDP service to untrusted clients.
+- **Bounded resources.** A service holds at most 256 flows, and one peer at most
+  64 on Serve; Access also stops at 256. A new flow over a cap is dropped and
+  counted, and no running flow is evicted. Each flow has its own queue of 64
+  datagrams, and a full queue drops the newest, so one slow target cannot stall
+  other flows. An idle flow's socket is kept open for 30 seconds before it is
+  released, which makes it unlikely that a late reply reaches a new client;
+  that time counts against the caps. It is not isolation: once the socket is
+  released the operating system may hand the same local port to a later flow,
+  and a reply that is still in flight could then arrive there. All of these
+  values are untested estimates.
+- **Tuning.** The service table accepts optional `idle_timeout` (seconds),
+  `max_flows`, `max_flows_per_peer` (Serve only) and `queue_depth` (Serve only),
+  on a UDP service only. Zero and absurdly large values are rejected when the
+  config loads:
+
+  ```toml
+  [[services]]
+  name = "dns"
+  protocol = "udp"
+  port = 53
+  max_flows = 128
+  max_flows_per_peer = 32
+  ```
+
+- **Diagnostics.** `serve-status.json` and `access-status.json` carry a `udp`
+  block per UDP service: active and quarantined flows, the current datagram
+  limit, and a drop counter for each reason (`oversize`, `malformed`,
+  `unknown_flow`, `upstream_error`, `cap`, `queue_full`, `limit_shrink`,
+  `quarantine_reply`, `foreign_source`). `foreign_source` stays 0 today: Serve
+  connects each upstream socket to the target, so the operating system drops a
+  reply from any other source before the tunnel sees it, and that drop is not
+  counted.
+- **Still not for hostile networks.** The caps bound memory and descriptors, but
+  the target service must still protect itself: the tunnel does not
+  authenticate clients of the Access listener.
 - **Not verified under impairment.** Behavior under packet loss, delay,
   congestion and path migration has not been measured.
 

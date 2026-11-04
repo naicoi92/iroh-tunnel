@@ -162,7 +162,11 @@ impl ServeStrategy {
         // streams.
         let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
         for svc in &cfg.services {
-            let target = ServiceTarget::new(format!("{}:{}", svc.host, svc.port), svc.protocol);
+            let target = ServiceTarget::new(
+                format!("{}:{}", svc.host, svc.port),
+                svc.protocol,
+                svc.udp.resolve(),
+            );
             targets.insert(proto::alpn_for(&svc.name), target);
         }
 
@@ -189,6 +193,13 @@ impl ServeStrategy {
                         .get(&proto::alpn_for(&s.name))
                         .map(|t| t.active_streams())
                         .unwrap_or_default(),
+                    udp_stats: (s.protocol == Protocol::Udp)
+                        .then(|| {
+                            targets
+                                .get(&proto::alpn_for(&s.name))
+                                .map(|t| t.udp_stats.clone())
+                        })
+                        .flatten(),
                 })
                 .collect(),
             state_dir,
@@ -304,13 +315,18 @@ struct ServiceTarget {
     local_addr: String,
     protocol: Protocol,
     active_streams: Arc<AtomicU64>,
+    /// Resolved UDP limits and live counters; used only by a UDP service.
+    udp_limits: crate::config::UdpLimits,
+    udp_stats: Arc<crate::udp::UdpStats>,
 }
 
 impl ServiceTarget {
-    fn new(local_addr: String, protocol: Protocol) -> Self {
+    fn new(local_addr: String, protocol: Protocol, udp_limits: crate::config::UdpLimits) -> Self {
         Self {
             local_addr,
             protocol,
+            udp_limits,
+            udp_stats: Arc::default(),
             active_streams: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -340,6 +356,8 @@ struct StatusServiceRow {
     protocol: String,
     local_addr: String,
     active_streams: Arc<AtomicU64>,
+    /// Present for a UDP service.
+    udp_stats: Option<Arc<crate::udp::UdpStats>>,
 }
 
 impl StatusSnapshot {
@@ -360,6 +378,7 @@ impl StatusSnapshot {
                     protocol: s.protocol.clone(),
                     local_addr: s.local_addr.clone(),
                     active_connections: s.active_streams.load(Ordering::Relaxed),
+                    udp: s.udp_stats.as_ref().map(|stats| stats.snapshot()),
                 })
                 .collect(),
             connections,
@@ -763,8 +782,14 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
     }
 }
 
-/// Per flow: the upstream socket and the handle that ends its reply relay.
-type UdpUpstream = (Arc<UdpSocket>, tokio::task::AbortHandle);
+/// One flow's upstream: its socket, the bounded queue feeding the writer task,
+/// and the handles that end the reply relay and the writer.
+struct UdpUpstream {
+    socket: Arc<UdpSocket>,
+    queue: crate::udp::FlowQueue,
+    relay: tokio::task::AbortHandle,
+    writer: tokio::task::AbortHandle,
+}
 
 /// One peer connection's live UDP flows, shared with the reply relays.
 type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
@@ -773,14 +798,17 @@ type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
 ///
 /// Each flow gets its own connected upstream socket, so a reply is attributed
 /// to a flow by the socket it arrives on, never by inspecting the payload.
-/// Contract: `docs/design/udp-integration-contract.md`. Idle flows expire after
-/// `udp::IDLE_TIMEOUT` and close at once. Caps, quarantine and counters are not
-/// implemented yet; they belong to #89.
+/// Contract: `docs/design/udp-integration-contract.md`. Flows are capped per
+/// peer and per service, expire after the service's idle timeout, and their
+/// sockets are then quarantined as sinks; each flow has a bounded queue.
 async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
-    use crate::udp::Admission;
+    use crate::udp::{Admission, DropReason};
+    let stats = target.udp_stats.clone();
+    let limits = target.udp_limits;
+    let idle = limits.idle_timeout;
     let flows = UdpFlowTable::default();
     let mut readers = JoinSet::new();
-    let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
+    let mut sweep = tokio::time::interval(crate::udp::sweep_interval(idle));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let datagram = tokio::select! {
@@ -790,12 +818,12 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                 let ended = flows
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .expire(std::time::Instant::now(), crate::udp::IDLE_TIMEOUT);
-                for (_, relay) in &ended {
-                    relay.abort();
-                }
+                    .expire(std::time::Instant::now(), idle);
                 if !ended.is_empty() {
                     tracing::debug!(count = ended.len(), "udp upstream flows expired");
+                }
+                for upstream in ended {
+                    quarantine(upstream, &stats, &stop);
                 }
                 continue;
             }
@@ -812,6 +840,7 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
             }
         };
         let Ok((flow, payload)) = crate::udp::decode(&datagram) else {
+            stats.record_drop(DropReason::Malformed);
             tracing::debug!("dropping malformed udp datagram");
             continue;
         };
@@ -822,25 +851,46 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
             .admit(flow, now);
         let upstream = match admission {
             Admission::Unknown => {
+                stats.record_drop(DropReason::UnknownFlow);
                 tracing::debug!(flow = flow.0, "dropping datagram for unknown udp flow");
                 continue;
             }
             Admission::Live => {
                 let table = flows.lock().unwrap_or_else(|p| p.into_inner());
                 match table.get(flow) {
-                    Some((socket, _)) => socket.clone(),
+                    Some(upstream) => upstream.queue.clone(),
                     None => continue,
                 }
             }
             Admission::New => {
+                // Caps: the peer's own flows, then the service's flows across
+                // every peer. A refused flow is counted and its identifier
+                // spent; nothing running is evicted.
+                let peer_flows = flows.lock().unwrap_or_else(|p| p.into_inner()).len();
+                if peer_flows >= limits.max_flows_per_peer || !stats.try_open_flow(limits.max_flows)
+                {
+                    flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
+                    stats.record_drop(DropReason::Cap);
+                    tracing::debug!(flow = flow.0, "udp flow refused: flow cap reached");
+                    continue;
+                }
                 let opened = tokio::select! {
                     biased;
-                    _ = shutdown::stopped(&mut stop) => break,
+                    _ = shutdown::stopped(&mut stop) => {
+                        // Give back the slot reserved above.
+                        stats.flows_closed(1);
+                        break;
+                    }
                     opened = open_upstream(&target.local_addr) => opened,
                 };
                 let socket = match opened {
                     Ok(socket) => Arc::new(socket),
                     Err(error) => {
+                        // Bind or descriptor exhaustion refuses the flow; the
+                        // process keeps running (contract: counter `cap`).
+                        stats.flows_closed(1);
+                        flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
+                        stats.record_drop(DropReason::Cap);
                         tracing::warn!(flow = flow.0, "cannot open udp upstream: {error}");
                         continue;
                     }
@@ -850,28 +900,132 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                     flow,
                     socket.clone(),
                     flows.clone(),
+                    stats.clone(),
                 ));
+                // A writer per flow: a slow or blocked target stalls only this
+                // flow's bounded queue, never the receive loop.
+                let (queue, rx) = crate::udp::FlowQueue::new(limits.queue_depth);
+                let writer = readers.spawn(crate::udp::drain_queue(rx, {
+                    let socket = socket.clone();
+                    let stats = stats.clone();
+                    move |datagram: bytes::Bytes| {
+                        let socket = socket.clone();
+                        let stats = stats.clone();
+                        async move {
+                            if let Err(error) = socket.send(&datagram).await {
+                                stats.record_drop(DropReason::UpstreamError);
+                                tracing::debug!(flow = flow.0, "udp upstream send failed: {error}");
+                            }
+                        }
+                    }
+                }));
+                let entry = queue.clone();
                 flows.lock().unwrap_or_else(|p| p.into_inner()).insert(
                     flow,
-                    (socket.clone(), relay),
+                    UdpUpstream {
+                        socket,
+                        queue,
+                        relay,
+                        writer,
+                    },
                     now,
                 );
-                socket
+                entry
             }
         };
-        if let Err(error) = upstream.send(&payload).await {
-            tracing::debug!(flow = flow.0, "udp upstream send failed: {error}");
+        match upstream.push(payload) {
+            crate::udp::Push::Queued => {}
+            crate::udp::Push::Full => {
+                stats.record_drop(DropReason::QueueFull);
+                tracing::debug!(flow = flow.0, "udp flow queue full, dropping newest");
+            }
+            crate::udp::Push::Closed => {
+                stats.record_drop(DropReason::UpstreamError);
+                tracing::debug!(flow = flow.0, "udp flow writer ended, dropping datagram");
+            }
         }
+    }
+    // The connection's flows end with it, but their sockets are quarantined
+    // like any expired flow: they outlive the incarnation as sinks only.
+    let ended = flows.lock().unwrap_or_else(|p| p.into_inner()).drain_all();
+    for upstream in ended {
+        quarantine(upstream, &stats, &stop);
     }
     readers.abort_all();
     shutdown::join(&mut readers).await;
 }
 
+/// End a flow: stop relaying its replies and keep its socket open as a sink
+/// for [`crate::udp::QUARANTINE`], so a late reply cannot reach a new flow
+/// that the OS would otherwise give the same local port.
+///
+/// The socket keeps its slot against the caps until the sink closes. The sink
+/// runs detached: it must outlive the connection, and it ends early on
+/// shutdown.
+fn quarantine(upstream: UdpUpstream, stats: &Arc<crate::udp::UdpStats>, stop: &shutdown::Stop) {
+    let UdpUpstream {
+        socket,
+        relay,
+        writer,
+        ..
+    } = upstream;
+    // The relay and the writer hold clones of the socket; ending them leaves
+    // the sink as the only reader. Datagrams still queued are discarded: the
+    // flow is over.
+    relay.abort();
+    writer.abort();
+    stats.quarantine_started();
+    let slot = QuarantineSlot(stats.clone());
+    let stats = stats.clone();
+    let mut stop = stop.clone();
+    tokio::spawn(async move {
+        // Released on every exit path, even if this task is aborted.
+        let _slot = slot;
+        let deadline = tokio::time::Instant::now() + crate::udp::QUARANTINE;
+        // Replies are discarded; a small buffer is enough (the kernel drops
+        // the excess of a datagram larger than it).
+        let mut buf = vec![0u8; 2048];
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown::stopped(&mut stop) => break,
+                _ = tokio::time::sleep_until(deadline) => break,
+                result = socket.recv(&mut buf) => match result {
+                    Ok(_) => stats.record_drop(crate::udp::DropReason::QuarantineReply),
+                    Err(error) if crate::udp::is_transient_recv_error(&error) => {}
+                    // A socket that cannot be read again is done; release it.
+                    Err(_) => break,
+                },
+            }
+        }
+    });
+}
+
+/// Longest wait for a target hostname to resolve when a flow opens.
+const UPSTREAM_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Gives a quarantined flow's slot back when the sink task ends for any
+/// reason, including being aborted or unwinding from a panic.
+struct QuarantineSlot(Arc<crate::udp::UdpStats>);
+
+impl Drop for QuarantineSlot {
+    fn drop(&mut self) {
+        self.0.quarantine_ended();
+    }
+}
+
 /// Bind a fresh socket of the target's address family and connect it, so the
 /// kernel drops replies from any other source.
 async fn open_upstream(local_addr: &str) -> Result<UdpSocket> {
-    let target = tokio::net::lookup_host(local_addr)
-        .await
+    // A hostname target is resolved here, in the receive loop: bound the wait
+    // so a slow resolver cannot stall every flow of the peer.
+    let resolved = tokio::time::timeout(
+        UPSTREAM_RESOLVE_TIMEOUT,
+        tokio::net::lookup_host(local_addr),
+    )
+    .await
+    .with_context(|| format!("resolving {local_addr} timed out"))?;
+    let target = resolved
         .with_context(|| format!("cannot resolve {local_addr}"))?
         .next()
         .with_context(|| format!("{local_addr} resolved to no address"))?;
@@ -892,7 +1046,9 @@ async fn relay_upstream_replies(
     flow: crate::udp::FlowId,
     upstream: Arc<UdpSocket>,
     flows: UdpFlowTable,
+    stats: Arc<crate::udp::UdpStats>,
 ) {
+    use crate::udp::DropReason;
     let mut buf = vec![0u8; 65535];
     loop {
         let n = match upstream.recv(&mut buf).await {
@@ -913,11 +1069,15 @@ async fn relay_upstream_replies(
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .refresh(flow, std::time::Instant::now());
-        let Some(limit) = crate::udp::payload_limit(conn.max_datagram_size()) else {
+        let limit = crate::udp::payload_limit(conn.max_datagram_size());
+        stats.set_datagram_limit(limit);
+        let Some(limit) = limit else {
+            stats.record_drop(DropReason::LimitShrink);
             tracing::warn!(flow = flow.0, "datagrams unusable, dropping reply");
             continue;
         };
         if n > limit {
+            stats.record_drop(DropReason::Oversize);
             tracing::warn!(
                 flow = flow.0,
                 size = n,

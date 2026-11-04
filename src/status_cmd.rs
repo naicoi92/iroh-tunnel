@@ -349,6 +349,7 @@ mod tests {
                 protocol: "tcp".to_string(),
                 local_addr: "127.0.0.1:8080".to_string(),
                 active_connections: 2,
+                udp: None,
             }],
             connections: vec![PeerConnectionStatus {
                 path: PeerPathReport {
@@ -395,6 +396,7 @@ mod tests {
                         },
                     ],
                     local_bound_addrs: vec!["0.0.0.0:52111".to_string()],
+                    udp: None,
                 },
                 AccessServiceStatus {
                     name: "db".to_string(),
@@ -402,6 +404,7 @@ mod tests {
                     peer: OTHER_PEER.to_string(),
                     transports: Vec::new(),
                     local_bound_addrs: Vec::new(),
+                    udp: None,
                 },
             ],
         }
