@@ -58,22 +58,23 @@ use crate::status::{AccessServiceStatus, AccessStatusFile, StatusPayload, Status
 ///
 /// Thin wrapper over [`crate::role_run::run_with_shutdown`] that wires the
 /// real signal handler and the [`AccessStrategy`] implementer.
-pub async fn run(config_path: &Path) -> Result<()> {
+pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result<()> {
     crate::role_run::run_with_shutdown::<AccessStrategy>(
         config_path,
         crate::role_run::Ownership::Enforced(crate::status::StatusRole::Access),
+        ctx,
         crate::shutdown::wait_for_signal(),
     )
     .await
 }
 
 /// Run an in-memory quick configuration without persisting its identity.
-pub async fn run_quick(cfg: AccessConfig) -> Result<()> {
+pub async fn run_quick(cfg: AccessConfig, ctx: crate::shutdown::RunContext) -> Result<()> {
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("access quick mode: {e}")))?;
     let claim = Some(crate::ownership::claim(crate::status::StatusRole::Access)?);
-    crate::role_run::run_config::<AccessStrategy, _, _>(cfg, claim, |ep, cfg| {
-        AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal())
+    crate::role_run::run_config::<AccessStrategy, _, _>(cfg, claim, ctx, |ep, cfg, ctx| {
+        AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx)
     })
     .await
 }
@@ -90,6 +91,7 @@ pub async fn run_with_shutdown(
     crate::role_run::run_with_shutdown::<AccessStrategy>(
         config_path,
         crate::role_run::Ownership::Unenforced,
+        crate::shutdown::RunContext::new(),
         shutdown,
     )
     .await
@@ -115,7 +117,8 @@ pub async fn run_with_shutdown_with_state_dir(
     crate::role_run::run_skeleton::<AccessStrategy, _, _>(
         config_path,
         crate::role_run::Ownership::Unenforced,
-        |ep, cfg| AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir),
+        crate::shutdown::RunContext::new(),
+        |ep, cfg, ctx| AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir, ctx),
     )
     .await
 }
@@ -201,8 +204,9 @@ impl RoleStrategy for AccessStrategy {
         ep: iroh::Endpoint,
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
+        ctx: crate::shutdown::RunContext,
     ) -> Result<()> {
-        Self::run_loop_with_state_dir(ep, cfg, shutdown, None).await
+        Self::run_loop_with_state_dir(ep, cfg, shutdown, None, ctx).await
     }
 }
 
@@ -214,6 +218,7 @@ impl AccessStrategy {
         cfg: AccessConfig,
         shutdown: impl Future<Output = ()>,
         state_dir: Option<PathBuf>,
+        ctx: crate::shutdown::RunContext,
     ) -> Result<()> {
         // Resolve the node-level relays once (the per-service fallback) and
         // parse every service's node_id before spawning listeners, so a bad
@@ -320,7 +325,7 @@ impl AccessStrategy {
                 Some(result) = listeners.join_next(), if !listeners.is_empty() => shutdown::observe(result),
             }
         }
-        shutdown::begin(&stop);
+        shutdown::begin(&stop, &ctx);
         // Listeners seal admission and join their own channels against the
         // shared deadline. Never abort a supervisor with live descendants.
         shutdown::join(&mut listeners).await;

@@ -43,22 +43,23 @@ use crate::status::STATUS_FLUSH_INTERVAL;
 ///
 /// Thin wrapper over [`crate::role_run::run_with_shutdown`] that wires the
 /// real signal handler and the [`ServeStrategy`] implementer.
-pub async fn run(config_path: &Path) -> Result<()> {
+pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result<()> {
     crate::role_run::run_with_shutdown::<ServeStrategy>(
         config_path,
         crate::role_run::Ownership::Enforced(crate::status::StatusRole::Serve),
+        ctx,
         crate::shutdown::wait_for_signal(),
     )
     .await
 }
 
 /// Run an in-memory quick configuration without persisting its identity.
-pub async fn run_quick(cfg: ServeConfig) -> Result<()> {
+pub async fn run_quick(cfg: ServeConfig, ctx: crate::shutdown::RunContext) -> Result<()> {
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("serve quick mode: {e}")))?;
     let claim = Some(crate::ownership::claim(crate::status::StatusRole::Serve)?);
-    crate::role_run::run_config::<ServeStrategy, _, _>(cfg, claim, |ep, cfg| {
-        ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal())
+    crate::role_run::run_config::<ServeStrategy, _, _>(cfg, claim, ctx, |ep, cfg, ctx| {
+        ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx)
     })
     .await
 }
@@ -75,6 +76,7 @@ pub async fn run_with_shutdown(
     crate::role_run::run_with_shutdown::<ServeStrategy>(
         config_path,
         crate::role_run::Ownership::Unenforced,
+        crate::shutdown::RunContext::new(),
         shutdown,
     )
     .await
@@ -97,7 +99,8 @@ pub async fn run_with_shutdown_with_state_dir(
     crate::role_run::run_skeleton::<ServeStrategy, _, _>(
         config_path,
         crate::role_run::Ownership::Unenforced,
-        |ep, cfg| ServeStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir),
+        crate::shutdown::RunContext::new(),
+        |ep, cfg, ctx| ServeStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir, ctx),
     )
     .await
 }
@@ -144,8 +147,9 @@ impl RoleStrategy for ServeStrategy {
         ep: iroh::Endpoint,
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
+        ctx: crate::shutdown::RunContext,
     ) -> Result<()> {
-        Self::run_loop_with_state_dir(ep, cfg, shutdown, None).await
+        Self::run_loop_with_state_dir(ep, cfg, shutdown, None, ctx).await
     }
 }
 
@@ -157,6 +161,7 @@ impl ServeStrategy {
         cfg: ServeConfig,
         shutdown: impl Future<Output = ()>,
         state_dir: Option<std::path::PathBuf>,
+        ctx: crate::shutdown::RunContext,
     ) -> Result<()> {
         // Build the ALPN -> target lookup for demultiplexing accepted
         // streams.
@@ -260,7 +265,7 @@ impl ServeStrategy {
                 Some(result) = accept.join_next(), if !accept.is_empty() => shutdown::observe(result),
             }
         }
-        shutdown::begin(&stop);
+        shutdown::begin(&stop, &ctx);
         // The accept supervisor seals handshakes and connection admission;
         // its connection children seal stream admission and join pipe leaves.
         shutdown::join(&mut accept).await;

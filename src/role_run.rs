@@ -205,6 +205,7 @@ pub(crate) trait RoleStrategy {
         ep: iroh::Endpoint,
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
+        ctx: crate::shutdown::RunContext,
     ) -> impl std::future::Future<Output = Result<()>>;
 }
 
@@ -228,11 +229,12 @@ pub(crate) trait RoleStrategy {
 pub(crate) async fn run_skeleton<S, F, Fut>(
     config_path: &Path,
     ownership: Ownership,
+    ctx: crate::shutdown::RunContext,
     run_loop: F,
 ) -> Result<()>
 where
     S: RoleStrategy,
-    F: FnOnce(iroh::Endpoint, S::Config) -> Fut,
+    F: FnOnce(iroh::Endpoint, S::Config, crate::shutdown::RunContext) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     // Claim the role before touching the config: a refused start must not
@@ -251,7 +253,7 @@ where
     .await
     .context("config load task failed")??;
 
-    run_config::<S, _, _>(cfg, claim, run_loop).await
+    run_config::<S, _, _>(cfg, claim, ctx, run_loop).await
 }
 
 /// Build the endpoint and run the role while holding `claim`.
@@ -262,11 +264,12 @@ where
 pub(crate) async fn run_config<S, F, Fut>(
     mut cfg: S::Config,
     claim: Option<RoleClaim>,
+    ctx: crate::shutdown::RunContext,
     run_loop: F,
 ) -> Result<()>
 where
     S: RoleStrategy,
-    F: FnOnce(iroh::Endpoint, S::Config) -> Fut,
+    F: FnOnce(iroh::Endpoint, S::Config, crate::shutdown::RunContext) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     // A configured key is known before binding, so a duplicate identity is
@@ -303,7 +306,7 @@ where
 
     tracing::info!("endpoint ready");
     // The role owns admission, drain, task joins and endpoint/status cleanup.
-    let result = run_loop(ep, cfg).await;
+    let result = run_loop(ep, cfg, ctx).await;
     // Held to here so the role stays owned until it has fully stopped.
     drop(claim);
     result
@@ -313,10 +316,11 @@ where
 pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
     config_path: &Path,
     ownership: Ownership,
+    ctx: crate::shutdown::RunContext,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    run_skeleton::<S, _, _>(config_path, ownership, |ep, cfg| {
-        S::run_loop(ep, cfg, shutdown)
+    run_skeleton::<S, _, _>(config_path, ownership, ctx, |ep, cfg, ctx| {
+        S::run_loop(ep, cfg, shutdown, ctx)
     })
     .await
 }

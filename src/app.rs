@@ -66,10 +66,13 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     };
     // Racing the run future means a forced exit first DROPS it: owned tasks
     // and the endpoint are cancelled before the process status is decided.
+    // One drain context per invocation. Management commands never begin a
+    // drain, so `forced_exit` stays pending and installs no signal handler.
+    let ctx = shutdown::RunContext::new();
     let outcome = rt.block_on(async {
         tokio::select! {
-            result = run(parsed, packaging) => Ok(result),
-            forced = shutdown::forced_exit() => Err(forced),
+            result = run(parsed, packaging, ctx.clone()) => Ok(result),
+            forced = shutdown::forced_exit(&ctx) => Err(forced),
         }
     });
     let outcome = match outcome {
@@ -101,7 +104,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     }
 }
 
-async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
+async fn run(cli: Cli, packaging: Packaging, ctx: shutdown::RunContext) -> anyhow::Result<()> {
     // The typed role tag comes from ONE match on the CLI enum; the dispatch
     // string is derived from it — an invalid role is unrepresentable, and
     // the two can never disagree.
@@ -115,7 +118,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
     match cli.role {
         Role::Update(_) => unreachable!("handled above"),
         Role::Serve { cmd: Some(cmd), .. } | Role::Access { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd, packaging).await
+            dispatch_role_cmd(status_role, cmd, packaging, ctx).await
         }
         Role::Serve { quick, cmd: None } => {
             let protocol = quick_protocol("serve", &quick.protocol)?;
@@ -139,7 +142,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                     udp: Default::default(),
                 }],
             };
-            serve::run_quick(cfg).await
+            serve::run_quick(cfg, ctx).await
         }
         Role::Access { quick, cmd: None } => {
             let protocol = quick_protocol("access", &quick.protocol)?;
@@ -171,7 +174,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                     udp: Default::default(),
                 }],
             };
-            access::run_quick(cfg).await
+            access::run_quick(cfg, ctx).await
         }
     }
 }
@@ -191,6 +194,7 @@ async fn dispatch_role_cmd(
     status_role: StatusRole,
     cmd: RoleCmd,
     packaging: Packaging,
+    ctx: shutdown::RunContext,
 ) -> anyhow::Result<()> {
     let role = status_role.name();
     match cmd {
@@ -200,8 +204,8 @@ async fn dispatch_role_cmd(
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
             match status_role {
-                StatusRole::Serve => serve::run(&path).await,
-                StatusRole::Access => access::run(&path).await,
+                StatusRole::Serve => serve::run(&path, ctx).await,
+                StatusRole::Access => access::run(&path, ctx).await,
             }
         }
         RoleCmd::Config { action } => dispatch_config(role, action),
