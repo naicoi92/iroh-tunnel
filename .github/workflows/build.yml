@@ -49,12 +49,15 @@ jobs:
           persist-credentials: false
       # Mirrors build.rs (ADR-0003): HEAD on a tag vX.Y.Z -> X.Y.Z, otherwise
       # <CARGO_PKG_VERSION>-dev, so file names always match `--version`.
+      # Relies on the runner's preinstalled cargo and jq (no toolchain setup
+      # needed for `cargo metadata --no-deps`).
       - id: v
         run: |
+          set -o pipefail
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF#refs/tags/v}"
           else
-            version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name=="iroh-tunnel") | .version')-dev"
+            version="$(cargo metadata --no-deps --format-version 1 --locked | jq -er '.packages[] | select(.name=="iroh-tunnel") | .version')-dev"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
