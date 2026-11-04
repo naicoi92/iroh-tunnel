@@ -7,7 +7,7 @@
 //!   `APP_VERSION` = `{CARGO_PKG_VERSION}-dev` (e.g. `0.1.0-dev`).
 //!
 //! The resolved value is always a valid Cargo semver, so downstream packaging
-//! (`.deb`/`.apk`/container tags via GoReleaser) never breaks.
+//! (`.deb`/`.apk`/container tags) never breaks.
 //!
 //! vergen-gitcl additionally emits `VERGEN_GIT_*` env vars (sha, branch,
 //! describe) for richer build metadata; these are reserved for a future

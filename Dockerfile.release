@@ -1,8 +1,8 @@
-# Dockerfile used by GoReleaser's `dockers_v2` (ADR-0002).
+# Release image: packages prebuilt binaries (built by build.yml, packaged by docker.yml).
 #
 # Unlike the top-level `Dockerfile` (multi-stage, rebuilds from source for the
 # `docker-compose` demo / local builds), this image does NOT compile anything.
-# GoReleaser already built the release binaries and stages them in the build
+# The release workflow already built the binaries and stages them in the build
 # context at `$TARGETPLATFORM/iroh-tunnel` (e.g. `linux/amd64/iroh-tunnel`).
 # We simply copy the matching one into a minimal runtime image.
 #
@@ -13,7 +13,7 @@
 # syntax=docker/dockerfile:1
 FROM gcr.io/distroless/cc-debian12
 
-# Set by buildx (linux/amd64 or linux/arm64). GoReleaser stages the prebuilt
+# Set by buildx (linux/amd64 or linux/arm64). The workflow stages the prebuilt
 # binary at this path in the build context.
 ARG TARGETPLATFORM
 

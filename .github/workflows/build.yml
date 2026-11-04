@@ -1,5 +1,5 @@
 # Reusable native build + packaging. Called by ci.yml (rehearsal), snapshot.yml
-# (manual) and release.yml (tag). Replaces the GoReleaser build stage.
+# (manual) and release.yml (tag).
 #
 # Every target builds on its OWN runner IN PARALLEL, natively where a native
 # runner exists (no zig, no QEMU, no cross toolchain):
