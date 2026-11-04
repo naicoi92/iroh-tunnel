@@ -425,6 +425,7 @@ async fn render_access_status(
             peer: row.peer.clone(),
             transports,
             local_bound_addrs,
+            udp: (dialer.protocol == Protocol::Udp).then(|| dialer.udp_stats.snapshot()),
         });
     }
     AccessStatusFile {
@@ -507,6 +508,8 @@ struct ServiceDialer {
     alpn: Vec<u8>,
     svc_name: String,
     protocol: Protocol,
+    udp_limits: crate::config::UdpLimits,
+    udp_stats: Arc<crate::udp::UdpStats>,
     listen_addr: String,
     /// The shared multiplexed connection and its poller, behind ONE lock:
     /// the one-connection-and-one-poller-per-service rule is structural —
@@ -552,6 +555,8 @@ impl ServiceDialer {
             alpn: proto::alpn_for(&svc.name),
             svc_name: svc.name.clone(),
             protocol: svc.protocol,
+            udp_limits: svc.udp.resolve(),
+            udp_stats: Arc::default(),
             listen_addr,
             state: Mutex::new(ConnState {
                 conn: None,
@@ -722,6 +727,9 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 /// counters and ending the incarnation on identifier exhaustion belong to #89.
 /// Contract: `docs/design/udp-integration-contract.md`.
 async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
+    use crate::udp::DropReason;
+    let stats = dialer.udp_stats.clone();
+    let idle = dialer.udp_limits.idle_timeout;
     let listen_addr = dialer.listen_addr.clone();
     let socket = match UdpSocket::bind(&listen_addr).await {
         Ok(socket) => Arc::new(socket),
@@ -745,7 +753,8 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
                 let ended = flows
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .expire(std::time::Instant::now(), crate::udp::IDLE_TIMEOUT);
+                    .expire(std::time::Instant::now(), idle);
+                stats.set_active_flows(flows.lock().unwrap_or_else(|p| p.into_inner()).len());
                 if ended > 0 {
                     tracing::debug!(svc = %dialer.svc_name, ended, "udp flows expired");
                 }
@@ -793,18 +802,24 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             readers.abort_all();
             while readers.join_next().await.is_some() {}
             *flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
+            stats.set_active_flows(0);
             readers.spawn(relay_peer_replies(
                 conn.clone(),
                 socket.clone(),
                 flows.clone(),
+                stats.clone(),
             ));
             current = Some(conn.stable_id());
         }
-        let Some(limit) = crate::udp::payload_limit(conn.max_datagram_size()) else {
+        let limit = crate::udp::payload_limit(conn.max_datagram_size());
+        stats.set_datagram_limit(limit);
+        let Some(limit) = limit else {
+            stats.record_drop(DropReason::LimitShrink);
             tracing::warn!(svc = %dialer.svc_name, "datagrams unusable on this connection, dropping");
             continue;
         };
         if n > limit {
+            stats.record_drop(DropReason::Oversize);
             tracing::warn!(svc = %dialer.svc_name, size = n, limit, "dropping oversize udp datagram");
             continue;
         }
@@ -813,9 +828,11 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             .unwrap_or_else(|p| p.into_inner())
             .touch(client, std::time::Instant::now());
         let Some(flow) = flow else {
+            stats.record_drop(DropReason::Cap);
             tracing::warn!(svc = %dialer.svc_name, "udp flow identifiers exhausted, dropping");
             continue;
         };
+        stats.set_active_flows(flows.lock().unwrap_or_else(|p| p.into_inner()).len());
         if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
             tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
         }
@@ -829,9 +846,12 @@ async fn relay_peer_replies(
     conn: iroh::endpoint::Connection,
     socket: Arc<UdpSocket>,
     flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
+    stats: Arc<crate::udp::UdpStats>,
 ) {
+    use crate::udp::DropReason;
     while let Ok(datagram) = conn.read_datagram().await {
         let Ok((flow, payload)) = crate::udp::decode(&datagram) else {
+            stats.record_drop(DropReason::Malformed);
             tracing::debug!("dropping malformed udp datagram from peer");
             continue;
         };
@@ -845,7 +865,10 @@ async fn relay_peer_replies(
                     tracing::debug!(flow = flow.0, %client, "udp reply to client failed: {error}");
                 }
             }
-            None => tracing::debug!(flow = flow.0, "dropping reply for unknown udp flow"),
+            None => {
+                stats.record_drop(DropReason::UnknownFlow);
+                tracing::debug!(flow = flow.0, "dropping reply for unknown udp flow");
+            }
         }
     }
 }
@@ -1175,6 +1198,8 @@ mod tests {
             alpn,
             svc_name: "t".to_string(),
             protocol: Protocol::Tcp,
+            udp_limits: crate::config::UdpSettings::default().resolve(),
+            udp_stats: Arc::default(),
             listen_addr: "127.0.0.1:0".to_string(),
             state: Mutex::new(ConnState {
                 conn: None,

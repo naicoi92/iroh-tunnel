@@ -50,6 +50,9 @@ struct UdpTunnel {
     relay_url: String,
     serve_id: String,
     cfg: tempfile::TempDir,
+    /// State dirs of the two primary roles, where their status files land.
+    serve_state: tempfile::TempDir,
+    access_state: tempfile::TempDir,
     _relay: Box<dyn std::any::Any>,
 }
 
@@ -125,20 +128,36 @@ port = {port}
             ),
         )?;
 
+        let serve_state = tempfile::tempdir().context("serve state dir")?;
+        let access_state = tempfile::tempdir().context("access state dir")?;
         let (serve_tx, serve_rx) = oneshot::channel::<()>();
         let (access_tx, access_rx) = oneshot::channel::<()>();
-        let serve = tokio::spawn(async move {
-            iroh_tunnel::serve::run_with_shutdown(&serve_cfg, async move {
-                let _ = serve_rx.await;
+        let serve = {
+            let state = serve_state.path().to_path_buf();
+            tokio::spawn(async move {
+                iroh_tunnel::serve::run_with_shutdown_with_state_dir(
+                    &state,
+                    &serve_cfg,
+                    async move {
+                        let _ = serve_rx.await;
+                    },
+                )
+                .await
             })
-            .await
-        });
-        let access = tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown(&access_cfg, async move {
-                let _ = access_rx.await;
+        };
+        let access = {
+            let state = access_state.path().to_path_buf();
+            tokio::spawn(async move {
+                iroh_tunnel::access::run_with_shutdown_with_state_dir(
+                    &state,
+                    &access_cfg,
+                    async move {
+                        let _ = access_rx.await;
+                    },
+                )
+                .await
             })
-            .await
-        });
+        };
 
         Ok(Self {
             access_addr,
@@ -149,6 +168,8 @@ port = {port}
             relay_url,
             serve_id: serve_key.public().to_string(),
             cfg,
+            serve_state,
+            access_state,
             _relay: Box::new(relay),
         })
     }
@@ -197,6 +218,30 @@ port = {port}
     /// while the tunnel is still connecting (UDP gives no connect signal).
     async fn roundtrip(&self, client: &UdpSocket, payload: &[u8]) -> Result<Vec<u8>> {
         roundtrip_via(self.access_addr, client, payload).await
+    }
+
+    /// Poll a role's status file until `ready` accepts its JSON.
+    async fn status_when(
+        dir: &std::path::Path,
+        file: &str,
+        ready: impl Fn(&serde_json::Value) -> bool,
+    ) -> Result<serde_json::Value> {
+        let path = dir.join(file);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(body) = std::fs::read_to_string(&path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if ready(&json) {
+                        return Ok(json);
+                    }
+                }
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "{file} never reached the expected state"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     async fn shutdown(mut self) -> Result<()> {
@@ -438,5 +483,54 @@ async fn a_flow_survives_its_target_being_down_at_first() -> Result<()> {
     );
 
     echo.abort();
+    tunnel.shutdown().await
+}
+
+/// #89 diagnostics: both roles' status files report the live flow count, the
+/// current datagram limit and a drop counter per reason. An oversized client
+/// datagram is dropped at Access, counted as `oversize`, and never delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_files_report_flows_limit_and_drops_by_reason() -> Result<()> {
+    let tunnel = UdpTunnel::start().await?;
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    tunnel.roundtrip(&client, b"warm").await?;
+    drain(&client).await;
+    let delivered = tunnel.target_sources.lock().unwrap().len();
+
+    // Far above any QUIC datagram limit, but well inside what UDP loopback carries.
+    client.send_to(&vec![7u8; 4000], tunnel.access_addr).await?;
+
+    let access = UdpTunnel::status_when(tunnel.access_state.path(), "access-status.json", |s| {
+        s["services"][0]["udp"]["drops"]["oversize"].as_u64() >= Some(1)
+    })
+    .await?;
+    let udp = &access["services"][0]["udp"];
+    assert!(udp["active_flows"].as_u64() >= Some(1), "{udp}");
+    assert!(udp["datagram_limit"].as_u64() > Some(0), "{udp}");
+    for reason in [
+        "oversize",
+        "malformed",
+        "unknown_flow",
+        "upstream_error",
+        "cap",
+        "queue_full",
+        "limit_shrink",
+        "quarantine_reply",
+        "foreign_source",
+    ] {
+        assert!(
+            udp["drops"][reason].is_u64(),
+            "missing counter {reason}: {udp}"
+        );
+    }
+
+    let serve = UdpTunnel::status_when(tunnel.serve_state.path(), "serve-status.json", |s| {
+        s["services"][0]["udp"]["active_flows"].as_u64() >= Some(1)
+    })
+    .await?;
+    assert_eq!(serve["services"][0]["udp"]["drops"]["oversize"], 0);
+
+    // The oversized datagram never reached the target.
+    assert_eq!(tunnel.target_sources.lock().unwrap().len(), delivered);
     tunnel.shutdown().await
 }

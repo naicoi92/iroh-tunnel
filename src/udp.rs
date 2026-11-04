@@ -28,6 +28,122 @@ pub const DEFAULT_MAX_FLOWS_PER_PEER: usize = 64;
 /// estimate.
 pub const DEFAULT_QUEUE_DEPTH: usize = 64;
 
+/// Why a datagram was dropped (one counter each; see the contract's failure
+/// table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropReason {
+    Oversize,
+    Malformed,
+    UnknownFlow,
+    UpstreamError,
+    Cap,
+    QueueFull,
+    LimitShrink,
+    QuarantineReply,
+    ForeignSource,
+}
+
+/// Live counters of one UDP service, shared between the data path and the
+/// status writer. Relaxed ordering: these are diagnostics, not synchronization.
+#[derive(Debug, Default)]
+pub struct UdpStats {
+    active_flows: std::sync::atomic::AtomicU64,
+    quarantined_flows: std::sync::atomic::AtomicU64,
+    datagram_limit: std::sync::atomic::AtomicU64,
+    oversize: std::sync::atomic::AtomicU64,
+    malformed: std::sync::atomic::AtomicU64,
+    unknown_flow: std::sync::atomic::AtomicU64,
+    upstream_error: std::sync::atomic::AtomicU64,
+    cap: std::sync::atomic::AtomicU64,
+    queue_full: std::sync::atomic::AtomicU64,
+    limit_shrink: std::sync::atomic::AtomicU64,
+    quarantine_reply: std::sync::atomic::AtomicU64,
+    foreign_source: std::sync::atomic::AtomicU64,
+}
+
+impl UdpStats {
+    fn counter(&self, reason: DropReason) -> &std::sync::atomic::AtomicU64 {
+        match reason {
+            DropReason::Oversize => &self.oversize,
+            DropReason::Malformed => &self.malformed,
+            DropReason::UnknownFlow => &self.unknown_flow,
+            DropReason::UpstreamError => &self.upstream_error,
+            DropReason::Cap => &self.cap,
+            DropReason::QueueFull => &self.queue_full,
+            DropReason::LimitShrink => &self.limit_shrink,
+            DropReason::QuarantineReply => &self.quarantine_reply,
+            DropReason::ForeignSource => &self.foreign_source,
+        }
+    }
+
+    /// Count one dropped datagram.
+    pub fn record_drop(&self, reason: DropReason) {
+        self.counter(reason)
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set the live flow count (Access owns one table per service).
+    pub fn set_active_flows(&self, count: usize) {
+        self.active_flows
+            .store(count as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// One flow started (Serve sums the flows of every peer).
+    pub fn flow_opened(&self) {
+        self.active_flows
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `count` flows ended.
+    pub fn flows_closed(&self, count: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        // A manual loop, not `fetch_update`: that name is deprecated on new
+        // toolchains and its replacement is newer than the crate's MSRV.
+        let mut now = self.active_flows.load(Relaxed);
+        loop {
+            let next = now.saturating_sub(count as u64);
+            match self
+                .active_flows
+                .compare_exchange_weak(now, next, Relaxed, Relaxed)
+            {
+                Ok(_) => return,
+                Err(actual) => now = actual,
+            }
+        }
+    }
+
+    /// Record the connection's current payload limit; `None` when datagrams
+    /// are unusable.
+    pub fn set_datagram_limit(&self, limit: Option<usize>) {
+        self.datagram_limit.store(
+            limit.map_or(0, |l| l as u64),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// A point-in-time copy for the status file.
+    pub fn snapshot(&self) -> crate::status::UdpStatus {
+        use std::sync::atomic::Ordering::Relaxed;
+        let limit = self.datagram_limit.load(Relaxed);
+        crate::status::UdpStatus {
+            active_flows: self.active_flows.load(Relaxed),
+            quarantined_flows: self.quarantined_flows.load(Relaxed),
+            datagram_limit: (limit > 0).then_some(limit),
+            drops: crate::status::UdpDrops {
+                oversize: self.oversize.load(Relaxed),
+                malformed: self.malformed.load(Relaxed),
+                unknown_flow: self.unknown_flow.load(Relaxed),
+                upstream_error: self.upstream_error.load(Relaxed),
+                cap: self.cap.load(Relaxed),
+                queue_full: self.queue_full.load(Relaxed),
+                limit_shrink: self.limit_shrink.load(Relaxed),
+                quarantine_reply: self.quarantine_reply.load(Relaxed),
+                foreign_source: self.foreign_source.load(Relaxed),
+            },
+        }
+    }
+}
+
 /// How often each side looks for idle flows.
 pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -128,6 +244,16 @@ impl ClientFlows {
         Some(entry.0)
     }
 
+    /// Flows currently live.
+    pub fn len(&self) -> usize {
+        self.by_flow.len()
+    }
+
+    /// Whether no flow is live.
+    pub fn is_empty(&self) -> bool {
+        self.by_flow.is_empty()
+    }
+
     /// End every flow idle for at least `idle`; returns how many ended.
     pub fn expire(&mut self, now: std::time::Instant, idle: std::time::Duration) -> usize {
         let expired: Vec<FlowId> = self
@@ -194,6 +320,16 @@ impl<T> PeerFlows<T> {
     pub fn insert(&mut self, flow: FlowId, upstream: T, now: std::time::Instant) {
         self.highest = Some(self.highest.map_or(flow, |mark| mark.max(flow)));
         self.live.insert(flow, (upstream, now));
+    }
+
+    /// Flows currently live.
+    pub fn len(&self) -> usize {
+        self.live.len()
+    }
+
+    /// Whether no flow is live.
+    pub fn is_empty(&self) -> bool {
+        self.live.is_empty()
     }
 
     /// The upstream of a live flow.
@@ -381,5 +517,40 @@ mod tests {
         assert!(!is_transient_recv_error(&Error::from(
             ErrorKind::InvalidInput
         )));
+    }
+
+    #[test]
+    fn stats_count_each_reason_separately_and_report_the_limit() {
+        let stats = UdpStats::default();
+        stats.record_drop(DropReason::Oversize);
+        stats.record_drop(DropReason::Oversize);
+        stats.record_drop(DropReason::Cap);
+        stats.set_datagram_limit(Some(1158));
+        stats.flow_opened();
+        stats.flow_opened();
+        stats.flows_closed(1);
+        let snap = stats.snapshot();
+        assert_eq!(
+            (snap.drops.oversize, snap.drops.cap, snap.drops.malformed),
+            (2, 1, 0)
+        );
+        assert_eq!(snap.datagram_limit, Some(1158));
+        assert_eq!(snap.active_flows, 1);
+    }
+
+    #[test]
+    fn closing_more_flows_than_are_open_does_not_underflow() {
+        let stats = UdpStats::default();
+        stats.flow_opened();
+        stats.flows_closed(5);
+        assert_eq!(stats.snapshot().active_flows, 0);
+    }
+
+    #[test]
+    fn an_unusable_connection_reports_no_datagram_limit() {
+        let stats = UdpStats::default();
+        stats.set_datagram_limit(Some(1158));
+        stats.set_datagram_limit(None);
+        assert_eq!(stats.snapshot().datagram_limit, None);
     }
 }

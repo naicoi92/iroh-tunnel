@@ -98,6 +98,48 @@ pub struct ServiceStatus {
     /// Since 0.2.0 this counts *active streams* (in-flight pipes), not iroh
     /// connections — one multiplexed connection carries many channels.
     pub active_connections: u64,
+    /// UDP flow diagnostics; present only for a UDP service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp: Option<UdpStatus>,
+}
+
+/// UDP flow diagnostics of one service (UDP-06): live flows, the current
+/// datagram limit and a drop counter per reason. Counters only grow while the
+/// role runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdpStatus {
+    /// Flows that currently carry traffic.
+    pub active_flows: u64,
+    /// Expired flows whose upstream socket is held as a sink (Serve only).
+    pub quarantined_flows: u64,
+    /// Largest client payload the connection carries now; `null` until a
+    /// connection exists. Changes with the path.
+    pub datagram_limit: Option<u64>,
+    pub drops: UdpDrops,
+}
+
+/// Datagrams dropped, by reason (contract failure table).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdpDrops {
+    /// Larger than the datagram limit; never delivered in part.
+    pub oversize: u64,
+    /// Shorter than the 4-byte flow header.
+    pub malformed: u64,
+    /// For a flow that is not live and cannot be admitted.
+    pub unknown_flow: u64,
+    /// The upstream socket could not send.
+    pub upstream_error: u64,
+    /// A flow cap was reached, or the upstream socket could not be opened.
+    pub cap: u64,
+    /// A flow's queue was full; the newest datagram was dropped.
+    pub queue_full: u64,
+    /// Datagrams became unusable on the connection mid-session.
+    pub limit_shrink: u64,
+    /// A late reply reached a quarantined socket.
+    pub quarantine_reply: u64,
+    /// A reply from a source other than the target, where the platform
+    /// exposes it.
+    pub foreign_source: u64,
 }
 
 /// One currently-connected remote peer in the status file (issue #57).
@@ -150,6 +192,9 @@ pub struct AccessServiceStatus {
     /// This endpoint's local UDP socket *candidates* (endpoint-wide, not a
     /// per-transport local address — same semantics as the serve file).
     pub local_bound_addrs: Vec<String>,
+    /// UDP flow diagnostics; present only for a UDP service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp: Option<UdpStatus>,
 }
 
 /// The typed snapshot a role saves — re-tying each schema to its role at
@@ -525,6 +570,7 @@ mod tests {
                 protocol: "tcp".to_string(),
                 local_addr: "127.0.0.1:8080".to_string(),
                 active_connections: 0,
+                udp: None,
             }],
             connections: vec![PeerConnectionStatus {
                 path: crate::conn_path::PeerPathReport {
@@ -556,6 +602,7 @@ mod tests {
                     active: true,
                 }],
                 local_bound_addrs: vec!["0.0.0.0:52111".to_string()],
+                udp: None,
             }],
         }
     }
