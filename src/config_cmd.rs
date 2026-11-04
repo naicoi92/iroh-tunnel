@@ -136,7 +136,7 @@ pub fn show(role: Role, config: Option<&Path>, reveal: bool) -> Result<()> {
 /// `config edit` (CLI): open the config in `$EDITOR`, then validate and save it.
 ///
 /// The editor runs without any lock held; see [`prepare_edit`] and
-/// [`EditAttempt::commit`] for the rules applied to the result.
+/// [`iroh_tunnel_host::config::EditAttempt::commit`] for the rules applied to the result.
 pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
     let attempt = prepare_edit(role, config)?;
     edit::edit_file(attempt.scratch_path()).map_err(anyhow::Error::from)?;

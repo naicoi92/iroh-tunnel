@@ -87,7 +87,7 @@ fn registration_of(role: &str, scope: ServiceScope) -> Result<Registration> {
     #[cfg(target_os = "macos")]
     let path = super::backend::launchd::registration_path(role, scope)?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let path = PathBuf::new();
+    let path = std::path::PathBuf::new();
     Ok(if path.exists() {
         Registration::Present {
             location: path.display().to_string(),

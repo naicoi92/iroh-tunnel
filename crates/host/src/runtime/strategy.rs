@@ -84,7 +84,7 @@ impl RoleStrategy for AccessStrategy {
 /// endpoint with role-specific args, print the per-service status lines,
 /// run the role-specific loop and finish owned shutdown). The shared skeleton
 /// — load config, resolve key, print NodeId, dispatch role — lives in
-/// [`run_with_shutdown`] so it has exactly one definition site.
+/// `run_foreground` (via `run_skeleton`) so it has exactly one definition site.
 ///
 /// The associated type [`RoleStrategy::Config`] is the role's TOML document
 /// (`ServeConfig` / `AccessConfig`); it must load+validate+persist its own

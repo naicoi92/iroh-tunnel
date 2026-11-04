@@ -150,7 +150,7 @@ port = {port}
         ),
     )?;
 
-    // Bind the access ports up front (access rebinds inside run_with_shutdown).
+    // Bind the access ports up front (access rebinds inside testing::run_unowned).
     let mux_listener = TcpListener::bind("127.0.0.1:0").await?;
     let mux_addr = mux_listener.local_addr()?;
     drop(mux_listener);

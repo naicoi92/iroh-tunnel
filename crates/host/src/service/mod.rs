@@ -7,7 +7,8 @@
 //! as the Sipeed NanoKVM). On Windows the backend is a per-user Task Scheduler
 //! task that runs in the logged-in session (user scope only; SM-04, issue
 //! #92). Backends, `Native`, the trust policy and the account lookup are
-//! private; operations are the only way in.
+//! private; the operations (`install`, `uninstall`, `start`, `stop`,
+//! `restart`, `status`) are the only way in.
 
 pub(crate) mod account;
 mod account_name;

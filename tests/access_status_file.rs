@@ -4,7 +4,7 @@
 //! against an IN-PROCESS relay (`iroh::test_utils::run_relay_server`,
 //! self-signed cert trusted via the crate's `test-utils` feature) — no
 //! Internet, no n0 relay network, CI-safe. BOTH roles get the same injected
-//! state dir (`run_with_shutdown_with_state_dir` — no process-global env
+//! state dir (`testing::run_unowned` — no process-global env
 //! mutation), so the test reads real `serve-status.json` and
 //! `access-status.json` files exactly as an operator would.
 //!
@@ -97,7 +97,7 @@ port = {port}
         ),
     )?;
 
-    // Bind the access port up front (access rebinds inside run_with_shutdown).
+    // Bind the access port up front (access rebinds inside testing::run_unowned).
     let access_listener = TcpListener::bind("127.0.0.1:0").await?;
     let access_addr = access_listener.local_addr()?;
     drop(access_listener);

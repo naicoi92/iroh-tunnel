@@ -113,8 +113,7 @@ impl StatusWriter {
     /// writes `<dir>/<file_name>` directly; `None` uses [`Self::save`]
     /// (env-aware default path).
     ///
-    /// The seam the roles' `run_with_shutdown_with_state_dir` entry points
-    /// feed: production passes `None`, integration tests inject a tempdir
+    /// The seam `testing::run_unowned` entry point feeds: production passes `None`, integration tests inject a tempdir
     /// without mutating process-global environment.
     pub(crate) fn save_with_state_dir(
         &self,

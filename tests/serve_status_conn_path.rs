@@ -88,7 +88,7 @@ port = {port}
         ),
     )?;
 
-    // Bind the access port up front (access rebinds inside run_with_shutdown).
+    // Bind the access port up front (access rebinds inside testing::run_unowned).
     let access_listener = TcpListener::bind("127.0.0.1:0").await?;
     let access_addr = access_listener.local_addr()?;
     drop(access_listener);

@@ -63,8 +63,8 @@ impl Pin {
 
 /// Consent to retarget, valid only against the registration it was given for.
 ///
-/// DEVIATION (needs controller decision): `previous` is `Option<Pin>` so that
-/// consent can be given for a legacy unpinned registration (`None`).
+/// `previous` is `None` when the registration being replaced is a legacy
+/// unpinned one, so consent can still be given for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetargetConsent {
     /// The pin of the registration being replaced; `None` for a legacy unpinned one.
