@@ -1,6 +1,10 @@
 //! Text rendering of typed role events for the CLI.
 
+use std::path::Path;
+
+use crate::config_cmd::{GeneratedIdentity, Mutation, ServiceList};
 use crate::ready::ReadyReport;
+use crate::status::Role;
 
 use crate::ready::{OnReady, ReadyServices};
 use crate::role_run::protocol_str;
@@ -38,6 +42,78 @@ pub(crate) fn render_ready(report: &ReadyReport) -> String {
                     svc.listen_addr
                 ));
             }
+        }
+    }
+    out
+}
+
+/// `config add` confirmation line.
+pub(crate) fn render_added(outcome: &Mutation) -> String {
+    format!(
+        "Added service '{}' to {}.\n",
+        outcome.service,
+        outcome.path.display()
+    )
+}
+
+/// `config remove` confirmation line.
+pub(crate) fn render_removed(outcome: &Mutation) -> String {
+    format!(
+        "Removed service '{}' from {}.\n",
+        outcome.service,
+        outcome.path.display()
+    )
+}
+
+/// `config path` output.
+pub(crate) fn render_path(path: &Path) -> String {
+    format!("{}\n", path.display())
+}
+
+/// `config keygen random` output.
+pub(crate) fn render_identity(identity: &GeneratedIdentity) -> String {
+    format!(
+        "Secret key: {}\nNode ID: {}\n",
+        identity.secret(),
+        identity.node_id
+    )
+}
+
+/// `config list` output: the role's table, or the "No services configured"
+/// line when the list has no rows array.
+pub(crate) fn render_service_list(role: Role, list: &ServiceList) -> String {
+    let Some(rows) = &list.rows else {
+        return format!("No services configured ({}).\n", list.path.display());
+    };
+    let text = |v: &Option<String>| v.clone().unwrap_or_else(|| "?".to_owned());
+    let mut out = String::new();
+    if role == Role::Access {
+        out.push_str(&format!(
+            "{:<24} {:<14} {:<22} {:<8}\n",
+            "NAME", "NODE_ID", "PROTO", "PORT"
+        ));
+        for r in rows {
+            out.push_str(&format!(
+                "{:<24} {:<14} {:<22} {:<8}\n",
+                text(&r.name),
+                text(&r.node_id),
+                text(&r.protocol),
+                r.port.unwrap_or(0),
+            ));
+        }
+    } else {
+        out.push_str(&format!(
+            "{:<24} {:<22} {:<18} {:<8}\n",
+            "NAME", "PROTO", "HOST", "PORT"
+        ));
+        for r in rows {
+            out.push_str(&format!(
+                "{:<24} {:<22} {:<18} {:<8}\n",
+                text(&r.name),
+                text(&r.protocol),
+                text(&r.host),
+                r.port.unwrap_or(0),
+            ));
         }
     }
     out

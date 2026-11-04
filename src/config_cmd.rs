@@ -27,6 +27,8 @@ use crate::config_store::{
     strip_retired_fields, write_atomic, ConfigLock,
 };
 use crate::error::CliError;
+use crate::render;
+pub use crate::status::Role;
 
 /// Placeholder printed by `config show` instead of a secret.
 const REDACTED: &str = "<redacted>";
@@ -44,7 +46,7 @@ const SECRET_FIELDS: [&str; 2] = ["secret_key", "relay_token"];
 /// Replacing an existing key changes the NodeId, so it needs confirmation
 /// (D1): `yes` skips the prompt; without a terminal and without `yes` the
 /// command fails and the key is kept. A first key needs no confirmation.
-pub fn keygen(role: &str, config: Option<&Path>, yes: bool) -> Result<()> {
+pub fn keygen(role: Role, config: Option<&Path>, yes: bool) -> Result<()> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     let mut confirmed = yes;
     // Ask before taking the lock so a slow answer does not stall other
@@ -112,43 +114,106 @@ fn confirm_rotation(path: &Path) -> Result<()> {
     }
 }
 
-/// `config keygen random`: print a fresh key and its node ID without touching
-/// any configuration file or the default path.
+/// A freshly generated identity from `config keygen random`.
 ///
-/// The secret goes to stdout only, so it can be captured (`$(…)`, pipes). It is
-/// never logged.
-pub fn keygen_random() -> Result<()> {
+/// The secret is reachable only through [`GeneratedIdentity::secret`]; `Debug`
+/// never prints it (RS-10).
+pub struct GeneratedIdentity {
+    secret: String,
+    pub node_id: String,
+}
+
+impl GeneratedIdentity {
+    /// The base64 secret key, exactly as it is stored in `[node].secret_key`.
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+}
+
+impl std::fmt::Debug for GeneratedIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedIdentity")
+            .field("secret", &"[redacted]")
+            .field("node_id", &self.node_id)
+            .finish()
+    }
+}
+
+/// Generate a fresh key and its node ID without touching any configuration
+/// file or the default path. Nothing is logged.
+pub fn random_identity() -> GeneratedIdentity {
     let key = iroh::SecretKey::generate();
-    println!("Secret key: {}", crate::config::encode_secret_key(&key));
-    println!("Node ID: {}", key.public());
+    GeneratedIdentity {
+        secret: crate::config::encode_secret_key(&key),
+        node_id: key.public().to_string(),
+    }
+}
+
+/// `config keygen random`: print the identity. The secret goes to stdout only,
+/// so it can be captured (`$(…)`, pipes).
+pub fn keygen_random() -> Result<()> {
+    print!("{}", render::render_identity(&random_identity()));
     Ok(())
 }
 
-/// `config add`: append a `[[services]]` entry.
+/// Request to append one `[[services]]` entry. Fields are raw strings so the
+/// schema validation (and its messages) run at the same stage as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddService {
+    pub config: Option<PathBuf>,
+    pub name: String,
+    pub protocol: String,
+    pub host: String,
+    pub port: u16,
+    /// Required only for the access role.
+    pub node_id: Option<String>,
+}
+
+impl From<&AddServiceArgs> for AddService {
+    fn from(args: &AddServiceArgs) -> Self {
+        Self {
+            config: args.config.clone(),
+            name: args.name.clone(),
+            protocol: args.protocol.clone(),
+            host: args.host.clone(),
+            port: args.port,
+            node_id: args.node_id.clone(),
+        }
+    }
+}
+
+/// Outcome of a service add/remove: the service name and the file changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mutation {
+    pub service: String,
+    pub path: PathBuf,
+}
+
+/// Append a `[[services]]` entry.
 ///
 /// Validates the new service (name regex/length, port range, node_id for
 /// access, duplicate-name check) by re-loading the mutated document through the
 /// schema. A duplicate or invalid entry is a config error → exit 2.
-pub fn add(role: &str, args: &AddServiceArgs) -> Result<()> {
-    let path = resolve_target(&resolve_config_path(role, args.config.as_deref())?);
+pub fn add_service(role: Role, req: &AddService) -> Result<Mutation> {
+    let path = resolve_target(&resolve_config_path(role, req.config.as_deref())?);
     mutate(role, &path, |doc| {
         // Reject a duplicate name up front with a clear message.
-        if find_service(doc, &args.name).is_some() {
+        if find_service(doc, &req.name).is_some() {
             return Err(CliError::Config(format!(
                 "a service named '{}' already exists in {}",
-                args.name,
+                req.name,
                 path.display()
             ))
             .into());
         }
 
         let mut entry = toml_edit::Table::new();
-        entry["name"] = toml_edit::value(args.name.as_str());
-        entry["protocol"] = toml_edit::value(args.protocol.as_str());
-        entry["host"] = toml_edit::value(args.host.as_str());
-        entry["port"] = toml_edit::value(i64::from(args.port));
-        if role == "access" {
-            let node_id = args.node_id.as_deref().ok_or_else(|| {
+        entry["name"] = toml_edit::value(req.name.as_str());
+        entry["protocol"] = toml_edit::value(req.protocol.as_str());
+        entry["host"] = toml_edit::value(req.host.as_str());
+        entry["port"] = toml_edit::value(i64::from(req.port));
+        if role == Role::Access {
+            let node_id = req.node_id.as_deref().ok_or_else(|| {
                 CliError::Config("--node-id is required when adding an access service".into())
             })?;
             entry["node_id"] = toml_edit::value(node_id);
@@ -165,12 +230,21 @@ pub fn add(role: &str, args: &AddServiceArgs) -> Result<()> {
         services.push(entry);
         Ok(())
     })?;
-    println!("Added service '{}' to {}.", args.name, path.display());
+    Ok(Mutation {
+        service: req.name.clone(),
+        path,
+    })
+}
+
+/// `config add`: add the service and print the confirmation.
+pub fn add(role: Role, args: &AddServiceArgs) -> Result<()> {
+    let outcome = add_service(role, &AddService::from(args))?;
+    print!("{}", render::render_added(&outcome));
     Ok(())
 }
 
-/// `config remove`: delete the `[[services]]` entry whose `name` matches.
-pub fn remove(role: &str, config: Option<&Path>, name: &str) -> Result<()> {
+/// Delete the `[[services]]` entry whose `name` matches.
+pub fn remove_service(role: Role, config: Option<&Path>, name: &str) -> Result<Mutation> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     // Nothing to remove from a missing config: fail without creating files.
     require_existing(role, &path)?;
@@ -192,65 +266,119 @@ pub fn remove(role: &str, config: Option<&Path>, name: &str) -> Result<()> {
             .remove(idx);
         Ok(())
     })?;
-    println!("Removed service '{name}' from {}.", path.display());
+    Ok(Mutation {
+        service: name.to_owned(),
+        path,
+    })
+}
+
+/// `config remove`: remove the service and print the confirmation.
+pub fn remove(role: Role, config: Option<&Path>, name: &str) -> Result<()> {
+    let outcome = remove_service(role, config, name)?;
+    print!("{}", render::render_removed(&outcome));
     Ok(())
+}
+
+/// One `[[services]]` entry as listed; a missing or mistyped field is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceRow {
+    pub name: Option<String>,
+    pub node_id: Option<String>,
+    pub protocol: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<i64>,
+}
+
+/// The configured services of one config file.
+///
+/// `rows` is `None` when `services` is not an array of tables: the key is
+/// absent, or it is any other TOML shape — including the inline `services = []`
+/// (an empty inline array is not an array of tables). The CLI prints the
+/// "No services configured" line for `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceList {
+    pub path: PathBuf,
+    pub rows: Option<Vec<ServiceRow>>,
+}
+
+/// Read the configured services. The config must exist ([`require_existing`]).
+pub fn list_services(role: Role, config: Option<&Path>) -> Result<ServiceList> {
+    let path = resolve_config_path(role, config)?;
+    let doc = parse_doc(&require_existing(role, &path)?, &path)?;
+    let rows = doc
+        .get("services")
+        .and_then(|i| i.as_array_of_tables())
+        .map(|services| {
+            let text = |t: &toml_edit::Table, key: &str| {
+                t.get(key).and_then(|v| v.as_str()).map(str::to_owned)
+            };
+            services
+                .iter()
+                .map(|t| ServiceRow {
+                    name: text(t, "name"),
+                    node_id: text(t, "node_id"),
+                    protocol: text(t, "protocol"),
+                    host: text(t, "host"),
+                    port: t.get("port").and_then(|v| v.as_integer()),
+                })
+                .collect()
+        });
+    Ok(ServiceList { path, rows })
 }
 
 /// `config list`: print a compact table of the configured services.
-pub fn list(role: &str, config: Option<&Path>) -> Result<()> {
-    let path = resolve_config_path(role, config)?;
-    let doc = parse_doc(&require_existing(role, &path)?, &path)?;
-    let Some(services) = doc.get("services").and_then(|i| i.as_array_of_tables()) else {
-        println!("No services configured ({}).", path.display());
-        return Ok(());
-    };
-
-    if role == "access" {
-        println!(
-            "{:<24} {:<14} {:<22} {:<8}",
-            "NAME", "NODE_ID", "PROTO", "PORT"
-        );
-        for t in services {
-            println!(
-                "{:<24} {:<14} {:<22} {:<8}",
-                t.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                t.get("node_id").and_then(|v| v.as_str()).unwrap_or("?"),
-                t.get("protocol").and_then(|v| v.as_str()).unwrap_or("?"),
-                t.get("port").and_then(|v| v.as_integer()).unwrap_or(0),
-            );
-        }
-    } else {
-        println!(
-            "{:<24} {:<22} {:<18} {:<8}",
-            "NAME", "PROTO", "HOST", "PORT"
-        );
-        for t in services {
-            println!(
-                "{:<24} {:<22} {:<18} {:<8}",
-                t.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                t.get("protocol").and_then(|v| v.as_str()).unwrap_or("?"),
-                t.get("host").and_then(|v| v.as_str()).unwrap_or("?"),
-                t.get("port").and_then(|v| v.as_integer()).unwrap_or(0),
-            );
-        }
-    }
+pub fn list(role: Role, config: Option<&Path>) -> Result<()> {
+    let list = list_services(role, config)?;
+    print!("{}", render::render_service_list(role, &list));
     Ok(())
 }
 
-/// `config show`: print the config file contents with `secret_key` and
-/// `relay_token` replaced by a placeholder, unless `reveal` is set (D2).
-/// Comments and formatting are kept; the file itself is never changed.
-pub fn show(role: &str, config: Option<&Path>, reveal: bool) -> Result<()> {
+/// Whether `config show` reveals secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disclosure {
+    Redacted,
+    Reveal,
+}
+
+/// Config file text for display. `Debug` never prints the text, which may
+/// hold secrets (RS-10).
+pub struct ShownConfig(String);
+
+impl ShownConfig {
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ShownConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShownConfig([redacted])")
+    }
+}
+
+/// Read the config file contents with `secret_key` and `relay_token` replaced
+/// by a placeholder, unless `d` is [`Disclosure::Reveal`] (D2). Comments and
+/// formatting are kept; the file itself is never changed.
+pub fn show_config(role: Role, config: Option<&Path>, d: Disclosure) -> Result<ShownConfig> {
     let path = resolve_config_path(role, config)?;
     let text = require_existing(role, &path)?;
-    if reveal {
-        print!("{text}");
-        return Ok(());
+    if d == Disclosure::Reveal {
+        return Ok(ShownConfig(text));
     }
     // A document that does not parse cannot be redacted, so it is never echoed.
     let mut doc = parse_doc(&text, &path)?;
     redact_secrets(&mut doc);
-    print!("{doc}");
+    Ok(ShownConfig(doc.to_string()))
+}
+
+/// `config show`: print the config, redacted unless `reveal`.
+pub fn show(role: Role, config: Option<&Path>, reveal: bool) -> Result<()> {
+    let disclosure = if reveal {
+        Disclosure::Reveal
+    } else {
+        Disclosure::Redacted
+    };
+    print!("{}", show_config(role, config, disclosure)?.text());
     Ok(())
 }
 
@@ -276,7 +404,7 @@ fn redact_secrets(doc: &mut DocumentMut) {
 /// applied only if the live file is unchanged since the copy was taken and the
 /// edited document is valid; otherwise the live file is left as it was and the
 /// edited text is kept in `<config>.rejected` (owner-only) so it is not lost.
-pub fn edit(role: &str, config: Option<&Path>) -> Result<()> {
+pub fn edit(role: Role, config: Option<&Path>) -> Result<()> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     let original = read_optional(&path)?;
     let original_text = original.clone().unwrap_or_default();
@@ -346,9 +474,9 @@ fn keep_rejected(path: &Path, edited: &str) -> String {
 }
 
 /// `config path`: print the resolved config file path.
-pub fn path(role: &str, config: Option<&Path>) -> Result<()> {
+pub fn path(role: Role, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(role, config)?;
-    println!("{}", path.display());
+    print!("{}", render::render_path(&path));
     Ok(())
 }
 
@@ -362,7 +490,7 @@ pub fn path(role: &str, config: Option<&Path>) -> Result<()> {
 ///
 /// Returns an error when the platform root is unavailable or the test root is
 /// not absolute. Production builds resolve defaults with [`crate::paths`].
-pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<std::path::PathBuf> {
+pub fn resolve_config_path(role: Role, override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.to_path_buf());
     }
@@ -370,9 +498,11 @@ pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<s
     if let Some(dir) = std::env::var_os("IROH_TUNNEL_TEST_CONFIG_DIR") {
         let dir = std::path::PathBuf::from(dir);
         anyhow::ensure!(dir.is_absolute(), "test config directory must be absolute");
-        return Ok(dir.join("iroh-tunnel").join(format!("{role}.toml")));
+        return Ok(dir
+            .join("iroh-tunnel")
+            .join(format!("{}.toml", role.name())));
     }
-    crate::paths::default_config_path(role)
+    crate::paths::default_config_path(role.name())
 }
 
 /// Read `path`, which a read command needs to exist (D3).
@@ -381,12 +511,13 @@ pub fn resolve_config_path(role: &str, override_path: Option<&Path>) -> Result<s
 ///
 /// [`CliError::Config`] with guidance naming the path and the commands that
 /// create a configuration. Nothing is created and no identity is generated.
-pub fn require_existing(role: &str, path: &Path) -> Result<String> {
+pub fn require_existing(role: Role, path: &Path) -> Result<String> {
     read_optional(path)?.ok_or_else(|| {
         CliError::Config(format!(
             "no configuration at {path}. Create one with `config add` or `config keygen` \
              (`iroh-tunnel {role} config add`, or `iroh-tunnel-{role} config add`), or pass --config",
-            path = path.display()
+            path = path.display(),
+            role = role.name()
         ))
         .into()
     })
@@ -400,7 +531,7 @@ pub fn require_existing(role: &str, path: &Path) -> Result<String> {
 /// through the role schema and replaces the file atomically and owner-only.
 /// If `change` or validation fails the file is left byte-for-byte unchanged.
 fn mutate(
-    role: &str,
+    role: Role,
     path: &Path,
     change: impl FnOnce(&mut DocumentMut) -> Result<()>,
 ) -> Result<()> {
@@ -426,7 +557,7 @@ fn find_service<'a>(doc: &'a DocumentMut, name: &str) -> Option<&'a toml_edit::T
 /// Re-parse `content` through the role's schema to enforce all validation rules
 /// (name regex/length, port range, node_id length, duplicate names, https
 /// relay_urls). A failure is a `CliError::Config` → exit 2.
-fn validate_role_doc(role: &str, content: &str, path: &Path) -> Result<()> {
+fn validate_role_doc(role: Role, content: &str, path: &Path) -> Result<()> {
     let invalid = |detail: String| -> anyhow::Error {
         CliError::Config(format!("invalid config at {}{detail}", path.display())).into()
     };
@@ -440,12 +571,128 @@ fn validate_role_doc(role: &str, content: &str, path: &Path) -> Result<()> {
         ))
     };
     match role {
-        "access" => toml::from_str::<crate::config::AccessConfig>(content)
+        Role::Access => toml::from_str::<crate::config::AccessConfig>(content)
             .map_err(parse_failure)?
             .validate(),
-        _ => toml::from_str::<crate::config::ServeConfig>(content)
+        Role::Serve => toml::from_str::<crate::config::ServeConfig>(content)
             .map_err(parse_failure)?
             .validate(),
     }
     .map_err(|e| invalid(format!(": {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn add_web(config: &Path) -> AddService {
+        AddService {
+            config: Some(config.to_path_buf()),
+            name: "web".into(),
+            protocol: "tcp".into(),
+            host: "127.0.0.1".into(),
+            port: 8080,
+            node_id: None,
+        }
+    }
+
+    #[test]
+    fn add_service_returns_name_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        let outcome = add_service(Role::Serve, &add_web(&path)).unwrap();
+        assert_eq!(
+            outcome,
+            Mutation {
+                service: "web".into(),
+                path: path.clone()
+            }
+        );
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("name = \"web\""));
+    }
+
+    #[test]
+    fn invalid_access_add_leaves_bytes_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access.toml");
+        let before = "# keep me\n";
+        std::fs::write(&path, before).unwrap();
+        let err = add_service(Role::Access, &add_web(&path)).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<CliError>(),
+            Some(CliError::Config(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn list_services_returns_rows_without_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        add_service(Role::Serve, &add_web(&path)).unwrap();
+        let list = list_services(Role::Serve, Some(&path)).unwrap();
+        assert_eq!(list.path, path);
+        assert_eq!(
+            list.rows,
+            Some(vec![ServiceRow {
+                name: Some("web".into()),
+                node_id: None,
+                protocol: Some("tcp".into()),
+                host: Some("127.0.0.1".into()),
+                port: Some(8080),
+            }])
+        );
+
+        let empty = dir.path().join("empty.toml");
+        std::fs::write(&empty, "# nothing\n").unwrap();
+        assert_eq!(list_services(Role::Serve, Some(&empty)).unwrap().rows, None);
+    }
+
+    #[test]
+    fn show_redacts_secret_key_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        std::fs::write(&path, "[node]\nsecret_key = \"TOPSECRETVALUE\"\n").unwrap();
+        let redacted = show_config(Role::Serve, Some(&path), Disclosure::Redacted).unwrap();
+        assert!(!redacted.text().contains("TOPSECRETVALUE"));
+        assert!(!format!("{redacted:?}").contains("TOPSECRETVALUE"));
+        let revealed = show_config(Role::Serve, Some(&path), Disclosure::Reveal).unwrap();
+        assert!(revealed.text().contains("TOPSECRETVALUE"));
+        assert!(!format!("{revealed:?}").contains("TOPSECRETVALUE"));
+    }
+
+    /// `random_identity` takes no path and no environment input, so there is
+    /// nothing to point it at; setting `HOME` would race other threads of the
+    /// test binary. Instead assert the identity is self-consistent and that a
+    /// tempdir this test controls stays empty across the call.
+    #[test]
+    fn random_identity_touches_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = random_identity();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let (key, _) = crate::config::resolve_secret_key(identity.secret()).unwrap();
+        assert_eq!(identity.node_id, key.public().to_string());
+        assert!(!format!("{identity:?}").contains(identity.secret()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_service_accepts_non_utf8_config_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"serve-\xff.toml"));
+        // APFS (macOS) rejects non-UTF-8 names outright; there is nothing to
+        // test on a filesystem that cannot hold such a path.
+        if std::fs::write(&path, "").is_err() {
+            return;
+        }
+        std::fs::remove_file(&path).unwrap();
+        let outcome = add_service(Role::Serve, &add_web(&path)).unwrap();
+        assert_eq!(outcome.path, path);
+        assert!(path.exists());
+    }
 }

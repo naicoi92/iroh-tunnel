@@ -200,7 +200,7 @@ async fn dispatch_role_cmd(
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
-            config_cmd::require_existing(role, &path)?;
+            config_cmd::require_existing(status_role, &path)?;
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
             match status_role {
@@ -208,7 +208,7 @@ async fn dispatch_role_cmd(
                 StatusRole::Access => access::run(&path, ctx).await,
             }
         }
-        RoleCmd::Config { action } => dispatch_config(role, action),
+        RoleCmd::Config { action } => dispatch_config(status_role, action),
         RoleCmd::Status { json } => status_cmd::run(status_role, json),
         RoleCmd::Update(args) => match packaging {
             Packaging::Standalone => {
@@ -234,7 +234,16 @@ async fn dispatch_role_cmd(
 /// Resolve the config path: explicit `--config` wins, otherwise the
 /// platform default from [`config_cmd::resolve_config_path`].
 fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    config_cmd::resolve_config_path(role, config.as_deref())
+    config_cmd::resolve_config_path(role_named(role)?, config.as_deref())
+}
+
+/// The typed role for a CLI role name.
+fn role_named(name: &str) -> anyhow::Result<StatusRole> {
+    match name {
+        "serve" => Ok(StatusRole::Serve),
+        "access" => Ok(StatusRole::Access),
+        other => anyhow::bail!("unknown role {other:?}"),
+    }
 }
 
 /// Make `path` absolute for embedding in a system service file.
@@ -254,7 +263,7 @@ fn absolutize_config_path(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(cwd.join(path))
 }
 
-fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
+fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()> {
     match action {
         ConfigAction::Keygen {
             mode: Some(KeygenMode::Random),
@@ -338,12 +347,7 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
             let scope = existing("start", &scope)?;
             // Refuse here too: the unit would otherwise start and exit
             // after systemd/launchd already reported success (RO-03).
-            let status_role = match role {
-                "serve" => StatusRole::Serve,
-                "access" => StatusRole::Access,
-                other => anyhow::bail!("unknown role {other:?}"),
-            };
-            crate::ownership::ensure_not_running(status_role)?;
+            crate::ownership::ensure_not_running(role_named(role)?)?;
             service::start(role, scope)
         }
         ServiceAction::Stop { scope } => service::stop(role, existing("stop", &scope)?),

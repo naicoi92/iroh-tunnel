@@ -372,25 +372,28 @@ impl StatusPayload {
 /// change-detect cadence) and differ only in the file name — this enum is
 /// the entire role-specific surface of the writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusRole {
+pub enum Role {
     Serve,
     Access,
 }
 
-impl StatusRole {
+/// Former name of [`Role`]; removed in Task 20.
+pub type StatusRole = Role;
+
+impl Role {
     /// File name of this role's status file.
     pub fn file_name(self) -> &'static str {
         match self {
-            StatusRole::Serve => SERVE_STATUS_FILE_NAME,
-            StatusRole::Access => ACCESS_STATUS_FILE_NAME,
+            Role::Serve => SERVE_STATUS_FILE_NAME,
+            Role::Access => ACCESS_STATUS_FILE_NAME,
         }
     }
 
     /// The role's CLI name (`"serve"` / `"access"`).
     pub fn name(self) -> &'static str {
         match self {
-            StatusRole::Serve => "serve",
-            StatusRole::Access => "access",
+            Role::Serve => "serve",
+            Role::Access => "access",
         }
     }
 }
