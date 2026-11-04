@@ -33,7 +33,7 @@ const ATTEMPTS: usize = 3;
 const REQUEST: &[u8] = b"release-smoke request \x00\xff";
 const RESPONSE: &[u8] = b"release-smoke response \xff\x00";
 
-struct Process(Child);
+struct Process(Child, PathBuf);
 impl Drop for Process {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -117,7 +117,20 @@ fn spawn(
         .stderr(out)
         .spawn()
         .with_context(|| format!("spawn {}", exe.display()))?;
-    Ok(Process(child))
+    Ok(Process(child, log.to_path_buf()))
+}
+
+/// The last lines of a role's log, so a failed start explains itself in the
+/// evidence instead of only an exit code.
+fn log_tail(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines[lines.len().saturating_sub(12)..].join(" | ");
+    if tail.is_empty() {
+        "(empty)".into()
+    } else {
+        tail
+    }
 }
 
 async fn wait_for<T>(
@@ -131,7 +144,10 @@ async fn wait_for<T>(
             return Ok(value);
         }
         if let Some(exit) = process.0.try_wait()? {
-            anyhow::bail!("{what}: process exited early: {exit}");
+            anyhow::bail!(
+                "{what}: process exited early: {exit}; log tail: {}",
+                log_tail(&process.1)
+            );
         }
         anyhow::ensure!(Instant::now() < deadline, "{what}: timed out");
         tokio::time::sleep(Duration::from_millis(200)).await;
