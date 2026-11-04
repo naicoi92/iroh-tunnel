@@ -2,7 +2,7 @@
 //! show / edit / path.
 //!
 //! Each handler calls the terminal-free host operation in
-//! [`iroh_tunnel_host::config_ops`] and does the prompting and printing; the
+//! [`iroh_tunnel_host::config`] and does the prompting and printing; the
 //! `$EDITOR` invocation of `edit` lives here too.
 
 use std::io::{BufRead, Write};
