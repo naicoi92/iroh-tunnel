@@ -15,7 +15,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # <target>::<test path>; target = lib | bins/<name> | <integration test stem> | doc,
 # derived from cargo's "Running ..." headers. Non-header, non-test output goes to capture.log.
 list_tests() { # list_tests <extra libtest args...>
-  cargo +1.91 test --all-features --locked ${ws:+"$ws"} -- --list --format terse "$@" 2>&1 | awk -v log="$out/capture.log" '
+  cargo +1.91 test --all-features --locked ${ws:+"$ws"} -- --list --format terse "$@" 2>&1 | awk -v logf="$out/capture.log" '
     /^[ \t]*Running / {
       p = $2
       if (p == "unittests") p = $3
@@ -26,7 +26,7 @@ list_tests() { # list_tests <extra libtest args...>
       next }
     /^[ \t]*Doc-tests / { t = "doc"; next }
     /: test$/ { sub(/: test$/, ""); print t "::" $0; next }
-    { print > log }' | LC_ALL=C sort
+    { print >> logf }' | LC_ALL=C sort
 }
 list_tests > "$out/tests.txt"
 list_tests --ignored > "$out/tests-ignored.txt"
