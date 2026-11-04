@@ -63,6 +63,7 @@ pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result
         config_path,
         crate::role_run::Ownership::Enforced(crate::status::StatusRole::Access),
         ctx,
+        crate::render::print_ready(),
         crate::shutdown::wait_for_signal(),
     )
     .await
@@ -73,9 +74,14 @@ pub async fn run_quick(cfg: AccessConfig, ctx: crate::shutdown::RunContext) -> R
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("access quick mode: {e}")))?;
     let claim = Some(crate::ownership::claim(crate::status::StatusRole::Access)?);
-    crate::role_run::run_config::<AccessStrategy, _, _>(cfg, claim, ctx, None, |ep, cfg, ctx| {
-        AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx)
-    })
+    crate::role_run::run_config::<AccessStrategy, _, _>(
+        cfg,
+        claim,
+        ctx,
+        None,
+        crate::render::print_ready(),
+        |ep, cfg, ctx| AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx),
+    )
     .await
 }
 
@@ -92,6 +98,7 @@ pub async fn run_with_shutdown(
         config_path,
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
+        crate::render::print_ready(),
         shutdown,
     )
     .await
@@ -120,6 +127,7 @@ pub async fn run_with_shutdown_with_state_dir(
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
         Some(&state_dir_path),
+        crate::render::print_ready(),
         |ep, cfg, ctx| AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir, ctx),
     )
     .await
@@ -162,13 +170,13 @@ impl RoleStrategy for AccessStrategy {
         endpoint::create_access_endpoint(&cfg.node, &extra_relays).await
     }
 
-    fn print_services(cfg: &Self::Config) {
+    fn ready_services(cfg: &Self::Config) -> crate::ready::ReadyServices {
         if cfg.services.is_empty() {
             tracing::warn!("no services configured; nothing to expose");
-            return;
+            return crate::ready::ReadyServices::Access(Vec::new());
         }
         // Resolve and parse everything up front so a bad config fails loudly
-        // before we bind any ports. The results feed both the printout and the
+        // before we bind any ports. The results feed both the report and the
         // spawned listeners.
         let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)
             .unwrap_or_else(|e| {
@@ -181,27 +189,28 @@ impl RoleStrategy for AccessStrategy {
                 "no relay_urls configured, falling back to n0 default relays"
             );
         }
-        for svc in &cfg.services {
-            // We don't fail here — print_services is infallible in the trait
-            // signature. parse errors surface later when listen_loop tries
-            // to dial; printing the raw node_id preserves the operator's
-            // intent so they can see what was configured.
-            let node_id_display = match svc.node_id.parse::<iroh::EndpointId>() {
-                Ok(id) => id.to_string(),
-                Err(_) => svc.node_id.clone(),
-            };
-            let listen_addr = format!("{}:{}", svc.host, svc.port);
-            let relay_note = if svc.relay_urls.is_empty() {
-                String::new()
-            } else {
-                format!(" [relay override: {}]", svc.relay_urls.len())
-            };
-            println!(
-                "Exposed: {} {listen_addr} -> peer {node_id_display} ({}://{listen_addr}){relay_note}",
-                svc.name,
-                crate::role_run::protocol_str(svc.protocol)
-            );
-        }
+        let services = cfg
+            .services
+            .iter()
+            .map(|svc| {
+                // This is infallible: parse errors surface later when
+                // listen_loop tries to dial; reporting the raw node_id
+                // preserves the operator's intent so they can see what was
+                // configured.
+                let peer_display = match svc.node_id.parse::<iroh::EndpointId>() {
+                    Ok(id) => id.to_string(),
+                    Err(_) => svc.node_id.clone(),
+                };
+                crate::ready::AccessReady {
+                    name: svc.name.clone(),
+                    listen_addr: format!("{}:{}", svc.host, svc.port),
+                    peer_display,
+                    protocol: svc.protocol,
+                    relay_override_count: svc.relay_urls.len(),
+                }
+            })
+            .collect();
+        crate::ready::ReadyServices::Access(services)
     }
 
     async fn run_loop(

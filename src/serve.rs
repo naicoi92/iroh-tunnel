@@ -48,6 +48,7 @@ pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result
         config_path,
         crate::role_run::Ownership::Enforced(crate::status::StatusRole::Serve),
         ctx,
+        crate::render::print_ready(),
         crate::shutdown::wait_for_signal(),
     )
     .await
@@ -58,9 +59,14 @@ pub async fn run_quick(cfg: ServeConfig, ctx: crate::shutdown::RunContext) -> Re
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("serve quick mode: {e}")))?;
     let claim = Some(crate::ownership::claim(crate::status::StatusRole::Serve)?);
-    crate::role_run::run_config::<ServeStrategy, _, _>(cfg, claim, ctx, None, |ep, cfg, ctx| {
-        ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx)
-    })
+    crate::role_run::run_config::<ServeStrategy, _, _>(
+        cfg,
+        claim,
+        ctx,
+        None,
+        crate::render::print_ready(),
+        |ep, cfg, ctx| ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx),
+    )
     .await
 }
 
@@ -77,6 +83,7 @@ pub async fn run_with_shutdown(
         config_path,
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
+        crate::render::print_ready(),
         shutdown,
     )
     .await
@@ -102,6 +109,7 @@ pub async fn run_with_shutdown_with_state_dir(
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
         Some(&state_dir_path),
+        crate::render::print_ready(),
         |ep, cfg, ctx| ServeStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir, ctx),
     )
     .await
@@ -132,19 +140,20 @@ impl RoleStrategy for ServeStrategy {
         endpoint::create_serve_endpoint(&cfg.node, &alpns).await
     }
 
-    fn print_services(cfg: &Self::Config) {
+    fn ready_services(cfg: &Self::Config) -> crate::ready::ReadyServices {
         if cfg.services.is_empty() {
             tracing::warn!("no services configured; nothing to serve");
-            return;
         }
-        for svc in &cfg.services {
-            let local_addr = format!("{}:{}", svc.host, svc.port);
-            println!(
-                "Serving: {} {}://{local_addr}",
-                svc.name,
-                crate::role_run::protocol_str(svc.protocol)
-            );
-        }
+        crate::ready::ReadyServices::Serve(
+            cfg.services
+                .iter()
+                .map(|svc| crate::ready::ServeReady {
+                    name: svc.name.clone(),
+                    protocol: svc.protocol,
+                    local_addr: format!("{}:{}", svc.host, svc.port),
+                })
+                .collect(),
+        )
     }
 
     async fn run_loop(

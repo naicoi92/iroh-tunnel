@@ -273,9 +273,9 @@ pub(crate) trait RoleStrategy {
         cfg: &Self::Config,
     ) -> impl std::future::Future<Output = Result<iroh::Endpoint>>;
 
-    /// Print the per-service status lines after the endpoint is up (serve:
-    /// "Serving: ..."; access: "Exposed: ... -> peer ...").
-    fn print_services(cfg: &Self::Config);
+    /// The per-service half of the ready report (serve: published services;
+    /// access: exposed services). Also warns when no services are configured.
+    fn ready_services(cfg: &Self::Config) -> crate::ready::ReadyServices;
 
     /// Run the role's accept/listen loop until `shutdown` resolves.
     ///
@@ -314,6 +314,7 @@ pub(crate) async fn run_skeleton<S, F, Fut>(
     ownership: Ownership,
     ctx: crate::shutdown::RunContext,
     state_dir: Option<&Path>,
+    on_ready: crate::ready::OnReady,
     run_loop: F,
 ) -> Result<()>
 where
@@ -337,7 +338,7 @@ where
     .await
     .context("config load task failed")??;
 
-    run_config::<S, _, _>(cfg, claim, ctx, state_dir, run_loop).await
+    run_config::<S, _, _>(cfg, claim, ctx, state_dir, on_ready, run_loop).await
 }
 
 /// Build the endpoint and run the role while holding `claim`.
@@ -350,6 +351,7 @@ pub(crate) async fn run_config<S, F, Fut>(
     claim: Option<RoleClaim>,
     ctx: crate::shutdown::RunContext,
     state_dir: Option<&Path>,
+    on_ready: crate::ready::OnReady,
     run_loop: F,
 ) -> Result<()>
 where
@@ -378,16 +380,18 @@ where
         claim.publish_identity(&crate::endpoint::node_id_string(&ep))?;
     }
 
-    // Print the operator-facing NodeId line (identical across roles).
-    println!("NodeId: {}", crate::endpoint::node_id_string(&ep));
-    if let Some(relay) = crate::endpoint::home_relay(&ep) {
-        println!("Home relay: {relay}");
+    // Per-service entries diverge (Serving vs Exposed), so they sit behind
+    // the strategy, which also warns when no services are configured.
+    let report = crate::ready::ReadyReport {
+        node_id: crate::endpoint::node_id_string(&ep),
+        home_relay: crate::endpoint::home_relay(&ep).map(|relay| relay.to_string()),
+        services: S::ready_services(&cfg),
+    };
+    if let Err(error) = on_ready(&report) {
+        // `claim` drops on return; run_loop never ran, so no status file.
+        ep.close().await;
+        return Err(error);
     }
-
-    // Per-service status lines diverge (Serving vs Exposed), so they sit
-    // behind the strategy. The strategy is also responsible for warning
-    // when there are no services configured.
-    S::print_services(&cfg);
 
     tracing::info!("endpoint ready");
     // The role owns admission, drain, task joins and endpoint close; this
@@ -404,11 +408,17 @@ pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
     config_path: &Path,
     ownership: Ownership,
     ctx: crate::shutdown::RunContext,
+    on_ready: crate::ready::OnReady,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    run_skeleton::<S, _, _>(config_path, ownership, ctx, None, |ep, cfg, ctx| {
-        S::run_loop(ep, cfg, shutdown, ctx)
-    })
+    run_skeleton::<S, _, _>(
+        config_path,
+        ownership,
+        ctx,
+        None,
+        on_ready,
+        |ep, cfg, ctx| S::run_loop(ep, cfg, shutdown, ctx),
+    )
     .await
 }
 
@@ -495,6 +505,69 @@ mod tests {
         .expect("connect_with_retry must return by itself at the deadline");
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    /// A failing `on_ready` aborts the start: the run returns that error, the
+    /// claim is released and no status file was written. Role locks are keyed
+    /// by `HOME`, so the body re-runs in a child process with an isolated
+    /// `HOME` instead of mutating this multi-threaded process's environment.
+    #[test]
+    fn ready_hook_failure_closes_endpoint_and_releases_claim() {
+        const CHILD_MARKER: &str = "IROH_TUNNEL_READY_HOOK_CHILD";
+        const NAME: &str = "role_run::tests::ready_hook_failure_closes_endpoint_and_releases_claim";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env(CHILD_MARKER, "1")
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let claim = crate::ownership::claim(StatusRole::Serve).unwrap();
+            let on_ready: crate::ready::OnReady =
+                Box::new(|_| Err(anyhow::anyhow!("ready hook refused")));
+            let error = run_config::<crate::serve::ServeStrategy, _, _>(
+                crate::config::ServeConfig::default(),
+                Some(claim),
+                crate::shutdown::RunContext::new(),
+                Some(state_dir.path()),
+                on_ready,
+                |ep, cfg, ctx| {
+                    crate::serve::ServeStrategy::run_loop(
+                        ep,
+                        cfg,
+                        std::future::pending::<()>(),
+                        ctx,
+                    )
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), "ready hook refused");
+
+            let reclaimed = crate::ownership::claim(StatusRole::Serve);
+            assert!(
+                reclaimed.is_ok(),
+                "claim must be released after the failure"
+            );
+            let leftovers: Vec<_> = std::fs::read_dir(state_dir.path()).unwrap().collect();
+            assert!(
+                leftovers.is_empty(),
+                "no status file may exist: {leftovers:?}"
+            );
+        });
     }
 
     fn write_own_serve_status(dir: &Path) -> std::path::PathBuf {

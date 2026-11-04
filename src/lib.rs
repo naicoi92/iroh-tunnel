@@ -23,6 +23,8 @@ pub(crate) mod ownership;
 pub mod paths;
 pub mod pipe;
 pub mod proto;
+pub mod ready;
+pub(crate) mod render;
 /// `pub(crate)` — internal seam between serve/access, not a public extension
 /// point. See `src/role_run.rs` module docs.
 pub(crate) mod role_run;
