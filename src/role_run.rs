@@ -590,11 +590,12 @@ mod tests {
                 .env("HOME", home.path())
                 .output()
                 .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "child failed:\n{stdout}\n{stderr}");
             assert!(
-                output.status.success(),
-                "child failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                stdout.contains(&format!("IROH_CHILD_BODY_RAN {NAME}")),
+                "child did not run the test body (0 tests matched?):\n{stdout}\n{stderr}"
             );
             return;
         }
@@ -638,6 +639,7 @@ mod tests {
                 "no status file may exist: {leftovers:?}"
             );
         });
+        println!("IROH_CHILD_BODY_RAN {NAME}");
     }
 
     fn write_own_serve_status(dir: &Path) -> std::path::PathBuf {
