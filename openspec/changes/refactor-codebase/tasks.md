@@ -55,10 +55,10 @@ Owner: `src/config.rs`, `src/config_store.rs`, `src/config_cmd.rs`, `src/status_
 
 Owner: `Cargo.toml` (workspace section), `Cargo.lock`, `crates/engine/**` (new), moved engine modules from `src/`, engine-owned tests. Depends on: 2, 3.
 
-- [ ] 5.1 Convert root `Cargo.toml` to package+workspace manifest (`resolver = "2"`, all three default members, inherited version/edition/MSRV/license, shared dependency declarations without test features) and create `crates/engine` with `publish = false`. Traces WB-1 (both), WB-21.
-- [ ] 5.2 Move `endpoint.rs`, `proto.rs`, `pipe.rs`, `udp.rs`, `conn_path.rs` observation, Serve/Access role loops and run-local drain mechanics into engine modules (`runtime`, `tcp`, `udp`, `observation`); keep UDP decision types together. Traces WB-4, WB-5.
-- [ ] 5.3 Forward `test-utils` engine-locally to `iroh/test-utils`; move in-process network tests that exercise engine (`serve_access_tunnel`, `udp_tunnel`, `configured_multiplex`, `relay_auth`, `access_path_logging`) to engine or keep at root via explicit feature forwarding. Traces WB-18 (both), WB-20.
-- [ ] 5.4 Add a dependency-direction check (cargo metadata assertion test or documented command) proving engine depends on neither host nor root, and a source scan for `process::exit`, signal handlers and `println!`/`eprintln!` in non-test engine code. Also add a check of the one-exported-operation-per-file convention (design.md Decision 1). Traces WB-2 (Engine depends on neither host nor root), WB-5 (No exit, signal or print calls).
+- [x] 5.1 Convert root `Cargo.toml` to package+workspace manifest (`resolver = "2"`, all three default members, inherited version/edition/MSRV/license, shared dependency declarations without test features) and create `crates/engine` with `publish = false`. Traces WB-1 (both), WB-21.
+- [x] 5.2 Move `endpoint.rs`, `proto.rs`, `pipe.rs`, `udp.rs`, `conn_path.rs` observation, Serve/Access role loops and run-local drain mechanics into engine modules (`runtime`, `tcp`, `udp`, `observation`); keep UDP decision types together. Traces WB-4, WB-5.
+- [x] 5.3 Forward `test-utils` engine-locally to `iroh/test-utils`; move in-process network tests that exercise engine (`serve_access_tunnel`, `udp_tunnel`, `configured_multiplex`, `relay_auth`, `access_path_logging`) to engine or keep at root via explicit feature forwarding. Traces WB-18 (both), WB-20.
+- [x] 5.4 Add a dependency-direction check (cargo metadata assertion test or documented command) proving engine depends on neither host nor root, and a source scan for `process::exit`, signal handlers and `println!`/`eprintln!` in non-test engine code. Also add a check of the one-exported-operation-per-file convention (design.md Decision 1). Traces WB-2 (Engine depends on neither host nor root), WB-5 (No exit, signal or print calls).
 
 ## 6. Extract `iroh-tunnel-host` (Migration step 4)
 
