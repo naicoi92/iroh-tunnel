@@ -835,6 +835,12 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
         stats.set_active_flows(flows.lock().unwrap_or_else(|p| p.into_inner()).len());
         if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
             tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
+            // A lost connection never recovers. Evict it so the next datagram
+            // dials a fresh one and starts a new incarnation (UDP-04); the
+            // cached dead connection would otherwise swallow traffic forever.
+            if matches!(error, iroh::endpoint::SendDatagramError::ConnectionLost(_)) {
+                dialer.invalidate(&conn).await;
+            }
         }
     }
     readers.abort_all();

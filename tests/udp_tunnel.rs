@@ -294,6 +294,30 @@ port = {port}
         }
     }
 
+    /// Stop the Serve role and start a new one with the same identity, config
+    /// and target. Every connection to the old one is gone.
+    async fn restart_serve(&mut self) -> Result<()> {
+        let _ = self.stop.remove(0).send(());
+        tokio::time::timeout(Duration::from_secs(15), self.roles.remove(0))
+            .await
+            .context("old serve did not stop within 15s")??
+            .context("old serve returned an error")?;
+        let (tx, rx) = oneshot::channel::<()>();
+        let state = self.serve_state.path().to_path_buf();
+        let path = self.cfg.path().join("serve.toml");
+        self.stop.insert(0, tx);
+        self.roles.insert(
+            0,
+            tokio::spawn(async move {
+                iroh_tunnel::serve::run_with_shutdown_with_state_dir(&state, &path, async move {
+                    let _ = rx.await;
+                })
+                .await
+            }),
+        );
+        Ok(())
+    }
+
     async fn shutdown(mut self) -> Result<()> {
         for tx in self.stop.drain(..) {
             let _ = tx.send(());
@@ -761,5 +785,28 @@ async fn quarantine_holds_the_slot_and_then_releases_it() -> Result<()> {
     )
     .await?;
     assert_eq!(tunnel.roundtrip(&c, b"c").await?, b"c");
+    tunnel.shutdown().await
+}
+
+/// UDP-04: no flow survives a reconnect. When Serve restarts, the Access
+/// connection is dead; the next datagram must dial a fresh one and start a
+/// new incarnation, instead of sending into the dead connection forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forwarding_resumes_after_serve_restarts() -> Result<()> {
+    let mut tunnel = UdpTunnel::start().await?;
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    assert_eq!(tunnel.roundtrip(&client, b"before").await?, b"before");
+    drain(&client).await;
+
+    tunnel.restart_serve().await?;
+
+    // `roundtrip` keeps resending while the new connection is dialed.
+    let reply = tokio::time::timeout(Duration::from_secs(40), tunnel.roundtrip(&client, b"after"))
+        .await
+        .context("forwarding never resumed after Serve restarted")??;
+    assert!(
+        reply == b"after" || reply == b"before",
+        "unexpected {reply:?}"
+    );
     tunnel.shutdown().await
 }
