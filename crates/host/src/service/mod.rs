@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::host::error::CliError;
+use crate::error::CliError;
 #[allow(unused_imports)] // unused on targets without a service backend
 use native::{system_runner, Native};
 pub use scope::Environment;
@@ -51,7 +51,7 @@ mod windows;
 ///
 /// [`CliError::Permission`] for an unsafe path under a system service, or the
 /// ordinary config errors.
-pub(crate) fn load_config<C: crate::host::config::RoleDoc>(path: &Path) -> Result<C> {
+pub(crate) fn load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
     #[cfg(unix)]
     {
         trust::load_config(path)
@@ -259,7 +259,7 @@ fn unsupported<T>() -> Result<T> {
 mod tests {
     use super::ops::{install_via, verb_via, Verb};
     use super::*;
-    use crate::host::error::CliError;
+    use crate::error::CliError;
     use std::path::PathBuf;
 
     #[test]
@@ -280,8 +280,8 @@ mod tests {
 
     // ---- operations with policy (Task 14) --------------------------------
 
-    use crate::host::service::native::fake::{Event, Events, FakeRunner};
-    use crate::host::status::Role;
+    use crate::service::native::fake::{Event, Events, FakeRunner};
+    use crate::status::Role;
 
     fn tunnel_exe() -> PathBuf {
         if cfg!(windows) {
@@ -322,7 +322,7 @@ mod tests {
         let events = Events::default();
         let mut fake = FakeRunner::new(&events, responses);
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
-        let mut notes = crate::host::service::native::fake::note_sink(&events);
+        let mut notes = crate::service::native::fake::note_sink(&events);
         let mut call = ServiceCall::capture(&mut notes);
         let result = install_via(req, env, &mut call, &mut runner);
         let log = events.borrow().clone();
@@ -453,13 +453,13 @@ mod tests {
             // `bootstrap` fails.
             let responses = if cfg!(target_os = "linux") {
                 vec![
-                    crate::host::service::native::fake::output(0, "", ""),
-                    crate::host::service::native::fake::output(1, "", "boom"),
+                    crate::service::native::fake::output(0, "", ""),
+                    crate::service::native::fake::output(1, "", "boom"),
                 ]
             } else {
                 vec![
-                    crate::host::service::native::fake::output(0, "", ""),
-                    crate::host::service::native::fake::output(5, "", "boom"),
+                    crate::service::native::fake::output(0, "", ""),
+                    crate::service::native::fake::output(5, "", "boom"),
                 ]
             };
             let (result, log) = run_install(&req, BATCH, responses);
@@ -487,11 +487,11 @@ mod tests {
     fn start_is_refused_before_manager_when_role_runs() {
         const NAME: &str = "host::service::tests::start_is_refused_before_manager_when_role_runs";
         in_isolated_home(NAME, |_| {
-            let _claim = crate::host::ownership::claim(Role::Serve).unwrap();
+            let _claim = crate::ownership::claim(Role::Serve).unwrap();
             let events = Events::default();
             let mut fake = FakeRunner::new(&events, vec![]);
             let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
-            let mut notes = crate::host::service::native::fake::note_sink(&events);
+            let mut notes = crate::service::native::fake::note_sink(&events);
             let mut call = ServiceCall::capture(&mut notes);
             let result = verb_via(
                 Verb::Start,
@@ -557,7 +557,7 @@ mod tests {
         let events = Events::default();
         let mut fake = FakeRunner::new(&events, responses);
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
-        let mut notes = crate::host::service::native::fake::note_sink(&events);
+        let mut notes = crate::service::native::fake::note_sink(&events);
         let mut call = ServiceCall::capture(&mut notes);
         ops::status_via(
             Role::Serve,
@@ -574,7 +574,7 @@ mod tests {
         const NAME: &str =
             "host::service::tests::status_reports_foreground_role_without_registration";
         in_isolated_home(NAME, |_| {
-            let _claim = crate::host::ownership::claim(Role::Serve).unwrap();
+            let _claim = crate::ownership::claim(Role::Serve).unwrap();
             let report = run_status(vec![]).unwrap();
             assert!(matches!(
                 report.registration,
@@ -582,7 +582,7 @@ mod tests {
             ));
             assert!(matches!(
                 report.liveness,
-                Fact::Known(crate::host::ownership::Liveness::Running { .. })
+                Fact::Known(crate::ownership::Liveness::Running { .. })
             ));
         });
     }
@@ -592,13 +592,13 @@ mod tests {
     fn status_reports_missing_owner_as_unavailable() {
         const NAME: &str = "host::service::tests::status_reports_missing_owner_as_unavailable";
         in_isolated_home(NAME, |home| {
-            let _claim = crate::host::ownership::claim(Role::Serve).unwrap();
+            let _claim = crate::ownership::claim(Role::Serve).unwrap();
             std::fs::remove_file(home.join(".local/state/iroh-tunnel/serve.owner.json")).unwrap();
             let report = run_status(vec![]).expect("a missing owner is not a failure");
             assert!(matches!(report.owner, Fact::Unavailable(_)), "{report:?}");
             assert!(matches!(
                 report.liveness,
-                Fact::Known(crate::host::ownership::Liveness::Running { .. })
+                Fact::Known(crate::ownership::Liveness::Running { .. })
             ));
         });
     }
@@ -609,11 +609,11 @@ mod tests {
         const NAME: &str = "host::service::tests::status_does_not_parse_native_prose";
         in_isolated_home(NAME, |_| {
             // Nothing runs the role, whatever the localized native text says.
-            let prose = crate::host::service::native::fake::output(0, "aktiv (läuft)\n", "");
+            let prose = crate::service::native::fake::output(0, "aktiv (läuft)\n", "");
             let report = run_status(vec![prose]).unwrap();
             assert!(matches!(
                 report.liveness,
-                Fact::Known(crate::host::ownership::Liveness::NotRunning)
+                Fact::Known(crate::ownership::Liveness::NotRunning)
             ));
             let native = report.native.expect("native output is returned");
             assert_eq!(native.stdout, "aktiv (läuft)\n".as_bytes());
@@ -631,7 +631,7 @@ mod tests {
     }
 
     fn ok_output(program: String) -> NativeOutput {
-        let mut out = crate::host::service::native::fake::output(0, "", "");
+        let mut out = crate::service::native::fake::output(0, "", "");
         out.program = program;
         out
     }

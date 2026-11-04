@@ -76,7 +76,7 @@ impl Fixture {
             format!(
                 "[node]\nsecret_key = {:?}\nrelay_urls = [{relay:?}]\n\n\
                  [[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
-                iroh_tunnel::config::encode_secret_key(&key)
+                iroh_tunnel_host::config::encode_secret_key(&key)
             ),
         )?;
         Ok(())

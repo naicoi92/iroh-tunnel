@@ -24,7 +24,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use iroh::SecretKey;
-use iroh_tunnel::config::encode_secret_key;
+use iroh_tunnel_host::config::encode_secret_key;
 
 /// Bytes the tunnel must transport unchanged in each direction.
 const PAYLOAD: &[u8] = b"hello-through-the-path-logs";
@@ -34,7 +34,7 @@ const LOG_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Poller cadence — the real one from the crate (`test-utils` exposes it),
 /// so the derived windows below can never drift from production timing.
-use iroh_tunnel::access::PATH_POLL_INTERVAL;
+use iroh_tunnel_engine::access::PATH_POLL_INTERVAL;
 
 /// Quiet window for [`wait_for_quiet`]: one poller tick plus slack.
 const QUIET_WINDOW: Duration = Duration::from_secs(PATH_POLL_INTERVAL.as_secs() + 1);
@@ -195,8 +195,8 @@ multiplex = false
         let path = serve_cfg.clone();
         let state_dir = state_tmp.path().to_path_buf();
         tokio::spawn(async move {
-            iroh_tunnel::host::testing::run_unowned(
-                iroh_tunnel::host::status::Role::Serve,
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::status::Role::Serve,
                 &path,
                 Some(&state_dir),
                 async move {
@@ -209,8 +209,8 @@ multiplex = false
     let access_spawn = {
         let path = access_cfg.clone();
         tokio::spawn(async move {
-            iroh_tunnel::host::testing::run_unowned(
-                iroh_tunnel::host::status::Role::Access,
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::status::Role::Access,
                 &path,
                 None,
                 async move {

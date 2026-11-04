@@ -7,9 +7,9 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::host::runtime::{run_role, Ownership};
-use crate::host::status::Role;
-use crate::host::RunContext;
+use crate::runtime::{run_role, Ownership};
+use crate::status::Role;
+use crate::RunContext;
 
 /// Run `role` from `config` until `shutdown` resolves, without claiming the
 /// role. With `state_dir` the status file is written there instead of the

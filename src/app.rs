@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use crate::cli;
 use crate::cli::{AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ServeCli};
 use crate::config_cmd;
-use crate::host::config_ops;
-use crate::host::error::CliError;
-use crate::host::runtime;
-use crate::host::status::Role as StatusRole;
-use crate::host::update;
-use crate::host::RunContext;
+use iroh_tunnel_host::config_ops;
+use iroh_tunnel_host::error::CliError;
+use iroh_tunnel_host::runtime;
+use iroh_tunnel_host::status::Role as StatusRole;
+use iroh_tunnel_host::update;
+use iroh_tunnel_host::RunContext;
 use crate::lifecycle;
 use crate::status_cmd;
 use anyhow::Context as _;
@@ -42,7 +42,7 @@ pub fn main_access() -> ! {
 /// Show the operator the macOS legacy-configuration copy on stderr; the host
 /// only reports it through this observer. Runs before any path resolution.
 fn install_migration_notice() {
-    crate::host::paths::set_migration_notice(|legacy, dest| {
+    iroh_tunnel_host::paths::set_migration_notice(|legacy, dest| {
         eprintln!(
             "migrated configuration {} -> {} (original kept)",
             legacy.display(),
@@ -142,13 +142,13 @@ async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<
                 CliError::Config("serve quick mode: --target IP:PORT is required".into())
             })?;
             let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = crate::host::config::ServeConfig {
-                node: crate::host::config::NodeConfig {
+            let cfg = iroh_tunnel_host::config::ServeConfig {
+                node: iroh_tunnel_host::config::NodeConfig {
                     secret_key,
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
-                services: vec![crate::host::config::ServeService {
+                services: vec![iroh_tunnel_host::config::ServeService {
                     name: quick.name.ok_or_else(|| {
                         CliError::Config("serve quick mode: --name is required".into())
                     })?,
@@ -178,13 +178,13 @@ async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<
                 CliError::Config(format!("access quick mode: invalid --node-id: {e}"))
             })?;
             let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = crate::host::config::AccessConfig {
-                node: crate::host::config::NodeConfig {
+            let cfg = iroh_tunnel_host::config::AccessConfig {
+                node: iroh_tunnel_host::config::NodeConfig {
                     secret_key,
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
-                services: vec![crate::host::config::AccessService {
+                services: vec![iroh_tunnel_host::config::AccessService {
                     name: quick.name.ok_or_else(|| {
                         CliError::Config("access quick mode: --name is required".into())
                     })?,
@@ -234,7 +234,7 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
         exe_name,
         target,
         current_version: env!("APP_VERSION"),
-        owner: crate::host::update_owner::detect(&install_path),
+        owner: iroh_tunnel_host::update_owner::detect(&install_path),
         install_path,
         verifier: &update::SigstoreVerifier::release(),
     };
@@ -272,10 +272,10 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
 }
 
 /// Parse a quick-mode `--protocol` value.
-fn quick_protocol(role: &str, value: &str) -> Result<crate::host::config::Protocol, CliError> {
+fn quick_protocol(role: &str, value: &str) -> Result<iroh_tunnel_host::config::Protocol, CliError> {
     match value {
-        "tcp" => Ok(crate::host::config::Protocol::Tcp),
-        "udp" => Ok(crate::host::config::Protocol::Udp),
+        "tcp" => Ok(iroh_tunnel_host::config::Protocol::Tcp),
+        "udp" => Ok(iroh_tunnel_host::config::Protocol::Udp),
         other => Err(CliError::Config(format!(
             "{role} quick mode supports tcp or udp protocol, got '{other}'; use --protocol tcp or --protocol udp"
         ))),
@@ -395,7 +395,7 @@ fn read_key_file(path: Option<&Path>) -> anyhow::Result<String> {
             CliError::Config(format!("--key-file {}: file is empty", path.display())).into(),
         );
     }
-    crate::host::config::resolve_secret_key(key).map_err(|_| {
+    iroh_tunnel_host::config::resolve_secret_key(key).map_err(|_| {
         CliError::Config(format!(
             "--key-file {}: not a valid base64 32-byte secret key",
             path.display()

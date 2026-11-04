@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::host::error::CliError;
-use crate::host::status::Role;
+use crate::error::CliError;
+use crate::status::Role;
 
 /// Test-only stand-in for the root-owned machine lock directory.
 #[cfg(feature = "test-utils")]
@@ -90,13 +90,13 @@ fn conflict(msg: String) -> anyhow::Error {
 fn user_dir() -> Result<PathBuf> {
     match std::env::var_os("HOME").map(PathBuf::from) {
         Some(home) if home.is_absolute() => Ok(home.join(".local/state/iroh-tunnel")),
-        _ => crate::host::paths::default_state_dir(),
+        _ => crate::paths::default_state_dir(),
     }
 }
 
 #[cfg(not(all(windows, feature = "test-utils")))]
 fn user_dir() -> Result<PathBuf> {
-    crate::host::paths::default_state_dir()
+    crate::paths::default_state_dir()
 }
 
 #[cfg(feature = "test-utils")]
@@ -263,7 +263,7 @@ fn write_owner(dir: &Path, role: Role, node_id: Option<&str>) {
 }
 
 /// Human description of a recorded owner: pid, plus public node id when known.
-pub(crate) fn describe_owner(owner: Option<&OwnerRecord>) -> String {
+pub fn describe_owner(owner: Option<&OwnerRecord>) -> String {
     match owner {
         Some(OwnerRecord {
             pid,

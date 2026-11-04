@@ -17,9 +17,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::host::config::{AccessConfig, RoleDoc, ServeConfig};
-use crate::host::ownership::RoleClaim;
-use crate::host::status::{Role, StatusPayload, StatusWriter};
+use crate::config::{AccessConfig, RoleDoc, ServeConfig};
+use crate::ownership::RoleClaim;
+use crate::status::{Role, StatusPayload, StatusWriter};
 
 use iroh_tunnel_engine::observation::{AccessObservation, ServeObservation};
 use iroh_tunnel_engine::settings::{AccessSettings, NodeSettings, ServeSettings};
@@ -43,7 +43,7 @@ impl Ownership {
     /// Take the role's locks, refusing while the role already runs.
     pub(crate) fn claim(self) -> Result<Option<RoleClaim>> {
         match self {
-            Self::Enforced(role) => crate::host::ownership::claim(role).map(Some),
+            Self::Enforced(role) => crate::ownership::claim(role).map(Some),
             #[cfg(feature = "test-utils")]
             Self::Unenforced => Ok(None),
         }
@@ -59,13 +59,13 @@ pub(crate) async fn finish_run(
     state_dir: Option<&Path>,
 ) -> Result<()> {
     if completion.status_quiesced {
-        crate::host::status::remove_own_status_file(writer, state_dir).await;
+        crate::status::remove_own_status_file(writer, state_dir).await;
     }
     completion.result
 }
 
 /// Hooks whose status sink writes the role's status file via
-/// [`crate::host::status::StatusWriter::save_with_state_dir`] (`None` = env
+/// [`crate::status::StatusWriter::save_with_state_dir`] (`None` = env
 /// default dir). The save runs on the blocking pool (the atomic save fsyncs;
 /// RS-07) and is awaited to completion by the flush loop, never detached.
 pub(crate) fn file_status_hooks<S: RoleStrategy>(
@@ -73,12 +73,12 @@ pub(crate) fn file_status_hooks<S: RoleStrategy>(
     state_dir: Option<&Path>,
 ) -> RoleHooks<S::Observation>
 where
-    for<'a> crate::host::status::StatusPayload: From<&'a S::Observation>,
+    for<'a> crate::status::StatusPayload: From<&'a S::Observation>,
 {
     let state_dir = state_dir.map(Path::to_path_buf);
     let writer = S::STATUS_WRITER;
     let status = StatusSink::new(move |observation: S::Observation| {
-        let payload = crate::host::status::StatusPayload::from(&observation);
+        let payload = crate::status::StatusPayload::from(&observation);
         let state_dir = state_dir.clone();
         Box::pin(async move {
             let path = tokio::task::spawn_blocking(move || {
@@ -107,7 +107,7 @@ where
 ///
 /// # Errors
 ///
-/// [`crate::host::error::CliError`]-classified config, ownership and iroh
+/// [`crate::error::CliError`]-classified config, ownership and iroh
 /// failures, or whatever `on_ready` returned.
 pub async fn run_foreground(
     role: Role,
@@ -134,7 +134,7 @@ pub async fn run_foreground(
 ///
 /// # Errors
 ///
-/// [`crate::host::error::CliError::Config`] when `cfg` is invalid, plus the
+/// [`crate::error::CliError::Config`] when `cfg` is invalid, plus the
 /// failures of [`run_foreground`].
 pub async fn run_quick_serve(
     cfg: ServeConfig,
@@ -171,8 +171,8 @@ where
     for<'a> StatusPayload: From<&'a S::Observation>,
 {
     cfg.validate()
-        .map_err(|e| crate::host::error::CliError::Config(format!("{label} quick mode: {e}")))?;
-    let claim = Some(crate::host::ownership::claim(role)?);
+        .map_err(|e| crate::error::CliError::Config(format!("{label} quick mode: {e}")))?;
+    let claim = Some(crate::ownership::claim(role)?);
     run_config::<S, _, _>(
         cfg,
         claim,
@@ -237,7 +237,7 @@ where
 /// where the async runtime no longer drives cleanup. Pid-checked, so a file
 /// another process owns is left alone.
 pub fn remove_own_status_file_for_exit(role: Role) {
-    crate::host::status::remove_own_status_file_for_exit(role);
+    crate::status::remove_own_status_file_for_exit(role);
 }
 
 /// Serve-role implementation of [`RoleStrategy`]: maps the config to engine
@@ -252,7 +252,7 @@ impl RoleStrategy for ServeStrategy {
     type Observation = ServeObservation;
 
     fn settings(cfg: &Self::Config) -> Result<Self::Settings> {
-        crate::host::config::serve_settings(cfg)
+        crate::config::serve_settings(cfg)
     }
 
     fn node(settings: &Self::Settings) -> &NodeSettings {
@@ -285,7 +285,7 @@ impl RoleStrategy for AccessStrategy {
     type Observation = AccessObservation;
 
     fn settings(cfg: &Self::Config) -> Result<Self::Settings> {
-        crate::host::config::access_settings(cfg)
+        crate::config::access_settings(cfg)
     }
 
     fn node(settings: &Self::Settings) -> &NodeSettings {
@@ -321,10 +321,10 @@ impl RoleStrategy for AccessStrategy {
 ///
 /// The associated type [`RoleStrategy::Config`] is the role's TOML document
 /// (`ServeConfig` / `AccessConfig`); it must load+validate+persist its own
-/// key via the [`crate::host::config::RoleDoc`] trait.
+/// key via the [`crate::config::RoleDoc`] trait.
 pub(crate) trait RoleStrategy {
     /// The TOML config document this role loads.
-    type Config: crate::host::config::RoleDoc + Send + 'static;
+    type Config: crate::config::RoleDoc + Send + 'static;
 
     /// The engine settings this role runs with.
     type Settings: Send + 'static;
@@ -399,7 +399,7 @@ where
     // (RS-07). It is awaited to completion, never detached.
     let path = config_path.to_path_buf();
     let cfg = tokio::task::spawn_blocking(move || -> Result<S::Config> {
-        let mut cfg = crate::host::service::load_config::<S::Config>(&path)?;
+        let mut cfg = crate::service::load_config::<S::Config>(&path)?;
         cfg.resolve_and_save_key(&path)?;
         Ok(cfg)
     })
@@ -491,12 +491,12 @@ mod tests {
         let state_dir = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let claim = crate::host::ownership::claim(Role::Serve).unwrap();
+            let claim = crate::ownership::claim(Role::Serve).unwrap();
             let on_ready: iroh_tunnel_engine::OnReady =
                 Box::new(|_| Err(anyhow::anyhow!("ready hook refused")));
             let hooks = file_status_hooks::<ServeStrategy>(on_ready, Some(state_dir.path()));
             let error = run_config::<ServeStrategy, _, _>(
-                crate::host::config::ServeConfig::default(),
+                crate::config::ServeConfig::default(),
                 Some(claim),
                 RunContext::new(),
                 Some(state_dir.path()),
@@ -509,7 +509,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.to_string(), "ready hook refused");
 
-            let reclaimed = crate::host::ownership::claim(Role::Serve);
+            let reclaimed = crate::ownership::claim(Role::Serve);
             assert!(
                 reclaimed.is_ok(),
                 "claim must be released after the failure"
@@ -524,7 +524,7 @@ mod tests {
     }
 
     fn write_own_serve_status(dir: &Path) -> std::path::PathBuf {
-        let status = crate::host::status::StatusFile {
+        let status = crate::status::StatusFile {
             node_id: "node".into(),
             home_relay: None,
             pid: std::process::id(),
@@ -532,8 +532,8 @@ mod tests {
             services: Vec::new(),
             connections: Vec::new(),
         };
-        crate::host::status::StatusWriter::serve()
-            .save_to(dir, &crate::host::status::StatusPayload::Serve(status))
+        crate::status::StatusWriter::serve()
+            .save_to(dir, &crate::status::StatusPayload::Serve(status))
             .unwrap()
     }
 
@@ -541,7 +541,7 @@ mod tests {
     async fn status_file_kept_when_flush_join_times_out() {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_own_serve_status(tmp.path());
-        let writer = crate::host::status::StatusWriter::serve();
+        let writer = crate::status::StatusWriter::serve();
 
         let unquiesced = RunCompletion {
             result: Ok(()),

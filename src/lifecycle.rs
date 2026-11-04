@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::signal;
 use tokio::time::Instant;
 
-pub use crate::host::RunContext;
+pub use iroh_tunnel_host::RunContext;
 
 /// Extra time past the drain deadline (endpoint close, status cleanup) before
 /// a stuck shutdown is abandoned by [`forced_exit`]. Technical implementation

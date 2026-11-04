@@ -9,7 +9,7 @@
 use anyhow::Result;
 
 use super::ServiceScope;
-use crate::host::error::CliError;
+use crate::error::CliError;
 
 /// What the install-time scope decision depends on, injected so the policy is
 /// a pure function of its inputs.

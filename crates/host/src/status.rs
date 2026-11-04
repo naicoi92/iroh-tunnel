@@ -12,7 +12,7 @@
 //! ## Path
 //!
 //! `<state dir>/<role>-status.json`, where the state dir is
-//! [`crate::host::paths::default_state_dir`] (`~/.local/state/iroh-tunnel` on
+//! [`crate::paths::default_state_dir`] (`~/.local/state/iroh-tunnel` on
 //! macOS/Linux, ignoring XDG; `LocalAppData/iroh-tunnel/state` on Windows).
 //! The file names are role-scoped (`serve-status.json`, renamed from
 //! `status.json` in 0.4.0; `access-status.json` since the #59 work) so both
@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub use iroh_tunnel_engine::conn_path::short_peer_id;
 use iroh_tunnel_engine::observation as obs;
 
 /// File name of the serve status file (role-scoped).
@@ -463,7 +464,7 @@ impl StatusWriter {
             })?;
             return Ok(dir.join(self.file_name()));
         }
-        Ok(crate::host::paths::default_state_dir()?.join(self.file_name()))
+        Ok(crate::paths::default_state_dir()?.join(self.file_name()))
     }
 
     /// Write `value` under the env-aware default path for this role.
@@ -551,14 +552,14 @@ impl StatusWriter {
         // Under a system service root writes into a user-owned directory:
         // go through a verified handle instead of paths (SM-04).
         #[cfg(unix)]
-        if let Some(uid) = crate::host::service::trust::trusted_uid_from_env()? {
+        if let Some(uid) = crate::service::trust::trusted_uid_from_env()? {
             let temp = format!(
                 "{}.tmp.{}.{}",
                 self.file_name(),
                 std::process::id(),
                 TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             );
-            crate::host::service::trust::publish(
+            crate::service::trust::publish(
                 dir,
                 uid,
                 self.file_name(),
@@ -566,7 +567,7 @@ impl StatusWriter {
                 content.as_bytes(),
             )?;
             // Best-effort, like the path-based branch below.
-            let _ = crate::host::service::trust::remove_in(dir, uid, LEGACY_STATUS_FILE_NAME);
+            let _ = crate::service::trust::remove_in(dir, uid, LEGACY_STATUS_FILE_NAME);
             return Ok(path);
         }
         std::fs::create_dir_all(dir)
@@ -655,8 +656,8 @@ fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path
         return;
     };
     #[cfg(unix)]
-    if let Ok(Some(uid)) = crate::host::service::trust::trusted_uid_from_env() {
-        use crate::host::service::trust::{read_in, remove_in};
+    if let Ok(Some(uid)) = crate::service::trust::trusted_uid_from_env() {
+        use crate::service::trust::{read_in, remove_in};
         let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
         else {
             return;
@@ -1171,7 +1172,7 @@ mod tests {
         assert_eq!(empty, unset);
         assert_eq!(
             unset,
-            crate::host::paths::default_state_dir()
+            crate::paths::default_state_dir()
                 .unwrap()
                 .join("serve-status.json")
         );

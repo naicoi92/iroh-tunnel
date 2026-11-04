@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context as _};
 use sha2::{Digest as _, Sha256};
 
-use crate::host::error::CliError;
-use crate::host::update_owner::Owner;
+use crate::error::CliError;
+use crate::update_owner::Owner;
 
 /// Release location; overridable for tests and mirrors (same variable as `install.sh`).
 pub const DEFAULT_BASE_URL: &str = "https://github.com/naicoi92/iroh-tunnel/releases";
@@ -625,7 +625,7 @@ pub fn replace_executable(target: &Path, contents: &[u8]) -> anyhow::Result<()> 
 }
 
 #[cfg(test)]
-#[path = "../../tests/common/release_server.rs"]
+#[path = "../tests/common/release_server.rs"]
 mod release_server;
 
 #[cfg(test)]
@@ -844,9 +844,9 @@ mod tests {
 
     // Real `cosign sign-blob` bundle (Sigstore public-good, issuer GitHub OAuth,
     // signer w.vollprecht@gmail.com), copied from sigstore-rust's test data.
-    const BLOB: &[u8] = include_bytes!("../../tests/fixtures/sigstore/cosign-v3-blob.txt");
+    const BLOB: &[u8] = include_bytes!("../tests/fixtures/sigstore/cosign-v3-blob.txt");
     const BUNDLE: &[u8] =
-        include_bytes!("../../tests/fixtures/sigstore/cosign-v3-blob.sigstore.json");
+        include_bytes!("../tests/fixtures/sigstore/cosign-v3-blob.sigstore.json");
     const ISSUER: &str = "https://github.com/login/oauth";
 
     #[test]

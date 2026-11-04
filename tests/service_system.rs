@@ -112,7 +112,7 @@ impl Home {
             format!(
                 "[node]\nsecret_key = {:?}\nrelay_urls = [\"https://relay.invalid\"]\n\n\
                  [[services]]\nname = \"{service}\"\nprotocol = \"tcp\"\nport = 9\n",
-                iroh_tunnel::config::encode_secret_key(&key)
+                iroh_tunnel_host::config::encode_secret_key(&key)
             ),
         )
         .unwrap();

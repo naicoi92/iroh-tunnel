@@ -24,7 +24,7 @@ use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::pin::Pin;
 use super::AppliedEffect;
 use super::{write_registration, ServiceScope};
-use crate::host::error::CliError;
+use crate::error::CliError;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 

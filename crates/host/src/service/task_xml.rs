@@ -14,7 +14,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::RestartPolicy;
-use crate::host::error::CliError;
+use crate::error::CliError;
 
 /// Task Scheduler refuses a restart interval below one minute.
 const MIN_RESTART_MINUTES: u64 = 1;

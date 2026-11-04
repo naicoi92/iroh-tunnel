@@ -27,8 +27,8 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::host::config::RoleDoc;
-use crate::host::error::CliError;
+use crate::config::RoleDoc;
+use crate::error::CliError;
 
 /// Set by the root-owned registration of a system service: the UID whose
 /// files the service may trust besides root. Its presence turns the checks on.

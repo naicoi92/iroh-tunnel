@@ -4,7 +4,7 @@
 //! `relay_auth.rs`: `iroh::test_utils::run_relay_server`, self-signed cert
 //! trusted via the crate's `test-utils` feature) — no Internet, no n0 relay
 //! network, CI-safe. The serve role's state dir is *injected* via
-//! [`iroh_tunnel::serve::run_with_shutdown_with_state_dir`] (no
+//! [`iroh_tunnel_host::testing::run_unowned`] (no
 //! process-global env mutation), so the test reads a real
 //! `serve-status.json` exactly as an operator would.
 //!
@@ -27,7 +27,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use iroh::SecretKey;
-use iroh_tunnel::config::encode_secret_key;
+use iroh_tunnel_host::config::encode_secret_key;
 
 /// Bytes the tunnel must transport unchanged in each direction.
 const PAYLOAD: &[u8] = b"hello-through-the-status-file";
@@ -121,8 +121,8 @@ multiplex = true
         let path = serve_cfg.clone();
         let state_dir = state_tmp.path().to_path_buf();
         tokio::spawn(async move {
-            iroh_tunnel::host::testing::run_unowned(
-                iroh_tunnel::host::status::Role::Serve,
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::status::Role::Serve,
                 &path,
                 Some(&state_dir),
                 async move {
@@ -135,8 +135,8 @@ multiplex = true
     let access_spawn = {
         let path = access_cfg.clone();
         tokio::spawn(async move {
-            iroh_tunnel::host::testing::run_unowned(
-                iroh_tunnel::host::status::Role::Access,
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::status::Role::Access,
                 &path,
                 None,
                 async move {

@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use crate::host::config_ops::{GeneratedIdentity, KeygenOutcome, Mutation, ServiceList};
-use crate::host::status::Role;
-use iroh_tunnel_engine::ReadyReport;
+use iroh_tunnel_host::config_ops::{GeneratedIdentity, KeygenOutcome, Mutation, ServiceList};
+use iroh_tunnel_host::status::Role;
+use iroh_tunnel_host::ReadyReport;
 
-use crate::host::service::{InstalledAt, ServiceNote};
-use iroh_tunnel_engine::{OnReady, ReadyServices};
+use iroh_tunnel_host::service::{InstalledAt, ServiceNote};
+use iroh_tunnel_host::{OnReady, ReadyServices};
 
 /// The stream a rendered line belongs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,10 +213,10 @@ pub(crate) fn print_ready() -> OnReady {
 /// Render the outcome of `update` as the stdout text the CLI printed before
 /// outcomes were typed. `exe_name` is the executable that was asked to update.
 pub(crate) fn render_update(
-    outcome: &crate::host::update::UpdateOutcome,
+    outcome: &iroh_tunnel_host::update::UpdateOutcome,
     exe_name: &str,
 ) -> String {
-    use crate::host::update::UpdateOutcome;
+    use iroh_tunnel_host::update::UpdateOutcome;
     match outcome {
         UpdateOutcome::AlreadyCurrent { version } => {
             format!("{exe_name} is already at {version}\n")
@@ -236,12 +236,12 @@ pub(crate) fn render_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::config::Protocol;
-    use iroh_tunnel_engine::{AccessReady, ReadyServices, ServeReady};
+    use iroh_tunnel_host::config::Protocol;
+    use iroh_tunnel_host::{AccessReady, ReadyServices, ServeReady};
 
     #[test]
     fn render_service_note_matches_legacy_text() {
-        use crate::host::service::{InstalledAt, ServiceNote};
+        use iroh_tunnel_host::service::{InstalledAt, ServiceNote};
         let check = |note: ServiceNote, stream: Stream, text: &str| {
             let (got_stream, got) = render_service_note(&note);
             assert_eq!((got_stream, got.as_str()), (stream, text));

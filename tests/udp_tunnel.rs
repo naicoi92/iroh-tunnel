@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use iroh::test_utils::run_relay_server;
 use iroh::SecretKey;
-use iroh_tunnel::config::encode_secret_key;
+use iroh_tunnel_host::config::encode_secret_key;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 
@@ -54,7 +54,7 @@ async fn try_recv(client: &UdpSocket, limit: Duration) -> Result<Option<Vec<u8>>
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, client.recv_from(&mut buf)).await {
             Ok(Ok((n, _))) => return Ok(Some(buf[..n].to_vec())),
-            Ok(Err(error)) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+            Ok(Err(error)) if iroh_tunnel_engine::udp::is_transient_recv_error(&error) => continue,
             Ok(Err(error)) => return Err(error.into()),
             Err(_) => return Ok(None),
         }
@@ -187,8 +187,8 @@ port = {port}
         let serve = {
             let state = serve_state.path().to_path_buf();
             tokio::spawn(async move {
-                iroh_tunnel::host::testing::run_unowned(
-                    iroh_tunnel::host::status::Role::Serve,
+                iroh_tunnel_host::testing::run_unowned(
+                    iroh_tunnel_host::status::Role::Serve,
                     &serve_cfg,
                     Some(&state),
                     async move {
@@ -201,8 +201,8 @@ port = {port}
         let access = {
             let state = access_state.path().to_path_buf();
             tokio::spawn(async move {
-                iroh_tunnel::host::testing::run_unowned(
-                    iroh_tunnel::host::status::Role::Access,
+                iroh_tunnel_host::testing::run_unowned(
+                    iroh_tunnel_host::status::Role::Access,
                     &access_cfg,
                     Some(&state),
                     async move {
@@ -258,8 +258,8 @@ port = {port}
         let (tx, rx) = oneshot::channel::<()>();
         self.stop.push(tx);
         self.roles.push(tokio::spawn(async move {
-            iroh_tunnel::host::testing::run_unowned(
-                iroh_tunnel::host::status::Role::Access,
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::status::Role::Access,
                 &path,
                 None,
                 async move {
@@ -328,8 +328,8 @@ port = {port}
         self.roles.insert(
             0,
             tokio::spawn(async move {
-                iroh_tunnel::host::testing::run_unowned(
-                    iroh_tunnel::host::status::Role::Serve,
+                iroh_tunnel_host::testing::run_unowned(
+                    iroh_tunnel_host::status::Role::Serve,
                     &path,
                     Some(&state),
                     async move {
@@ -369,7 +369,7 @@ async fn udp_echo(sock: UdpSocket, sources: Arc<Mutex<Vec<SocketAddr>>>) {
                 let _ = sock.send_to(&buf[..n], from).await;
             }
             // Windows reports an earlier reply's ICMP error here; keep serving.
-            Err(error) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+            Err(error) if iroh_tunnel_engine::udp::is_transient_recv_error(&error) => continue,
             Err(_) => break,
         }
     }

@@ -10,7 +10,7 @@
 //!
 //! A missing status file means the role is not running. The command itself
 //! is healthy, the config is fine, nothing permission-related failed, and
-//! iroh was never reached — none of the specific [`CliError`](crate::host::error::CliError)
+//! iroh was never reached — none of the specific [`CliError`](iroh_tunnel_host::error::CliError)
 //! categories (config/permission/iroh/service) fits. It therefore maps to
 //! the general error (exit 1) with an actionable message naming the exact
 //! path (see README §Exit codes).
@@ -20,12 +20,11 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::host::ownership;
-pub use crate::host::ownership::{Liveness, OwnerRecord, Tier};
-use crate::host::status::{
+pub use iroh_tunnel_host::status_read::{describe_owner, Liveness, OwnerRecord, Tier};
+use iroh_tunnel_host::status::{
     AccessStatusFile, Role, StatusFile, StatusPayload, StatusWriter, TransportStatus,
 };
-pub use crate::host::status_read::{
+pub use iroh_tunnel_host::status_read::{
     read_role_status, snapshot_pid, snapshot_started_at, Freshness, RoleStatus, Snapshot,
 };
 
@@ -127,7 +126,7 @@ fn describe_running(role: Role, tier: Tier, owner: Option<&OwnerRecord>, path: &
         "{} is running for {} ({}); no status snapshot at {} (it may use another state directory)",
         role.name(),
         tier.label(),
-        ownership::describe_owner(owner),
+        describe_owner(owner),
         path.display()
     )
 }
@@ -225,12 +224,12 @@ pub fn render_access_status(file: &AccessStatusFile) -> String {
     out
 }
 
-/// Short node id via the shared [`crate::conn_path::short_peer_id`] — one
+/// Short node id via the shared [`iroh_tunnel_host::status::short_peer_id`] — one
 /// definition shared with the access role's log lines, so a short id means
 /// the same thing everywhere. The header of each table carries this node's
 /// full id; the `--json` output carries everyone's.
 fn short_peer_id(peer: &str) -> String {
-    crate::conn_path::short_peer_id(peer)
+    iroh_tunnel_host::status::short_peer_id(peer)
 }
 
 /// One line per transport: `relay <url> [active]` / `direct <addr>`. The
@@ -310,7 +309,7 @@ fn padded_lines(cells: &[Vec<String>], widths: &[usize]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::{
+    use iroh_tunnel_host::status::{
         AccessServiceStatus, PeerConnectionStatus, PeerPathReport, ServiceStatus, TransportKind,
     };
 

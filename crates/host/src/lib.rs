@@ -2,10 +2,9 @@
 //! (the CLI today) drives — config editing, status files, role ownership,
 //! service management, updating and the role runtime.
 //!
-//! Gathered in one module so the whole tree can move verbatim into its own
-//! package: nothing here may reach outside `crate::host::` except the engine
-//! package, and nothing here reads stdin, prints, installs signal handlers or
-//! exits the process.
+//! Nothing here reads stdin, prints, installs signal handlers or exits the
+//! process; frontends own the terminal and map [`error::CliError`] to exit
+//! codes. The only package below is `iroh-tunnel-engine`.
 
 pub mod config;
 pub mod config_ops;

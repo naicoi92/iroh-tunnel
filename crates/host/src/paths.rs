@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::host::error::CliError;
+use crate::error::CliError;
 
 const APP_DIR: &str = "iroh-tunnel";
 

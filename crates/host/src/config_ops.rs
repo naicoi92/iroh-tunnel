@@ -3,13 +3,13 @@
 //!
 //! Each action edits the role's TOML config file in place with [`toml_edit`]
 //! so existing formatting and comments survive. Validation reuses the
-//! schema's own `validate()` (via [`ServeConfig`](crate::host::config::ServeConfig) /
-//! [`AccessConfig`](crate::host::config::AccessConfig)); a validation failure is
+//! schema's own `validate()` (via [`ServeConfig`](crate::config::ServeConfig) /
+//! [`AccessConfig`](crate::config::AccessConfig)); a validation failure is
 //! surfaced as a [`CliError::Config`] so it maps to exit code 2.
 //!
 //! ## Path resolution
 //!
-//! `--config` wins; otherwise [`crate::host::paths::default_config_path`]
+//! `--config` wins; otherwise [`crate::paths::default_config_path`]
 //! (`~/.config/iroh-tunnel/{role}.toml`, LocalAppData on Windows, with macOS
 //! legacy migration).
 
@@ -18,12 +18,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use toml_edit::DocumentMut;
 
-use crate::host::config_store::{
+use crate::config_store::{
     ensure_node_table, existing_secret_key, parse_doc, read_optional, resolve_target,
     strip_retired_fields, write_atomic, ConfigLock,
 };
-use crate::host::error::CliError;
-pub use crate::host::status::Role;
+use crate::error::CliError;
+pub use crate::status::Role;
 
 /// Placeholder printed by `config show` instead of a secret.
 const REDACTED: &str = "<redacted>";
@@ -91,12 +91,12 @@ pub fn keygen(
 ) -> Result<KeygenOutcome> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     let key = iroh::SecretKey::generate();
-    let key_str = crate::host::config::encode_secret_key(&key);
+    let key_str = crate::config::encode_secret_key(&key);
     let outcome = mutate_deciding(role, &path, |doc| {
         let existing = existing_secret_key(doc);
         if existing.is_some() && consent == RotationConsent::NotGiven {
             let current_node_id = existing
-                .and_then(|s| crate::host::config::resolve_secret_key(s).ok())
+                .and_then(|s| crate::config::resolve_secret_key(s).ok())
                 .map(|(k, _)| k.public().to_string());
             return Ok(Edit::Keep(KeygenOutcome::ConsentNeeded {
                 path: path.clone(),
@@ -145,7 +145,7 @@ impl std::fmt::Debug for GeneratedIdentity {
 pub fn random_identity() -> GeneratedIdentity {
     let key = iroh::SecretKey::generate();
     GeneratedIdentity {
-        secret: crate::host::config::encode_secret_key(&key),
+        secret: crate::config::encode_secret_key(&key),
         node_id: key.public().to_string(),
     }
 }
@@ -404,7 +404,7 @@ pub fn prepare_edit(role: Role, config: Option<&Path>) -> Result<EditAttempt> {
     let original = read_optional(&path)?;
     let original_text = original.clone().unwrap_or_default();
 
-    crate::host::config_store::ensure_parent(&path)?;
+    crate::config_store::ensure_parent(&path)?;
     let scratch = scratch_path(&path);
     write_atomic(&scratch, original_text.as_bytes())?;
     Ok(EditAttempt {
@@ -499,12 +499,19 @@ fn keep_rejected(path: &Path, edited: &str) -> (Option<PathBuf>, String) {
 // helpers
 // ---------------------------------------------------------------------------
 
+/// Follow symlinks from `path` to the file a write would actually replace
+/// (a dangling link resolves to its target). Pure path arithmetic: nothing is
+/// created or locked.
+pub fn resolve_write_target(path: &Path) -> PathBuf {
+    resolve_target(path)
+}
+
 /// Resolve a role configuration path. An explicit path takes precedence over
 /// the platform default. With `test-utils`, an absolute test config root may
 /// replace the platform root; a relative override is rejected.
 ///
 /// Returns an error when the platform root is unavailable or the test root is
-/// not absolute. Production builds resolve defaults with [`crate::host::paths`].
+/// not absolute. Production builds resolve defaults with [`crate::paths`].
 pub fn resolve_config_path(role: Role, override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.to_path_buf());
@@ -517,7 +524,7 @@ pub fn resolve_config_path(role: Role, override_path: Option<&Path>) -> Result<P
             .join("iroh-tunnel")
             .join(format!("{}.toml", role.name())));
     }
-    crate::host::paths::default_config_path(role.name())
+    crate::paths::default_config_path(role.name())
 }
 
 /// Read `path`, which a read command needs to exist (D3).
@@ -602,15 +609,15 @@ fn validate_role_doc(role: Role, content: &str, path: &Path) -> Result<()> {
     let parse_failure = |e: toml::de::Error| {
         invalid(format!(
             "{}: {}",
-            crate::host::config_store::describe_location(content, e.span()),
+            crate::config_store::describe_location(content, e.span()),
             e.message()
         ))
     };
     match role {
-        Role::Access => toml::from_str::<crate::host::config::AccessConfig>(content)
+        Role::Access => toml::from_str::<crate::config::AccessConfig>(content)
             .map_err(parse_failure)?
             .validate(),
-        Role::Serve => toml::from_str::<crate::host::config::ServeConfig>(content)
+        Role::Serve => toml::from_str::<crate::config::ServeConfig>(content)
             .map_err(parse_failure)?
             .validate(),
     }
@@ -785,7 +792,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = random_identity();
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-        let (key, _) = crate::host::config::resolve_secret_key(identity.secret()).unwrap();
+        let (key, _) = crate::config::resolve_secret_key(identity.secret()).unwrap();
         assert_eq!(identity.node_id, key.public().to_string());
         assert!(!format!("{identity:?}").contains(identity.secret()));
     }
@@ -796,7 +803,7 @@ mod tests {
         let key = iroh::SecretKey::generate();
         let text = format!(
             "[node]\nsecret_key = \"{}\"\n",
-            crate::host::config::encode_secret_key(&key)
+            crate::config::encode_secret_key(&key)
         );
         std::fs::write(path, &text).unwrap();
         key.public().to_string()

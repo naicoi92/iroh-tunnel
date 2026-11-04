@@ -1,5 +1,5 @@
 //! CLI glue for `service` commands: builds requests, answers the structured
-//! needs of [`crate::host::service`] with prompts, and prints notes.
+//! needs of [`iroh_tunnel_host::service`] with prompts, and prints notes.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 
 use crate::cli::{ScopeArgs, ServiceAction};
-use crate::host::error::CliError;
-use crate::host::service::scope::{self, Environment};
-use crate::host::service::{
+use iroh_tunnel_host::error::CliError;
+use iroh_tunnel_host::service::scope::{self, Environment};
+use iroh_tunnel_host::service::{
     self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, ServiceCall, ServiceScope,
 };
-use crate::host::status::Role;
+use iroh_tunnel_host::status::Role;
 use crate::render::print_service_note;
 
 /// The `iroh-tunnel` executable to register: the one on `PATH` (so a system

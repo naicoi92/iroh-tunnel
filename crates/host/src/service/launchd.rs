@@ -366,9 +366,9 @@ pub(super) fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
-    use crate::host::service::native::{Native, OutputMode};
-    use crate::host::service::ServiceNote;
+    use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
+    use crate::service::native::{Native, OutputMode};
+    use crate::service::ServiceNote;
 
     #[test]
     fn capture_mode_returns_native_output() {

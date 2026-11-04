@@ -72,7 +72,7 @@ impl Fixture {
     /// The task cannot carry `IROH_TUNNEL_STATE_DIR`, so the real per-user
     /// default is used (the test is opt-in and removes its task on exit).
     fn state(&self) -> PathBuf {
-        iroh_tunnel::paths::default_state_dir().expect("default state dir")
+        iroh_tunnel_host::paths::default_state_dir().expect("default state dir")
     }
     fn write_config(&self, relay: &str) -> Result<()> {
         let key = iroh::SecretKey::generate();
@@ -82,7 +82,7 @@ impl Fixture {
             format!(
                 "[node]\nsecret_key = {:?}\nrelay_urls = [{relay:?}]\n\n\
                  [[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
-                iroh_tunnel::config::encode_secret_key(&key)
+                iroh_tunnel_host::config::encode_secret_key(&key)
             ),
         )?;
         Ok(())

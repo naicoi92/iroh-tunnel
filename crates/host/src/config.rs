@@ -362,7 +362,7 @@ pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
             anyhow::anyhow!(
                 "failed to parse config: {}{}: {}",
                 path.display(),
-                crate::host::config_store::describe_location(content, e.span()),
+                crate::config_store::describe_location(content, e.span()),
                 e.message()
             )
         })?;
@@ -374,9 +374,9 @@ pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
     /// atomically and owner-only (CFG-04).
     fn save(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self).context("failed to serialize config")?;
-        let path = crate::host::config_store::resolve_target(path);
-        let _lock = crate::host::config_store::ConfigLock::acquire(&path)?;
-        crate::host::config_store::write_atomic(&path, content.as_bytes())
+        let path = crate::config_store::resolve_target(path);
+        let _lock = crate::config_store::ConfigLock::acquire(&path)?;
+        crate::config_store::write_atomic(&path, content.as_bytes())
     }
 
     /// Resolve the node secret key; if it was just generated, persist it back
@@ -394,7 +394,7 @@ pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
             return Ok(key);
         }
         tracing::warn!("secret_key empty, generated new key, saving to config");
-        let stored = crate::host::config_store::persist_generated_key::<Self>(
+        let stored = crate::config_store::persist_generated_key::<Self>(
             path,
             &encode_secret_key(&key),
         )?;

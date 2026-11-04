@@ -7,11 +7,9 @@ use std::process::Command;
 use serde_json::Value;
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
-/// The target is three members; `iroh-tunnel-host` is created by Task 20, so
-/// until then the workspace holds the other two. Task 20 adds the host here.
-const MEMBERS: [&str; 2] = ["iroh-tunnel", "iroh-tunnel-engine"];
+const MEMBERS: [&str; 3] = ["iroh-tunnel", "iroh-tunnel-host", "iroh-tunnel-engine"];
 /// Internal packages that must carry `publish = false`.
-const INTERNAL_PACKAGES: [&str; 1] = ["iroh-tunnel-engine"];
+const INTERNAL_PACKAGES: [&str; 2] = ["iroh-tunnel-host", "iroh-tunnel-engine"];
 
 fn metadata() -> Value {
     let output = Command::new(env!("CARGO"))
@@ -175,47 +173,28 @@ fn engine_sources_have_no_exit_signal_or_print() {
 
 fn host_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
-    rust_files(&Path::new(ROOT).join("src/host"), &mut files);
+    rust_files(&Path::new(ROOT).join("crates/host/src"), &mut files);
     files.sort();
     files
 }
 
-/// 20a: the in-package `src/host/` module reaches nothing in the root
-/// package, so Task 20b can move it verbatim into `crates/host`.
 #[test]
-fn host_module_has_no_outward_crate_paths() {
-    let mut offenders = Vec::new();
-    for file in host_files() {
-        let text = std::fs::read_to_string(&file).unwrap();
-        for (n, line) in text.lines().enumerate() {
-            let mut rest = line;
-            while let Some(i) = rest.find("crate::") {
-                rest = &rest[i + "crate::".len()..];
-                if !rest.starts_with("host::") {
-                    offenders.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
-                    break;
-                }
-            }
-        }
+fn host_depends_neither_on_root_nor_clap() {
+    let meta = metadata();
+    let host = package(&meta, "iroh-tunnel-host");
+    for dep in host["dependencies"].as_array().unwrap() {
+        let name = dep["name"].as_str().unwrap();
+        assert!(
+            !["iroh-tunnel", "clap", "edit", "which", "tracing-subscriber"].contains(&name),
+            "host depends on {name} ({} dependency)",
+            dep["kind"]
+        );
     }
-    assert!(
-        offenders.is_empty(),
-        "paths outside crate::host:\n{}",
-        offenders.join("\n")
-    );
 }
 
-#[test]
-fn host_module_has_no_terminal_io() {
-    let forbidden = [
-        concat!("process", "::exit"),
-        concat!("tokio", "::signal"),
-        concat!("print", "ln!"),
-        concat!("eprint", "ln!"),
-        concat!("print", "!"),
-        concat!("eprint", "!"),
-        concat!("std::io::", "stdin"),
-    ];
+/// Offending `file:line` entries for host non-test lines containing any of
+/// `forbidden` (comments and `testing.rs` excluded).
+fn host_offenders(forbidden: &[&str]) -> Vec<String> {
     let mut offenders = Vec::new();
     for file in host_files() {
         if file_name(&file) == "testing.rs" {
@@ -231,11 +210,114 @@ fn host_module_has_no_terminal_io() {
             }
         }
     }
+    offenders
+}
+
+#[test]
+fn host_sources_have_no_exit_stdin_print_or_signal() {
+    let offenders = host_offenders(&[
+        concat!("process", "::exit"),
+        concat!("tokio", "::signal"),
+        concat!("print", "ln!"),
+        concat!("eprint", "ln!"),
+        concat!("print", "!"),
+        concat!("eprint", "!"),
+        concat!("std::io::", "stdin"),
+        concat!("stdin", "()"),
+    ]);
     assert!(
         offenders.is_empty(),
         "forbidden terminal I/O:\n{}",
         offenders.join("\n")
     );
+}
+
+#[test]
+fn host_sources_open_no_listener() {
+    let offenders = host_offenders(&[
+        concat!("Tcp", "Listener"),
+        concat!("UdpSocket", "::bind"),
+        concat!("Unix", "Listener"),
+    ]);
+    assert!(
+        offenders.is_empty(),
+        "host opens a listener:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Every `run_unowned` / `Ownership::Unenforced` use sits in an item behind
+/// `#[cfg(feature = "test-utils")]`; `testing.rs` counts when `lib.rs` gates
+/// the `mod testing;` declaration.
+#[test]
+fn ownership_bypass_is_test_utils_gated() {
+    let gate = "#[cfg(feature = \"test-utils\")]";
+    let lib = std::fs::read_to_string(Path::new(ROOT).join("crates/host/src/lib.rs")).unwrap();
+    assert!(
+        lib.contains(&format!("{gate}\npub mod testing;")),
+        "testing module is not test-utils gated in lib.rs"
+    );
+    let mut offenders = Vec::new();
+    for file in host_files() {
+        if file_name(&file) == "testing.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") || !(code.contains("run_unowned") || code.contains("Unenforced"))
+            {
+                continue;
+            }
+            // Gated when an attribute run directly above (or the enclosing
+            // `#[cfg(feature = "test-utils")]` impl/match-arm head) names it.
+            let gated = lines[..i]
+                .iter()
+                .rev()
+                .take_while(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("#[") || t.starts_with("//")
+                })
+                .any(|l| l.trim() == gate);
+            if !gated {
+                offenders.push(format!("{}:{}: {}", file.display(), i + 1, code));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "ungated bypass:\n{}", offenders.join("\n"));
+}
+
+#[test]
+fn release_feature_graph_excludes_test_utils() {
+    let output = Command::new(env!("CARGO"))
+        .args(["tree", "-e", "features", "-e", "normal", "-p", "iroh-tunnel", "--locked"])
+        .current_dir(ROOT)
+        .output()
+        .expect("run cargo tree");
+    assert!(
+        output.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tree = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !tree.contains("test-utils"),
+        "release feature graph contains test-utils"
+    );
+}
+
+#[test]
+fn root_has_no_self_dev_dependency() {
+    let meta = metadata();
+    let root = package(&meta, "iroh-tunnel");
+    for dep in root["dependencies"].as_array().unwrap() {
+        assert_ne!(
+            dep["name"], "iroh-tunnel",
+            "root depends on itself ({} dependency)",
+            dep["kind"]
+        );
+    }
 }
 
 #[test]
@@ -281,6 +363,45 @@ fn engine_files_export_at_most_one_operation() {
         }
         if !NO_TEST_ALLOWLIST.contains(&name) && !text.contains("#[cfg(test)]\nmod tests") {
             offenders.push(format!("{}: no #[cfg(test)] mod tests", file.display()));
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+/// Private host infrastructure exempt from the one-operation rule (plan
+/// Task 20): each holds helpers, not a frontend-facing operation.
+const HOST_INFRASTRUCTURE: [&str; 11] = [
+    "store.rs",
+    "writer.rs",
+    "ownership.rs",
+    "native.rs",
+    "trust.rs",
+    "account.rs",
+    "system.rs",
+    "pin.rs",
+    "task_xml.rs",
+    "replace.rs",
+    "verify.rs",
+];
+
+#[test]
+fn host_files_export_at_most_one_operation() {
+    let mut offenders = Vec::new();
+    for file in host_files() {
+        let name = file_name(&file);
+        let in_backend = file.parent().is_some_and(|p| p.ends_with("backend"));
+        if ["lib.rs", "mod.rs", "types.rs", "testing.rs"].contains(&name) || in_backend {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        let count = non_test_lines(&text)
+            .iter()
+            .filter(|(_, l)| l.starts_with("pub fn ") || l.starts_with("pub async fn "))
+            .count();
+        // `to_settings.rs` is one mapping operation per role pair (two fns).
+        let limit = if name == "to_settings.rs" { 2 } else { 1 };
+        if count > limit && !HOST_INFRASTRUCTURE.contains(&name) {
+            offenders.push(format!("{}: {count} exported operations", file.display()));
         }
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));

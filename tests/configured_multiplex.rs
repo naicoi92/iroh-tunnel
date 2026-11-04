@@ -3,7 +3,7 @@
 //! verification: never use this artifact with public relays or real secrets.
 
 use anyhow::{Context, Result};
-use iroh_tunnel::config::{encode_secret_key, AccessConfig};
+use iroh_tunnel_host::config::{encode_secret_key, AccessConfig};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};

@@ -2,7 +2,7 @@
 //! show / edit / path.
 //!
 //! Each handler calls the terminal-free host operation in
-//! [`crate::host::config_ops`] and does the prompting and printing; the
+//! [`iroh_tunnel_host::config_ops`] and does the prompting and printing; the
 //! `$EDITOR` invocation of `edit` lives here too.
 
 use std::io::{BufRead, Write};
@@ -11,14 +11,13 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::cli::AddServiceArgs;
-use crate::host::config_ops::{
+use iroh_tunnel_host::config_ops::{
     add_service, identity_state, keygen, list_services, prepare_edit, random_identity,
     remove_service, show_config, AddService, Disclosure, EditOutcome, IdentityState, KeygenOutcome,
     RotationConsent,
 };
-use crate::host::config_store::resolve_target;
-use crate::host::error::CliError;
-pub use crate::host::status::Role;
+use iroh_tunnel_host::error::CliError;
+pub use iroh_tunnel_host::status::Role;
 use crate::render;
 
 /// Request for `config add` built from the parsed CLI arguments.
@@ -44,7 +43,9 @@ pub fn keygen_cli(role: Role, config: Option<&Path>, yes: bool) -> Result<()> {
     // Ask before taking the lock so a slow answer does not stall other
     // writers; the decision is re-checked under the lock in `keygen`.
     if !yes && identity_state(role, config)? == IdentityState::HasKey {
-        let path = resolve_target(&crate::host::config_ops::resolve_config_path(role, config)?);
+        let path = iroh_tunnel_host::config_ops::resolve_write_target(
+            &iroh_tunnel_host::config_ops::resolve_config_path(role, config)?,
+        );
         confirm_rotation(&path)?;
         consent = RotationConsent::Given;
     }
@@ -154,7 +155,7 @@ pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
 
 /// `config path`: print the resolved config file path.
 pub fn path(role: Role, config: Option<&Path>) -> Result<()> {
-    let path = crate::host::config_ops::resolve_config_path(role, config)?;
+    let path = iroh_tunnel_host::config_ops::resolve_config_path(role, config)?;
     print!("{}", render::render_path(&path));
     Ok(())
 }

@@ -36,7 +36,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use iroh::SecretKey;
-use iroh_tunnel::config::encode_secret_key;
+use iroh_tunnel_host::config::encode_secret_key;
 
 /// Bytes the tunnel must transport unchanged in each direction.
 const PAYLOAD: &[u8] = b"hello-through-the-tokened-relay";
@@ -304,8 +304,8 @@ multiplex = true
     let serve_handle = {
         let path = serve_cfg_path.clone();
         tokio::spawn(async move {
-            iroh_tunnel::host::testing::run_unowned(
-                iroh_tunnel::host::status::Role::Serve,
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::status::Role::Serve,
                 &path,
                 None,
                 async move {
@@ -318,8 +318,8 @@ multiplex = true
     let access_handle = {
         let path = access_cfg_path.clone();
         tokio::spawn(async move {
-            iroh_tunnel::host::testing::run_unowned(
-                iroh_tunnel::host::status::Role::Access,
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::status::Role::Access,
                 &path,
                 None,
                 async move {

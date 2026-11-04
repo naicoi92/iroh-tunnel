@@ -347,7 +347,7 @@ fn write_key(dir: &Path, seed: u8) -> Result<(PathBuf, String)> {
     let path = dir.join("identity.key");
     std::fs::write(
         &path,
-        format!("{}\n", iroh_tunnel::config::encode_secret_key(&key)),
+        format!("{}\n", iroh_tunnel_host::config::encode_secret_key(&key)),
     )?;
     Ok((path, key.public().to_string()))
 }

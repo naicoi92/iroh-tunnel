@@ -4,7 +4,7 @@
 //!
 //! A missing status file means the role is not running. The command itself
 //! is healthy, the config is fine, nothing permission-related failed, and
-//! iroh was never reached — none of the specific [`crate::host::error::CliError`]
+//! iroh was never reached — none of the specific [`crate::error::CliError`]
 //! categories fits, so the CLI maps it to the general error (exit 1).
 
 use std::path::{Path, PathBuf};
@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 
-use crate::host::ownership;
-pub use crate::host::ownership::{Liveness, OwnerRecord, Tier};
-use crate::host::status::{Role, StatusPayload, StatusWriter};
+use crate::ownership;
+pub use crate::ownership::{describe_owner, Liveness, OwnerRecord, Tier};
+use crate::status::{Role, StatusPayload, StatusWriter};
 
 /// The classified, read-only state of one role's status: where the file
 /// lives, whether the role is running, and what the file held.
@@ -151,7 +151,7 @@ fn parse_status_file<T: DeserializeOwned>(body: &str, path: &Path) -> Result<T> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::status::StatusFile;
+    use crate::status::StatusFile;
 
     fn serve_file_json(pid: u32) -> String {
         serde_json::to_string(&StatusFile {

@@ -14,7 +14,7 @@ use anyhow::Result;
 use super::account::{self, Account};
 use super::pin::{Pin, RetargetConsent};
 use super::trust;
-use crate::host::error::CliError;
+use crate::error::CliError;
 
 /// The user whose files a system service uses, and their pinned paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +48,7 @@ pub struct Request<'a> {
     pub sudo_user: Option<&'a str>,
 }
 
-pub(crate) fn unknown_user(why: &str, role: &str) -> anyhow::Error {
+pub fn unknown_user(why: &str, role: &str) -> anyhow::Error {
     CliError::Config(format!(
         "cannot tell which user this system service is for ({why}); the service must not fall \
          back to root's home. Re-run from the user's session with `sudo iroh-tunnel {role} \
@@ -132,7 +132,7 @@ pub fn resolve_target_account(
     let config = match request.config {
         Some(path) => trust::canonical(path)?,
         None => {
-            let path = crate::host::paths::config_path_in(&account.home, request.role);
+            let path = crate::paths::config_path_in(&account.home, request.role);
             trust::canonical(&path).map_err(|_| {
                 CliError::Config(format!(
                     "no configuration for user {} at {}. Create it as that user \
@@ -148,7 +148,7 @@ pub fn resolve_target_account(
     // symlinked home or /var must be resolved once, here (SM-04).
     let state = trust::canonical(&match request.state {
         Some(path) => std::path::absolute(path)?,
-        None => crate::host::paths::state_dir_in(&account.home),
+        None => crate::paths::state_dir_in(&account.home),
     })
     .map_err(|_| {
         CliError::Config(format!(
