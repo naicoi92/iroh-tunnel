@@ -48,6 +48,9 @@ pub struct Request<'a> {
     pub sudo_user: Option<&'a str>,
 }
 
+/// The refusal for a system install whose target user cannot be determined.
+///
+/// A [`CliError::Config`] naming `why` and the re-run options for `role`; nothing was changed.
 pub fn unknown_user(why: &str, role: &str) -> anyhow::Error {
     CliError::Config(format!(
         "cannot tell which user this system service is for ({why}); the service must not fall \

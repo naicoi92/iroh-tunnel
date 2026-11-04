@@ -11,14 +11,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::cli::AddServiceArgs;
-use iroh_tunnel_host::config_ops::{
+use crate::render;
+use iroh_tunnel_host::config::{
     add_service, identity_state, keygen, list_services, prepare_edit, random_identity,
     remove_service, show_config, AddService, Disclosure, EditOutcome, IdentityState, KeygenOutcome,
     RotationConsent,
 };
 use iroh_tunnel_host::error::CliError;
-pub use iroh_tunnel_host::status::Role;
-use crate::render;
+pub use iroh_tunnel_host::Role;
 
 /// Request for `config add` built from the parsed CLI arguments.
 fn add_request(args: &AddServiceArgs) -> AddService {
@@ -43,8 +43,8 @@ pub fn keygen_cli(role: Role, config: Option<&Path>, yes: bool) -> Result<()> {
     // Ask before taking the lock so a slow answer does not stall other
     // writers; the decision is re-checked under the lock in `keygen`.
     if !yes && identity_state(role, config)? == IdentityState::HasKey {
-        let path = iroh_tunnel_host::config_ops::resolve_write_target(
-            &iroh_tunnel_host::config_ops::resolve_config_path(role, config)?,
+        let path = iroh_tunnel_host::config::resolve_write_target(
+            &iroh_tunnel_host::config::resolve_config_path(role, config)?,
         );
         confirm_rotation(&path)?;
         consent = RotationConsent::Given;
@@ -155,7 +155,7 @@ pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
 
 /// `config path`: print the resolved config file path.
 pub fn path(role: Role, config: Option<&Path>) -> Result<()> {
-    let path = iroh_tunnel_host::config_ops::resolve_config_path(role, config)?;
+    let path = iroh_tunnel_host::config::resolve_config_path(role, config)?;
     print!("{}", render::render_path(&path));
     Ok(())
 }

@@ -30,9 +30,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use iroh::SecretKey;
+use iroh_tunnel::status_cmd::{render_access_status, render_serve_status};
 use iroh_tunnel_host::config::encode_secret_key;
 use iroh_tunnel_host::status::{AccessStatusFile, StatusFile};
-use iroh_tunnel::status_cmd::{render_access_status, render_serve_status};
 
 /// Bytes the tunnel must transport unchanged in each direction.
 const PAYLOAD: &[u8] = b"hello-through-the-access-status-file";
@@ -131,7 +131,7 @@ multiplex = true
         let state = state_dir.clone();
         tokio::spawn(async move {
             iroh_tunnel_host::testing::run_unowned(
-                iroh_tunnel_host::status::Role::Serve,
+                iroh_tunnel_host::Role::Serve,
                 &path,
                 Some(&state),
                 async move {
@@ -146,7 +146,7 @@ multiplex = true
         let state = state_dir.clone();
         tokio::spawn(async move {
             iroh_tunnel_host::testing::run_unowned(
-                iroh_tunnel_host::status::Role::Access,
+                iroh_tunnel_host::Role::Access,
                 &path,
                 Some(&state),
                 async move {

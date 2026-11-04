@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Host operations: everything file-, OS- and process-bound that a frontend
 //! (the CLI today) drives — config editing, status files, role ownership,
 //! service management, updating and the role runtime.
@@ -7,17 +8,16 @@
 //! codes. The only package below is `iroh-tunnel-engine`.
 
 pub mod config;
-pub mod config_ops;
-pub(crate) mod config_store;
 pub mod error;
 pub(crate) mod ownership;
 pub mod paths;
+pub mod role;
 pub mod runtime;
 pub mod service;
 pub mod status;
-pub mod status_read;
 pub mod update;
-pub mod update_owner;
+
+pub use role::Role;
 
 pub use iroh_tunnel_engine::settings::Protocol;
 /// Bridge re-exports (deviation R3): the runtime types the CLI hands to or

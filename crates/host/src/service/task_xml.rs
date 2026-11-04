@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::RestartPolicy;
+use super::types::RestartPolicy;
 use crate::error::CliError;
 
 /// Task Scheduler refuses a restart interval below one minute.

@@ -10,7 +10,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::AppliedEffect;
+use super::types::AppliedEffect;
 
 /// How a native command's output is delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,9 @@ pub enum OutputMode {
 /// delivered and where notes go. Notes reach `notes` synchronously, at the
 /// point in the operation where they happen.
 pub struct ServiceCall<'a> {
+    /// How native command output is delivered.
     pub output: OutputMode,
+    /// Observer for notes, called synchronously.
     pub notes: &'a mut dyn FnMut(&ServiceNote),
 }
 
@@ -53,26 +55,54 @@ pub enum InstalledAt {
 pub enum ServiceNote {
     /// BusyBox init has no per-user services: a user-scope request installs
     /// the system-wide script.
-    BusyboxSystemWide { script: PathBuf },
+    BusyboxSystemWide {
+        /// The system-wide script that was installed.
+        script: PathBuf,
+    },
     /// `launchctl bootstrap` failed; commands that give richer diagnostics.
     LaunchdBootstrapHint {
+        /// The `launchctl` service target.
         target: String,
+        /// The `launchctl` domain.
         domain: String,
+        /// The plist that failed to bootstrap.
         plist: PathBuf,
     },
     /// The service was installed and started.
-    Installed { name: String, at: InstalledAt },
+    Installed {
+        /// The registered service name.
+        name: String,
+        /// Where the registration lives.
+        at: InstalledAt,
+    },
     /// The service was removed.
-    Uninstalled { name: String },
+    Uninstalled {
+        /// The removed service name.
+        name: String,
+    },
     /// `stop` found nothing running.
-    AlreadyStopped { name: String },
+    AlreadyStopped {
+        /// The service name.
+        name: String,
+    },
     /// Windows `status`: the role lock says it runs. `owner` is the
     /// described owner (pid, node id).
-    RoleRunning { role: String, owner: String },
+    RoleRunning {
+        /// Role name.
+        role: String,
+        /// Description of the owner.
+        owner: String,
+    },
     /// Windows `status`: the role lock is free.
-    RoleNotRunning { role: String },
+    RoleNotRunning {
+        /// Role name.
+        role: String,
+    },
     /// Windows `status`: the verbose task listing, verbatim.
-    TaskListing { text: String },
+    TaskListing {
+        /// The listing text.
+        text: String,
+    },
 }
 
 /// The result of one native command.

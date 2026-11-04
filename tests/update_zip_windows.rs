@@ -68,7 +68,7 @@ fn run_update(server: &ReleaseServer, target: &str, install: &Path) -> Result<()
         current_version: "0.0.1",
         install_path: install.to_owned(),
         verifier: &Accept,
-        owner: iroh_tunnel_host::update_owner::Owner::Standalone,
+        owner: iroh_tunnel_host::update::Owner::Standalone,
     };
     let req = UpdateRequest {
         to: None,

@@ -7,8 +7,8 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::role::Role;
 use crate::runtime::{run_role, Ownership};
-use crate::status::Role;
 use crate::RunContext;
 
 /// Run `role` from `config` until `shutdown` resolves, without claiming the

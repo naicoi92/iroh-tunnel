@@ -305,7 +305,7 @@ multiplex = true
         let path = serve_cfg_path.clone();
         tokio::spawn(async move {
             iroh_tunnel_host::testing::run_unowned(
-                iroh_tunnel_host::status::Role::Serve,
+                iroh_tunnel_host::Role::Serve,
                 &path,
                 None,
                 async move {
@@ -319,7 +319,7 @@ multiplex = true
         let path = access_cfg_path.clone();
         tokio::spawn(async move {
             iroh_tunnel_host::testing::run_unowned(
-                iroh_tunnel_host::status::Role::Access,
+                iroh_tunnel_host::Role::Access,
                 &path,
                 None,
                 async move {

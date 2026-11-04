@@ -193,11 +193,12 @@ fn host_depends_neither_on_root_nor_clap() {
 }
 
 /// Offending `file:line` entries for host non-test lines containing any of
-/// `forbidden` (comments and `testing.rs` excluded).
+/// `forbidden`. Comments, `testing.rs` and `fixtures.rs` (test-only modules
+/// declared behind `#[cfg(test)]`) are excluded.
 fn host_offenders(forbidden: &[&str]) -> Vec<String> {
     let mut offenders = Vec::new();
     for file in host_files() {
-        if file_name(&file) == "testing.rs" {
+        if ["testing.rs", "fixtures.rs"].contains(&file_name(&file)) {
             continue;
         }
         let text = std::fs::read_to_string(&file).unwrap();
@@ -266,7 +267,8 @@ fn ownership_bypass_is_test_utils_gated() {
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let code = line.trim_start();
-            if code.starts_with("//") || !(code.contains("run_unowned") || code.contains("Unenforced"))
+            if code.starts_with("//")
+                || !(code.contains("run_unowned") || code.contains("Unenforced"))
             {
                 continue;
             }
@@ -285,13 +287,26 @@ fn ownership_bypass_is_test_utils_gated() {
             }
         }
     }
-    assert!(offenders.is_empty(), "ungated bypass:\n{}", offenders.join("\n"));
+    assert!(
+        offenders.is_empty(),
+        "ungated bypass:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]
 fn release_feature_graph_excludes_test_utils() {
     let output = Command::new(env!("CARGO"))
-        .args(["tree", "-e", "features", "-e", "normal", "-p", "iroh-tunnel", "--locked"])
+        .args([
+            "tree",
+            "-e",
+            "features",
+            "-e",
+            "normal",
+            "-p",
+            "iroh-tunnel",
+            "--locked",
+        ])
         .current_dir(ROOT)
         .output()
         .expect("run cargo tree");
@@ -394,14 +409,27 @@ fn host_files_export_at_most_one_operation() {
             continue;
         }
         let text = std::fs::read_to_string(&file).unwrap();
+        // Distinct names: a `cfg(unix)` / `cfg(not(unix))` twin is one operation.
         let count = non_test_lines(&text)
             .iter()
-            .filter(|(_, l)| l.starts_with("pub fn ") || l.starts_with("pub async fn "))
-            .count();
+            .filter_map(|(_, l)| {
+                let rest = l
+                    .strip_prefix("pub fn ")
+                    .or_else(|| l.strip_prefix("pub async fn "))?;
+                Some(rest.split(['(', '<']).next().unwrap().to_string())
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
         // `to_settings.rs` is one mapping operation per role pair (two fns).
         let limit = if name == "to_settings.rs" { 2 } else { 1 };
         if count > limit && !HOST_INFRASTRUCTURE.contains(&name) {
             offenders.push(format!("{}: {count} exported operations", file.display()));
+        }
+        if !HOST_INFRASTRUCTURE.contains(&name)
+            && name != "fixtures.rs"
+            && !text.contains("#[cfg(test)]\nmod tests")
+        {
+            offenders.push(format!("{}: no #[cfg(test)] mod tests", file.display()));
         }
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));

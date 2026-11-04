@@ -67,7 +67,9 @@ impl Pin {
 /// consent can be given for a legacy unpinned registration (`None`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetargetConsent {
+    /// The pin of the registration being replaced; `None` for a legacy unpinned one.
     pub previous: Option<Pin>,
+    /// The pin the new registration would carry.
     pub proposed: Pin,
 }
 

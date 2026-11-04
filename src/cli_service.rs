@@ -7,13 +7,13 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 
 use crate::cli::{ScopeArgs, ServiceAction};
+use crate::render::print_service_note;
 use iroh_tunnel_host::error::CliError;
-use iroh_tunnel_host::service::scope::{self, Environment};
+use iroh_tunnel_host::service::Environment;
 use iroh_tunnel_host::service::{
     self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, ServiceCall, ServiceScope,
 };
-use iroh_tunnel_host::status::Role;
-use crate::render::print_service_note;
+use iroh_tunnel_host::Role;
 
 /// The `iroh-tunnel` executable to register: the one on `PATH` (so a system
 /// install is used), else the running executable so `cargo run -- service
@@ -32,7 +32,7 @@ pub(crate) fn resolve_tunnel_executable() -> anyhow::Result<PathBuf> {
 /// Probe the running process for the install-time scope decision.
 pub(crate) fn detect_environment() -> Environment {
     Environment {
-        elevated: scope::is_elevated(),
+        elevated: service::is_elevated(),
         can_answer: is_interactive(),
     }
 }
@@ -85,7 +85,7 @@ pub(crate) fn dispatch(role: Role, action: ServiceAction) -> anyhow::Result<()> 
     // Verbs on an existing service: no prompt, and the scope follows privilege
     // when it is not given.
     let existing = |args: &ScopeArgs| {
-        explicit_scope(args).unwrap_or_else(|| scope::default_scope(env.elevated))
+        explicit_scope(args).unwrap_or_else(|| service::default_scope(env.elevated))
     };
     let mut notes = print_service_note;
     let mut call = cli_call(&mut notes);
@@ -173,7 +173,7 @@ fn ask_scope(input: &mut impl BufRead, prompt: &mut impl Write) -> anyhow::Resul
         )
         .into());
     }
-    scope::parse_scope_answer(&answer)
+    service::parse_scope_answer(&answer)
 }
 
 /// The user a person names for a system install. An unknown name is reported
@@ -191,7 +191,7 @@ fn ask_user(
     prompt.flush()?;
     let mut answer = String::new();
     if input.read_line(&mut answer)? == 0 {
-        return Err(service::system::unknown_user(
+        return Err(service::unknown_user(
             "no answer to the user prompt",
             role.name(),
         ));
@@ -220,7 +220,7 @@ fn confirm_retarget(
     let owner = match &previous {
         Some(p) => format!(
             "user {} (uid {}, config {})",
-            account_name(p.uid),
+            service::account_name(p.uid),
             p.uid,
             p.config.display()
         ),
@@ -229,7 +229,7 @@ fn confirm_retarget(
     let question = format!(
         "A system service is already installed for {owner}. Retarget it to user {} (config {})? \
          Both users' config files are kept. [y/N]: ",
-        account_name(proposed.uid),
+        service::account_name(proposed.uid),
         proposed.config.display()
     );
     let declined = |why: &str| -> anyhow::Error {
@@ -253,16 +253,6 @@ fn confirm_retarget(
     } else {
         Err(declined("retarget declined"))
     }
-}
-
-#[cfg(unix)]
-fn account_name(uid: u32) -> String {
-    service::account::by_uid(uid).map_or_else(|| "?".to_owned(), |a| a.name)
-}
-
-#[cfg(not(unix))]
-fn account_name(_uid: u32) -> String {
-    "?".to_owned()
 }
 
 #[cfg(test)]

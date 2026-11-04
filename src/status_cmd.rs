@@ -20,13 +20,10 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-pub use iroh_tunnel_host::status_read::{describe_owner, Liveness, OwnerRecord, Tier};
-use iroh_tunnel_host::status::{
-    AccessStatusFile, Role, StatusFile, StatusPayload, StatusWriter, TransportStatus,
-};
-pub use iroh_tunnel_host::status_read::{
-    read_role_status, snapshot_pid, snapshot_started_at, Freshness, RoleStatus, Snapshot,
-};
+pub use iroh_tunnel_host::status::{describe_owner, Liveness, OwnerRecord, Tier};
+pub use iroh_tunnel_host::status::{read_role_status, Freshness, RoleStatus, Snapshot};
+use iroh_tunnel_host::status::{AccessStatusFile, StatusFile, StatusPayload, TransportStatus};
+use iroh_tunnel_host::Role;
 
 /// Entry point for `iroh-tunnel <role> status [--json]`.
 pub fn run(role: Role, json: bool) -> Result<()> {
@@ -53,7 +50,7 @@ pub fn run(role: Role, json: bool) -> Result<()> {
             Err(anyhow!(
                 "{} is not running (no {} found at {})",
                 role.name(),
-                StatusWriter::new(role).file_name(),
+                role.status_file_name(),
                 path.display()
             ))
         }
@@ -93,8 +90,8 @@ fn print_line(line: &str) -> Result<()> {
 
 /// Print the stale-snapshot warning for `freshness`, if any.
 fn warn_for_freshness(role: Role, freshness: &Freshness, payload: &StatusPayload) {
-    let pid = snapshot_pid(payload);
-    let started_at = snapshot_started_at(payload);
+    let pid = payload.pid();
+    let started_at = payload.started_at();
     match freshness {
         Freshness::StalePid { live_pid: None } => eprintln!(
             "warning: {} is not running; this snapshot (pid {pid}) is stale, showing the last \

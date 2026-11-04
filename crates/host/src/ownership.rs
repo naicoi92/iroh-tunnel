@@ -41,7 +41,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CliError;
-use crate::status::Role;
+use crate::role::Role;
 
 /// Test-only stand-in for the root-owned machine lock directory.
 #[cfg(feature = "test-utils")]
@@ -54,27 +54,36 @@ const OTHERS_READ: u32 = 0o004;
 /// Who is recorded as running a role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnerRecord {
+    /// Role name (`"serve"` / `"access"`).
     pub role: String,
+    /// Process id of the owner.
     pub pid: u32,
     /// Public node id (never the secret key); `None` until the endpoint's
     /// identity is known.
     pub node_id: Option<String>,
+    /// Start time of the owner, in epoch seconds.
     pub started_at: u64,
 }
 
 /// Where a running owner was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
+    /// The per-user lock directory.
     User,
+    /// The machine-wide lock directory.
     Machine,
 }
 
 /// Result of probing a role for a live owner.
 #[derive(Debug)]
 pub enum Liveness {
+    /// No process holds the role.
     NotRunning,
+    /// A process holds the role.
     Running {
+        /// Which lock tier is held.
         tier: Tier,
+        /// The owner record, when it can be read.
         owner: Option<OwnerRecord>,
     },
 }

@@ -10,16 +10,16 @@ use std::path::{Path, PathBuf};
 use crate::cli;
 use crate::cli::{AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ServeCli};
 use crate::config_cmd;
-use iroh_tunnel_host::config_ops;
-use iroh_tunnel_host::error::CliError;
-use iroh_tunnel_host::runtime;
-use iroh_tunnel_host::status::Role as StatusRole;
-use iroh_tunnel_host::update;
-use iroh_tunnel_host::RunContext;
 use crate::lifecycle;
 use crate::status_cmd;
 use anyhow::Context as _;
 use clap::Parser;
+use iroh_tunnel_host::config as config_ops;
+use iroh_tunnel_host::error::CliError;
+use iroh_tunnel_host::runtime;
+use iroh_tunnel_host::update;
+use iroh_tunnel_host::Role as StatusRole;
+use iroh_tunnel_host::RunContext;
 
 /// Entry point of the all-in-one `iroh-tunnel` (`it`) binary.
 pub fn main_all_in_one() -> ! {
@@ -234,7 +234,7 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
         exe_name,
         target,
         current_version: env!("APP_VERSION"),
-        owner: iroh_tunnel_host::update_owner::detect(&install_path),
+        owner: iroh_tunnel_host::update::detect(&install_path),
         install_path,
         verifier: &update::SigstoreVerifier::release(),
     };

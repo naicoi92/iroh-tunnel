@@ -10,11 +10,11 @@ mod common;
 
 use anyhow::Result;
 use common::release_server::ReleaseServer;
+use iroh_tunnel_host::update::Owner;
 use iroh_tunnel_host::update::{
     check_owner, update, OverwritePolicy, OwnerDecision, SignatureVerifier, UpdateContext,
     UpdateRequest, Verification,
 };
-use iroh_tunnel_host::update_owner::Owner;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use iroh_tunnel_host::config_ops::{GeneratedIdentity, KeygenOutcome, Mutation, ServiceList};
-use iroh_tunnel_host::status::Role;
+use iroh_tunnel_host::config::{GeneratedIdentity, KeygenOutcome, Mutation, ServiceList};
 use iroh_tunnel_host::ReadyReport;
+use iroh_tunnel_host::Role;
 
 use iroh_tunnel_host::service::{InstalledAt, ServiceNote};
 use iroh_tunnel_host::{OnReady, ReadyServices};

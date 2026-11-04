@@ -188,7 +188,7 @@ port = {port}
             let state = serve_state.path().to_path_buf();
             tokio::spawn(async move {
                 iroh_tunnel_host::testing::run_unowned(
-                    iroh_tunnel_host::status::Role::Serve,
+                    iroh_tunnel_host::Role::Serve,
                     &serve_cfg,
                     Some(&state),
                     async move {
@@ -202,7 +202,7 @@ port = {port}
             let state = access_state.path().to_path_buf();
             tokio::spawn(async move {
                 iroh_tunnel_host::testing::run_unowned(
-                    iroh_tunnel_host::status::Role::Access,
+                    iroh_tunnel_host::Role::Access,
                     &access_cfg,
                     Some(&state),
                     async move {
@@ -259,7 +259,7 @@ port = {port}
         self.stop.push(tx);
         self.roles.push(tokio::spawn(async move {
             iroh_tunnel_host::testing::run_unowned(
-                iroh_tunnel_host::status::Role::Access,
+                iroh_tunnel_host::Role::Access,
                 &path,
                 None,
                 async move {
@@ -329,7 +329,7 @@ port = {port}
             0,
             tokio::spawn(async move {
                 iroh_tunnel_host::testing::run_unowned(
-                    iroh_tunnel_host::status::Role::Serve,
+                    iroh_tunnel_host::Role::Serve,
                     &path,
                     Some(&state),
                     async move {
