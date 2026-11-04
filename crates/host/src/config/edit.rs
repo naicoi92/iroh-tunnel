@@ -2,6 +2,7 @@
 //! live file is unchanged and the edit is valid.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -89,10 +90,14 @@ impl EditAttempt {
     }
 }
 
+/// Distinguishes concurrent edit attempts on one config within this process.
+static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
 /// Private copy of the config handed to the editor.
 fn scratch_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".edit-{}.toml", std::process::id()));
+    let attempt = NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    name.push(format!(".edit-{}-{attempt}.toml", std::process::id()));
     path.with_file_name(name)
 }
 
@@ -188,5 +193,35 @@ mod tests {
             }
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# created\n");
+    }
+
+    #[test]
+    fn concurrent_edit_attempts_use_distinct_scratch_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        std::fs::write(&path, "# original\n").unwrap();
+        let first = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        let second = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        assert_ne!(first.scratch_path(), second.scratch_path());
+        let second_text = format!("{VALID_SERVE}# second\n");
+        std::fs::write(first.scratch_path(), VALID_SERVE).unwrap();
+        std::fs::write(second.scratch_path(), &second_text).unwrap();
+
+        // Dropping one attempt must not remove the other's scratch.
+        let third = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        let third_scratch = third.scratch_path().to_path_buf();
+        drop(third);
+        assert!(!third_scratch.exists());
+        assert!(first.scratch_path().exists() && second.scratch_path().exists());
+
+        assert!(matches!(first.commit().unwrap(), EditOutcome::Saved { .. }));
+        match second.commit().unwrap() {
+            EditOutcome::Rejected {
+                reason: EditRejection::Conflict,
+                sidecar: Some(p),
+                ..
+            } => assert_eq!(std::fs::read_to_string(&p).unwrap(), second_text),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }
