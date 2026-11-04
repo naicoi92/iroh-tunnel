@@ -84,6 +84,8 @@ pub struct NativeOutput {
     pub stdout: Vec<u8>,
     /// Captured stderr; empty in [`OutputMode::Inherit`].
     pub stderr: Vec<u8>,
+    /// The platform `ExitStatus` Display text, set by the production runner.
+    status_display: Option<String>,
 }
 
 impl NativeOutput {
@@ -93,8 +95,12 @@ impl NativeOutput {
     }
 
     /// The exit status as the platform's `ExitStatus` printed it, for error
-    /// texts. A signal death has no code and reads "terminated by a signal".
+    /// texts. Without a stored Display text (fake runners) a code is formatted
+    /// the way std does.
     pub(crate) fn status_text(&self) -> String {
+        if let Some(text) = &self.status_display {
+            return text.clone();
+        }
         match self.status {
             #[cfg(windows)]
             Some(code) => format!("exit code: {code}"),
@@ -144,6 +150,7 @@ pub(crate) fn system_runner(command: &mut Command, mode: OutputMode) -> io::Resu
                 status: status.code(),
                 stdout: Vec::new(),
                 stderr: Vec::new(),
+                status_display: Some(status.to_string()),
             })
         }
         OutputMode::Capture => {
@@ -153,6 +160,7 @@ pub(crate) fn system_runner(command: &mut Command, mode: OutputMode) -> io::Resu
                 status: output.status.code(),
                 stdout: output.stdout,
                 stderr: output.stderr,
+                status_display: Some(output.status.to_string()),
             })
         }
     }
@@ -194,6 +202,7 @@ pub(crate) mod fake {
             status: Some(status),
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
+            status_display: None,
         }
     }
 
@@ -268,5 +277,28 @@ mod tests {
                 call("y", &[], OutputMode::Capture)
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_killed_status_text_matches_std_display() {
+        let script = ["-c", "kill -9 $$"];
+        let std_text = Command::new("sh")
+            .args(script)
+            .status()
+            .unwrap()
+            .to_string();
+        for mode in [OutputMode::Inherit, OutputMode::Capture] {
+            let got = system_runner(Command::new("sh").args(script), mode).unwrap();
+            assert_eq!(got.status, None);
+            assert_eq!(got.status_text(), std_text);
+        }
+        let exited = system_runner(
+            Command::new("sh").args(["-c", "exit 3"]),
+            OutputMode::Capture,
+        )
+        .unwrap();
+        assert_eq!(exited.status_text(), "exit status: 3");
+        assert_eq!(output(3, "", "").status_text(), "exit status: 3");
     }
 }
