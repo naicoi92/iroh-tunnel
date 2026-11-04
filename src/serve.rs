@@ -885,18 +885,6 @@ async fn open_upstream(local_addr: &str) -> Result<UdpSocket> {
     Ok(socket)
 }
 
-/// Whether a receive error on a connected UDP socket only means a lost
-/// datagram (the target's ICMP answer), not a dead socket.
-fn is_transient_udp_error(error: &std::io::Error) -> bool {
-    use std::io::ErrorKind::{
-        ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted, WouldBlock,
-    };
-    matches!(
-        error.kind(),
-        ConnectionRefused | ConnectionReset | ConnectionAborted | Interrupted | WouldBlock
-    )
-}
-
 /// Forward each reply on `upstream` to the peer as a datagram of `flow`.
 /// A reply counts as traffic for the flow's idle timer.
 async fn relay_upstream_replies(
@@ -912,7 +900,7 @@ async fn relay_upstream_replies(
             // A connected UDP socket reports an ICMP error from the target
             // (for example port unreachable while the target is not up yet)
             // on a later call. The datagram is lost; the flow stays.
-            Err(error) if is_transient_udp_error(&error) => {
+            Err(error) if crate::udp::is_transient_recv_error(&error) => {
                 tracing::debug!(flow = flow.0, "udp upstream receive failed: {error}");
                 continue;
             }

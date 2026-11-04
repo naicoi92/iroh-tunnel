@@ -611,7 +611,12 @@ async fn quick_udp_forwards_datagrams_to_fixed_target() -> Result<()> {
     let fixture = async {
         let mut buf = [0u8; 64];
         loop {
-            let (n, from) = target.recv_from(&mut buf).await?;
+            let (n, from) = match target.recv_from(&mut buf).await {
+                Ok(received) => received,
+                // Windows reports an earlier reply's ICMP error here.
+                Err(error) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+                Err(error) => return Err(error.into()),
+            };
             if &buf[..n] == b"request" {
                 target.send_to(b"response", from).await?;
             }

@@ -19,6 +19,25 @@ use tokio::sync::oneshot;
 /// How long a client waits for a reply before the tunnel is declared broken.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Wait up to `limit` for one datagram on `client`.
+///
+/// `None` means none arrived. Windows reports the ICMP port-unreachable of an
+/// earlier send (os error 10054) on the next receive of an unconnected UDP
+/// socket; that is not a failure of the tunnel, so it is skipped.
+async fn try_recv(client: &UdpSocket, limit: Duration) -> Result<Option<Vec<u8>>> {
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut buf = vec![0u8; 65535];
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, client.recv_from(&mut buf)).await {
+            Ok(Ok((n, _))) => return Ok(Some(buf[..n].to_vec())),
+            Ok(Err(error)) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => return Ok(None),
+        }
+    }
+}
+
 /// A running serve + access pair with a UDP echo target behind serve.
 struct UdpTunnel {
     /// Where clients send datagrams (the Access listener).
@@ -177,18 +196,7 @@ port = {port}
     /// Send `payload` from `client` and wait for the reply, retrying the send
     /// while the tunnel is still connecting (UDP gives no connect signal).
     async fn roundtrip(&self, client: &UdpSocket, payload: &[u8]) -> Result<Vec<u8>> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        let mut buf = vec![0u8; 65535];
-        loop {
-            client.send_to(payload, self.access_addr).await?;
-            match tokio::time::timeout(Duration::from_millis(500), client.recv_from(&mut buf)).await
-            {
-                Ok(Ok((n, _))) => return Ok(buf[..n].to_vec()),
-                Ok(Err(error)) => return Err(error.into()),
-                Err(_) if tokio::time::Instant::now() < deadline => continue,
-                Err(_) => anyhow::bail!("no reply through the tunnel within 30s"),
-            }
-        }
+        roundtrip_via(self.access_addr, client, payload).await
     }
 
     async fn shutdown(mut self) -> Result<()> {
@@ -211,9 +219,16 @@ port = {port}
 /// UDP echo target: replies to each datagram's sender with the same bytes.
 async fn udp_echo(sock: UdpSocket, sources: Arc<Mutex<Vec<SocketAddr>>>) {
     let mut buf = vec![0u8; 65535];
-    while let Ok((n, from)) = sock.recv_from(&mut buf).await {
-        sources.lock().unwrap().push(from);
-        let _ = sock.send_to(&buf[..n], from).await;
+    loop {
+        match sock.recv_from(&mut buf).await {
+            Ok((n, from)) => {
+                sources.lock().unwrap().push(from);
+                let _ = sock.send_to(&buf[..n], from).await;
+            }
+            // Windows reports an earlier reply's ICMP error here; keep serving.
+            Err(error) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+            Err(_) => break,
+        }
     }
 }
 
@@ -236,20 +251,14 @@ async fn a_datagram_round_trips_through_the_tunnel() -> Result<()> {
 /// Discard replies still in flight from earlier sends. `roundtrip` resends
 /// while the tunnel connects, so late duplicates are expected after warm-up.
 async fn drain(client: &UdpSocket) {
-    let mut buf = vec![0u8; 65535];
-    while tokio::time::timeout(Duration::from_millis(700), client.recv_from(&mut buf))
-        .await
-        .is_ok()
-    {}
+    while let Ok(Some(_)) = try_recv(client, Duration::from_millis(700)).await {}
 }
 
 /// Wait for one datagram on `client`.
 async fn recv_one(client: &UdpSocket) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; 65535];
-    let (n, _) = tokio::time::timeout(REPLY_TIMEOUT, client.recv_from(&mut buf))
-        .await
-        .context("no reply within the timeout")??;
-    Ok(buf[..n].to_vec())
+    try_recv(client, REPLY_TIMEOUT)
+        .await?
+        .context("no reply within the timeout")
 }
 
 /// AC-UDP-01 / AC-UDP-02: concurrent clients each receive their own reply,
@@ -341,15 +350,17 @@ async fn each_flow_has_its_own_stable_upstream_endpoint() -> Result<()> {
 /// Like `UdpTunnel::roundtrip`, for a client of another Access peer.
 async fn roundtrip_via(access: SocketAddr, client: &UdpSocket, payload: &[u8]) -> Result<Vec<u8>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut buf = vec![0u8; 65535];
     loop {
-        client.send_to(payload, access).await?;
-        match tokio::time::timeout(Duration::from_millis(500), client.recv_from(&mut buf)).await {
-            Ok(Ok((n, _))) => return Ok(buf[..n].to_vec()),
-            Ok(Err(error)) => return Err(error.into()),
-            Err(_) if tokio::time::Instant::now() < deadline => continue,
-            Err(_) => anyhow::bail!("no reply through the tunnel within 30s"),
+        // Nothing listens on `access` until the role has bound it, so this
+        // send may be refused; just try again.
+        let _ = client.send_to(payload, access).await;
+        if let Some(reply) = try_recv(client, Duration::from_millis(500)).await? {
+            return Ok(reply);
         }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "no reply through the tunnel within 30s"
+        );
     }
 }
 

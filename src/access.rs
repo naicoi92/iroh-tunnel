@@ -757,6 +757,12 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             }
             result = socket.recv_from(&mut buf) => match result {
                 Ok(received) => received,
+                // Windows reports a client's ICMP port-unreachable here after a
+                // reply to a client that has gone away. Nothing is wrong.
+                Err(error) if crate::udp::is_transient_recv_error(&error) => {
+                    tracing::debug!("udp recv on {listen_addr} reported a lost datagram: {error}");
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!("udp recv error on {listen_addr}: {error}");
                     // A persistent error must not spin the loop.
