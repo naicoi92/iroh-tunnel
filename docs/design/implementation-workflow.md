@@ -22,7 +22,7 @@ For release packaging work, a red run of the packaging verification on the uncha
 
 ## Implement and review
 
-1. Read [the specification](redesign-spec.md), [traceability](redesign-traceability.md), [acceptance procedures](redesign-acceptance.md), the issue and relevant decisions. Record the acceptance criteria and agreed real-process or platform test seam.
+1. Read [the specification](redesign-spec.md), the issue and relevant decisions. Record the acceptance criteria and agreed real-process or platform test seam.
 2. Follow Matt Pocock's `implement` and `tdd` skills: one observable behavior per red → green slice, then the appropriate full test suite. Preserve actual red/green evidence and disclose unavailable environments.
 3. Run the `code-review` skill against a pinned base and head with independent **Standards** and **Spec** reviews. Address valid findings and rerun affected tests. External OpenCodeReview and CodeRabbit reviews are temporarily suspended by the repository owner; the owner will add external review later. Preserve both independent review axes.
 4. Open the task's pull request against `main` using the `pr` skill. Include the template below. Require relevant CI and review on the exact final head before merge. Revalidate affected combined behavior after merge.

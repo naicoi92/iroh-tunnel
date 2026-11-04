@@ -1,7 +1,7 @@
 //! #91: install and run a system service across the privilege boundary,
 //! driven through the real binary as real root with real user accounts.
 //!
-//! Acceptance map (cases from `docs/design/redesign-acceptance.md`):
+//! Acceptance map:
 //! - SM-ELEVATED-01 (91.AC1, 91.CL1): root defaults to system scope with no
 //!   scope prompt, using the invoking user's paths, never root's home.
 //! - SM-PATH-01 (91.AC2): the registration pins the installing user's absolute

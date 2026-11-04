@@ -22,7 +22,7 @@ The [canonical tracker spec](https://github.com/naicoi92/iroh-tunnel/issues/68) 
 | Operations | Role exclusivity, service privilege behavior, pinned paths and independent updates. | Detection mechanism (#87), privileged config trust, Windows user background, rollback and trust rotation. |
 | Product scope | Windows plus currently released platforms, installers, separate packages, three images and verified updates. | Detailed platform matrix, exact CLI/exit codes and release recovery policy. |
 
-**Dependency version:** target Iroh stable `1.4.1` was selected during design and adopted by [#101](issue-101-evidence.md); recheck the latest stable before final release evidence. No benchmark has established UDP transport performance.
+**Dependency version:** target Iroh stable `1.4.1` was selected during design and adopted by #101; recheck the latest stable before final release evidence. No benchmark has established UDP transport performance.
 
 ## Capability boundaries
 
@@ -111,11 +111,10 @@ Unit tests alone do not establish end-to-end behavior. If a platform or network 
 ## Design artifacts
 
 - [Detailed design entrypoint](detailed-design.html): coverage, data models, flow and planned-work views.
-- [Executable architecture delta](executable-delta.html): target versus current topology.
 - [Scenario sequences](scenario-sequences.html) and [operational decisions](operational-decisions.html).
 - [Dependency graph, UML and story map](structural-views.html): UML and release slices are proposals.
 - [Target architecture dossier](target-diagrams.html) and [capability logic](capability-logic.html).
-- [UDP transport research](../research/udp-transport.md) and [wayfinding map](https://github.com/naicoi92/iroh-tunnel/issues/69).
+- [Wayfinding map](https://github.com/naicoi92/iroh-tunnel/issues/69).
 
 Diagrams depict target design unless explicitly labelled current. Automated geometry and accessibility checks do not establish business correctness. Full perceptual visual review of final diagrams has not been completed.
 

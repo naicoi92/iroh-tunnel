@@ -899,7 +899,7 @@ async fn relay_peer_replies(
 }
 
 // A single budget includes mutex wait, dial, backoff and opening the stream.
-// Keep established streams outside this timeout. See issue-86-retry-evidence.md.
+// Keep established streams outside this timeout.
 const CLIENT_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Tunnel one local client over a stream on the shared service connection.

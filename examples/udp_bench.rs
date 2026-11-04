@@ -1,8 +1,7 @@
 //! Benchmark harness for #73: QUIC DATAGRAM versus a framed-stream reference.
 //!
 //! Drives synthetic flows between two in-process Iroh endpoints over a forced
-//! relay path or a verified direct path, checks the exclusion criteria from
-//! `docs/design/issue-73-evidence.md` (E1, E2, E4 per run; E3 is sampled) and
+//! relay path or a verified direct path, checks the exclusion criteria (E1, E2, E4 per run; E3 is sampled) and
 //! prints one JSON object per run. It measures the transport only: there is no
 //! tunnel, so cross-delivery (E2) is checked as header/body consistency, and
 //! loss, delay and congestion must be injected by the operator outside this

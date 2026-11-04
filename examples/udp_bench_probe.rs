@@ -1,6 +1,6 @@
 //! Probe for #73: confirms the iroh 1.4.1 datagram API behaves as the
 //! benchmark harness assumes, on a forced-relay path and a direct path.
-//! Not shipped; see docs/design/issue-73-evidence.md.
+//! Not shipped.
 //!
 //! Run: `cargo run --example udp_bench_probe --features test-utils`
 

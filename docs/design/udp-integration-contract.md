@@ -61,7 +61,7 @@ Idle timeout 60 s (`idle_timeout`, seconds); quarantine 30 s (fixed constant); 2
 
 | Evidence | Status |
 |---|---|
-| `examples/udp_bench_probe.rs`, `examples/udp_bench.rs` and `issue-73-evidence.md`: loopback runs on forced relay and verified direct path, limit observed to change (1162 and 1414), oversize refused synchronously at the sender (not the tunnel's drop-and-count, which is NOT RUN) | Available |
+| `examples/udp_bench_probe.rs` and `examples/udp_bench.rs`: loopback runs on forced relay and verified direct path, limit observed to change (1162 and 1414), oversize refused synchronously at the sender (not the tunnel's drop-and-count, which is NOT RUN) | Available |
 | Loss, delay, congestion, path migration, long-run memory (E3), flow routing through a real tunnel | NOT RUN. Accepted risk of experimental status. A `tc netem` environment is unconfirmed (a hosted Linux runner may or may not allow it; not checked) |
 | Direct and forced-relay measurements through the real tunnel, per platform | Stay with UDP-PATH-01, #89 and final gate #97 |
 
