@@ -137,6 +137,11 @@ fn systemctl(
     native.run(&mut cmd)
 }
 
+/// Where the unit file is (or would be).
+pub(super) fn registration_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
+    unit_path(role, scope)
+}
+
 /// The installed unit's text, if any (to read its pin).
 pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
     super::read_registration(&unit_path(role, scope).ok()?)

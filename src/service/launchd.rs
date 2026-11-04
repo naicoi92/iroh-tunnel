@@ -159,6 +159,11 @@ fn run_launchctl(native: &mut Native, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Where the plist is (or would be).
+pub(super) fn registration_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
+    plist_path(role, scope)
+}
+
 /// The installed plist's text, if any (to read its pin).
 pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
     super::read_registration(&plist_path(role, scope).ok()?)

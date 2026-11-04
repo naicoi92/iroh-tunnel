@@ -65,6 +65,42 @@ impl From<ServiceFailure> for anyhow::Error {
     }
 }
 
+/// A fact about the service that may be unobtainable without failing the
+/// whole report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fact<T> {
+    Known(T),
+    /// Why the fact could not be determined.
+    Unavailable(String),
+}
+
+impl<T> Fact<T> {
+    fn from_result(result: Result<T>) -> Self {
+        match result {
+            Ok(value) => Fact::Known(value),
+            Err(error) => Fact::Unavailable(error.to_string()),
+        }
+    }
+}
+
+/// Whether a unit, plist, init script or task is registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Registration {
+    Present { location: String },
+    Absent,
+}
+
+/// What is known about a role's service, each fact from its own source:
+/// the registration from the host's files, liveness and owner from the role
+/// lock, and the native tool's output carried verbatim (never parsed).
+#[derive(Debug)]
+pub struct ServiceStatusReport {
+    pub registration: Fact<Registration>,
+    pub liveness: Fact<crate::ownership::Liveness>,
+    pub owner: Fact<crate::ownership::OwnerRecord>,
+    pub native: Option<NativeOutput>,
+}
+
 /// Everything `install` needs from its caller.
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
@@ -150,6 +186,24 @@ pub fn install(
     install_via(req, env, call, &mut runner)
 }
 
+/// `service status`: the registration, liveness and owner facts, plus the
+/// native tool's output (inherited by the terminal in
+/// [`OutputMode::Inherit`](super::OutputMode::Inherit), returned otherwise).
+///
+/// # Errors
+///
+/// A [`ServiceFailure`] for policy refusals and when the native tool cannot
+/// run. A fact that cannot be read is [`Fact::Unavailable`], not an error.
+pub fn status(
+    role: Role,
+    scope: ServiceScope,
+    env: Environment,
+    call: &mut ServiceCall,
+) -> Result<ServiceStatusReport, ServiceFailure> {
+    let mut runner = system_runner;
+    status_via(role, scope, env, call, &mut runner)
+}
+
 /// `service uninstall`: stop, disable, and remove the registration.
 ///
 /// # Errors
@@ -208,6 +262,75 @@ pub fn restart(
 ) -> Result<ServiceReport, ServiceFailure> {
     let mut runner = system_runner;
     verb_via(Verb::Restart, role, scope, env, call, &mut runner)
+}
+
+/// [`status`] over an injected command runner.
+pub(super) fn status_via(
+    role: Role,
+    scope: ServiceScope,
+    env: Environment,
+    call: &mut ServiceCall,
+    runner: &mut Runner<'_>,
+) -> Result<ServiceStatusReport, ServiceFailure> {
+    check_verb_policy("status", role, scope, env).map_err(ServiceFailure::before_effects)?;
+    let liveness = crate::ownership::probe(role);
+    let owner = match &liveness {
+        Ok(crate::ownership::Liveness::Running {
+            owner: Some(owner), ..
+        }) => Fact::Known(owner.clone()),
+        Ok(crate::ownership::Liveness::Running { owner: None, .. }) => {
+            Fact::Unavailable("the owner record is missing or unreadable".to_owned())
+        }
+        Ok(crate::ownership::Liveness::NotRunning) => {
+            Fact::Unavailable(format!("{} is not running", role.name()))
+        }
+        Err(error) => Fact::Unavailable(error.to_string()),
+    };
+    let mut native = Native::new(call.output, runner);
+    let output = backend_status(&mut native, &mut *call.notes, role.name(), scope);
+    let (applied, outputs) = native.finish();
+    let output = output.map_err(|error| ServiceFailure {
+        applied,
+        native: outputs,
+        error,
+    })?;
+    // On Windows the task backend refuses an unregistered task, so reaching
+    // here means it exists.
+    #[cfg(windows)]
+    let registration = Fact::Known(Registration::Present {
+        location: "scheduled task".to_owned(),
+    });
+    #[cfg(not(windows))]
+    let registration = Fact::from_result(registration_of(role.name(), scope));
+    Ok(ServiceStatusReport {
+        registration,
+        liveness: Fact::from_result(liveness),
+        owner,
+        native: Some(output),
+    })
+}
+
+/// Whether the platform's registration file exists (Unix backends).
+#[cfg(not(windows))]
+#[allow(unused_variables)] // unused on targets without a service backend
+fn registration_of(role: &str, scope: ServiceScope) -> Result<Registration> {
+    #[cfg(target_os = "linux")]
+    let path = if super::linux_is_systemd() {
+        super::systemd::registration_path(role, scope)?
+    } else {
+        super::busybox::registration_path(role)
+    };
+    #[cfg(target_os = "macos")]
+    let path = super::launchd::registration_path(role, scope)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let path = PathBuf::new();
+    Ok(if path.exists() {
+        Registration::Present {
+            location: path.display().to_string(),
+        }
+    } else {
+        Registration::Absent
+    })
 }
 
 /// Run a backend step with a [`Native`] over `runner`, keeping the effects and
@@ -524,6 +647,35 @@ fn backend_install(
     #[cfg(windows)]
     {
         super::windows::install(native, notes, role, scope, binary, config, state)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        super::unsupported()
+    }
+}
+
+#[allow(unused_variables)] // unused on targets without a service backend
+fn backend_status(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<NativeOutput> {
+    #[cfg(target_os = "linux")]
+    {
+        if super::linux_is_systemd() {
+            super::systemd::status(native, notes, role, scope)
+        } else {
+            super::busybox::status(native, notes, role, scope)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        super::launchd::status(native, notes, role, scope)
+    }
+    #[cfg(windows)]
+    {
+        super::windows::status(native, notes, role, scope)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {

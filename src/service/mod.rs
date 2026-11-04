@@ -27,8 +27,9 @@ mod native;
 pub use native::{InstalledAt, NativeOutput, OutputMode, ServiceCall, ServiceNote};
 mod ops;
 pub use ops::{
-    install, restart, start, stop, uninstall, AppliedEffect, InstallNeed, InstallOutcome,
-    InstallRequest, ServiceFailure, ServiceReport,
+    install, restart, start, status, stop, uninstall, AppliedEffect, Fact, InstallNeed,
+    InstallOutcome, InstallRequest, Registration, ServiceFailure, ServiceReport,
+    ServiceStatusReport,
 };
 pub mod pin;
 pub use pin::{Pin, RetargetConsent};
@@ -144,43 +145,6 @@ pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> 
     {
         let _ = (role, scope);
         None
-    }
-}
-
-/// `service status`: running/stopped (+ pid when available), shown by the
-/// native tool (inherited) or returned in the [`NativeOutput`] (captured).
-pub fn status(
-    role: crate::status::Role,
-    scope: ServiceScope,
-    env: Environment,
-    call: &mut ServiceCall,
-) -> Result<NativeOutput, ServiceFailure> {
-    ops::check_verb_policy("status", role, scope, env).map_err(ServiceFailure::before_effects)?;
-    let role = role.name();
-    status_backend(role, scope, call).map_err(ServiceFailure::before_effects)
-}
-
-fn status_backend(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<NativeOutput> {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            with_native(call, |n, notes| systemd::status(n, notes, role, scope))
-        } else {
-            with_native(call, |n, notes| busybox::status(n, notes, role, scope))
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        with_native(call, |n, notes| launchd::status(n, notes, role, scope))
-    }
-    #[cfg(windows)]
-    {
-        with_native(call, |n, notes| windows::status(n, notes, role, scope))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (role, scope, call);
-        unsupported()
     }
 }
 
@@ -583,6 +547,74 @@ mod tests {
             panic!("expected Service, got {err:?}");
         };
         assert!(msg.contains("--user"), "{msg}");
+    }
+
+    // ---- structured status (Task 15) -------------------------------------
+
+    fn run_status(responses: Vec<NativeOutput>) -> Result<ServiceStatusReport, ServiceFailure> {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, responses);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut notes = crate::service::native::fake::note_sink(&events);
+        let mut call = ServiceCall::capture(&mut notes);
+        ops::status_via(
+            Role::Serve,
+            ServiceScope::User,
+            BATCH,
+            &mut call,
+            &mut runner,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_foreground_role_without_registration() {
+        const NAME: &str = "service::tests::status_reports_foreground_role_without_registration";
+        in_isolated_home(NAME, |_| {
+            let _claim = crate::ownership::claim(Role::Serve).unwrap();
+            let report = run_status(vec![]).unwrap();
+            assert!(matches!(
+                report.registration,
+                Fact::Known(Registration::Absent)
+            ));
+            assert!(matches!(
+                report.liveness,
+                Fact::Known(crate::ownership::Liveness::Running { .. })
+            ));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_missing_owner_as_unavailable() {
+        const NAME: &str = "service::tests::status_reports_missing_owner_as_unavailable";
+        in_isolated_home(NAME, |home| {
+            let _claim = crate::ownership::claim(Role::Serve).unwrap();
+            std::fs::remove_file(home.join(".local/state/iroh-tunnel/serve.owner.json")).unwrap();
+            let report = run_status(vec![]).expect("a missing owner is not a failure");
+            assert!(matches!(report.owner, Fact::Unavailable(_)), "{report:?}");
+            assert!(matches!(
+                report.liveness,
+                Fact::Known(crate::ownership::Liveness::Running { .. })
+            ));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_does_not_parse_native_prose() {
+        const NAME: &str = "service::tests::status_does_not_parse_native_prose";
+        in_isolated_home(NAME, |_| {
+            // Nothing runs the role, whatever the localized native text says.
+            let prose = crate::service::native::fake::output(0, "aktiv (läuft)\n", "");
+            let report = run_status(vec![prose]).unwrap();
+            assert!(matches!(
+                report.liveness,
+                Fact::Known(crate::ownership::Liveness::NotRunning)
+            ));
+            let native = report.native.expect("native output is returned");
+            assert_eq!(native.stdout, "aktiv (läuft)\n".as_bytes());
+        });
     }
 
     // Compile-only guard: on Linux the runtime probe must exist and be bool.

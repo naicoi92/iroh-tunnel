@@ -189,6 +189,11 @@ fn run_script(native: &mut Native, role: &str, verb: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where the init script is (or would be).
+pub(super) fn registration_path(role: &str) -> PathBuf {
+    script_path(role)
+}
+
 /// The installed script's text, if any (to read its pin).
 pub fn existing_registration(role: &str) -> Option<String> {
     super::read_registration(&script_path(role))
