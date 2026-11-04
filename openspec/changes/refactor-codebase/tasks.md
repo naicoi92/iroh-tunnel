@@ -64,11 +64,11 @@ Owner: `Cargo.toml` (workspace section), `Cargo.lock`, `crates/engine/**` (new),
 
 Owner: `crates/host/**` (new), moved host modules from `src/`, host-owned tests, `src/error.rs` → host. Depends on: 4, 5.
 
-- [ ] 6.1 Create `crates/host` (`publish = false`) and move config/store/identity, paths, ownership, trust, foreground orchestration, status schema/store/read, service backends and updater into modules `config`, `service`, `status`, `runtime`, `update`. Traces WB-6, WB-7, FIM-1.
-- [ ] 6.2 Move `CliError` into host, preserving downcast through `anyhow` context; root keeps exit mapping. Re-run 1.5 characterization. Traces WB-15.
-- [ ] 6.3 Make raw backend dispatch, OS command construction, trust handles, lock internals and ownership-bypass entrypoints private or `test-utils`-gated; add rustdoc (ownership, cancellation, errors) to every widened `pub` item. Traces WB-23, FIM-2, FIM-9.
-- [ ] 6.4 Forward `test-utils` root → host → engine; remove the root self-dev-dependency; move host-owned tests (`config_lifecycle*`, `config_multiplex_compat`, `update*`, `role_ownership` where in-process) or keep real-binary ones at root. Traces WB-18, WB-20.
-- [ ] 6.5 Add checks proving host has no `clap` dependency, no root dependency, no `process::exit` or stdin reads, opens no listener/socket in management calls, and follows the one-exported-operation-per-file convention (design.md Decision 1). Traces WB-2 (Host does not depend on the root package), WB-7 (both), FIM-2.
+- [x] 6.1 Create `crates/host` (`publish = false`) and move config/store/identity, paths, ownership, trust, foreground orchestration, status schema/store/read, service backends and updater into modules `config`, `service`, `status`, `runtime`, `update`. Traces WB-6, WB-7, FIM-1.
+- [x] 6.2 Move `CliError` into host, preserving downcast through `anyhow` context; root keeps exit mapping. Re-run 1.5 characterization. Traces WB-15.
+- [x] 6.3 Make raw backend dispatch, OS command construction, trust handles, lock internals and ownership-bypass entrypoints private or `test-utils`-gated; add rustdoc (ownership, cancellation, errors) to every widened `pub` item. Traces WB-23, FIM-2, FIM-9.
+- [x] 6.4 Forward `test-utils` root → host → engine; remove the root self-dev-dependency; move host-owned tests (`config_lifecycle*`, `config_multiplex_compat`, `update*`, `role_ownership` where in-process) or keep real-binary ones at root. Traces WB-18, WB-20.
+- [x] 6.5 Add checks proving host has no `clap` dependency, no root dependency, no `process::exit` or stdin reads, opens no listener/socket in management calls, and follows the one-exported-operation-per-file convention (design.md Decision 1). Traces WB-2 (Host does not depend on the root package), WB-7 (both), FIM-2.
 
 ## 7. Root CLI composition and distribution integration (Migration step 5)
 
