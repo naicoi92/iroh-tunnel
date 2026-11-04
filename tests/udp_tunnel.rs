@@ -810,3 +810,37 @@ async fn forwarding_resumes_after_serve_restarts() -> Result<()> {
     );
     tunnel.shutdown().await
 }
+
+/// UDP-06 isolation: a client that floods its flow does not slow another
+/// client's flow. A UDP send to a local target rarely blocks, so this cannot
+/// force `queue_full` end to end (the unit tests in `src/udp.rs` cover the
+/// bounded queue itself); it proves the flood stays inside its own flow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flooding_flow_does_not_stop_another_flow() -> Result<()> {
+    let tunnel = UdpTunnel::start_limited("queue_depth = 1").await?;
+    let flooder = UdpSocket::bind("127.0.0.1:0").await?;
+    let calm = UdpSocket::bind("127.0.0.1:0").await?;
+    tunnel.roundtrip(&flooder, b"hello").await?;
+    tunnel.roundtrip(&calm, b"hello").await?;
+    drain(&flooder).await;
+    drain(&calm).await;
+
+    let access = tunnel.access_addr;
+    let flood = tokio::spawn(async move {
+        for _ in 0..5000 {
+            let _ = flooder.send_to(&[1u8; 512], access).await;
+        }
+        flooder
+    });
+    for i in 0..5u8 {
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            roundtrip_via(access, &calm, &[b'c', i]),
+        )
+        .await
+        .context("the calm flow stalled while another flow flooded")??;
+        assert!(reply == [b'c', i] || reply.len() == 512 || reply == b"hello");
+    }
+    let _ = flood.await;
+    tunnel.shutdown().await
+}

@@ -782,8 +782,14 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
     }
 }
 
-/// Per flow: the upstream socket and the handle that ends its reply relay.
-type UdpUpstream = (Arc<UdpSocket>, tokio::task::AbortHandle);
+/// One flow's upstream: its socket, the bounded queue feeding the writer task,
+/// and the handles that end the reply relay and the writer.
+struct UdpUpstream {
+    socket: Arc<UdpSocket>,
+    queue: crate::udp::FlowQueue,
+    relay: tokio::task::AbortHandle,
+    writer: tokio::task::AbortHandle,
+}
 
 /// One peer connection's live UDP flows, shared with the reply relays.
 type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
@@ -852,7 +858,7 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
             Admission::Live => {
                 let table = flows.lock().unwrap_or_else(|p| p.into_inner());
                 match table.get(flow) {
-                    Some((socket, _)) => socket.clone(),
+                    Some(upstream) => upstream.queue.clone(),
                     None => continue,
                 }
             }
@@ -892,17 +898,46 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                     flows.clone(),
                     stats.clone(),
                 ));
+                // A writer per flow: a slow or blocked target stalls only this
+                // flow's bounded queue, never the receive loop.
+                let (queue, rx) = crate::udp::FlowQueue::new(limits.queue_depth);
+                let writer = readers.spawn(crate::udp::drain_queue(rx, {
+                    let socket = socket.clone();
+                    let stats = stats.clone();
+                    move |datagram: bytes::Bytes| {
+                        let socket = socket.clone();
+                        let stats = stats.clone();
+                        async move {
+                            if let Err(error) = socket.send(&datagram).await {
+                                stats.record_drop(DropReason::UpstreamError);
+                                tracing::debug!(flow = flow.0, "udp upstream send failed: {error}");
+                            }
+                        }
+                    }
+                }));
+                let entry = queue.clone();
                 flows.lock().unwrap_or_else(|p| p.into_inner()).insert(
                     flow,
-                    (socket.clone(), relay),
+                    UdpUpstream {
+                        socket,
+                        queue,
+                        relay,
+                        writer,
+                    },
                     now,
                 );
-                socket
+                entry
             }
         };
-        if let Err(error) = upstream.send(&payload).await {
-            stats.record_drop(DropReason::UpstreamError);
-            tracing::debug!(flow = flow.0, "udp upstream send failed: {error}");
+        match upstream.push(payload) {
+            crate::udp::Push::Queued => {}
+            crate::udp::Push::Full => {
+                stats.record_drop(DropReason::QueueFull);
+                tracing::debug!(flow = flow.0, "udp flow queue full, dropping newest");
+            }
+            crate::udp::Push::Closed => {
+                tracing::debug!(flow = flow.0, "udp flow writer ended, dropping datagram");
+            }
         }
     }
     // The connection's flows end with it, but their sockets are quarantined
@@ -923,10 +958,17 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
 /// runs detached: it must outlive the connection, and it ends early on
 /// shutdown.
 fn quarantine(upstream: UdpUpstream, stats: &Arc<crate::udp::UdpStats>, stop: &shutdown::Stop) {
-    let (socket, relay) = upstream;
-    // The relay holds a clone of the socket; ending it leaves the sink as the
-    // only reader.
+    let UdpUpstream {
+        socket,
+        relay,
+        writer,
+        ..
+    } = upstream;
+    // The relay and the writer hold clones of the socket; ending them leaves
+    // the sink as the only reader. Datagrams still queued are discarded: the
+    // flow is over.
     relay.abort();
+    writer.abort();
     stats.quarantine_started();
     let stats = stats.clone();
     let mut stop = stop.clone();

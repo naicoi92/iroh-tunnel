@@ -176,6 +176,61 @@ impl UdpStats {
     }
 }
 
+/// What happened to a datagram offered to a [`FlowQueue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Push {
+    /// Queued for the flow's writer.
+    Queued,
+    /// The queue was full; the newest datagram (this one) was dropped.
+    Full,
+    /// The flow's writer has gone; the flow is ending.
+    Closed,
+}
+
+/// The bounded queue between the shared receive loop and one flow's writer.
+///
+/// A flow whose writer is slow fills only its own queue, so it cannot delay
+/// the receive loop or any other flow: [`FlowQueue::push`] never waits. When
+/// full the newest datagram is dropped, which keeps arrival order for what is
+/// delivered (UDP-06).
+#[derive(Debug, Clone)]
+pub struct FlowQueue {
+    tx: tokio::sync::mpsc::Sender<Bytes>,
+}
+
+impl FlowQueue {
+    /// A queue holding up to `depth` datagrams, and the receiving end for the
+    /// flow's writer task.
+    pub fn new(depth: usize) -> (Self, tokio::sync::mpsc::Receiver<Bytes>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(depth.max(1));
+        (Self { tx }, rx)
+    }
+
+    /// Offer a datagram without waiting.
+    pub fn push(&self, datagram: Bytes) -> Push {
+        use tokio::sync::mpsc::error::TrySendError;
+        match self.tx.try_send(datagram) {
+            Ok(()) => Push::Queued,
+            Err(TrySendError::Full(_)) => Push::Full,
+            Err(TrySendError::Closed(_)) => Push::Closed,
+        }
+    }
+}
+
+/// Run one flow's writer: hand each queued datagram to `sink` in order, until
+/// every [`FlowQueue`] handle is dropped.
+///
+/// `sink` may wait (a slow target); only this flow's queue backs up behind it.
+pub async fn drain_queue<F, Fut>(mut rx: tokio::sync::mpsc::Receiver<Bytes>, mut sink: F)
+where
+    F: FnMut(Bytes) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    while let Some(datagram) = rx.recv().await {
+        sink(datagram).await;
+    }
+}
+
 /// How long an expired flow's upstream socket stays open as a sink before it
 /// closes and its slot is released (UDP-06). A fixed constant, not configurable.
 pub const QUARANTINE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -678,5 +733,80 @@ mod tests {
             sweep_interval(Duration::from_millis(1)),
             Duration::from_millis(100)
         );
+    }
+
+    #[tokio::test]
+    async fn a_full_flow_queue_drops_the_newest_and_keeps_the_oldest() {
+        let (queue, mut rx) = FlowQueue::new(2);
+        assert_eq!(queue.push(Bytes::from_static(b"one")), Push::Queued);
+        assert_eq!(queue.push(Bytes::from_static(b"two")), Push::Queued);
+        assert_eq!(queue.push(Bytes::from_static(b"three")), Push::Full);
+        assert_eq!(rx.recv().await.unwrap().as_ref(), b"one");
+        assert_eq!(rx.recv().await.unwrap().as_ref(), b"two");
+        // Space is free again once the consumer has caught up.
+        assert_eq!(queue.push(Bytes::from_static(b"four")), Push::Queued);
+    }
+
+    #[tokio::test]
+    async fn a_stuck_flow_does_not_block_the_queue_of_another_flow() {
+        let (slow, _never_read) = FlowQueue::new(1);
+        let (fast, mut fast_rx) = FlowQueue::new(1);
+        assert_eq!(slow.push(Bytes::from_static(b"a")), Push::Queued);
+        // The slow flow is full and refuses more, without waiting.
+        assert_eq!(slow.push(Bytes::from_static(b"b")), Push::Full);
+        // The other flow is unaffected.
+        assert_eq!(fast.push(Bytes::from_static(b"x")), Push::Queued);
+        assert_eq!(fast_rx.recv().await.unwrap().as_ref(), b"x");
+    }
+
+    #[tokio::test]
+    async fn pushing_to_a_flow_whose_writer_is_gone_reports_closed() {
+        let (queue, rx) = FlowQueue::new(1);
+        drop(rx);
+        assert_eq!(queue.push(Bytes::from_static(b"x")), Push::Closed);
+    }
+
+    #[tokio::test]
+    async fn the_flow_writer_drains_its_queue_in_order_through_the_sink() {
+        let (queue, rx) = FlowQueue::new(4);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_seen = seen.clone();
+        let writer = tokio::spawn(drain_queue(rx, move |datagram: Bytes| {
+            let sink_seen = sink_seen.clone();
+            async move { sink_seen.lock().unwrap().push(datagram) }
+        }));
+        for word in [&b"a"[..], b"b", b"c"] {
+            assert_eq!(queue.push(Bytes::copy_from_slice(word)), Push::Queued);
+        }
+        drop(queue);
+        writer.await.unwrap();
+        let got: Vec<_> = seen.lock().unwrap().iter().map(|b| b.to_vec()).collect();
+        assert_eq!(got, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn a_stuck_sink_fills_only_its_own_queue_and_never_blocks_the_producer() {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (stuck, rx) = FlowQueue::new(2);
+        let sink_gate = gate.clone();
+        let writer = tokio::spawn(drain_queue(rx, move |_datagram: Bytes| {
+            let sink_gate = sink_gate.clone();
+            async move { sink_gate.notified().await }
+        }));
+        // The sink holds the first datagram, two more fill the queue, the rest
+        // are refused at once: the producer never waits on the stuck flow.
+        let mut full = 0;
+        for _ in 0..10 {
+            if stuck.push(Bytes::from_static(b"x")) == Push::Full {
+                full += 1;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(full >= 7, "expected most pushes refused, got {full}");
+        // Another flow's queue is untouched by the stuck one.
+        let (other, mut other_rx) = FlowQueue::new(2);
+        assert_eq!(other.push(Bytes::from_static(b"y")), Push::Queued);
+        assert_eq!(other_rx.recv().await.unwrap().as_ref(), b"y");
+        writer.abort();
     }
 }
