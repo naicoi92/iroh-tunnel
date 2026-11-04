@@ -88,10 +88,26 @@ impl UdpStats {
             .store(count as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// One flow started (Serve sums the flows of every peer).
-    pub fn flow_opened(&self) {
-        self.active_flows
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    /// Reserve one flow slot if fewer than `max` are in use.
+    ///
+    /// Serve calls this for every peer of a service, so the cap is shared and
+    /// two peers cannot both take the last slot. Release with
+    /// [`UdpStats::flows_closed`].
+    pub fn try_open_flow(&self, max: usize) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut now = self.active_flows.load(Relaxed);
+        loop {
+            if now >= max as u64 {
+                return false;
+            }
+            match self
+                .active_flows
+                .compare_exchange_weak(now, now + 1, Relaxed, Relaxed)
+            {
+                Ok(_) => return true,
+                Err(actual) => now = actual,
+            }
+        }
     }
 
     /// `count` flows ended.
@@ -316,6 +332,13 @@ impl<T> PeerFlows<T> {
         Admission::New
     }
 
+    /// Record that `flow` was refused (cap reached or no socket could be
+    /// opened). Its identifier is spent: later datagrams for it are
+    /// [`Admission::Unknown`], never admitted mid-flow.
+    pub fn refuse(&mut self, flow: FlowId) {
+        self.highest = Some(self.highest.map_or(flow, |mark| mark.max(flow)));
+    }
+
     /// Register the upstream of a flow that `admit` returned `New` for.
     pub fn insert(&mut self, flow: FlowId, upstream: T, now: std::time::Instant) {
         self.highest = Some(self.highest.map_or(flow, |mark| mark.max(flow)));
@@ -526,8 +549,8 @@ mod tests {
         stats.record_drop(DropReason::Oversize);
         stats.record_drop(DropReason::Cap);
         stats.set_datagram_limit(Some(1158));
-        stats.flow_opened();
-        stats.flow_opened();
+        assert!(stats.try_open_flow(10));
+        assert!(stats.try_open_flow(10));
         stats.flows_closed(1);
         let snap = stats.snapshot();
         assert_eq!(
@@ -541,7 +564,7 @@ mod tests {
     #[test]
     fn closing_more_flows_than_are_open_does_not_underflow() {
         let stats = UdpStats::default();
-        stats.flow_opened();
+        assert!(stats.try_open_flow(10));
         stats.flows_closed(5);
         assert_eq!(stats.snapshot().active_flows, 0);
     }
@@ -552,5 +575,25 @@ mod tests {
         stats.set_datagram_limit(Some(1158));
         stats.set_datagram_limit(None);
         assert_eq!(stats.snapshot().datagram_limit, None);
+    }
+
+    #[test]
+    fn a_refused_flow_is_never_admitted_later() {
+        let t0 = Instant::now();
+        let mut flows: PeerFlows<&str> = PeerFlows::default();
+        assert_eq!(flows.admit(FlowId(4), t0), Admission::New);
+        flows.refuse(FlowId(4));
+        assert_eq!(flows.admit(FlowId(4), t0), Admission::Unknown);
+        assert_eq!(flows.admit(FlowId(5), t0), Admission::New);
+    }
+
+    #[test]
+    fn the_service_cap_is_shared_and_released() {
+        let stats = UdpStats::default();
+        assert!(stats.try_open_flow(2));
+        assert!(stats.try_open_flow(2));
+        assert!(!stats.try_open_flow(2), "third slot must be refused");
+        stats.flows_closed(1);
+        assert!(stats.try_open_flow(2), "a freed slot can be taken again");
     }
 }

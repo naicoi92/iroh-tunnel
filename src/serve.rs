@@ -798,7 +798,8 @@ type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
 async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
     use crate::udp::{Admission, DropReason};
     let stats = target.udp_stats.clone();
-    let idle = target.udp_limits.idle_timeout;
+    let limits = target.udp_limits;
+    let idle = limits.idle_timeout;
     let flows = UdpFlowTable::default();
     let mut readers = JoinSet::new();
     let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
@@ -857,6 +858,17 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                 }
             }
             Admission::New => {
+                // Caps: the peer's own flows, then the service's flows across
+                // every peer. A refused flow is counted and its identifier
+                // spent; nothing running is evicted.
+                let peer_flows = flows.lock().unwrap_or_else(|p| p.into_inner()).len();
+                if peer_flows >= limits.max_flows_per_peer || !stats.try_open_flow(limits.max_flows)
+                {
+                    flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
+                    stats.record_drop(DropReason::Cap);
+                    tracing::debug!(flow = flow.0, "udp flow refused: flow cap reached");
+                    continue;
+                }
                 let opened = tokio::select! {
                     biased;
                     _ = shutdown::stopped(&mut stop) => break,
@@ -867,6 +879,8 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                     Err(error) => {
                         // Bind or descriptor exhaustion refuses the flow; the
                         // process keeps running (contract: counter `cap`).
+                        stats.flows_closed(1);
+                        flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
                         stats.record_drop(DropReason::Cap);
                         tracing::warn!(flow = flow.0, "cannot open udp upstream: {error}");
                         continue;
@@ -879,7 +893,6 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                     flows.clone(),
                     stats.clone(),
                 ));
-                stats.flow_opened();
                 flows.lock().unwrap_or_else(|p| p.into_inner()).insert(
                     flow,
                     (socket.clone(), relay),

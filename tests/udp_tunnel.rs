@@ -16,6 +16,29 @@ use iroh_tunnel::config::encode_secret_key;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 
+/// Next Access listener port to try. These ports sit below every OS's
+/// ephemeral range, so a test client's socket (bound to port 0) can never be
+/// handed a port another test has reserved but not yet bound.
+static NEXT_ACCESS_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// Reserve a free UDP port for an Access listener; the role rebinds it.
+async fn reserve_access_port() -> Result<SocketAddr> {
+    use std::sync::atomic::Ordering::Relaxed;
+    // Spread concurrently running test binaries apart by process id.
+    let first = 20_000 + (std::process::id() % 200) as u16 * 100;
+    let _ = NEXT_ACCESS_PORT.compare_exchange(0, first, Relaxed, Relaxed);
+    for _ in 0..500 {
+        let port = NEXT_ACCESS_PORT.fetch_add(1, Relaxed);
+        anyhow::ensure!(port < 40_000, "ran out of access test ports");
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        if let Ok(probe) = UdpSocket::bind(addr).await {
+            drop(probe);
+            return Ok(addr);
+        }
+    }
+    anyhow::bail!("no free access test port")
+}
+
 /// How long a client waits for a reply before the tunnel is declared broken.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -58,21 +81,40 @@ struct UdpTunnel {
 
 impl UdpTunnel {
     async fn start() -> Result<Self> {
+        Self::start_limited("").await
+    }
+
+    /// Start with extra lines in the serve service table (UDP limits).
+    async fn start_limited(serve_extra: &str) -> Result<Self> {
         // The UDP target behind serve: echoes every datagram to its sender.
         let target_sock = UdpSocket::bind("127.0.0.1:0").await?;
         let target_addr = target_sock.local_addr()?;
         let target_sources = Arc::new(Mutex::new(Vec::new()));
         let target = tokio::spawn(udp_echo(target_sock, target_sources.clone()));
-        Self::start_with_target(target_addr, Some(target), target_sources).await
+        Self::start_configured(target_addr, Some(target), target_sources, serve_extra).await
     }
 
-    /// Start the tunnel in front of `target_addr`. `target` is the task that
-    /// serves it, if the caller already runs one.
     async fn start_with_target(
         target_addr: SocketAddr,
         target: Option<tokio::task::JoinHandle<()>>,
         target_sources: Arc<Mutex<Vec<SocketAddr>>>,
     ) -> Result<Self> {
+        Self::start_configured(target_addr, target, target_sources, "").await
+    }
+
+    /// Start the tunnel in front of `target_addr`. `target` is the task that
+    /// serves it, if the caller already runs one.
+    async fn start_configured(
+        target_addr: SocketAddr,
+        target: Option<tokio::task::JoinHandle<()>>,
+        target_sources: Arc<Mutex<Vec<SocketAddr>>>,
+        serve_extra: &str,
+    ) -> Result<Self> {
+        // Opt-in diagnostics: RUST_LOG=iroh_tunnel=debug shows both roles.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
         let cfg = tempfile::tempdir().context("config tempdir")?;
         let (_map, relay_url, relay) = run_relay_server().await?;
         let relay_url = relay_url.to_string();
@@ -94,6 +136,7 @@ name = "dns"
 protocol = "udp"
 host = "{host}"
 port = {port}
+{serve_extra}
 "#,
                 key = encode_secret_key(&serve_key),
                 host = target_addr.ip(),
@@ -101,10 +144,7 @@ port = {port}
             ),
         )?;
 
-        // Reserve a free UDP port for the Access listener; access rebinds it.
-        let probe = UdpSocket::bind("127.0.0.1:0").await?;
-        let access_addr = probe.local_addr()?;
-        drop(probe);
+        let access_addr = reserve_access_port().await?;
 
         let access_cfg = cfg.path().join("access.toml");
         std::fs::write(
@@ -177,9 +217,7 @@ port = {port}
     /// Start a second Access peer (own identity) for the same service and
     /// return the address its clients send to.
     async fn add_access_peer(&mut self, tag: &str) -> Result<SocketAddr> {
-        let probe = UdpSocket::bind("127.0.0.1:0").await?;
-        let addr = probe.local_addr()?;
-        drop(probe);
+        let addr = reserve_access_port().await?;
         let key = SecretKey::generate();
         let path = self.cfg.path().join(format!("access-{tag}.toml"));
         std::fs::write(
@@ -451,10 +489,11 @@ async fn clients_on_two_access_peers_are_not_cross_delivered() -> Result<()> {
 /// target is up, the same client gets its reply on the same flow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_flow_survives_its_target_being_down_at_first() -> Result<()> {
-    // Reserve the target's address, but leave nothing listening on it yet.
-    let reserved = UdpSocket::bind("127.0.0.1:0").await?;
-    let target_addr = reserved.local_addr()?;
-    drop(reserved);
+    // Reserve the target's address, but leave nothing listening on it yet. It
+    // comes from the reserved low range: an ephemeral port freed here could be
+    // handed to another test's client socket, which would then receive this
+    // test's traffic.
+    let target_addr = reserve_access_port().await?;
 
     let sources = Arc::new(Mutex::new(Vec::new()));
     let tunnel = UdpTunnel::start_with_target(target_addr, None, sources.clone()).await?;
@@ -532,5 +571,82 @@ async fn status_files_report_flows_limit_and_drops_by_reason() -> Result<()> {
 
     // The oversized datagram never reached the target.
     assert_eq!(tunnel.target_sources.lock().unwrap().len(), delivered);
+    tunnel.shutdown().await
+}
+
+/// #89 / UDP-06 admission: at the service cap Serve refuses a new flow, counts
+/// it as `cap`, and never evicts a flow that is already running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_the_service_cap_a_new_flow_is_refused_and_old_flows_keep_working() -> Result<()> {
+    let tunnel = UdpTunnel::start_limited("max_flows = 2\nmax_flows_per_peer = 2").await?;
+    let a = UdpSocket::bind("127.0.0.1:0").await?;
+    let b = UdpSocket::bind("127.0.0.1:0").await?;
+    let c = UdpSocket::bind("127.0.0.1:0").await?;
+
+    tunnel.roundtrip(&a, b"a-1").await?;
+    tunnel.roundtrip(&b, b"b-1").await?;
+    drain(&a).await;
+    drain(&b).await;
+
+    // The third client's flow is over the cap: it gets nothing back.
+    for _ in 0..3 {
+        c.send_to(b"c-1", tunnel.access_addr).await?;
+    }
+    assert!(
+        try_recv(&c, Duration::from_secs(2)).await?.is_none(),
+        "a flow over the cap must not be served"
+    );
+
+    // The flows that were admitted first still work.
+    assert_eq!(tunnel.roundtrip(&a, b"a-2").await?, b"a-2");
+    assert_eq!(tunnel.roundtrip(&b, b"b-2").await?, b"b-2");
+
+    // The status file is flushed every few seconds: wait for a snapshot that
+    // already shows both facts, not just the first one.
+    let serve = UdpTunnel::status_when(tunnel.serve_state.path(), "serve-status.json", |s| {
+        let udp = &s["services"][0]["udp"];
+        udp["drops"]["cap"].as_u64() >= Some(1) && udp["active_flows"] == 2
+    })
+    .await?;
+    assert_eq!(serve["services"][0]["udp"]["active_flows"], 2);
+    tunnel.shutdown().await
+}
+
+/// UDP-06 per-peer cap: one Access peer that has used its share is refused
+/// further flows, while another peer is still served from the shared service
+/// cap. A flooding peer cannot take every slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_peer_cannot_take_the_slots_of_another() -> Result<()> {
+    let mut tunnel = UdpTunnel::start_limited("max_flows = 4\nmax_flows_per_peer = 1").await?;
+    let second = tunnel.add_access_peer("second").await?;
+    let first = tunnel.access_addr;
+    let a1 = UdpSocket::bind("127.0.0.1:0").await?;
+    let a2 = UdpSocket::bind("127.0.0.1:0").await?;
+    let b1 = UdpSocket::bind("127.0.0.1:0").await?;
+
+    // The first peer's only slot.
+    roundtrip_via(first, &a1, b"a1").await?;
+    drain(&a1).await;
+
+    // Its second flow is over the per-peer cap.
+    for _ in 0..3 {
+        a2.send_to(b"a2", first).await?;
+    }
+    assert!(
+        try_recv(&a2, Duration::from_secs(2)).await?.is_none(),
+        "a second flow from the same peer must be refused"
+    );
+
+    // The other peer is not affected by the first peer's usage.
+    assert_eq!(roundtrip_via(second, &b1, b"b1").await?, b"b1");
+
+    // The status file is flushed every few seconds: wait for a snapshot that
+    // already shows both facts, not just the first one.
+    let serve = UdpTunnel::status_when(tunnel.serve_state.path(), "serve-status.json", |s| {
+        let udp = &s["services"][0]["udp"];
+        udp["drops"]["cap"].as_u64() >= Some(1) && udp["active_flows"] == 2
+    })
+    .await?;
+    assert_eq!(serve["services"][0]["udp"]["active_flows"], 2);
     tunnel.shutdown().await
 }
