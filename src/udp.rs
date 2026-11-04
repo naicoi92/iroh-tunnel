@@ -1,6 +1,6 @@
 //! UDP datagram framing shared by Access and Serve (#88).
 //!
-//! Wire contract: `docs/design/udp-integration-contract.md`. Each tunnel
+//! Wire contract: `docs/udp-integration-contract.md`. Each tunnel
 //! datagram is `[flow id: u32 big-endian][client payload]`, carried as one
 //! QUIC DATAGRAM. The payload is opaque and may be empty. There is no
 //! fragmentation: a payload larger than the connection's datagram limit

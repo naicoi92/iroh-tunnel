@@ -726,7 +726,7 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 /// (session incarnation). Idle flows expire after the service's idle timeout.
 /// New clients are refused at `max_flows`, and spent flow identifiers end the
 /// incarnation by evicting the connection.
-/// Contract: `docs/design/udp-integration-contract.md`.
+/// Contract: `docs/udp-integration-contract.md`.
 async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     use crate::udp::DropReason;
     let stats = dialer.udp_stats.clone();
