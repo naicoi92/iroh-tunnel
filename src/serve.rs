@@ -802,7 +802,7 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
     let idle = limits.idle_timeout;
     let flows = UdpFlowTable::default();
     let mut readers = JoinSet::new();
-    let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
+    let mut sweep = tokio::time::interval(crate::udp::sweep_interval(idle));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let datagram = tokio::select! {
@@ -813,12 +813,11 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .expire(std::time::Instant::now(), idle);
-                for (_, relay) in &ended {
-                    relay.abort();
-                }
-                stats.flows_closed(ended.len());
                 if !ended.is_empty() {
                     tracing::debug!(count = ended.len(), "udp upstream flows expired");
+                }
+                for upstream in ended {
+                    quarantine(upstream, &stats, &stop);
                 }
                 continue;
             }
@@ -906,11 +905,51 @@ async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut sto
             tracing::debug!(flow = flow.0, "udp upstream send failed: {error}");
         }
     }
-    // The connection's flows end with it.
-    let remaining = flows.lock().unwrap_or_else(|p| p.into_inner()).len();
-    stats.flows_closed(remaining);
+    // The connection's flows end with it, but their sockets are quarantined
+    // like any expired flow: they outlive the incarnation as sinks only.
+    let ended = flows.lock().unwrap_or_else(|p| p.into_inner()).drain_all();
+    for upstream in ended {
+        quarantine(upstream, &stats, &stop);
+    }
     readers.abort_all();
     shutdown::join(&mut readers).await;
+}
+
+/// End a flow: stop relaying its replies and keep its socket open as a sink
+/// for [`crate::udp::QUARANTINE`], so a late reply cannot reach a new flow
+/// that the OS would otherwise give the same local port.
+///
+/// The socket keeps its slot against the caps until the sink closes. The sink
+/// runs detached: it must outlive the connection, and it ends early on
+/// shutdown.
+fn quarantine(upstream: UdpUpstream, stats: &Arc<crate::udp::UdpStats>, stop: &shutdown::Stop) {
+    let (socket, relay) = upstream;
+    // The relay holds a clone of the socket; ending it leaves the sink as the
+    // only reader.
+    relay.abort();
+    stats.quarantine_started();
+    let stats = stats.clone();
+    let mut stop = stop.clone();
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + crate::udp::QUARANTINE;
+        // Replies are discarded; a small buffer is enough (the kernel drops
+        // the excess of a datagram larger than it).
+        let mut buf = vec![0u8; 2048];
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown::stopped(&mut stop) => break,
+                _ = tokio::time::sleep_until(deadline) => break,
+                result = socket.recv(&mut buf) => match result {
+                    Ok(_) => stats.record_drop(crate::udp::DropReason::QuarantineReply),
+                    Err(error) if crate::udp::is_transient_recv_error(&error) => {}
+                    // A socket that cannot be read again is done; release it.
+                    Err(_) => break,
+                },
+            }
+        }
+        stats.quarantine_ended();
+    });
 }
 
 /// Bind a fresh socket of the target's address family and connect it, so the

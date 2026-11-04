@@ -743,7 +743,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     let mut readers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     let mut current: Option<usize> = None;
     let mut buf = vec![0u8; 65535];
-    let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
+    let mut sweep = tokio::time::interval(crate::udp::sweep_interval(idle));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let (n, client) = tokio::select! {

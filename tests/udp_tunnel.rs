@@ -264,19 +264,31 @@ port = {port}
         file: &str,
         ready: impl Fn(&serde_json::Value) -> bool,
     ) -> Result<serde_json::Value> {
+        Self::status_within(dir, file, Duration::from_secs(30), ready).await
+    }
+
+    /// [`Self::status_when`] with an explicit patience.
+    async fn status_within(
+        dir: &std::path::Path,
+        file: &str,
+        patience: Duration,
+        ready: impl Fn(&serde_json::Value) -> bool,
+    ) -> Result<serde_json::Value> {
         let path = dir.join(file);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + patience;
+        let mut last = String::from("(file never readable)");
         loop {
             if let Ok(body) = std::fs::read_to_string(&path) {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                     if ready(&json) {
                         return Ok(json);
                     }
+                    last = json["services"][0]["udp"].to_string();
                 }
             }
             anyhow::ensure!(
                 tokio::time::Instant::now() < deadline,
-                "{file} never reached the expected state"
+                "{file} never reached the expected state; last udp block: {last}"
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -648,5 +660,106 @@ async fn one_peer_cannot_take_the_slots_of_another() -> Result<()> {
     })
     .await?;
     assert_eq!(serve["services"][0]["udp"]["active_flows"], 2);
+    tunnel.shutdown().await
+}
+
+/// Echo target that answers after `delay`, so a reply can arrive after its
+/// flow has gone idle.
+async fn delayed_echo(sock: Arc<UdpSocket>, delay: Duration, sources: Arc<Mutex<Vec<SocketAddr>>>) {
+    let mut buf = vec![0u8; 65535];
+    while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+        sources.lock().unwrap().push(from);
+        let reply = buf[..n].to_vec();
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = sock.send_to(&reply, from).await;
+        });
+    }
+}
+
+/// UDP-04 / UDP-06 quarantine: after a flow goes idle its upstream socket is
+/// kept open as a sink. A late reply from the target lands there, is counted
+/// as `quarantine_reply` and is never delivered to anyone. The flow is
+/// reported as quarantined, not active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_reply_to_an_expired_flow_is_counted_and_not_delivered() -> Result<()> {
+    let target = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+    let target_addr = target.local_addr()?;
+    let sources = Arc::new(Mutex::new(Vec::new()));
+    let echo = tokio::spawn(delayed_echo(
+        target,
+        Duration::from_secs(4),
+        sources.clone(),
+    ));
+    let tunnel =
+        UdpTunnel::start_configured(target_addr, None, sources.clone(), "idle_timeout = 1").await?;
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+
+    // UDP gives no connect signal and Access may not be listening yet: send
+    // until the target has seen a datagram, then stop so the flow can go idle.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while sources.lock().unwrap().is_empty() {
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "the datagram never reached the target"
+        );
+        let _ = client.send_to(b"slow", tunnel.access_addr).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let serve = UdpTunnel::status_when(tunnel.serve_state.path(), "serve-status.json", |s| {
+        let udp = &s["services"][0]["udp"];
+        udp["drops"]["quarantine_reply"].as_u64() >= Some(1)
+            && udp["quarantined_flows"] == 1
+            && udp["active_flows"] == 0
+    })
+    .await?;
+    assert!(serve["services"][0]["udp"]["drops"]["quarantine_reply"].as_u64() >= Some(1));
+    assert!(
+        try_recv(&client, Duration::from_millis(500))
+            .await?
+            .is_none(),
+        "a reply that arrives after the flow expired must not reach any client"
+    );
+
+    echo.abort();
+    tunnel.shutdown().await
+}
+
+/// UDP-06: a quarantined socket still counts against the caps, so a new flow
+/// is refused while it lasts, and is admitted once quarantine ends (30 s).
+/// Slow on purpose: it runs the real quarantine period.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quarantine_holds_the_slot_and_then_releases_it() -> Result<()> {
+    let tunnel =
+        UdpTunnel::start_limited("idle_timeout = 1\nmax_flows = 1\nmax_flows_per_peer = 1").await?;
+    let a = UdpSocket::bind("127.0.0.1:0").await?;
+    let b = UdpSocket::bind("127.0.0.1:0").await?;
+    let c = UdpSocket::bind("127.0.0.1:0").await?;
+
+    tunnel.roundtrip(&a, b"a").await?;
+    // a goes idle after 1 s and is quarantined; its socket still holds the slot.
+    UdpTunnel::status_when(tunnel.serve_state.path(), "serve-status.json", |s| {
+        s["services"][0]["udp"]["quarantined_flows"] == 1
+    })
+    .await?;
+
+    for _ in 0..3 {
+        b.send_to(b"b", tunnel.access_addr).await?;
+    }
+    assert!(
+        try_recv(&b, Duration::from_secs(2)).await?.is_none(),
+        "a quarantined socket must keep holding its slot"
+    );
+
+    // Quarantine ends after 30 s; the status file lags by up to one flush.
+    UdpTunnel::status_within(
+        tunnel.serve_state.path(),
+        "serve-status.json",
+        Duration::from_secs(60),
+        |s| s["services"][0]["udp"]["quarantined_flows"] == 0,
+    )
+    .await?;
+    assert_eq!(tunnel.roundtrip(&c, b"c").await?, b"c");
     tunnel.shutdown().await
 }

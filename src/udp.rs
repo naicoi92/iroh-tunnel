@@ -47,7 +47,9 @@ pub enum DropReason {
 /// status writer. Relaxed ordering: these are diagnostics, not synchronization.
 #[derive(Debug, Default)]
 pub struct UdpStats {
-    active_flows: std::sync::atomic::AtomicU64,
+    /// Slots in use: live flows plus quarantined ones (what the caps count).
+    held_flows: std::sync::atomic::AtomicU64,
+    /// Of those, the flows whose socket is only a sink.
     quarantined_flows: std::sync::atomic::AtomicU64,
     datagram_limit: std::sync::atomic::AtomicU64,
     oversize: std::sync::atomic::AtomicU64,
@@ -59,6 +61,18 @@ pub struct UdpStats {
     limit_shrink: std::sync::atomic::AtomicU64,
     quarantine_reply: std::sync::atomic::AtomicU64,
     foreign_source: std::sync::atomic::AtomicU64,
+}
+
+/// Subtract `n` from `value`, stopping at zero.
+fn sub_saturating(value: &std::sync::atomic::AtomicU64, n: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut now = value.load(Relaxed);
+    loop {
+        match value.compare_exchange_weak(now, now.saturating_sub(n), Relaxed, Relaxed) {
+            Ok(_) => return,
+            Err(actual) => now = actual,
+        }
+    }
 }
 
 impl UdpStats {
@@ -84,7 +98,7 @@ impl UdpStats {
 
     /// Set the live flow count (Access owns one table per service).
     pub fn set_active_flows(&self, count: usize) {
-        self.active_flows
+        self.held_flows
             .store(count as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -95,13 +109,13 @@ impl UdpStats {
     /// [`UdpStats::flows_closed`].
     pub fn try_open_flow(&self, max: usize) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
-        let mut now = self.active_flows.load(Relaxed);
+        let mut now = self.held_flows.load(Relaxed);
         loop {
             if now >= max as u64 {
                 return false;
             }
             match self
-                .active_flows
+                .held_flows
                 .compare_exchange_weak(now, now + 1, Relaxed, Relaxed)
             {
                 Ok(_) => return true,
@@ -110,22 +124,21 @@ impl UdpStats {
         }
     }
 
-    /// `count` flows ended.
+    /// `count` flows ended and release their slots.
     pub fn flows_closed(&self, count: usize) {
-        use std::sync::atomic::Ordering::Relaxed;
-        // A manual loop, not `fetch_update`: that name is deprecated on new
-        // toolchains and its replacement is newer than the crate's MSRV.
-        let mut now = self.active_flows.load(Relaxed);
-        loop {
-            let next = now.saturating_sub(count as u64);
-            match self
-                .active_flows
-                .compare_exchange_weak(now, next, Relaxed, Relaxed)
-            {
-                Ok(_) => return,
-                Err(actual) => now = actual,
-            }
-        }
+        sub_saturating(&self.held_flows, count as u64);
+    }
+
+    /// A live flow expired: its socket stays open as a sink and keeps its slot.
+    pub fn quarantine_started(&self) {
+        self.quarantined_flows
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A quarantined socket closed: its slot is free again.
+    pub fn quarantine_ended(&self) {
+        sub_saturating(&self.quarantined_flows, 1);
+        sub_saturating(&self.held_flows, 1);
     }
 
     /// Record the connection's current payload limit; `None` when datagrams
@@ -142,7 +155,10 @@ impl UdpStats {
         use std::sync::atomic::Ordering::Relaxed;
         let limit = self.datagram_limit.load(Relaxed);
         crate::status::UdpStatus {
-            active_flows: self.active_flows.load(Relaxed),
+            active_flows: self
+                .held_flows
+                .load(Relaxed)
+                .saturating_sub(self.quarantined_flows.load(Relaxed)),
             quarantined_flows: self.quarantined_flows.load(Relaxed),
             datagram_limit: (limit > 0).then_some(limit),
             drops: crate::status::UdpDrops {
@@ -160,8 +176,20 @@ impl UdpStats {
     }
 }
 
+/// How long an expired flow's upstream socket stays open as a sink before it
+/// closes and its slot is released (UDP-06). A fixed constant, not configurable.
+pub const QUARANTINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// How often each side looks for idle flows.
 pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The sweep period for a service with this idle timeout: never longer than
+/// the timeout itself, so a short timeout is honoured promptly.
+pub fn sweep_interval(idle: std::time::Duration) -> std::time::Duration {
+    SWEEP_INTERVAL
+        .min(idle)
+        .max(std::time::Duration::from_millis(100))
+}
 
 /// Identifier of one flow, assigned by Access within a session incarnation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -365,6 +393,15 @@ impl<T> PeerFlows<T> {
         if let Some(entry) = self.live.get_mut(&flow) {
             entry.1 = now;
         }
+    }
+
+    /// Take every live flow's upstream, ending them all (the connection is
+    /// gone).
+    pub fn drain_all(&mut self) -> Vec<T> {
+        self.live
+            .drain()
+            .map(|(_, (upstream, _))| upstream)
+            .collect()
     }
 
     /// End every flow idle for at least `idle`, returning their upstreams so
@@ -595,5 +632,51 @@ mod tests {
         assert!(!stats.try_open_flow(2), "third slot must be refused");
         stats.flows_closed(1);
         assert!(stats.try_open_flow(2), "a freed slot can be taken again");
+    }
+
+    #[test]
+    fn a_quarantined_flow_keeps_its_slot_until_the_quarantine_ends() {
+        let stats = UdpStats::default();
+        assert!(stats.try_open_flow(1));
+        stats.quarantine_started();
+        let snap = stats.snapshot();
+        assert_eq!((snap.active_flows, snap.quarantined_flows), (0, 1));
+        assert!(!stats.try_open_flow(1), "the slot is still held");
+        stats.quarantine_ended();
+        assert_eq!(stats.snapshot().quarantined_flows, 0);
+        assert!(
+            stats.try_open_flow(1),
+            "the slot is free once quarantine ends"
+        );
+    }
+
+    #[test]
+    fn drain_all_returns_every_live_upstream() {
+        let t0 = Instant::now();
+        let mut flows: PeerFlows<&str> = PeerFlows::default();
+        flows.insert(FlowId(1), "one", t0);
+        flows.insert(FlowId(2), "two", t0);
+        let mut all = flows.drain_all();
+        all.sort();
+        assert_eq!(all, vec!["one", "two"]);
+        assert!(flows.is_empty());
+        assert_eq!(
+            flows.admit(FlowId(2), t0),
+            Admission::Unknown,
+            "ids stay spent"
+        );
+    }
+
+    #[test]
+    fn the_sweep_never_waits_longer_than_the_idle_timeout() {
+        assert_eq!(sweep_interval(Duration::from_secs(60)), SWEEP_INTERVAL);
+        assert_eq!(
+            sweep_interval(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            sweep_interval(Duration::from_millis(1)),
+            Duration::from_millis(100)
+        );
     }
 }
