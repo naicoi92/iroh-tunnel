@@ -1,15 +1,6 @@
-# UDP integration contract (#78)
+# UDP integration contract
 
-Single reference for implementation issues #88 and #89. It consolidates decisions already recorded in `redesign-spec.md` (UDP-01 to UDP-06); it adds only the wire framing and the admission-refusal behavior chosen on #78. UDP is **experimental** (#73 decision): behavior under loss, delay, congestion and path migration is not verified.
-
-## Decision sources
-
-| Topic | Rule | Issue |
-|---|---|---|
-| Boundaries, best effort, client routing | UDP-01, UDP-02, UDP-03 (Confirmed) | #68, #70 |
-| Flow identity, filtering, lifecycle, quarantine | UDP-04 (Confirmed) | #71 |
-| Transport, oversize, datagram limit, flow identifier | UDP-05 (Confirmed) | #72, #73 |
-| Caps, admission, timeouts, queues, diagnostics | UDP-06 (Confirmed; defaults are untested estimates) | #74 |
+Single reference for the UDP wire framing and admission-refusal behavior. UDP is **experimental**: behavior under loss, delay, congestion and path migration is not verified.
 
 ## Transport and wire framing
 
@@ -54,26 +45,5 @@ Idle timeout 60 s (`idle_timeout`, seconds); quarantine 30 s (fixed constant); 2
 
 ## Left to implementation
 
-- Nothing is left open from #89: the Access cap counts live flows of the service (default 256, same field as Serve's `max_flows`), and the queue depth default is 64 datagrams per flow.
-- Keep-alive or refresh semantics beyond UDP-04's rule that a datagram in either direction refreshes the idle timer.
-
-## Evidence and known risk
-
-| Evidence | Status |
-|---|---|
-| `examples/udp_bench_probe.rs` and `examples/udp_bench.rs`: loopback runs on forced relay and verified direct path, limit observed to change (1162 and 1414), oversize refused synchronously at the sender (not the tunnel's drop-and-count, which is NOT RUN) | Available |
-| Loss, delay, congestion, path migration, long-run memory (E3), flow routing through a real tunnel | NOT RUN. Accepted risk of experimental status. A `tc netem` environment is unconfirmed (a hosted Linux runner may or may not allow it; not checked) |
-| Direct and forced-relay measurements through the real tunnel, per platform | Stay with UDP-PATH-01, #89 and final gate #97 |
-
-This document does not claim the #73 benchmark acceptance was met.
-
-## Traceability to implementation
-
-| Behavior | Owner | Acceptance case |
-|---|---|---|
-| Wire codec (header encode and decode, per-send limit read, empty payload, short datagram) | #88 | UDP-DATA-01 |
-| Opaque payload, boundaries, interleaved replies, equal flow ids across peers | #88 | UDP-DATA-01 |
-| Upstream socket per flow, shared connection, documented NAT and best effort | #88 | UDP-SOCKET-01 |
-| Expiry, quarantine, reconnect, source filtering, tuple reuse | #89 | UDP-LIFECYCLE-01 |
-| Caps, admission, queues, oversize, descriptor exhaustion, diagnostics | #89 | UDP-LIMIT-01 |
-| Direct and relay paths, impairment, platform matrix | #89, #97 | UDP-PATH-01 |
+- The Access cap counts live flows of the service (default 256, same field as Serve's `max_flows`), and the queue depth default is 64 datagrams per flow.
+- Keep-alive or refresh semantics beyond the rule that a datagram in either direction refreshes the idle timer.
