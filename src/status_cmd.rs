@@ -20,9 +20,10 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
 
-use crate::conn_path::TransportStatus;
 use crate::ownership::{self, Liveness, Owner, Tier};
-use crate::status::{AccessStatusFile, StatusFile, StatusPayload, StatusRole, StatusWriter};
+use crate::status::{
+    AccessStatusFile, StatusFile, StatusPayload, StatusRole, StatusWriter, TransportStatus,
+};
 
 /// Entry point for `iroh-tunnel <role> status [--json]`.
 ///
@@ -330,8 +331,9 @@ fn padded_lines(cells: &[Vec<String>], widths: &[usize]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conn_path::{PeerPathReport, TransportKind};
-    use crate::status::{AccessServiceStatus, PeerConnectionStatus, ServiceStatus};
+    use crate::status::{
+        AccessServiceStatus, PeerConnectionStatus, PeerPathReport, ServiceStatus, TransportKind,
+    };
 
     /// A realistic 64-hex-char serve peer id (same shape as real node ids,
     /// so the short-id truncation is exercised exactly as in production).

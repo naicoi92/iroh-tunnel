@@ -42,10 +42,11 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::observation as obs;
 
 /// File name of the serve status file (role-scoped).
 const SERVE_STATUS_FILE_NAME: &str = "serve-status.json";
@@ -63,13 +64,6 @@ const LEGACY_STATUS_FILE_NAME: &str = "status.json";
 /// (advanced/testing seam; empty is treated as unset). Shared by both
 /// roles — one directory, two role-scoped file names.
 const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
-
-/// How often each role's status flush task re-renders its status file.
-///
-/// Shared so the two roles' cadence can never drift: 5 s is near-live for
-/// operators while keeping the endpoint query and disk write off the hot
-/// path.
-pub(crate) const STATUS_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Top-level status snapshot written to disk by the serve role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -145,17 +139,169 @@ pub struct UdpDrops {
 /// One currently-connected remote peer in the status file (issue #57).
 ///
 /// The path fields (`peer`, `transports`, `local_bound_addrs`) are flattened
-/// in from a [`crate::conn_path::PeerPathReport`] so the two schemas cannot
+/// in from a [`PeerPathReport`] so the two schemas cannot
 /// drift apart; the serve role adds only the per-peer `services` merge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerConnectionStatus {
     /// Connection-path snapshot for this peer (peer id, transports,
     /// endpoint-wide local UDP candidates), flattened into this row.
     #[serde(flatten)]
-    pub path: crate::conn_path::PeerPathReport,
+    pub path: PeerPathReport,
     /// Service names this peer is connected to (from the connection's ALPN,
     /// merged across all of the peer's connections).
     pub services: Vec<String>,
+}
+
+/// How one remote peer is currently reachable, for status files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerPathReport {
+    /// The remote peer's endpoint id (full node id string).
+    pub peer: String,
+    /// Transports iroh knows for this peer, active ones first.
+    pub transports: Vec<TransportStatus>,
+    /// Local UDP socket candidates of *our* endpoint (endpoint-wide, not a
+    /// per-transport local address).
+    pub local_bound_addrs: Vec<String>,
+}
+
+/// The kind of network path a transport uses, serialized lowercase
+/// (`"relay"` / `"direct"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    /// Via a relay server.
+    Relay,
+    /// Direct IP path.
+    Direct,
+}
+
+impl std::fmt::Display for TransportKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Matches the serde lowercase form.
+        f.write_str(match self {
+            TransportKind::Relay => "relay",
+            TransportKind::Direct => "direct",
+        })
+    }
+}
+
+/// One transport path to a remote peer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransportStatus {
+    /// `"relay"` (via a relay server URL) or `"direct"` (IP path).
+    pub kind: TransportKind,
+    /// The relay URL or `SocketAddr` (`host:port`, IPv6 bracketed) in use.
+    pub addr: String,
+    /// Whether iroh is actively sending on this transport at query time.
+    pub active: bool,
+}
+
+impl From<&obs::TransportObservation> for TransportStatus {
+    fn from(t: &obs::TransportObservation) -> Self {
+        Self {
+            kind: match t.kind {
+                obs::TransportKind::Relay => TransportKind::Relay,
+                obs::TransportKind::Direct => TransportKind::Direct,
+            },
+            addr: t.addr.clone(),
+            active: t.active,
+        }
+    }
+}
+
+impl From<&obs::PeerPathObservation> for PeerPathReport {
+    fn from(p: &obs::PeerPathObservation) -> Self {
+        Self {
+            peer: p.peer.clone(),
+            transports: p.transports.iter().map(TransportStatus::from).collect(),
+            local_bound_addrs: p.local_bound_addrs.clone(),
+        }
+    }
+}
+
+impl From<&obs::UdpObservation> for UdpStatus {
+    fn from(u: &obs::UdpObservation) -> Self {
+        Self {
+            active_flows: u.active_flows,
+            quarantined_flows: u.quarantined_flows,
+            datagram_limit: u.datagram_limit,
+            drops: UdpDrops {
+                oversize: u.drops.oversize,
+                malformed: u.drops.malformed,
+                unknown_flow: u.drops.unknown_flow,
+                upstream_error: u.drops.upstream_error,
+                cap: u.drops.cap,
+                queue_full: u.drops.queue_full,
+                limit_shrink: u.drops.limit_shrink,
+                quarantine_reply: u.drops.quarantine_reply,
+                foreign_source: u.drops.foreign_source,
+            },
+        }
+    }
+}
+
+impl From<&obs::ServeObservation> for StatusFile {
+    fn from(o: &obs::ServeObservation) -> Self {
+        Self {
+            node_id: o.node_id.clone(),
+            home_relay: o.home_relay.clone(),
+            pid: o.pid,
+            started_at: o.started_at,
+            services: o
+                .services
+                .iter()
+                .map(|s| ServiceStatus {
+                    name: s.name.clone(),
+                    protocol: s.protocol.clone(),
+                    local_addr: s.local_addr.clone(),
+                    active_connections: s.active_connections,
+                    udp: s.udp.as_ref().map(UdpStatus::from),
+                })
+                .collect(),
+            connections: o
+                .connections
+                .iter()
+                .map(|c| PeerConnectionStatus {
+                    path: PeerPathReport::from(&c.path),
+                    services: c.services.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<&obs::ServeObservation> for StatusPayload {
+    fn from(o: &obs::ServeObservation) -> Self {
+        Self::Serve(StatusFile::from(o))
+    }
+}
+
+impl From<&obs::AccessObservation> for StatusPayload {
+    fn from(o: &obs::AccessObservation) -> Self {
+        Self::Access(AccessStatusFile::from(o))
+    }
+}
+
+impl From<&obs::AccessObservation> for AccessStatusFile {
+    fn from(o: &obs::AccessObservation) -> Self {
+        Self {
+            node_id: o.node_id.clone(),
+            pid: o.pid,
+            started_at: o.started_at,
+            services: o
+                .services
+                .iter()
+                .map(|s| AccessServiceStatus {
+                    name: s.name.clone(),
+                    listen_addr: s.listen_addr.clone(),
+                    peer: s.peer.clone(),
+                    transports: s.transports.iter().map(TransportStatus::from).collect(),
+                    local_bound_addrs: s.local_bound_addrs.clone(),
+                    udp: s.udp.as_ref().map(UdpStatus::from),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Top-level status snapshot written to disk by the access role (issue #59).
@@ -188,7 +334,7 @@ pub struct AccessServiceStatus {
     /// Live transports of the service's shared multiplexed connection,
     /// queried fresh at each flush. Empty while the service has no live
     /// connection.
-    pub transports: Vec<crate::conn_path::TransportStatus>,
+    pub transports: Vec<TransportStatus>,
     /// This endpoint's local UDP socket *candidates* (endpoint-wide, not a
     /// per-transport local address — same semantics as the serve file).
     pub local_bound_addrs: Vec<String>,
@@ -459,20 +605,6 @@ impl StatusWriter {
     }
 }
 
-/// Format a `host:port` pair for the machine-readable status file, bracketing
-/// IPv6 literals (`[::1]:8080`) so the result is unambiguous. Plain IPv4
-/// addresses and hostnames are left as `host:port`.
-///
-/// Co-located with [`ServiceStatus::local_addr`] — the field that consumes
-/// it — so the format is defined next to the schema that depends on it.
-pub(crate) fn format_local_addr(host: &str, port: u16) -> String {
-    if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
-}
-
 /// Just the `pid` field of a status file — the minimal probe
 /// [`remove_own_status_file`] needs, so the ownership check works against
 /// both roles' schemas (unknown fields are ignored by serde).
@@ -573,10 +705,10 @@ mod tests {
                 udp: None,
             }],
             connections: vec![PeerConnectionStatus {
-                path: crate::conn_path::PeerPathReport {
+                path: PeerPathReport {
                     peer: "peer456".to_string(),
-                    transports: vec![crate::conn_path::TransportStatus {
-                        kind: crate::conn_path::TransportKind::Relay,
+                    transports: vec![TransportStatus {
+                        kind: TransportKind::Relay,
                         addr: "https://relay.example/".to_string(),
                         active: true,
                     }],
@@ -596,8 +728,8 @@ mod tests {
                 name: "echo".to_string(),
                 listen_addr: "127.0.0.1:8080".to_string(),
                 peer: "peer456".to_string(),
-                transports: vec![crate::conn_path::TransportStatus {
-                    kind: crate::conn_path::TransportKind::Direct,
+                transports: vec![TransportStatus {
+                    kind: TransportKind::Direct,
                     addr: "192.168.1.10:52618".to_string(),
                     active: true,
                 }],
@@ -605,6 +737,192 @@ mod tests {
                 udp: None,
             }],
         }
+    }
+
+    const SERVE_GOLDEN: &str = r#"{"node_id":"node-s","home_relay":"https://relay.example/","pid":42,"started_at":1700000000,"services":[{"name":"echo","protocol":"tcp","local_addr":"127.0.0.1:8080","active_connections":2},{"name":"dns","protocol":"udp","local_addr":"[::1]:5353","active_connections":0,"udp":{"active_flows":3,"quarantined_flows":1,"datagram_limit":1200,"drops":{"oversize":1,"malformed":2,"unknown_flow":3,"upstream_error":4,"cap":5,"queue_full":6,"limit_shrink":7,"quarantine_reply":8,"foreign_source":9}}}],"connections":[{"peer":"peer-a","transports":[{"kind":"relay","addr":"https://relay.example/","active":true},{"kind":"direct","addr":"10.0.0.2:1","active":false}],"local_bound_addrs":["0.0.0.0:1","[::]:2"],"services":["echo","dns"]},{"peer":"peer-b","transports":[],"local_bound_addrs":[],"services":["echo"]}]}"#;
+    const ACCESS_GOLDEN: &str = r#"{"node_id":"node-a","pid":43,"started_at":1700000001,"services":[{"name":"echo","listen_addr":"127.0.0.1:9","peer":"peer-a","transports":[{"kind":"relay","addr":"https://relay.example/","active":true},{"kind":"direct","addr":"10.0.0.2:1","active":true}],"local_bound_addrs":["0.0.0.0:1"],"udp":{"active_flows":3,"quarantined_flows":1,"datagram_limit":1200,"drops":{"oversize":1,"malformed":2,"unknown_flow":3,"upstream_error":4,"cap":5,"queue_full":6,"limit_shrink":7,"quarantine_reply":8,"foreign_source":9}}},{"name":"idle","listen_addr":"127.0.0.1:10","peer":"peer-a","transports":[],"local_bound_addrs":[]}]}"#;
+
+    fn udp_observation() -> obs::UdpObservation {
+        obs::UdpObservation {
+            active_flows: 3,
+            quarantined_flows: 1,
+            datagram_limit: Some(1200),
+            drops: obs::UdpDropCounts {
+                oversize: 1,
+                malformed: 2,
+                unknown_flow: 3,
+                upstream_error: 4,
+                cap: 5,
+                queue_full: 6,
+                limit_shrink: 7,
+                quarantine_reply: 8,
+                foreign_source: 9,
+            },
+        }
+    }
+
+    fn transport(kind: obs::TransportKind, addr: &str, active: bool) -> obs::TransportObservation {
+        obs::TransportObservation {
+            kind,
+            addr: addr.to_string(),
+            active,
+        }
+    }
+
+    fn serve_observation() -> obs::ServeObservation {
+        obs::ServeObservation {
+            node_id: "node-s".into(),
+            home_relay: Some("https://relay.example/".into()),
+            pid: 42,
+            started_at: 1_700_000_000,
+            services: vec![
+                obs::ServiceObservation {
+                    name: "echo".into(),
+                    protocol: "tcp".into(),
+                    local_addr: "127.0.0.1:8080".into(),
+                    active_connections: 2,
+                    udp: None,
+                },
+                obs::ServiceObservation {
+                    name: "dns".into(),
+                    protocol: "udp".into(),
+                    local_addr: "[::1]:5353".into(),
+                    active_connections: 0,
+                    udp: Some(udp_observation()),
+                },
+            ],
+            connections: vec![
+                obs::PeerConnectionObservation {
+                    path: obs::PeerPathObservation {
+                        peer: "peer-a".into(),
+                        transports: vec![
+                            transport(obs::TransportKind::Relay, "https://relay.example/", true),
+                            transport(obs::TransportKind::Direct, "10.0.0.2:1", false),
+                        ],
+                        local_bound_addrs: vec!["0.0.0.0:1".into(), "[::]:2".into()],
+                    },
+                    services: vec!["echo".into(), "dns".into()],
+                },
+                obs::PeerConnectionObservation {
+                    path: obs::PeerPathObservation {
+                        peer: "peer-b".into(),
+                        transports: vec![],
+                        local_bound_addrs: vec![],
+                    },
+                    services: vec!["echo".into()],
+                },
+            ],
+        }
+    }
+
+    fn access_observation() -> obs::AccessObservation {
+        obs::AccessObservation {
+            node_id: "node-a".into(),
+            pid: 43,
+            started_at: 1_700_000_001,
+            services: vec![
+                obs::AccessServiceObservation {
+                    name: "echo".into(),
+                    listen_addr: "127.0.0.1:9".into(),
+                    peer: "peer-a".into(),
+                    transports: vec![
+                        transport(obs::TransportKind::Relay, "https://relay.example/", true),
+                        transport(obs::TransportKind::Direct, "10.0.0.2:1", true),
+                    ],
+                    local_bound_addrs: vec!["0.0.0.0:1".into()],
+                    udp: Some(udp_observation()),
+                },
+                obs::AccessServiceObservation {
+                    name: "idle".into(),
+                    listen_addr: "127.0.0.1:10".into(),
+                    peer: "peer-a".into(),
+                    transports: vec![],
+                    local_bound_addrs: vec![],
+                    udp: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn observation_mapping_is_field_for_field() {
+        // Goldens were captured from the pre-observation DTO serialization
+        // of the same values: the on-disk schema must not move.
+        assert_eq!(
+            serde_json::to_string(&StatusFile::from(&serve_observation())).unwrap(),
+            SERVE_GOLDEN
+        );
+        assert_eq!(
+            serde_json::to_string(&AccessStatusFile::from(&access_observation())).unwrap(),
+            ACCESS_GOLDEN
+        );
+    }
+
+    #[test]
+    fn transport_kind_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(TransportKind::Relay).unwrap(),
+            serde_json::json!("relay")
+        );
+        assert_eq!(
+            serde_json::to_value(TransportKind::Direct).unwrap(),
+            serde_json::json!("direct")
+        );
+        let back: TransportKind = serde_json::from_value(serde_json::json!("direct")).unwrap();
+        assert_eq!(back, TransportKind::Direct);
+    }
+
+    #[test]
+    fn peer_path_report_serializes_with_documented_field_names() {
+        let report = PeerPathReport {
+            peer: "k7gp…nodeid".to_string(),
+            transports: vec![TransportStatus {
+                kind: TransportKind::Relay,
+                addr: "https://use1-1.relay.iroh.network/".to_string(),
+                active: true,
+            }],
+            local_bound_addrs: vec!["0.0.0.0:52110".to_string()],
+        };
+        let json = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(json["peer"], "k7gp…nodeid");
+        assert_eq!(json["local_bound_addrs"][0], "0.0.0.0:52110");
+        assert_eq!(json["transports"][0]["kind"], "relay");
+        assert_eq!(
+            json["transports"][0]["addr"],
+            "https://use1-1.relay.iroh.network/"
+        );
+        assert_eq!(json["transports"][0]["active"], true);
+
+        // Round-trips ( Deserialize is part of the schema contract for the
+        // #58/#59 reuse).
+        let back: PeerPathReport = serde_json::from_value(json).unwrap();
+        assert_eq!(back, report);
+    }
+
+    #[test]
+    fn transport_kind_display_matches_serde_form() {
+        // The two spellings of a kind must stay identical: serde drives
+        // the status-file schema, Display drives the log rendering.
+        for kind in [TransportKind::Relay, TransportKind::Direct] {
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!(kind.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn observation_equality_ignores_nothing_rendered() {
+        let base = serve_observation();
+        assert_eq!(base, serve_observation());
+        let mut flipped = serve_observation();
+        flipped.connections[0].path.transports[0].active = false;
+        assert_ne!(base, flipped);
+        let mut access = access_observation();
+        assert_eq!(access, access_observation());
+        access.services[0].transports[0].active = false;
+        assert_ne!(access, access_observation());
     }
 
     #[test]
@@ -780,25 +1098,6 @@ mod tests {
         let body = std::fs::read_to_string(tmp.path().join("serve-status.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["node_id"], "xyz789");
-    }
-
-    #[test]
-    fn format_local_addr_brackets_ipv6_literal() {
-        // IPv6 addresses contain ':' and must be bracketed to be unambiguous.
-        assert_eq!(format_local_addr("::1", 8080), "[::1]:8080");
-        assert_eq!(format_local_addr("fe80::1", 443), "[fe80::1]:443");
-    }
-
-    #[test]
-    fn format_local_addr_passes_ipv4_through_unchanged() {
-        assert_eq!(format_local_addr("127.0.0.1", 8080), "127.0.0.1:8080");
-        assert_eq!(format_local_addr("0.0.0.0", 9000), "0.0.0.0:9000");
-    }
-
-    #[test]
-    fn format_local_addr_passes_hostname_through_unchanged() {
-        assert_eq!(format_local_addr("localhost", 8080), "localhost:8080");
-        assert_eq!(format_local_addr("db.internal", 5432), "db.internal:5432");
     }
 
     #[test]

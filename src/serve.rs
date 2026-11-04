@@ -35,9 +35,12 @@ use crate::shutdown;
 
 use crate::config::{Protocol, ServeConfig};
 use crate::endpoint;
+use crate::observation::{
+    PeerConnectionObservation, ServeObservation, ServiceObservation, StatusSink,
+    STATUS_FLUSH_INTERVAL,
+};
 use crate::proto;
 use crate::role_run::RoleStrategy;
-use crate::status::STATUS_FLUSH_INTERVAL;
 
 /// Run the serve role until interrupted (Ctrl-C).
 ///
@@ -46,9 +49,9 @@ use crate::status::STATUS_FLUSH_INTERVAL;
 pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result<()> {
     crate::role_run::run_with_shutdown::<ServeStrategy>(
         config_path,
-        crate::role_run::Ownership::Enforced(crate::status::StatusRole::Serve),
+        crate::role_run::Ownership::Enforced(crate::role_run::StatusRole::Serve),
         ctx,
-        crate::render::print_ready(),
+        crate::role_run::file_status_hooks::<ServeStrategy>(crate::render::print_ready(), None),
         crate::shutdown::wait_for_signal(),
     )
     .await
@@ -58,14 +61,16 @@ pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result
 pub async fn run_quick(cfg: ServeConfig, ctx: crate::shutdown::RunContext) -> Result<()> {
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("serve quick mode: {e}")))?;
-    let claim = Some(crate::ownership::claim(crate::status::StatusRole::Serve)?);
+    let claim = Some(crate::ownership::claim(crate::role_run::StatusRole::Serve)?);
     crate::role_run::run_config::<ServeStrategy, _, _>(
         cfg,
         claim,
         ctx,
         None,
-        crate::render::print_ready(),
-        |ep, cfg, ctx| ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx),
+        crate::role_run::file_status_hooks::<ServeStrategy>(crate::render::print_ready(), None),
+        |ep, cfg, ctx, status| {
+            ServeStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx, status)
+        },
     )
     .await
 }
@@ -83,7 +88,7 @@ pub async fn run_with_shutdown(
         config_path,
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
-        crate::render::print_ready(),
+        crate::role_run::file_status_hooks::<ServeStrategy>(crate::render::print_ready(), None),
         shutdown,
     )
     .await
@@ -102,15 +107,16 @@ pub async fn run_with_shutdown_with_state_dir(
     config_path: &Path,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    let state_dir_path = state_dir.to_path_buf();
-    let state_dir = Some(state_dir_path.clone());
     crate::role_run::run_skeleton::<ServeStrategy, _, _>(
         config_path,
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
-        Some(&state_dir_path),
-        crate::render::print_ready(),
-        |ep, cfg, ctx| ServeStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir, ctx),
+        Some(state_dir),
+        crate::role_run::file_status_hooks::<ServeStrategy>(
+            crate::render::print_ready(),
+            Some(state_dir),
+        ),
+        |ep, cfg, ctx, status| ServeStrategy::run_loop(ep, cfg, shutdown, ctx, status),
     )
     .await
 }
@@ -123,9 +129,10 @@ pub async fn run_with_shutdown_with_state_dir(
 pub(crate) struct ServeStrategy;
 
 impl RoleStrategy for ServeStrategy {
-    const STATUS_WRITER: crate::status::StatusWriter = crate::status::StatusWriter::serve();
+    const STATUS_WRITER: crate::role_run::StatusWriter = crate::role_run::StatusWriter::serve();
 
     type Config = ServeConfig;
+    type Observation = ServeObservation;
 
     async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
         // Collect every service's ALPN up front — iroh 1.0 registers ALPNs on
@@ -161,34 +168,8 @@ impl RoleStrategy for ServeStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
         ctx: crate::shutdown::RunContext,
+        sink: Option<StatusSink<ServeObservation>>,
     ) -> crate::role_run::RunCompletion {
-        Self::run_loop_with_state_dir(ep, cfg, shutdown, None, ctx).await
-    }
-}
-
-impl ServeStrategy {
-    /// [`RoleStrategy::run_loop`] with an optional injected state dir for
-    /// the status file (see [`run_with_shutdown_with_state_dir`]).
-    async fn run_loop_with_state_dir(
-        ep: iroh::Endpoint,
-        cfg: ServeConfig,
-        shutdown: impl Future<Output = ()>,
-        state_dir: Option<std::path::PathBuf>,
-        ctx: crate::shutdown::RunContext,
-    ) -> crate::role_run::RunCompletion {
-        crate::role_run::RunCompletion::from_body(
-            Self::run_loop_body(ep, cfg, shutdown, state_dir, ctx).await,
-        )
-    }
-
-    /// The loop proper; `Ok(true)` means the status writer quiesced.
-    async fn run_loop_body(
-        ep: iroh::Endpoint,
-        cfg: ServeConfig,
-        shutdown: impl Future<Output = ()>,
-        state_dir: Option<std::path::PathBuf>,
-        ctx: crate::shutdown::RunContext,
-    ) -> Result<bool> {
         // Build the ALPN -> target lookup for demultiplexing accepted
         // streams.
         let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
@@ -219,7 +200,7 @@ impl ServeStrategy {
                 .map(|s| StatusServiceRow {
                     name: s.name.clone(),
                     protocol: crate::role_run::protocol_str(s.protocol).to_string(),
-                    local_addr: crate::status::format_local_addr(&s.host, s.port),
+                    local_addr: crate::role_run::format_local_addr(&s.host, s.port),
                     active_streams: targets
                         .get(&proto::alpn_for(&s.name))
                         .map(|t| t.active_streams())
@@ -233,22 +214,22 @@ impl ServeStrategy {
                         .flatten(),
                 })
                 .collect(),
-            state_dir,
         };
         let initial = status.render(Vec::new());
         // Seed the flush loop's change detection with the initial write when
         // it succeeded — otherwise the first tick would rewrite an identical
         // idle snapshot. A failed initial write seeds `None`, so the first
-        // tick retries it.
-        let seeded = match save_status_file(initial.clone(), status.state_dir.clone()).await {
-            Ok(p) => {
-                tracing::info!(path = %p.display(), "wrote status file");
-                Some(initial)
-            }
-            Err(e) => {
-                tracing::warn!("failed to write status file: {e}");
-                None
-            }
+        // tick retries it. Without a sink nothing is published.
+        let mut sink = sink;
+        let seeded = match sink.as_mut() {
+            Some(sink) => match sink.save(initial.clone()).await {
+                Ok(()) => Some(initial),
+                Err(e) => {
+                    tracing::warn!("failed to write status file: {e}");
+                    None
+                }
+            },
+            None => None,
         };
 
         // Live registry of connected peers, fed by the accept loop below and
@@ -272,15 +253,17 @@ impl ServeStrategy {
         // stream counters, connected peers, or their transport states — at
         // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
         // stream churn, still near-live for operators.
-        let flush = tokio::spawn(status_flush_loop(
-            status,
-            ep.clone(),
-            peers,
-            seeded,
-            stop_rx,
-            STATUS_FLUSH_INTERVAL,
-            save_status_file,
-        ));
+        let flush = sink.map(|sink| {
+            tokio::spawn(status_flush_loop(
+                status,
+                ep.clone(),
+                peers,
+                sink,
+                seeded,
+                stop_rx,
+                STATUS_FLUSH_INTERVAL,
+            ))
+        });
 
         tokio::pin!(shutdown);
         loop {
@@ -299,9 +282,15 @@ impl ServeStrategy {
         sinks.shutdown(drain_deadline).await;
         // Stop the flush task and bound its join; the run owner removes the
         // status file only when this reports the writer quiesced.
-        let status_quiesced = crate::role_run::stop_flush(stop_tx, flush).await;
+        let status_quiesced = match flush {
+            Some(flush) => crate::role_run::stop_flush(stop_tx, flush).await,
+            None => true,
+        };
         ep.close().await;
-        Ok(status_quiesced)
+        crate::role_run::RunCompletion {
+            result: Ok(()),
+            status_quiesced,
+        }
     }
 }
 
@@ -332,7 +321,7 @@ impl ServiceTarget {
     }
 }
 
-/// Status-file template: everything immutable for the life of the process,
+/// Observation template: everything immutable for the life of the process,
 /// plus the live per-service counters rendered into `active_connections`.
 ///
 /// Since 0.2.0 `active_connections` counts *active streams* (in-flight pipes),
@@ -344,8 +333,6 @@ struct StatusSnapshot {
     pid: u32,
     started_at: u64,
     services: Vec<StatusServiceRow>,
-    /// Injected state dir (testing seam); `None` → env-resolved default.
-    state_dir: Option<std::path::PathBuf>,
 }
 struct StatusServiceRow {
     name: String,
@@ -357,11 +344,8 @@ struct StatusServiceRow {
 }
 
 impl StatusSnapshot {
-    fn render(
-        &self,
-        connections: Vec<crate::status::PeerConnectionStatus>,
-    ) -> crate::status::StatusFile {
-        crate::status::StatusFile {
+    fn render(&self, connections: Vec<PeerConnectionObservation>) -> ServeObservation {
+        ServeObservation {
             node_id: self.node_id.clone(),
             home_relay: self.home_relay.clone(),
             pid: self.pid,
@@ -369,7 +353,7 @@ impl StatusSnapshot {
             services: self
                 .services
                 .iter()
-                .map(|s| crate::status::ServiceStatus {
+                .map(|s| ServiceObservation {
                     name: s.name.clone(),
                     protocol: s.protocol.clone(),
                     local_addr: s.local_addr.clone(),
@@ -481,35 +465,18 @@ impl Drop for TrackedPeer {
 async fn render_connections(
     ep: &iroh::Endpoint,
     peers: &PeerTracker,
-) -> Vec<crate::status::PeerConnectionStatus> {
+) -> Vec<PeerConnectionObservation> {
     let mut out = Vec::new();
     for (peer, services) in peers.snapshot() {
         let Some(report) = crate::conn_path::peer_path_report(ep, peer).await else {
             continue;
         };
-        out.push(crate::status::PeerConnectionStatus {
+        out.push(PeerConnectionObservation {
             path: report,
             services,
         });
     }
     out
-}
-
-/// Persist the rendered status file via the shared writer: into `state_dir`
-/// when the testing seam injected one, otherwise the env-aware default
-/// path (see [`crate::status::StatusWriter`]).
-///
-/// Runs on the blocking pool: the atomic save fsyncs, and a stalled disk
-/// must never stall an async worker (the accept loop shares this runtime).
-async fn save_status_file(
-    file: crate::status::StatusFile,
-    state_dir: Option<std::path::PathBuf>,
-) -> Result<std::path::PathBuf> {
-    let writer = crate::status::StatusWriter::serve();
-    let payload = crate::status::StatusPayload::Serve(file);
-    tokio::task::spawn_blocking(move || writer.save_with_state_dir(state_dir.as_deref(), &payload))
-        .await
-        .context("status save task failed")?
 }
 
 /// Periodically rewrite serve-status.json, but only when the rendered
@@ -522,20 +489,17 @@ async fn save_status_file(
 /// task before removing the file — the loop here must exit on the signal
 /// while letting the current save finish.
 ///
-/// `interval` and `save` are seams for unit-testing the stop handshake;
-/// production passes [`STATUS_FLUSH_INTERVAL`] and [`save_status_file`].
-async fn status_flush_loop<S, F>(
+/// `interval` is a seam for unit-testing the stop handshake; production
+/// passes [`STATUS_FLUSH_INTERVAL`]. `sink` is the host's publisher.
+async fn status_flush_loop(
     status: StatusSnapshot,
     ep: iroh::Endpoint,
     peers: PeerTracker,
-    mut last: Option<crate::status::StatusFile>,
+    mut sink: StatusSink<ServeObservation>,
+    mut last: Option<ServeObservation>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
     interval: Duration,
-    mut save: S,
-) where
-    S: FnMut(crate::status::StatusFile, Option<std::path::PathBuf>) -> F,
-    F: Future<Output = Result<std::path::PathBuf>>,
-{
+) {
     loop {
         // `biased` so a stop that arrives during a save is observed before
         // the next sleep even starts — no extra tick, no extra save.
@@ -545,15 +509,15 @@ async fn status_flush_loop<S, F>(
             _ = tokio::time::sleep(interval) => {}
         }
         let connections = render_connections(&ep, &peers).await;
-        let file = status.render(connections);
-        if last.as_ref() == Some(&file) {
+        let observation = status.render(connections);
+        if last.as_ref() == Some(&observation) {
             continue;
         }
-        // Only record the file as written on success, so a failed write is
-        // retried on the next tick rather than silently dropped until the
-        // next change.
-        match save(file.clone(), status.state_dir.clone()).await {
-            Ok(_) => last = Some(file),
+        // Only record the observation as written on success, so a failed
+        // write is retried on the next tick rather than silently dropped
+        // until the next change.
+        match sink.save(observation.clone()).await {
+            Ok(()) => last = Some(observation),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
     }
@@ -1234,7 +1198,7 @@ mod tests {
 
     // --- status publishing characterization (flush loop + initial write) ---
 
-    type SaveLog = Arc<std::sync::Mutex<Vec<crate::status::StatusFile>>>;
+    type SaveLog = Arc<std::sync::Mutex<Vec<ServeObservation>>>;
 
     async fn local_endpoint() -> iroh::Endpoint {
         let node = crate::config::NodeConfig {
@@ -1253,7 +1217,6 @@ mod tests {
             pid: 1,
             started_at: 0,
             services: Vec::new(),
-            state_dir: None,
         }
     }
 
@@ -1261,34 +1224,35 @@ mod tests {
     /// returns the files `save` was called with. `fail_first` makes the
     /// first save return `Err`.
     async fn run_flush_for_three_ticks(
-        last: Option<crate::status::StatusFile>,
+        last: Option<ServeObservation>,
         fail_first: bool,
-    ) -> Vec<crate::status::StatusFile> {
+    ) -> Vec<ServeObservation> {
         let ep = local_endpoint().await;
         tokio::time::pause();
         let interval = Duration::from_secs(5);
         let log: SaveLog = Arc::default();
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let log_for_save = log.clone();
+        let sink = StatusSink::new(move |observation| {
+            let log = log_for_save.clone();
+            Box::pin(async move {
+                let mut log = log.lock().unwrap();
+                log.push(observation);
+                if fail_first && log.len() == 1 {
+                    Err(anyhow::anyhow!("first save fails"))
+                } else {
+                    Ok(())
+                }
+            })
+        });
         let flush = tokio::spawn(status_flush_loop(
             empty_snapshot(),
             ep,
             PeerTracker::default(),
+            sink,
             last,
             stop_rx,
             interval,
-            move |file, _dir| {
-                let log = log_for_save.clone();
-                async move {
-                    let mut log = log.lock().unwrap();
-                    log.push(file);
-                    if fail_first && log.len() == 1 {
-                        Err(anyhow::anyhow!("first save fails"))
-                    } else {
-                        Ok(std::path::PathBuf::from("recorded"))
-                    }
-                }
-            },
         ));
         tokio::time::sleep(interval * 3 + Duration::from_secs(1)).await;
         let _ = stop_tx.send(());
@@ -1371,6 +1335,103 @@ mod tests {
 
         let _ = stop_tx.send(());
         role.await.unwrap().unwrap();
+    }
+
+    /// Strict ordering: the initial save completes BEFORE the accept loop
+    /// runs. The recording sink holds the first save open; while it is held,
+    /// a real client must not get through the handshake (nothing accepts).
+    /// Releasing the save lets the same client connect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initial_status_saved_before_accept_loop() {
+        use iroh::endpoint::presets::Minimal;
+        let node = crate::config::NodeConfig {
+            relay_urls: vec!["https://relay.invalid".to_string()],
+            ..Default::default()
+        };
+        let alpn = proto::alpn_for("echo");
+        let ep = crate::endpoint::create_serve_endpoint(&node, std::slice::from_ref(&alpn))
+            .await
+            .expect("bind serve endpoint");
+        let mut addr = iroh::EndpointAddr::new(ep.id());
+        for sock in ep.bound_sockets() {
+            let ip = if sock.ip().is_unspecified() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                sock.ip()
+            };
+            addr = addr.with_ip_addr((ip, sock.port()).into());
+        }
+        let client = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind client");
+
+        let events: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::default();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered_tx = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let sink = {
+            let events = events.clone();
+            let release = release.clone();
+            StatusSink::new(move |_observation: ServeObservation| {
+                let events = events.clone();
+                let release = release.clone();
+                let entered_tx = entered_tx.clone();
+                Box::pin(async move {
+                    let first = entered_tx.lock().unwrap().take();
+                    if let Some(tx) = first {
+                        events.lock().unwrap().push("save-started");
+                        let _ = tx.send(());
+                        release.notified().await;
+                        events.lock().unwrap().push("save-finished");
+                    }
+                    Ok(())
+                })
+            })
+        };
+
+        let cfg: ServeConfig =
+            toml::from_str("[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n")
+                .expect("serve config");
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let role = tokio::spawn(async move {
+            ServeStrategy::run_loop(
+                ep,
+                cfg,
+                async move {
+                    let _ = stop_rx.await;
+                },
+                crate::shutdown::RunContext::new(),
+                Some(sink),
+            )
+            .await
+        });
+
+        entered_rx.await.expect("initial save must start");
+        let early = tokio::time::timeout(
+            Duration::from_millis(500),
+            client.connect(addr.clone(), &alpn),
+        )
+        .await;
+        assert!(
+            early.is_err(),
+            "nothing may be admitted while the initial save is in flight"
+        );
+
+        release.notify_one();
+        let conn = tokio::time::timeout(Duration::from_secs(10), client.connect(addr, &alpn))
+            .await
+            .expect("admission opens once the initial save finished")
+            .expect("connect after initial save");
+        assert_eq!(*events.lock().unwrap(), ["save-started", "save-finished"]);
+        drop(conn);
+
+        let _ = stop_tx.send(());
+        let completion = role.await.expect("role task");
+        completion.result.expect("role result");
+        assert!(completion.status_quiesced);
+        client.close().await;
     }
 
     async fn quarantined_upstream(

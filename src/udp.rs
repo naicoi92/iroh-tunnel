@@ -162,17 +162,17 @@ impl UdpStats {
     }
 
     /// A point-in-time copy for the status file.
-    pub fn snapshot(&self) -> crate::status::UdpStatus {
+    pub fn snapshot(&self) -> crate::observation::UdpObservation {
         use std::sync::atomic::Ordering::Relaxed;
         let limit = self.datagram_limit.load(Relaxed);
-        crate::status::UdpStatus {
+        crate::observation::UdpObservation {
             active_flows: self
                 .held_flows
                 .load(Relaxed)
                 .saturating_sub(self.quarantined_flows.load(Relaxed)),
             quarantined_flows: self.quarantined_flows.load(Relaxed),
             datagram_limit: (limit > 0).then_some(limit),
-            drops: crate::status::UdpDrops {
+            drops: crate::observation::UdpDropCounts {
                 oversize: self.oversize.load(Relaxed),
                 malformed: self.malformed.load(Relaxed),
                 unknown_flow: self.unknown_flow.load(Relaxed),

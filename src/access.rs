@@ -37,7 +37,7 @@
 //! earlier draft the spec was written against — see the API notes inline.
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,9 +50,11 @@ use crate::shutdown;
 
 use crate::config::{AccessConfig, AccessService, Protocol};
 use crate::endpoint;
+use crate::observation::{
+    AccessObservation, AccessServiceObservation, StatusSink, STATUS_FLUSH_INTERVAL,
+};
 use crate::proto;
 use crate::role_run::RoleStrategy;
-use crate::status::{AccessServiceStatus, AccessStatusFile, StatusPayload, StatusWriter};
 
 /// Run the access role until interrupted (Ctrl-C).
 ///
@@ -61,9 +63,9 @@ use crate::status::{AccessServiceStatus, AccessStatusFile, StatusPayload, Status
 pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result<()> {
     crate::role_run::run_with_shutdown::<AccessStrategy>(
         config_path,
-        crate::role_run::Ownership::Enforced(crate::status::StatusRole::Access),
+        crate::role_run::Ownership::Enforced(crate::role_run::StatusRole::Access),
         ctx,
-        crate::render::print_ready(),
+        crate::role_run::file_status_hooks::<AccessStrategy>(crate::render::print_ready(), None),
         crate::shutdown::wait_for_signal(),
     )
     .await
@@ -73,14 +75,18 @@ pub async fn run(config_path: &Path, ctx: crate::shutdown::RunContext) -> Result
 pub async fn run_quick(cfg: AccessConfig, ctx: crate::shutdown::RunContext) -> Result<()> {
     cfg.validate()
         .map_err(|e| crate::error::CliError::Config(format!("access quick mode: {e}")))?;
-    let claim = Some(crate::ownership::claim(crate::status::StatusRole::Access)?);
+    let claim = Some(crate::ownership::claim(
+        crate::role_run::StatusRole::Access,
+    )?);
     crate::role_run::run_config::<AccessStrategy, _, _>(
         cfg,
         claim,
         ctx,
         None,
-        crate::render::print_ready(),
-        |ep, cfg, ctx| AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx),
+        crate::role_run::file_status_hooks::<AccessStrategy>(crate::render::print_ready(), None),
+        |ep, cfg, ctx, status| {
+            AccessStrategy::run_loop(ep, cfg, crate::shutdown::wait_for_signal(), ctx, status)
+        },
     )
     .await
 }
@@ -98,7 +104,7 @@ pub async fn run_with_shutdown(
         config_path,
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
-        crate::render::print_ready(),
+        crate::role_run::file_status_hooks::<AccessStrategy>(crate::render::print_ready(), None),
         shutdown,
     )
     .await
@@ -120,15 +126,16 @@ pub async fn run_with_shutdown_with_state_dir(
     config_path: &Path,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    let state_dir_path = state_dir.to_path_buf();
-    let state_dir = Some(state_dir_path.clone());
     crate::role_run::run_skeleton::<AccessStrategy, _, _>(
         config_path,
         crate::role_run::Ownership::Unenforced,
         crate::shutdown::RunContext::new(),
-        Some(&state_dir_path),
-        crate::render::print_ready(),
-        |ep, cfg, ctx| AccessStrategy::run_loop_with_state_dir(ep, cfg, shutdown, state_dir, ctx),
+        Some(state_dir),
+        crate::role_run::file_status_hooks::<AccessStrategy>(
+            crate::render::print_ready(),
+            Some(state_dir),
+        ),
+        |ep, cfg, ctx, status| AccessStrategy::run_loop(ep, cfg, shutdown, ctx, status),
     )
     .await
 }
@@ -141,9 +148,10 @@ pub async fn run_with_shutdown_with_state_dir(
 pub(crate) struct AccessStrategy;
 
 impl RoleStrategy for AccessStrategy {
-    const STATUS_WRITER: crate::status::StatusWriter = crate::status::StatusWriter::access();
+    const STATUS_WRITER: crate::role_run::StatusWriter = crate::role_run::StatusWriter::access();
 
     type Config = AccessConfig;
+    type Observation = AccessObservation;
 
     async fn build_endpoint(cfg: &Self::Config) -> Result<iroh::Endpoint> {
         // Access only dials out, so no ALPNs are registered. The endpoint
@@ -218,79 +226,19 @@ impl RoleStrategy for AccessStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
         ctx: crate::shutdown::RunContext,
+        sink: Option<StatusSink<AccessObservation>>,
     ) -> crate::role_run::RunCompletion {
-        Self::run_loop_with_state_dir(ep, cfg, shutdown, None, ctx).await
-    }
-}
-
-impl AccessStrategy {
-    /// [`RoleStrategy::run_loop`] with an optional injected state dir for
-    /// the status file (see [`run_with_shutdown_with_state_dir`]).
-    async fn run_loop_with_state_dir(
-        ep: iroh::Endpoint,
-        cfg: AccessConfig,
-        shutdown: impl Future<Output = ()>,
-        state_dir: Option<PathBuf>,
-        ctx: crate::shutdown::RunContext,
-    ) -> crate::role_run::RunCompletion {
-        crate::role_run::RunCompletion::from_body(
-            Self::run_loop_body(ep, cfg, shutdown, state_dir, ctx).await,
-        )
-    }
-
-    /// The loop proper; `Ok(true)` means the status writer quiesced.
-    async fn run_loop_body(
-        ep: iroh::Endpoint,
-        cfg: AccessConfig,
-        shutdown: impl Future<Output = ()>,
-        state_dir: Option<PathBuf>,
-        ctx: crate::shutdown::RunContext,
-    ) -> Result<bool> {
-        // Resolve the node-level relays once (the per-service fallback) and
-        // parse every service's node_id before spawning listeners, so a bad
-        // config fails fast. Each service resolves its own effective relay
-        // list — its override when set, else the node's — so dialers carry
-        // only their service's URLs (issue #54).
-        let node_relay_urls = endpoint::resolve_relay_urls(&cfg.node.relay_urls)?;
-        if cfg.node.relay_urls.is_empty() {
-            tracing::info!(
-                count = node_relay_urls.len(),
-                "no relay_urls configured, falling back to n0 default relays"
-            );
-        }
-
+        // Failures before the flush task spawns leave no writer to wait for.
+        let (dialers, status_services) = match build_dialers(&ep, &cfg) {
+            Ok(built) => built,
+            Err(error) => {
+                return crate::role_run::RunCompletion {
+                    result: Err(error),
+                    status_quiesced: true,
+                }
+            }
+        };
         let mut listeners = JoinSet::new();
-        // One dialer per service, kept alive alongside the listener tasks:
-        // the status flush task reads each service's live connection path
-        // from its dialer (issue #59).
-        let mut dialers: Vec<Arc<ServiceDialer>> = Vec::new();
-        let mut status_services: Vec<AccessStatusServiceRow> = Vec::new();
-        for svc in &cfg.services {
-            let node_id = svc
-                .node_id
-                .parse::<iroh::EndpointId>()
-                .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
-            // Raw `host:port` is what TcpListener::bind consumes; the
-            // status row renders the bracketed-IPv6 form via
-            // format_local_addr — the same normalization as the serve
-            // schema's `local_addr`.
-            let bind_addr = format!("{}:{}", svc.host, svc.port);
-            let effective: Vec<iroh::RelayUrl> = if svc.relay_urls.is_empty() {
-                node_relay_urls.clone()
-            } else {
-                endpoint::resolve_relay_urls(&svc.relay_urls)
-                    .with_context(|| format!("service '{}': invalid relay_urls", svc.name))?
-            };
-            let dialer = Arc::new(ServiceDialer::new(&ep, node_id, svc, &effective, bind_addr));
-            status_services.push(AccessStatusServiceRow {
-                name: svc.name.clone(),
-                listen_addr: crate::status::format_local_addr(&svc.host, svc.port),
-                // The parsed id, not the raw config string — the status row
-                // is normalized exactly like every other rendered id.
-                peer: node_id.to_string(),
-            });
-            dialers.push(dialer);
-        }
         // The initial status write happens BEFORE any listener spawns (the
         // same ordering as serve): no local client can have connected yet,
         // so the first snapshot deterministically carries every service's
@@ -310,32 +258,34 @@ impl AccessStrategy {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             services: status_services,
-            state_dir,
         };
         let initial = render_access_status(&status, &dialers).await;
-        let seeded = match save_access_status(initial.clone(), status.state_dir.clone()).await {
-            Ok(p) => {
-                tracing::info!(path = %p.display(), "wrote status file");
-                Some(initial)
-            }
-            Err(e) => {
-                tracing::warn!("failed to write status file: {e}");
-                None
-            }
+        let mut sink = sink;
+        let seeded = match sink.as_mut() {
+            Some(sink) => match sink.save(initial.clone()).await {
+                Ok(()) => Some(initial),
+                Err(e) => {
+                    tracing::warn!("failed to write status file: {e}");
+                    None
+                }
+            },
+            None => None,
         };
 
         // Cooperative stop channel for the flush task.
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 
         tracing::info!("access endpoint ready, listening for local clients");
-        let flush = tokio::spawn(access_status_flush_loop(
-            status,
-            dialers.clone(),
-            seeded,
-            stop_rx,
-            crate::status::STATUS_FLUSH_INTERVAL,
-            save_access_status,
-        ));
+        let flush = sink.map(|sink| {
+            tokio::spawn(access_status_flush_loop(
+                status,
+                dialers.clone(),
+                sink,
+                seeded,
+                stop_rx,
+                STATUS_FLUSH_INTERVAL,
+            ))
+        });
         let (stop, stop_rx) = shutdown::channel();
         for dialer in &dialers {
             listeners.spawn(listen_loop(dialer.clone(), stop_rx.clone()));
@@ -357,12 +307,65 @@ impl AccessStrategy {
         }
         // Stop the flush task and bound its join; the run owner removes the
         // status file only when this reports the writer quiesced.
-        let status_quiesced = crate::role_run::stop_flush(stop_tx, flush).await;
+        let status_quiesced = match flush {
+            Some(flush) => crate::role_run::stop_flush(stop_tx, flush).await,
+            None => true,
+        };
         // Test-utils seam: simulate a shutdown stuck in the endpoint close.
         shutdown::test_hang_point().await;
         ep.close().await;
-        Ok(status_quiesced)
+        crate::role_run::RunCompletion {
+            result: Ok(()),
+            status_quiesced,
+        }
     }
+}
+
+/// Resolve relays and parse every service's `node_id` before any listener
+/// spawns, so a bad config fails fast. Each service resolves its own
+/// effective relay list — its override when set, else the node's — so
+/// dialers carry only their service's URLs (issue #54). One dialer per
+/// service is kept alive alongside the listener tasks: the status flush task
+/// reads each service's live connection path from its dialer (issue #59).
+fn build_dialers(
+    ep: &iroh::Endpoint,
+    cfg: &AccessConfig,
+) -> Result<(Vec<Arc<ServiceDialer>>, Vec<AccessStatusServiceRow>)> {
+    let node_relay_urls = endpoint::resolve_relay_urls(&cfg.node.relay_urls)?;
+    if cfg.node.relay_urls.is_empty() {
+        tracing::info!(
+            count = node_relay_urls.len(),
+            "no relay_urls configured, falling back to n0 default relays"
+        );
+    }
+    let mut dialers: Vec<Arc<ServiceDialer>> = Vec::new();
+    let mut status_services: Vec<AccessStatusServiceRow> = Vec::new();
+    for svc in &cfg.services {
+        let node_id = svc
+            .node_id
+            .parse::<iroh::EndpointId>()
+            .with_context(|| format!("invalid node_id: {}", svc.node_id))?;
+        // Raw `host:port` is what TcpListener::bind consumes; the status row
+        // renders the bracketed-IPv6 form via format_local_addr — the same
+        // normalization as the serve schema's `local_addr`.
+        let bind_addr = format!("{}:{}", svc.host, svc.port);
+        let effective: Vec<iroh::RelayUrl> = if svc.relay_urls.is_empty() {
+            node_relay_urls.clone()
+        } else {
+            endpoint::resolve_relay_urls(&svc.relay_urls)
+                .with_context(|| format!("service '{}': invalid relay_urls", svc.name))?
+        };
+        let dialer = Arc::new(ServiceDialer::new(ep, node_id, svc, &effective, bind_addr));
+        status_services.push(AccessStatusServiceRow {
+            name: svc.name.clone(),
+            listen_addr: crate::role_run::format_local_addr(&svc.host, svc.port),
+            // The parsed id, not the raw config string — the status row is
+            // normalized exactly like every other rendered id.
+            peer: node_id.to_string(),
+        });
+        dialers.push(dialer);
+    }
+    Ok((dialers, status_services))
 }
 
 // ---------------------------------------------------------------------------
@@ -377,8 +380,6 @@ struct AccessStatusTemplate {
     pid: u32,
     started_at: u64,
     services: Vec<AccessStatusServiceRow>,
-    /// Injected state dir (testing seam); `None` → env-resolved default.
-    state_dir: Option<PathBuf>,
 }
 
 /// One immutable per-service row of [`AccessStatusTemplate`].
@@ -398,7 +399,7 @@ struct AccessStatusServiceRow {
 async fn render_access_status(
     status: &AccessStatusTemplate,
     dialers: &[Arc<ServiceDialer>],
-) -> AccessStatusFile {
+) -> AccessObservation {
     debug_assert_eq!(
         status.services.len(),
         dialers.len(),
@@ -410,7 +411,7 @@ async fn render_access_status(
             Some(report) => (report.transports, report.local_bound_addrs),
             None => (Vec::new(), Vec::new()),
         };
-        services.push(AccessServiceStatus {
+        services.push(AccessServiceObservation {
             name: row.name.clone(),
             listen_addr: row.listen_addr.clone(),
             peer: row.peer.clone(),
@@ -419,7 +420,7 @@ async fn render_access_status(
             udp: (dialer.protocol == Protocol::Udp).then(|| dialer.udp_stats.snapshot()),
         });
     }
-    AccessStatusFile {
+    AccessObservation {
         node_id: status.node_id.clone(),
         pid: status.pid,
         started_at: status.started_at,
@@ -438,20 +439,17 @@ async fn render_access_status(
 /// task before removing the file — the loop here must exit on the signal
 /// while letting the current save finish.
 ///
-/// `interval` and `save` are seams for the unit test that drives a slow
-/// save against the stop signal; production passes
-/// [`crate::status::STATUS_FLUSH_INTERVAL`] and [`save_access_status`].
-async fn access_status_flush_loop<S, F>(
+/// `interval` is a seam for the unit test that drives a slow save against
+/// the stop signal; production passes [`STATUS_FLUSH_INTERVAL`]. `sink` is
+/// the host's publisher.
+async fn access_status_flush_loop(
     status: AccessStatusTemplate,
     dialers: Vec<Arc<ServiceDialer>>,
-    mut last: Option<AccessStatusFile>,
+    mut sink: StatusSink<AccessObservation>,
+    mut last: Option<AccessObservation>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
     interval: Duration,
-    mut save: S,
-) where
-    S: FnMut(AccessStatusFile, Option<std::path::PathBuf>) -> F,
-    F: Future<Output = Result<std::path::PathBuf>>,
-{
+) {
     loop {
         // `biased` so a stop that arrives during a save is observed before
         // the next sleep even starts — no extra tick, no extra save.
@@ -460,33 +458,18 @@ async fn access_status_flush_loop<S, F>(
             _ = &mut stop => break,
             _ = tokio::time::sleep(interval) => {}
         }
-        let file = render_access_status(&status, &dialers).await;
-        if last.as_ref() == Some(&file) {
+        let observation = render_access_status(&status, &dialers).await;
+        if last.as_ref() == Some(&observation) {
             continue;
         }
-        // Only record the file as written on success, so a failed write is
-        // retried on the next tick rather than silently dropped until the
-        // next change.
-        match save(file.clone(), status.state_dir.clone()).await {
-            Ok(_) => last = Some(file),
+        // Only record the observation as written on success, so a failed
+        // write is retried on the next tick rather than silently dropped
+        // until the next change.
+        match sink.save(observation.clone()).await {
+            Ok(()) => last = Some(observation),
             Err(e) => tracing::warn!("failed to write status file: {e}"),
         }
     }
-}
-
-/// Persist the rendered access status file via the shared writer.
-///
-/// Runs on the blocking pool: the atomic save fsyncs, and a stalled disk
-/// must never stall an async worker (the listen loops share this runtime).
-async fn save_access_status(
-    file: AccessStatusFile,
-    state_dir: Option<std::path::PathBuf>,
-) -> Result<std::path::PathBuf> {
-    let writer = StatusWriter::access();
-    let payload = StatusPayload::Access(file);
-    tokio::task::spawn_blocking(move || writer.save_with_state_dir(state_dir.as_deref(), &payload))
-        .await
-        .context("status save task failed")?
 }
 
 /// Per-service dialing state shared by all local-client tasks.
@@ -648,7 +631,7 @@ impl ServiceDialer {
     /// never holds channels off their dial path, and the report is queried
     /// fresh on every call — never cached — so the status file can't serve
     /// a stale path after a migration.
-    async fn path_report(&self) -> Option<crate::conn_path::PeerPathReport> {
+    async fn path_report(&self) -> Option<crate::observation::PeerPathObservation> {
         let peer = {
             let guard = self.state.lock().await;
             guard.conn.as_ref().map(|conn| conn.remote_id())?
@@ -1003,7 +986,7 @@ fn short_peer_id(peer: &iroh::EndpointId) -> String {
 }
 
 /// Delegate to the shared renderer in [`crate::conn_path`] — see its docs.
-fn render_established_paths(report: Option<&crate::conn_path::PeerPathReport>) -> String {
+fn render_established_paths(report: Option<&crate::observation::PeerPathObservation>) -> String {
     crate::conn_path::render_established_paths(report)
 }
 
@@ -1016,7 +999,7 @@ fn render_established_paths(report: Option<&crate::conn_path::PeerPathReport>) -
 fn log_connection_established(
     remote_id: iroh::EndpointId,
     svc_name: &str,
-    report: Option<&crate::conn_path::PeerPathReport>,
+    report: Option<&crate::observation::PeerPathObservation>,
 ) {
     tracing::info!(
         peer = %remote_id,
@@ -1052,7 +1035,7 @@ fn spawn_path_change_poller(
     ep: &iroh::Endpoint,
     conn: &iroh::endpoint::Connection,
     svc_name: String,
-    initial: Vec<crate::conn_path::TransportStatus>,
+    initial: Vec<crate::observation::TransportObservation>,
     tasks: &mut JoinSet<()>,
 ) {
     let peer = conn.remote_id();
@@ -1115,7 +1098,6 @@ mod tests {
             // No services → no dialers → the render is trivially stable;
             // the save seam below is the only observable.
             services: Vec::new(),
-            state_dir: Some(tmp.path().to_path_buf()),
         };
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         // Signalled the moment the slow save STARTS, so the stop below is
@@ -1125,29 +1107,31 @@ mod tests {
 
         let calls_for_save = calls.clone();
         let started_for_save = started_tx.clone();
+        let dir = tmp.path().to_path_buf();
+        let sink = StatusSink::new(move |_observation| {
+            let calls = calls_for_save.clone();
+            let started = started_for_save.clone();
+            let dir = dir.clone();
+            Box::pin(async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    let _ = started.try_send(());
+                    // The deliberately slow "blocking" save: its write
+                    // lands AFTER the stop signal below is sent.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    std::fs::write(dir.join("access-status.json"), b"slow-save-landed")
+                        .expect("spy save write");
+                }
+                Err(anyhow::anyhow!("spy save always fails"))
+            })
+        });
         let flush = tokio::spawn(access_status_flush_loop(
             template,
             Vec::new(),
+            sink,
             None, // unseeded `last`: the first tick always saves
             stop_rx,
             Duration::from_millis(20),
-            move |_file, dir| {
-                let calls = calls_for_save.clone();
-                let started = started_for_save.clone();
-                async move {
-                    let n = calls.fetch_add(1, Ordering::SeqCst);
-                    if n == 0 {
-                        let _ = started.try_send(());
-                        // The deliberately slow "blocking" save: its write
-                        // lands AFTER the stop signal below is sent.
-                        tokio::time::sleep(Duration::from_millis(300)).await;
-                        let dir = dir.expect("test always injects a state dir");
-                        std::fs::write(dir.join("access-status.json"), b"slow-save-landed")
-                            .expect("spy save write");
-                    }
-                    Err(anyhow::anyhow!("spy save always fails"))
-                }
-            },
         ));
 
         // Synchronize on the slow save being in-flight, THEN stop.

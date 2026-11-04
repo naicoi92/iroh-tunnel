@@ -19,6 +19,7 @@ pub(crate) mod config_store;
 pub mod conn_path;
 pub mod endpoint;
 pub mod error;
+pub mod observation;
 pub(crate) mod ownership;
 pub mod paths;
 pub mod pipe;

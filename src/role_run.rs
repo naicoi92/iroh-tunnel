@@ -18,8 +18,11 @@ use iroh::endpoint::Connection;
 use tokio::task::JoinHandle;
 
 use crate::config::{Protocol, RoleDoc};
+use crate::observation::{RoleHooks, StatusSink};
 use crate::ownership::RoleClaim;
-use crate::status::StatusRole;
+/// Role identity and writer, re-exported so role modules stay free of the
+/// status-file module (the host side owns that mapping).
+pub(crate) use crate::status::{StatusRole, StatusWriter};
 
 /// Whether a run enforces role ownership (RO-01..RO-03).
 ///
@@ -49,28 +52,13 @@ const STATUS_FLUSH_JOIN_BOUND: Duration = Duration::from_secs(5);
 ///
 /// `status_quiesced` is `true` only when the status flush task joined within
 /// [`STATUS_FLUSH_JOIN_BOUND`] and returned `Ok`, or when no flush task ever
-/// ran. Only then may the run owner remove the status file: an unquiesced
-/// writer may still have a save in flight that would recreate it.
+/// ran (no sink, or the body failed before spawning one). Only then may the
+/// run owner remove the status file: an unquiesced writer may still have a
+/// save in flight that would recreate it. Every role-body path states it
+/// explicitly; none is inferred from the result.
 pub(crate) struct RunCompletion {
     pub result: Result<()>,
     pub status_quiesced: bool,
-}
-
-impl RunCompletion {
-    /// Completion of a loop body that yields `Ok(status_quiesced)`. A body
-    /// that failed before starting a flush task has no writer to wait for.
-    pub(crate) fn from_body(body: Result<bool>) -> Self {
-        match body {
-            Ok(status_quiesced) => Self {
-                result: Ok(()),
-                status_quiesced,
-            },
-            Err(error) => Self {
-                result: Err(error),
-                status_quiesced: true,
-            },
-        }
-    }
 }
 
 /// Stop a status flush task cooperatively and join it within
@@ -119,9 +107,54 @@ pub(crate) async fn finish_run(
     completion.result
 }
 
+/// Hooks whose status sink writes the role's status file via
+/// [`crate::status::StatusWriter::save_with_state_dir`] (`None` = env
+/// default dir). The save runs on the blocking pool (the atomic save fsyncs;
+/// RS-07) and is awaited to completion by the flush loop, never detached.
+pub(crate) fn file_status_hooks<S: RoleStrategy>(
+    on_ready: crate::ready::OnReady,
+    state_dir: Option<&Path>,
+) -> RoleHooks<S::Observation>
+where
+    for<'a> crate::status::StatusPayload: From<&'a S::Observation>,
+{
+    let state_dir = state_dir.map(Path::to_path_buf);
+    let writer = S::STATUS_WRITER;
+    let status = StatusSink::new(move |observation: S::Observation| {
+        let payload = crate::status::StatusPayload::from(&observation);
+        let state_dir = state_dir.clone();
+        Box::pin(async move {
+            let path = tokio::task::spawn_blocking(move || {
+                writer.save_with_state_dir(state_dir.as_deref(), &payload)
+            })
+            .await
+            .context("status save task failed")??;
+            tracing::debug!(path = %path.display(), "wrote status file");
+            Ok(())
+        }) as crate::observation::BoxFuture<'static, Result<()>>
+    });
+    RoleHooks {
+        on_ready,
+        status: Some(status),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Small display helpers (shared, no polymorphism)
 // ---------------------------------------------------------------------------
+
+/// Format a `host:port` pair for the machine-readable status file, bracketing
+/// IPv6 literals (`[::1]:8080`) so the result is unambiguous. Plain IPv4
+/// addresses and hostnames are left as `host:port`.
+///
+/// Shared by both roles' status rows.
+pub(crate) fn format_local_addr(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
 
 /// Lowercase protocol name for display (matches the serde form in `config`).
 ///
@@ -264,6 +297,9 @@ pub(crate) trait RoleStrategy {
     /// The TOML config document this role loads.
     type Config: crate::config::RoleDoc + Send + 'static;
 
+    /// What the role observes about itself for status publishing.
+    type Observation: Clone + PartialEq + Send + 'static;
+
     /// The role's status file writer.
     const STATUS_WRITER: crate::status::StatusWriter;
 
@@ -289,6 +325,7 @@ pub(crate) trait RoleStrategy {
         cfg: Self::Config,
         shutdown: impl Future<Output = ()>,
         ctx: crate::shutdown::RunContext,
+        status: Option<StatusSink<Self::Observation>>,
     ) -> impl std::future::Future<Output = RunCompletion>;
 }
 
@@ -314,12 +351,17 @@ pub(crate) async fn run_skeleton<S, F, Fut>(
     ownership: Ownership,
     ctx: crate::shutdown::RunContext,
     state_dir: Option<&Path>,
-    on_ready: crate::ready::OnReady,
+    hooks: RoleHooks<S::Observation>,
     run_loop: F,
 ) -> Result<()>
 where
     S: RoleStrategy,
-    F: FnOnce(iroh::Endpoint, S::Config, crate::shutdown::RunContext) -> Fut,
+    F: FnOnce(
+        iroh::Endpoint,
+        S::Config,
+        crate::shutdown::RunContext,
+        Option<StatusSink<S::Observation>>,
+    ) -> Fut,
     Fut: Future<Output = RunCompletion>,
 {
     // Claim the role before touching the config: a refused start must not
@@ -338,7 +380,7 @@ where
     .await
     .context("config load task failed")??;
 
-    run_config::<S, _, _>(cfg, claim, ctx, state_dir, on_ready, run_loop).await
+    run_config::<S, _, _>(cfg, claim, ctx, state_dir, hooks, run_loop).await
 }
 
 /// Build the endpoint and run the role while holding `claim`.
@@ -351,12 +393,17 @@ pub(crate) async fn run_config<S, F, Fut>(
     claim: Option<RoleClaim>,
     ctx: crate::shutdown::RunContext,
     state_dir: Option<&Path>,
-    on_ready: crate::ready::OnReady,
+    hooks: RoleHooks<S::Observation>,
     run_loop: F,
 ) -> Result<()>
 where
     S: RoleStrategy,
-    F: FnOnce(iroh::Endpoint, S::Config, crate::shutdown::RunContext) -> Fut,
+    F: FnOnce(
+        iroh::Endpoint,
+        S::Config,
+        crate::shutdown::RunContext,
+        Option<StatusSink<S::Observation>>,
+    ) -> Fut,
     Fut: Future<Output = RunCompletion>,
 {
     // A configured key is known before binding, so a duplicate identity is
@@ -387,6 +434,7 @@ where
         home_relay: crate::endpoint::home_relay(&ep).map(|relay| relay.to_string()),
         services: S::ready_services(&cfg),
     };
+    let RoleHooks { on_ready, status } = hooks;
     if let Err(error) = on_ready(&report) {
         // `claim` drops on return; run_loop never ran, so no status file.
         ep.close().await;
@@ -396,7 +444,7 @@ where
     tracing::info!("endpoint ready");
     // The role owns admission, drain, task joins and endpoint close; this
     // owner removes the status file once the writer has quiesced.
-    let completion = run_loop(ep, cfg, ctx).await;
+    let completion = run_loop(ep, cfg, ctx, status).await;
     let result = finish_run(completion, S::STATUS_WRITER, state_dir).await;
     // Held to here so the role stays owned until it has fully stopped.
     drop(claim);
@@ -408,7 +456,7 @@ pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
     config_path: &Path,
     ownership: Ownership,
     ctx: crate::shutdown::RunContext,
-    on_ready: crate::ready::OnReady,
+    hooks: RoleHooks<S::Observation>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
     run_skeleton::<S, _, _>(
@@ -416,8 +464,8 @@ pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
         ownership,
         ctx,
         None,
-        on_ready,
-        |ep, cfg, ctx| S::run_loop(ep, cfg, shutdown, ctx),
+        hooks,
+        |ep, cfg, ctx, status| S::run_loop(ep, cfg, shutdown, ctx, status),
     )
     .await
 }
@@ -425,6 +473,25 @@ pub(crate) async fn run_with_shutdown<S: RoleStrategy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_local_addr_brackets_ipv6_literal() {
+        // IPv6 addresses contain ':' and must be bracketed to be unambiguous.
+        assert_eq!(format_local_addr("::1", 8080), "[::1]:8080");
+        assert_eq!(format_local_addr("fe80::1", 443), "[fe80::1]:443");
+    }
+
+    #[test]
+    fn format_local_addr_passes_ipv4_through_unchanged() {
+        assert_eq!(format_local_addr("127.0.0.1", 8080), "127.0.0.1:8080");
+        assert_eq!(format_local_addr("0.0.0.0", 9000), "0.0.0.0:9000");
+    }
+
+    #[test]
+    fn format_local_addr_passes_hostname_through_unchanged() {
+        assert_eq!(format_local_addr("localhost", 8080), "localhost:8080");
+        assert_eq!(format_local_addr("db.internal", 5432), "db.internal:5432");
+    }
 
     #[test]
     fn protocol_str_matches_serde_form() {
@@ -538,18 +605,21 @@ mod tests {
             let claim = crate::ownership::claim(StatusRole::Serve).unwrap();
             let on_ready: crate::ready::OnReady =
                 Box::new(|_| Err(anyhow::anyhow!("ready hook refused")));
+            let hooks =
+                file_status_hooks::<crate::serve::ServeStrategy>(on_ready, Some(state_dir.path()));
             let error = run_config::<crate::serve::ServeStrategy, _, _>(
                 crate::config::ServeConfig::default(),
                 Some(claim),
                 crate::shutdown::RunContext::new(),
                 Some(state_dir.path()),
-                on_ready,
-                |ep, cfg, ctx| {
+                hooks,
+                |ep, cfg, ctx, status| {
                     crate::serve::ServeStrategy::run_loop(
                         ep,
                         cfg,
                         std::future::pending::<()>(),
                         ctx,
+                        status,
                     )
                 },
             )
