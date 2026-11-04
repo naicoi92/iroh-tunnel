@@ -23,7 +23,7 @@ Owner: `src/shutdown.rs`, `src/udp.rs`, `src/serve.rs`, `src/access.rs`, `src/ro
 
 - [x] 2.1 Write failing tests, then replace process-global `DRAIN_DEADLINE` with a per-invocation drain context shared by the role task tree and the CLI watchdog; keep budgets, repeated-signal policy and forced exit codes. Traces WB-8 (both scenarios), `role-ownership-shutdown`. Platform: all.
 - [x] 2.2 Ensure management-only code paths create no drain context and install no signal handler; test with a config/status operation in a process without a role. Traces WB-9.
-- [ ] 2.3 Move UDP Quarantine sink tasks under a role-lifetime owner that retains, reaps, observes and joins/aborts them within the role stop deadline, with guarded Flow cap slot release on every exit. TDD against disconnect, role stop and sink failure. Traces WB-10, WB-11 (all three scenarios), `udp-datagram-forwarding`, docs/udp-integration-contract.md.
+- [x] 2.3 Move UDP Quarantine sink tasks under a role-lifetime owner that retains, reaps, observes and joins/aborts them within the role stop deadline, with guarded Flow cap slot release on every exit. TDD against disconnect, role stop and sink failure. Traces WB-10, WB-11 (all three scenarios), `udp-datagram-forwarding`, docs/udp-integration-contract.md.
 - [ ] 2.4 Make the status flush task supervisor-owned and report writer quiescence on every completion path; remove the owned status file only after quiescence and endpoint close. Traces WB-12, WB-13 (re-run 1.8).
 - [ ] 2.5 Implement redacted `Debug` for every secret-bearing type (config DTOs, requests, edit attempts, documents, outcomes) and add Debug/error-chain leakage tests. Traces WB-14 (both scenarios), FIM-5. Storage format unchanged.
 
