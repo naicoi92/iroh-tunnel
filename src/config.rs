@@ -18,7 +18,7 @@ use iroh::SecretKey;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::settings::{
+use iroh_tunnel_engine::settings::{
     AccessServiceSettings, AccessSettings, NodeSettings, RelayToken, ServeServiceSettings,
     ServeSettings,
 };
@@ -174,7 +174,7 @@ pub struct UdpSettings {
     pub queue_depth: Option<usize>,
 }
 
-pub use crate::engine::settings::UdpLimits;
+pub use iroh_tunnel_engine::settings::UdpLimits;
 
 impl UdpSettings {
     /// The effective limits, with the UDP-06 defaults for absent fields. A
@@ -295,7 +295,7 @@ pub struct AccessService {
     pub udp: UdpSettings,
 }
 
-pub use crate::engine::settings::Protocol;
+pub use iroh_tunnel_engine::settings::Protocol;
 
 /// Serde form of the engine [`Protocol`]: lowercase `"tcp"` / `"udp"`.
 mod protocol_serde {

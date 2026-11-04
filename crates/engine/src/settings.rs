@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use iroh::SecretKey;
 
-use crate::engine::udp;
+use crate::udp;
 
 /// Tunnel protocol of a service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

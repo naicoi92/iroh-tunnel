@@ -11,7 +11,7 @@
 //! and opens one bidirectional stream per local TCP connection. Legacy
 //! `multiplex` config values are ignored. A dead connection closes its channels;
 //! the next local client dials a fresh connection. The ALPN is unchanged
-//! (`iroh-tunnel/{name}`, see [`crate::engine::proto`]); no negotiation is added.
+//! (`iroh-tunnel/{name}`, see [`crate::proto`]); no negotiation is added.
 //!
 //! ## Concurrency model
 //!
@@ -45,15 +45,15 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::engine::endpoint;
-use crate::engine::observation::{
+use crate::endpoint;
+use crate::observation::{
     AccessObservation, AccessServiceObservation, RoleHooks, StatusSink, STATUS_FLUSH_INTERVAL,
 };
-use crate::engine::proto;
-use crate::engine::ready::{AccessReady, ReadyReport, ReadyServices};
-use crate::engine::runtime::{self, RunCompletion};
-use crate::engine::settings::{AccessServiceSettings, AccessSettings, Protocol, UdpLimits};
-use crate::engine::shutdown;
+use crate::proto;
+use crate::ready::{AccessReady, ReadyReport, ReadyServices};
+use crate::runtime::{self, RunCompletion};
+use crate::settings::{AccessServiceSettings, AccessSettings, Protocol, UdpLimits};
+use crate::shutdown;
 
 /// Run the access role on a bound endpoint until `shutdown` resolves.
 ///
@@ -172,7 +172,7 @@ pub async fn run_access(
         None => true,
     };
     // Test-utils seam: simulate a shutdown stuck in the endpoint close.
-    crate::engine::testing::hang_point().await;
+    crate::testing::hang_point().await;
     ep.close().await;
     RunCompletion {
         result: Ok(()),
@@ -385,7 +385,7 @@ struct ServiceDialer {
     svc_name: String,
     protocol: Protocol,
     udp_limits: UdpLimits,
-    udp_stats: Arc<crate::engine::udp::UdpStats>,
+    udp_stats: Arc<crate::udp::UdpStats>,
     listen_addr: String,
     /// The shared multiplexed connection and its poller, behind ONE lock:
     /// the one-connection-and-one-poller-per-service rule is structural —
@@ -487,7 +487,7 @@ impl ServiceDialer {
         // `None` report (paths pending) degrades to an empty baseline — the
         // seed path handles exactly that case. The connection is already
         // stored, so cancellation here only loses the poller.
-        let report = crate::engine::conn_path::peer_path_report(&self.ep, remote_id).await;
+        let report = crate::conn_path::peer_path_report(&self.ep, remote_id).await;
         let baseline = report
             .as_ref()
             .map(|r| r.transports.clone())
@@ -532,12 +532,12 @@ impl ServiceDialer {
     /// never holds channels off their dial path, and the report is queried
     /// fresh on every call — never cached — so the status file can't serve
     /// a stale path after a migration.
-    async fn path_report(&self) -> Option<crate::engine::observation::PeerPathObservation> {
+    async fn path_report(&self) -> Option<crate::observation::PeerPathObservation> {
         let peer = {
             let guard = self.state.lock().await;
             guard.conn.as_ref().map(|conn| conn.remote_id())?
         };
-        crate::engine::conn_path::peer_path_report(&self.ep, peer).await
+        crate::conn_path::peer_path_report(&self.ep, peer).await
     }
 }
 
@@ -603,7 +603,7 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 /// incarnation by evicting the connection.
 /// Contract: `docs/udp-integration-contract.md`.
 async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
-    use crate::engine::udp::DropReason;
+    use crate::udp::DropReason;
     let stats = dialer.udp_stats.clone();
     let limits = dialer.udp_limits;
     let idle = limits.idle_timeout;
@@ -616,13 +616,11 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
         }
     };
     tracing::info!(%listen_addr, "listening for local udp clients");
-    let flows = Arc::new(std::sync::Mutex::new(
-        crate::engine::udp::ClientFlows::default(),
-    ));
+    let flows = Arc::new(std::sync::Mutex::new(crate::udp::ClientFlows::default()));
     let mut readers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     let mut current: Option<usize> = None;
     let mut buf = vec![0u8; 65535];
-    let mut sweep = tokio::time::interval(crate::engine::udp::sweep_interval(idle));
+    let mut sweep = tokio::time::interval(crate::udp::sweep_interval(idle));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let (n, client) = tokio::select! {
@@ -647,7 +645,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
                 Ok(received) => received,
                 // Windows reports a client's ICMP port-unreachable here after a
                 // reply to a client that has gone away. Nothing is wrong.
-                Err(error) if crate::engine::udp::is_transient_recv_error(&error) => {
+                Err(error) if crate::udp::is_transient_recv_error(&error) => {
                     tracing::debug!("udp recv on {listen_addr} reported a lost datagram: {error}");
                     continue;
                 }
@@ -680,8 +678,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             // A new connection is a new incarnation: no flow survives it.
             readers.abort_all();
             while readers.join_next().await.is_some() {}
-            *flows.lock().unwrap_or_else(|p| p.into_inner()) =
-                crate::engine::udp::ClientFlows::default();
+            *flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
             stats.set_active_flows(0);
             readers.spawn(relay_peer_replies(
                 conn.clone(),
@@ -691,7 +688,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             ));
             current = Some(conn.stable_id());
         }
-        let limit = crate::engine::udp::payload_limit(conn.max_datagram_size());
+        let limit = crate::udp::payload_limit(conn.max_datagram_size());
         stats.set_datagram_limit(limit);
         let Some(limit) = limit else {
             stats.record_drop(DropReason::LimitShrink);
@@ -710,13 +707,13 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
         );
         let flow = match flow {
             Ok(flow) => flow,
-            Err(crate::engine::udp::Refused::Cap) => {
+            Err(crate::udp::Refused::Cap) => {
                 // Over the Access cap: drop before it costs Serve anything.
                 stats.record_drop(DropReason::Cap);
                 tracing::debug!(svc = %dialer.svc_name, %client, "udp flow refused: access flow cap reached");
                 continue;
             }
-            Err(crate::engine::udp::Refused::Exhausted) => {
+            Err(crate::udp::Refused::Exhausted) => {
                 // Identifiers are never reused within an incarnation, so the
                 // only way on is a new one: drop the connection, and the next
                 // datagram dials afresh with a clean flow table (contract).
@@ -730,7 +727,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             }
         };
         stats.set_active_flows(flows.lock().unwrap_or_else(|p| p.into_inner()).len());
-        if let Err(error) = conn.send_datagram(crate::engine::udp::encode(flow, &buf[..n])) {
+        if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
             tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
             // A lost connection never recovers. Evict it so the next datagram
             // dials a fresh one and starts a new incarnation (UDP-04); the
@@ -748,12 +745,12 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 async fn relay_peer_replies(
     conn: iroh::endpoint::Connection,
     socket: Arc<UdpSocket>,
-    flows: Arc<std::sync::Mutex<crate::engine::udp::ClientFlows>>,
-    stats: Arc<crate::engine::udp::UdpStats>,
+    flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
+    stats: Arc<crate::udp::UdpStats>,
 ) {
-    use crate::engine::udp::DropReason;
+    use crate::udp::DropReason;
     while let Ok(datagram) = conn.read_datagram().await {
-        let Ok((flow, payload)) = crate::engine::udp::decode(&datagram) else {
+        let Ok((flow, payload)) = crate::udp::decode(&datagram) else {
             stats.record_drop(DropReason::Malformed);
             tracing::debug!("dropping malformed udp datagram from peer");
             continue;
@@ -804,23 +801,21 @@ async fn handle_local_connection(
     // QUIC shutdown queues FIN; pipe completion alone does not prove final
     // request bytes reached Serve. Keep this task owned until acknowledged.
     let delivered = streams.0.stopped();
-    crate::engine::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
+    crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
     // Bounded: a peer that never acknowledges must not pin this task (and its
     // status/drain accounting) forever. A missing acknowledgement is NOT
     // success: it may hide a lost delivery, so it is reported as peer loss
     // (AC-TCP-06). Nothing is replayed.
-    match crate::engine::pipe::await_delivery(delivered, crate::engine::pipe::DELIVERY_ACK_GRACE)
-        .await
-    {
-        crate::engine::pipe::Delivery::Acknowledged => Ok(()),
-        crate::engine::pipe::Delivery::PeerStopped(code) => {
+    match crate::pipe::await_delivery(delivered, crate::pipe::DELIVERY_ACK_GRACE).await {
+        crate::pipe::Delivery::Acknowledged => Ok(()),
+        crate::pipe::Delivery::PeerStopped(code) => {
             anyhow::bail!("peer stopped client stream: {code}")
         }
-        crate::engine::pipe::Delivery::Unconfirmed => {
+        crate::pipe::Delivery::Unconfirmed => {
             tracing::warn!(svc = %dialer.svc_name, "peer lost: no delivery acknowledgement within grace");
             anyhow::bail!("peer lost: delivery unconfirmed (no acknowledgement within grace)")
         }
-        crate::engine::pipe::Delivery::Lost(error) => {
+        crate::pipe::Delivery::Lost(error) => {
             Err(anyhow::Error::new(error).context("client stream delivery failed"))
         }
     }
@@ -883,19 +878,17 @@ const PATH_POLL_INTERVAL: Duration = Duration::from_secs(PATH_POLL_INTERVAL_SECS
 
 /// First 8 chars of the peer id + `…`, for log-message readability.
 ///
-/// Delegates to the shared [`crate::engine::conn_path::short_peer_id`] — the same
+/// Delegates to the shared [`crate::conn_path::short_peer_id`] — the same
 /// shape the `<role> status` tables render — so a short id means one thing
 /// everywhere. The full id stays in the `peer=` field so both hosts can be
 /// correlated by grepping the same string.
 fn short_peer_id(peer: &iroh::EndpointId) -> String {
-    crate::engine::conn_path::short_peer_id(&peer.to_string())
+    crate::conn_path::short_peer_id(&peer.to_string())
 }
 
-/// Delegate to the shared renderer in [`crate::engine::conn_path`] — see its docs.
-fn render_established_paths(
-    report: Option<&crate::engine::observation::PeerPathObservation>,
-) -> String {
-    crate::engine::conn_path::render_established_paths(report)
+/// Delegate to the shared renderer in [`crate::conn_path`] — see its docs.
+fn render_established_paths(report: Option<&crate::observation::PeerPathObservation>) -> String {
+    crate::conn_path::render_established_paths(report)
 }
 
 /// Emit the connection-established line: full
@@ -907,7 +900,7 @@ fn render_established_paths(
 fn log_connection_established(
     remote_id: iroh::EndpointId,
     svc_name: &str,
-    report: Option<&crate::engine::observation::PeerPathObservation>,
+    report: Option<&crate::observation::PeerPathObservation>,
 ) {
     tracing::info!(
         peer = %remote_id,
@@ -925,7 +918,7 @@ fn log_connection_established(
 /// multiplexed connection outlives all of them. The poller snapshots the
 /// peer's transports every [`PATH_POLL_INTERVAL`] and logs exactly one line
 /// per real change (what counts as "real" is
-/// [`crate::engine::conn_path::diff_transports`]).
+/// [`crate::conn_path::diff_transports`]).
 ///
 /// Semantics: it watches the PEER-level remote map, which iroh shares
 /// across every connection to the same peer — a logged transition can be
@@ -943,7 +936,7 @@ fn spawn_path_change_poller(
     ep: &iroh::Endpoint,
     conn: &iroh::endpoint::Connection,
     svc_name: String,
-    initial: Vec<crate::engine::observation::TransportObservation>,
+    initial: Vec<crate::observation::TransportObservation>,
     tasks: &mut JoinSet<()>,
 ) {
     let peer = conn.remote_id();
@@ -963,14 +956,14 @@ fn spawn_path_change_poller(
             // The peer's remote-map entry can briefly disappear while iroh
             // re-negotiates paths; nothing to diff then — the next tick
             // re-checks.
-            let Some(report) = crate::engine::conn_path::peer_path_report(&ep, peer).await else {
+            let Some(report) = crate::conn_path::peer_path_report(&ep, peer).await else {
                 continue;
             };
             // One pure tick (see `conn_path::poller_step`): silent seed
             // while the baseline has never seen an active path, baseline
             // kept through teardown blips, otherwise a single line per
             // real migration.
-            let (line, next) = crate::engine::conn_path::poller_step(&last, report.transports);
+            let (line, next) = crate::conn_path::poller_step(&last, report.transports);
             if let Some(line) = line {
                 tracing::info!(peer = %peer, svc_name = %svc_name, "{}", line);
             }

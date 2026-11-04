@@ -4,7 +4,7 @@
 //! identity is published, and before it admits any forwarding. Callers
 //! decide how to present it (the CLI renders text; see the host renderer).
 
-use crate::engine::settings::Protocol;
+use crate::settings::Protocol;
 
 /// Hook a role calls once it is ready. An `Err` aborts the start: the
 /// endpoint is closed and the error is returned from the run.

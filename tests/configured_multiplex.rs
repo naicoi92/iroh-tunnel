@@ -1065,15 +1065,15 @@ async fn access_reports_peer_stop_as_tunnel_error() -> Result<()> {
     let home = temp.path();
     let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
     let key = iroh::SecretKey::generate();
-    let peer = iroh_tunnel::engine::bind_serve(&iroh_tunnel::engine::settings::ServeSettings {
-        node: iroh_tunnel::engine::settings::NodeSettings {
+    let peer = iroh_tunnel_engine::bind_serve(&iroh_tunnel_engine::settings::ServeSettings {
+        node: iroh_tunnel_engine::settings::NodeSettings {
             secret_key: Some(key.clone()),
             relay_urls: vec![relay.to_string()],
             ..Default::default()
         },
-        services: vec![iroh_tunnel::engine::settings::ServeServiceSettings {
+        services: vec![iroh_tunnel_engine::settings::ServeServiceSettings {
             name: "echo".to_string(),
-            protocol: iroh_tunnel::engine::settings::Protocol::Tcp,
+            protocol: iroh_tunnel_engine::settings::Protocol::Tcp,
             host: "127.0.0.1".to_string(),
             port: 9,
             udp: Default::default(),

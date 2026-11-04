@@ -1,7 +1,7 @@
 //! Access role host entry points.
 //!
 //! Thin wrappers that load the config, claim the role, map it to engine
-//! settings and call [`crate::engine::run_access`]; the accept loops and
+//! settings and call [`iroh_tunnel_engine::run_access`]; the accept loops and
 //! tunnels live in the engine. See `role_run` for the orchestration.
 
 use std::future::Future;
@@ -10,14 +10,14 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::config::AccessConfig;
-use crate::engine::observation::{AccessObservation, RoleHooks};
-use crate::engine::settings::AccessSettings;
-use crate::engine::{self, RunCompletion, RunContext};
 use crate::role_run::RoleStrategy;
+use iroh_tunnel_engine::observation::{AccessObservation, RoleHooks};
+use iroh_tunnel_engine::settings::AccessSettings;
+use iroh_tunnel_engine::{self as engine, RunCompletion, RunContext};
 
 /// Re-export of the engine's path-poller cadence for integration tests.
 #[cfg(feature = "test-utils")]
-pub use crate::engine::access::PATH_POLL_INTERVAL;
+pub use iroh_tunnel_engine::access::PATH_POLL_INTERVAL;
 
 /// Run the access role until interrupted (Ctrl-C).
 ///

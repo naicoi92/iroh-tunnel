@@ -17,13 +17,12 @@ pub(crate) mod cli_service;
 pub mod config;
 pub mod config_cmd;
 pub(crate) mod config_store;
-pub mod engine;
 pub mod error;
 pub(crate) mod ownership;
 pub mod paths;
 // Old-path re-exports so tests and downstream callers keep compiling until
 // the engine becomes its own crate (Task 19b/20).
-pub use crate::engine::{conn_path, endpoint, observation, pipe, proto, ready, udp};
+pub use iroh_tunnel_engine::{conn_path, endpoint, observation, pipe, proto, ready, udp};
 pub(crate) mod render;
 /// `pub(crate)` — internal seam between serve/access, not a public extension
 /// point. See `src/role_run.rs` module docs.

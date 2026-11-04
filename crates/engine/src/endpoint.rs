@@ -24,11 +24,6 @@ use iroh::{RelayMap, RelayUrl};
 
 use std::time::Duration;
 
-/// Old name of [`crate::engine::testing::set_relay_only`], kept for tests
-/// until they are rewired.
-#[cfg(feature = "test-utils")]
-pub use crate::engine::testing::set_relay_only as set_relay_only_for_tests;
-
 /// The n0 default relay URLs (use1-1, usw1-1, euc1-1, aps1-1).
 ///
 /// Relays are optional in iroh-tunnel config: when a user does not configure
@@ -48,8 +43,8 @@ pub fn n0_default_relay_urls() -> Vec<RelayUrl> {
     iroh::defaults::prod::default_relay_map().urls::<Vec<_>>()
 }
 
-use crate::engine::proto;
-use crate::engine::settings::{AccessSettings, NodeSettings, RelayToken, ServeSettings};
+use crate::proto;
+use crate::settings::{AccessSettings, NodeSettings, RelayToken, ServeSettings};
 
 /// Build an [`Endpoint`] for the **serve** role.
 ///
@@ -109,7 +104,7 @@ async fn create_endpoint_with_key(
     #[cfg(feature = "test-utils")]
     {
         builder = builder.ca_tls_config(CaTlsConfig::insecure_skip_verify());
-        if crate::engine::testing::relay_only() {
+        if crate::testing::relay_only() {
             builder = builder.clear_ip_transports();
         }
     }

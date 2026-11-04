@@ -1,10 +1,31 @@
-[package]
-name = "iroh-tunnel"
+[workspace]
+members = [".", "crates/engine"]
+default-members = [".", "crates/engine"]
+resolver = "2"
+
+[workspace.package]
 version = "0.4.3-rc.3"
 edition = "2021"
 rust-version = "1.91"
-description = "P2P port-forwarding tunnel (TCP/UDP) via Iroh"
 license = "MIT OR Apache-2.0"
+
+# Crates shared by more than one member. Never carries `test-utils` features:
+# those are forwarded explicitly (root -> engine -> iroh).
+[workspace.dependencies]
+anyhow = "1.0"
+bytes = "1.12"
+iroh = "1.4.1"
+tokio = { version = "1.53", features = ["full"] }
+tracing = "0.1"
+tempfile = "3.27"
+
+[package]
+name = "iroh-tunnel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "P2P port-forwarding tunnel (TCP/UDP) via Iroh"
+license.workspace = true
 
 [lib]
 name = "iroh_tunnel"
@@ -25,21 +46,22 @@ path = "src/bin_access.rs"
 # Enables the insecure relay-TLS trust override used by integration tests
 # (in-process relay with a self-signed certificate). Never enable in
 # production builds: it disables relay certificate verification.
-test-utils = ["iroh/test-utils"]
+test-utils = ["iroh-tunnel-engine/test-utils"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
-tokio = { version = "1.53", features = ["full"] }
-iroh = "1.4.1"
+iroh-tunnel-engine = { path = "crates/engine" }
+tokio.workspace = true
+iroh.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1"
 toml_edit = "0.25"
-tracing = "0.1"
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
+anyhow.workspace = true
 # `Bytes` for QUIC DATAGRAM send/receive in the UDP forwarding path (#88).
-bytes = "1.12"
+bytes.workspace = true
 thiserror = "2.0"
 dirs = "6"
 which = "8"
@@ -66,7 +88,7 @@ sigstore-types = { version = "0.15", default-features = false }
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3.27"
+tempfile.workspace = true
 # In-process relay server for the relay-auth integration tests.
 iroh = { version = "1.4.1", features = ["test-utils"] }
 # AccessControl types for the token relay in tests/relay_auth.rs.

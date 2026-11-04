@@ -43,13 +43,13 @@ pub(crate) async fn stop_flush(
     match tokio::time::timeout(STATUS_FLUSH_JOIN_BOUND, &mut flush).await {
         Ok(result) => {
             let clean = result.is_ok();
-            crate::engine::shutdown::observe(result);
+            crate::shutdown::observe(result);
             clean
         }
         Err(_) => {
             tracing::warn!("status flush task did not stop within 5s; keeping status file");
             flush_abort.abort();
-            crate::engine::shutdown::observe(flush.await);
+            crate::shutdown::observe(flush.await);
             false
         }
     }

@@ -1,7 +1,7 @@
 //! Serve role host entry points.
 //!
 //! Thin wrappers that load the config, claim the role, map it to engine
-//! settings and call [`crate::engine::run_serve`]; the accept loops and
+//! settings and call [`iroh_tunnel_engine::run_serve`]; the accept loops and
 //! tunnels live in the engine. See `role_run` for the orchestration.
 
 use std::future::Future;
@@ -10,10 +10,10 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::config::ServeConfig;
-use crate::engine::observation::{RoleHooks, ServeObservation};
-use crate::engine::settings::ServeSettings;
-use crate::engine::{self, RunCompletion, RunContext};
 use crate::role_run::RoleStrategy;
+use iroh_tunnel_engine::observation::{RoleHooks, ServeObservation};
+use iroh_tunnel_engine::settings::ServeSettings;
+use iroh_tunnel_engine::{self as engine, RunCompletion, RunContext};
 
 /// Run the serve role until interrupted (Ctrl-C).
 ///

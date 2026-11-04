@@ -11,7 +11,7 @@ use std::pin::Pin;
 
 use std::time::Duration;
 
-use crate::engine::ready::OnReady;
+use crate::ready::OnReady;
 
 /// How often each role's status flush task re-renders its observation.
 ///

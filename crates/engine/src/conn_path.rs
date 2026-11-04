@@ -28,7 +28,7 @@
 use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointId, TransportAddr};
 
-use crate::engine::observation::{PeerPathObservation, TransportKind, TransportObservation};
+use crate::observation::{PeerPathObservation, TransportKind, TransportObservation};
 
 /// Snapshot the current connection path of `peer` on `ep`.
 ///
@@ -188,7 +188,7 @@ pub(crate) fn diff_transports(
 /// thing everywhere. The full id stays in the machine-readable fields
 /// (`peer=`, status files) so both hosts can be correlated by grepping the
 /// same string; short forms only need to be recognizable at a glance.
-pub(crate) fn short_peer_id(peer: &str) -> String {
+pub fn short_peer_id(peer: &str) -> String {
     let head: String = peer.chars().take(8).collect();
     format!("{head}…")
 }

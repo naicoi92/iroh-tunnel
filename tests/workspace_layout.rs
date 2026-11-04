@@ -7,7 +7,11 @@ use std::process::Command;
 use serde_json::Value;
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
-const MEMBERS: [&str; 3] = ["iroh-tunnel", "iroh-tunnel-engine", "iroh-tunnel-host"];
+/// The target is three members; `iroh-tunnel-host` is created by Task 20, so
+/// until then the workspace holds the other two. Task 20 adds the host here.
+const MEMBERS: [&str; 2] = ["iroh-tunnel", "iroh-tunnel-engine"];
+/// Internal packages that must carry `publish = false`.
+const INTERNAL_PACKAGES: [&str; 1] = ["iroh-tunnel-engine"];
 
 fn metadata() -> Value {
     let output = Command::new(env!("CARGO"))
@@ -115,7 +119,7 @@ fn workspace_has_exactly_three_members_all_default() {
 #[test]
 fn internal_packages_are_not_published() {
     let meta = metadata();
-    for name in ["iroh-tunnel-engine", "iroh-tunnel-host"] {
+    for name in INTERNAL_PACKAGES {
         assert_eq!(
             package(&meta, name)["publish"],
             serde_json::json!([]),
@@ -162,7 +166,11 @@ fn engine_sources_have_no_exit_signal_or_print() {
             }
         }
     }
-    assert!(offenders.is_empty(), "forbidden calls:\n{}", offenders.join("\n"));
+    assert!(
+        offenders.is_empty(),
+        "forbidden calls:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]
@@ -179,7 +187,10 @@ fn udp_decision_model_lives_in_engine() {
         "pub const QUARANTINE",
         "pub fn payload_limit",
     ] {
-        assert!(text.contains(needle), "{needle} not defined under crates/engine/src");
+        assert!(
+            text.contains(needle),
+            "{needle} not defined under crates/engine/src"
+        );
     }
 }
 

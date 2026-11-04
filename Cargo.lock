@@ -1908,6 +1908,7 @@ dependencies = [
  "iroh",
  "iroh-relay",
  "iroh-tunnel",
+ "iroh-tunnel-engine",
  "libc",
  "regex",
  "reqwest",
@@ -1930,6 +1931,18 @@ dependencies = [
  "vergen-gitcl",
  "which 8.0.5",
  "zip",
+]
+
+[[package]]
+name = "iroh-tunnel-engine"
+version = "0.4.3-rc.3"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "iroh",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

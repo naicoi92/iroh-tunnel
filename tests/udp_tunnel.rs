@@ -934,11 +934,11 @@ async fn udp_round_trips_on_a_relay_only_path_and_on_a_direct_path() -> Result<(
     // `start` only spawns the roles; they build their endpoints a moment
     // later. Keep the switch on until the first round trip has proved both
     // endpoints exist, then turn it off so phase 2 gets default endpoints.
-    iroh_tunnel::endpoint::set_relay_only_for_tests(true);
+    iroh_tunnel_engine::testing::set_relay_only(true);
     let relay_only = UdpTunnel::start().await?;
     let client = UdpSocket::bind("127.0.0.1:0").await?;
     let first = relay_only.roundtrip(&client, b"over-relay").await;
-    iroh_tunnel::endpoint::set_relay_only_for_tests(false);
+    iroh_tunnel_engine::testing::set_relay_only(false);
     assert_eq!(first?, b"over-relay");
     let status =
         UdpTunnel::status_when(relay_only.access_state.path(), "access-status.json", |s| {
