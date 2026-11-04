@@ -17,6 +17,17 @@ pub const HEADER_LEN: usize = 4;
 /// once. Quarantine, caps and a configurable value follow in #89 (UDP-06).
 pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Default flows one service may hold (Serve: per service; Access: per
+/// service). An untested estimate (UDP-06).
+pub const DEFAULT_MAX_FLOWS: usize = 256;
+
+/// Default flows one peer may hold on a Serve service. An untested estimate.
+pub const DEFAULT_MAX_FLOWS_PER_PEER: usize = 64;
+
+/// Default datagrams queued per flow before the newest is dropped. An untested
+/// estimate.
+pub const DEFAULT_QUEUE_DEPTH: usize = 64;
+
 /// How often each side looks for idle flows.
 pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 

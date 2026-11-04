@@ -136,6 +136,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                     protocol,
                     host: target.ip().to_string(),
                     port: target.port(),
+                    udp: Default::default(),
                 }],
             };
             serve::run_quick(cfg).await
@@ -167,6 +168,7 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                     host: listen.ip().to_string(),
                     port: listen.port(),
                     relay_urls: vec![],
+                    udp: Default::default(),
                 }],
             };
             access::run_quick(cfg).await

@@ -118,6 +118,98 @@ impl NodeConfig {
     }
 }
 
+/// Optional UDP resource settings on a service table (UDP-06).
+///
+/// Every field is optional; absent fields use the defaults in
+/// [`UdpSettings::resolve`]. All defaults are untested estimates, not
+/// benchmarked values. Setting any of them on a non-UDP service is rejected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UdpSettings {
+    /// Seconds without traffic in either direction before a flow ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<u64>,
+    /// Most flows the service holds at once; quarantined flows count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flows: Option<usize>,
+    /// Most flows one peer may hold (Serve only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flows_per_peer: Option<usize>,
+    /// Datagrams queued per flow before the newest is dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<usize>,
+}
+
+/// [`UdpSettings`] with every default applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpLimits {
+    pub idle_timeout: std::time::Duration,
+    pub max_flows: usize,
+    pub max_flows_per_peer: usize,
+    pub queue_depth: usize,
+}
+
+impl UdpSettings {
+    /// The effective limits, with the UDP-06 defaults for absent fields. A
+    /// per-peer cap never exceeds the service cap.
+    pub fn resolve(&self) -> UdpLimits {
+        let max_flows = self.max_flows.unwrap_or(crate::udp::DEFAULT_MAX_FLOWS);
+        UdpLimits {
+            idle_timeout: self
+                .idle_timeout
+                .map_or(crate::udp::IDLE_TIMEOUT, std::time::Duration::from_secs),
+            max_flows,
+            max_flows_per_peer: self
+                .max_flows_per_peer
+                .unwrap_or(crate::udp::DEFAULT_MAX_FLOWS_PER_PEER)
+                .min(max_flows),
+            queue_depth: self.queue_depth.unwrap_or(crate::udp::DEFAULT_QUEUE_DEPTH),
+        }
+    }
+
+    fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Reject settings that cannot work. `per_peer_allowed` is false for the
+    /// Access role, which has no peers to cap.
+    fn validate(&self, service: &str, protocol: Protocol, per_peer_allowed: bool) -> Result<()> {
+        if protocol != Protocol::Udp {
+            if !self.is_unset() {
+                anyhow::bail!(
+                    "service '{service}': idle_timeout, max_flows, max_flows_per_peer and \
+                     queue_depth apply only to protocol = \"udp\""
+                );
+            }
+            return Ok(());
+        }
+        for (field, value) in [
+            ("idle_timeout", self.idle_timeout.map(|v| v as usize)),
+            ("max_flows", self.max_flows),
+            ("max_flows_per_peer", self.max_flows_per_peer),
+            ("queue_depth", self.queue_depth),
+        ] {
+            if value == Some(0) {
+                anyhow::bail!("service '{service}': invalid {field} 0: must be >= 1");
+            }
+        }
+        if !per_peer_allowed && self.max_flows_per_peer.is_some() {
+            anyhow::bail!(
+                "service '{service}': max_flows_per_peer is not valid on an access service"
+            );
+        }
+        // Only an explicit contradiction is an error; a default per-peer cap
+        // above an explicit `max_flows` is clamped by `resolve`.
+        if let (Some(per_peer), Some(total)) = (self.max_flows_per_peer, self.max_flows) {
+            if per_peer > total {
+                anyhow::bail!(
+                    "service '{service}': max_flows_per_peer {per_peer} exceeds max_flows {total}"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServeService {
     pub name: String,
@@ -125,6 +217,8 @@ pub struct ServeService {
     #[serde(default = "default_host")]
     pub host: String,
     pub port: u16,
+    #[serde(flatten)]
+    pub udp: UdpSettings,
 }
 
 /// Remote service mapping. Legacy `multiplex` is an ignored unknown field;
@@ -150,6 +244,8 @@ pub struct AccessService {
     /// only carries traffic for peers connected to it.
     #[serde(default)]
     pub relay_urls: Vec<String>,
+    #[serde(flatten)]
+    pub udp: UdpSettings,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -342,6 +438,7 @@ impl ServeConfig {
                 anyhow::bail!("duplicate service name: '{}'", svc.name);
             }
             validate_port(svc.port)?;
+            svc.udp.validate(&svc.name, svc.protocol, true)?;
         }
         for url in &self.node.relay_urls {
             if !url.starts_with("https://") {
@@ -388,6 +485,7 @@ impl AccessConfig {
                 );
             }
             validate_port(svc.port)?;
+            svc.udp.validate(&svc.name, svc.protocol, false)?;
             for url in &svc.relay_urls {
                 if !url.starts_with("https://") {
                     anyhow::bail!(
@@ -434,6 +532,7 @@ mod tests {
             protocol: Protocol::Tcp,
             host: "127.0.0.1".into(),
             port: 1,
+            udp: Default::default(),
         };
         let toml = toml::to_string(&svc).unwrap();
         assert!(toml.contains("protocol = \"tcp\""));
@@ -446,6 +545,109 @@ mod tests {
         };
         let toml_udp = toml::to_string(&svc_udp).unwrap();
         assert!(toml_udp.contains("protocol = \"udp\""));
+    }
+
+    const UDP_SERVE: &str = "[[services]]\nname = \"dns\"\nprotocol = \"udp\"\nport = 53\n";
+
+    #[test]
+    fn udp_limits_default_to_the_documented_values_when_absent() {
+        let f = tmpfile("serve.toml", UDP_SERVE);
+        let cfg = ServeConfig::load(f.path()).unwrap();
+        let limits = cfg.services[0].udp.resolve();
+        assert_eq!(limits.idle_timeout, std::time::Duration::from_secs(60));
+        assert_eq!(limits.max_flows, 256);
+        assert_eq!(limits.max_flows_per_peer, 64);
+        assert_eq!(limits.queue_depth, 64);
+    }
+
+    #[test]
+    fn udp_limits_read_from_the_service_table() {
+        let f = tmpfile(
+            "serve.toml",
+            &format!(
+                "{UDP_SERVE}idle_timeout = 30\nmax_flows = 10\nmax_flows_per_peer = 4\nqueue_depth = 8\n"
+            ),
+        );
+        let limits = ServeConfig::load(f.path()).unwrap().services[0]
+            .udp
+            .resolve();
+        assert_eq!(limits.idle_timeout, std::time::Duration::from_secs(30));
+        assert_eq!(limits.max_flows, 10);
+        assert_eq!(limits.max_flows_per_peer, 4);
+        assert_eq!(limits.queue_depth, 8);
+    }
+
+    #[test]
+    fn udp_limits_of_zero_are_rejected_with_the_field_name() {
+        for field in [
+            "idle_timeout",
+            "max_flows",
+            "max_flows_per_peer",
+            "queue_depth",
+        ] {
+            let f = tmpfile("serve.toml", &format!("{UDP_SERVE}{field} = 0\n"));
+            let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+            assert!(err.contains(field), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_per_peer_cap_above_the_service_cap_is_rejected() {
+        let f = tmpfile(
+            "serve.toml",
+            &format!("{UDP_SERVE}max_flows = 4\nmax_flows_per_peer = 5\n"),
+        );
+        let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+        assert!(err.contains("max_flows_per_peer"), "{err}");
+    }
+
+    #[test]
+    fn a_small_service_cap_alone_clamps_the_default_per_peer_cap() {
+        let f = tmpfile("serve.toml", &format!("{UDP_SERVE}max_flows = 10\n"));
+        let limits = ServeConfig::load(f.path()).unwrap().services[0]
+            .udp
+            .resolve();
+        assert_eq!((limits.max_flows, limits.max_flows_per_peer), (10, 10));
+    }
+
+    #[test]
+    fn udp_limits_on_a_tcp_service_are_rejected() {
+        let f = tmpfile(
+            "serve.toml",
+            "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nport = 5432\nmax_flows = 5\n",
+        );
+        let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+        assert!(err.contains("udp"), "{err}");
+    }
+
+    #[test]
+    fn access_takes_idle_timeout_cap_and_queue_but_no_per_peer_cap() {
+        let node = "0".repeat(64);
+        let base = format!(
+            "[[services]]\nname = \"dns\"\nnode_id = \"{node}\"\nprotocol = \"udp\"\nport = 53\n"
+        );
+        let ok = tmpfile(
+            "access.toml",
+            &format!("{base}max_flows = 7\nqueue_depth = 3\n"),
+        );
+        let limits = AccessConfig::load(ok.path()).unwrap().services[0]
+            .udp
+            .resolve();
+        assert_eq!((limits.max_flows, limits.queue_depth), (7, 3));
+
+        let bad = tmpfile("access.toml", &format!("{base}max_flows_per_peer = 2\n"));
+        let err = format!("{:#}", AccessConfig::load(bad.path()).unwrap_err());
+        assert!(err.contains("max_flows_per_peer"), "{err}");
+    }
+
+    #[test]
+    fn a_config_without_udp_limits_serializes_without_them() {
+        let f = tmpfile("serve.toml", UDP_SERVE);
+        let cfg = ServeConfig::load(f.path()).unwrap();
+        let out = toml::to_string(&cfg).unwrap();
+        for field in ["idle_timeout", "max_flows", "queue_depth"] {
+            assert!(!out.contains(field), "{field} leaked into {out}");
+        }
     }
 
     #[test]
@@ -482,6 +684,7 @@ mod tests {
                 protocol: Protocol::Tcp,
                 host: "127.0.0.1".into(),
                 port: 8080,
+                udp: Default::default(),
             }],
         };
         let f = tmpfile("serve.toml", "");
@@ -563,6 +766,7 @@ mod tests {
                 protocol: Protocol::Tcp,
                 host: "127.0.0.1".into(),
                 port: 5432,
+                udp: Default::default(),
             }],
             ..Default::default()
         };
@@ -577,6 +781,7 @@ mod tests {
             protocol: Protocol::Tcp,
             host: "127.0.0.1".into(),
             port: 5432,
+            udp: Default::default(),
         };
         let cfg = ServeConfig {
             services: vec![svc.clone(), svc],
@@ -594,6 +799,7 @@ mod tests {
                 protocol: Protocol::Tcp,
                 host: "127.0.0.1".into(),
                 port: 0,
+                udp: Default::default(),
             }],
             ..Default::default()
         };
@@ -624,6 +830,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 5432,
                 relay_urls: vec![],
+                udp: Default::default(),
             }],
             ..Default::default()
         };
@@ -643,6 +850,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 8080,
                 relay_urls: vec!["http://insecure.relay".into()],
+                udp: Default::default(),
             }],
             ..Default::default()
         };
@@ -690,6 +898,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 5432,
                 relay_urls: vec![],
+                udp: Default::default(),
             }],
             ..Default::default()
         };
