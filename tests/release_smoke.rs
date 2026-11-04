@@ -104,15 +104,19 @@ fn spawn(
 ) -> Result<Process> {
     commands.push(format!("{} {}", exe.display(), args.join(" ")));
     let out = std::fs::File::create(log)?;
-    let child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(args)
         .env("HOME", home)
-        .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home)
-        .env("APPDATA", home)
-        .env("LOCALAPPDATA", home)
         .env("IROH_TUNNEL_STATE_DIR", home)
-        .env("RUST_LOG", "iroh_tunnel=info")
+        .env("RUST_LOG", "iroh_tunnel=info");
+    // Windows resolves its default folders through the profile (the
+    // LocalAppData known folder). Pointing USERPROFILE/APPDATA/LOCALAPPDATA at
+    // a temp directory made the packaged executable fail with "could not
+    // resolve the LocalAppData folder" (run 41785531176), so the real profile
+    // is kept there; roles still write only status files into the state dir.
+    let child = command
         .stdout(out.try_clone()?)
         .stderr(out)
         .spawn()
