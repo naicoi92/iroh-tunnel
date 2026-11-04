@@ -1,0 +1,56 @@
+schema: superspec
+language: en
+
+context: |
+  Product: P2P TCP/UDP port forwarding over Iroh/QUIC. Serve publishes named
+  local targets; Access exposes local listeners. TCP multiplexes isolated
+  streams; experimental UDP preserves datagram/Flow and Session incarnation
+  boundaries with bounded admission and Quarantine. NodeId is identity, not
+  authorization; target services enforce access protection.
+
+  Stack: Rust 2021 (MSRV 1.91), Cargo.lock, Tokio, Iroh, clap, serde/JSON,
+  toml/toml_edit, tracing, anyhow/CliError, reqwest/rustls and Sigstore.
+  Support Linux, macOS and Windows with explicit platform service backends.
+  Cargo.toml is authoritative for dependency versions.
+
+  Authorities: docs/GLOSSARY.md for ubiquitous language;
+  docs/udp-integration-contract.md for UDP semantics and known deviations;
+  docs/agents/rust-coding-standards.md (RS-01–RS-16) for implementation standards.
+  Preserve exit classification, secret hygiene, safe atomic/locked persistence,
+  ownership, resource bounds and cancellation/shutdown contracts.
+  test-utils disables relay TLS verification: never use it in production or
+  against public relays. Surface code/test/doc conflicts rather than guessing intent.
+
+  Apply pragmatic DDD to new/changed code: identify bounded contexts, domain
+  invariants and meaningful types; keep use-case orchestration separate from
+  transport/platform effects where useful. The capability map is not a context
+  map. No blanket rewrite, speculative abstractions, CQRS or extra crates.
+
+  Use applicable skills: rust-best-practices for Rust implementation, rust-review
+  for review, coding-standards and test-from-spec; rust-port only for actual ports.
+  Repository standards override conflicting generic advice. Use TDD for code
+  changes, systematic-debugging for failures and fresh verification before completion.
+  Work in isolated worktrees; parallelize independent work with isolated writers.
+  Behavior changes start with /opsx-new; keep artifacts in the change directory.
+  Never push, merge or open a PR without explicit authorization.
+
+rules:
+  proposal:
+    - State scope, non-goals, affected capabilities and compatibility/security impact.
+  design:
+    - Identify affected DDD boundaries, invariants, use cases and justified adapter seams; address platforms and lifecycle without unrelated refactors.
+  specs:
+    - Specify observable behavior and failure/boundary scenarios using the glossary.
+    - "Bootstrap requirements need Evidence; mark code-only behavior Confidence: inferred and expose known deviations."
+  tasks:
+    - Trace tasks/tests to scenarios; define file ownership, dependencies and affected-platform coverage.
+
+operations:
+  apply:
+    guidance:
+      - Follow RS-01–RS-16 and applicable Rust skills; reproduce bugs through the real user path and verify it after fixing.
+      - For Rust changes run cargo fmt --all -- --check, cargo clippy --all-targets --all-features --locked -- -D warnings, and cargo test --all-features --locked; verify MSRV on Rust 1.91.
+      - Use real-binary E2E for affected CLI/network/lifecycle behavior with safe local-relay fixtures; report blocked coverage. Config/docs-only changes validate OpenSpec and resolved instructions instead.
+  archive:
+    guidance:
+      - Check completion and delta sync; structural validation alone does not approve inferred requirements or resolve documented deviations.

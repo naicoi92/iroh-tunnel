@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 6,
+  "packageVersion": "0.0.0",
+  "files": {
+    "LICENSE": "4904e74b0083784173b7ec8b6534919bc1a5e57b1c392397804f74ca165d8791",
+    "schema.yaml": "9d9e94fa84f81d03b51bb9988b2b987f3a6830f936ba8bc18d0e2c9881d813ec",
+    "templates/apply.md": "46646ae2f270e2da719f629d73c9ac85dd10651468595a9c3c15432172bdc056",
+    "templates/brainstorm.md": "19802b829107b8a7bd4b8311b9f79a5588512696a4c4a2ddc04cd8cd4d76f80c",
+    "templates/design.md": "1943eae321e81e900e0923ef69ab84734b4c3c7d80b64cf5c622da326425e75f",
+    "templates/finalize.md": "2a9fdd042353cfd94fab2c28fb9583255edc6aa570c7f9a4719bbe4f4b6c1c85",
+    "templates/plan.md": "3792ac9e214a525e3a98eb9a84b5be704bf72e1a81d4a0372b32f28c2820fb26",
+    "templates/proposal.md": "4e8b4f1eee5295947013af9f01e6dfe03bfc51a64ce98e6fc4700bc674a807d2",
+    "templates/spec.md": "ddaec1a29ca1c409e816373cda2430aeb63a974480e212e2eb85e4834fe89712",
+    "templates/tasks.md": "b2a6a4c08c15f347a1d8c3e2d43e0c8fb066dc5cc0feb795f47555f176f9c421",
+    "templates/verify.md": "9945589c74c800f9e9036c02419b0f75db72b1b306234b91fa4beb3f86f1d567"
+  }
+}
