@@ -726,7 +726,7 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 /// (session incarnation). Idle flows expire after the service's idle timeout.
 /// New clients are refused at `max_flows`, and spent flow identifiers end the
 /// incarnation by evicting the connection.
-/// Contract: `docs/design/udp-integration-contract.md`.
+/// Contract: `docs/udp-integration-contract.md`.
 async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     use crate::udp::DropReason;
     let stats = dialer.udp_stats.clone();
@@ -899,7 +899,7 @@ async fn relay_peer_replies(
 }
 
 // A single budget includes mutex wait, dial, backoff and opening the stream.
-// Keep established streams outside this timeout. See issue-86-retry-evidence.md.
+// Keep established streams outside this timeout.
 const CLIENT_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Tunnel one local client over a stream on the shared service connection.

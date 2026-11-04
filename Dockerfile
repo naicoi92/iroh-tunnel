@@ -8,7 +8,7 @@
 # sources, overwrite, rebuild" trick fragile — the post-swap cargo run
 # failed with APP_VERSION undefined at compile time. Source changes
 # therefore recompile dependencies; release images use
-# Dockerfile.goreleaser (prebuilt binaries) and are unaffected.
+# Dockerfile.release (prebuilt binaries) and are unaffected.
 
 # ---- build stage ----
 FROM rust:1.91-slim-bookworm AS builder

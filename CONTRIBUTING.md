@@ -49,7 +49,7 @@ Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
 CI runs these three commands on every pull request, in a `lint` and a `test`
-job, plus a `packaging` job that runs `shellcheck` and `goreleaser check`. Run
+job, plus a `scripts` job that runs `shellcheck` and `actionlint`. Run
 the three commands locally before pushing:
 
 ```sh

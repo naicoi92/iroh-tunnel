@@ -2,7 +2,7 @@
 # Render the Homebrew cask for a release to stdout.
 #   usage: homebrew-cask.sh <version> <sha256-of-darwin-arm64-tarball>
 #
-# Replaces GoReleaser's `homebrew_casks` block (ADR-0002).
+#
 set -euo pipefail
 
 version="${1:?version required}"

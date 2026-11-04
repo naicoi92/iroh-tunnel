@@ -798,7 +798,7 @@ type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
 ///
 /// Each flow gets its own connected upstream socket, so a reply is attributed
 /// to a flow by the socket it arrives on, never by inspecting the payload.
-/// Contract: `docs/design/udp-integration-contract.md`. Flows are capped per
+/// Contract: `docs/udp-integration-contract.md`. Flows are capped per
 /// peer and per service, expire after the service's idle timeout, and their
 /// sockets are then quarantined as sinks; each flow has a bounded queue.
 async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {

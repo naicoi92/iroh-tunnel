@@ -1,6 +1,6 @@
 //! #90: install and manage a user service, driven through the real binary.
 //!
-//! Acceptance map (cases from `docs/design/redesign-acceptance.md`):
+//! Acceptance map:
 //! - SM-SCOPE-01 (90.CL1): the non-elevated interactive install offers
 //!   user/system; `system` without privilege stops with rerun guidance that
 //!   keeps the intended arguments and absolute paths, never elevates, never

@@ -1,5 +1,5 @@
-# Role-only image for `iroh-tunnel-serve` (issue #94), used by GoReleaser's
-# `dockers_v2`. Same layout as `Dockerfile.goreleaser` (read its header for
+# Role-only image for `iroh-tunnel-serve` (issue #94), built by docker.yml.
+# Same layout as `Dockerfile.release` (read its header for
 # how the prebuilt binary is staged), but it ships ONLY the standalone
 # `iroh-tunnel-serve` executable, so the image runs without any other binary.
 

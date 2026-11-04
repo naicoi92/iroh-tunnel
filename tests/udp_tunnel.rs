@@ -3,7 +3,7 @@
 //! Boots serve + access in-process against an in-process relay (no Internet,
 //! CI-safe; same harness shape as `serve_status_conn_path.rs`) and drives
 //! real UDP sockets: clients send to the Access listener, a real UDP target
-//! sits behind Serve. Contract: `docs/design/udp-integration-contract.md`.
+//! sits behind Serve. Contract: `docs/udp-integration-contract.md`.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

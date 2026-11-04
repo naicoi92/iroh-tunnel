@@ -1,5 +1,5 @@
 # Reusable multi-arch Docker images (one per executable, issue #94) from the PREBUILT glibc binaries produced by
-# build.yml. Nothing is compiled here and Dockerfile.goreleaser has no RUN
+# build.yml. Nothing is compiled here and Dockerfile.release has no RUN
 # step, so no QEMU is needed — buildx only assembles layers.
 #
 # Rehearsal mode needs only the two glibc build artifacts, so it runs in PARALLEL
@@ -39,9 +39,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { image: iroh-tunnel,        dockerfile: Dockerfile.goreleaser }
-          - { image: iroh-tunnel-serve,  dockerfile: Dockerfile.goreleaser.serve }
-          - { image: iroh-tunnel-access, dockerfile: Dockerfile.goreleaser.access }
+          - { image: iroh-tunnel,        dockerfile: Dockerfile.release }
+          - { image: iroh-tunnel-serve,  dockerfile: Dockerfile.release.serve }
+          - { image: iroh-tunnel-access, dockerfile: Dockerfile.release.access }
     steps:
       # Dockerfiles come from the tag when promoting, so they match the binaries.
       - uses: actions/checkout@v7

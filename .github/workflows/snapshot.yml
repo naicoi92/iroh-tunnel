@@ -24,7 +24,7 @@ on:
       - "Cargo.lock"
       - "build.rs"
       - "packaging/**"
-      - "Dockerfile.goreleaser*"
+      - "Dockerfile.release*"
       - ".github/workflows/build.yml"
       - ".github/workflows/package.yml"
       - ".github/workflows/docker.yml"

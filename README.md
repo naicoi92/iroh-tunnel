@@ -442,7 +442,7 @@ What to expect:
 - **Not verified under impairment.** Behavior under packet loss, delay,
   congestion and path migration has not been measured.
 
-Details: [`docs/design/udp-integration-contract.md`](docs/design/udp-integration-contract.md).
+Details: [`docs/udp-integration-contract.md`](docs/udp-integration-contract.md).
 
 ## Multiplexing (0.2.0)
 

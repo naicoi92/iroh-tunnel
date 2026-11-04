@@ -9,8 +9,7 @@
 //!
 //! Per RO-03 stop is `schtasks /End`; no control channel or stop command is
 //! added. Whether `/End` lets the tunnel drain is measured on real Windows in
-//! `tests/service_user_windows.rs` and recorded in
-//! `docs/design/issue-92-evidence.md`.
+//! `tests/service_user_windows.rs`.
 
 use std::path::Path;
 use std::process::{Command, Output};
