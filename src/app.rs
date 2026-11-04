@@ -433,7 +433,7 @@ fn install_system(
             config: config_abs.as_deref(),
             state: state_override.as_deref(),
             sudo_user: sudo_user.as_deref(),
-            interactive: env.interactive,
+            interactive: env.can_answer,
         },
         &mut input,
         &mut prompt,
@@ -445,7 +445,7 @@ fn install_system(
     system::confirm_retarget(
         service::existing_registration(role, ServiceScope::System).as_deref(),
         &target,
-        env.interactive,
+        env.can_answer,
         &mut input,
         &mut prompt,
     )?;

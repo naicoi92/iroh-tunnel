@@ -75,11 +75,38 @@ pub fn resolve_target(
     input: &mut impl BufRead,
     prompt: &mut impl Write,
 ) -> Result<Target> {
-    let from_sudo = request
+    let invoking_user = if request.interactive && !has_known_user(request) {
+        Some(ask_user(request.role, input, prompt)?.name)
+    } else {
+        None
+    };
+    resolve_target_account(request, invoking_user.as_deref())?
+        .ok_or_else(|| unknown_user("no SUDO_USER", request.role))
+}
+
+fn sudo_account(request: &Request<'_>) -> Option<Account> {
+    request
         .sudo_user
         .filter(|name| !name.is_empty())
         .and_then(account::by_name)
-        .filter(|a| a.uid != 0);
+        .filter(|a| a.uid != 0)
+}
+
+fn has_known_user(request: &Request<'_>) -> bool {
+    sudo_account(request).is_some() || request.config.is_some()
+}
+
+/// The pure core of [`resolve_target`]: `Ok(None)` means the user is unknown
+/// and `invoking_user` (a name to look up) was not supplied.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the user or the paths cannot be resolved.
+pub fn resolve_target_account(
+    request: &Request<'_>,
+    invoking_user: Option<&str>,
+) -> Result<Option<Target>> {
+    let from_sudo = sudo_account(request);
 
     let config_dir_owner = |config: &Path| -> Result<Account> {
         let parent = config.parent().unwrap_or(Path::new("/"));
@@ -121,8 +148,11 @@ pub fn resolve_target(
         }
         (Some(account), None) => account,
         (None, Some(config)) => config_dir_owner(&trust::canonical(config)?)?,
-        (None, None) if request.interactive => ask_user(request.role, input, prompt)?,
-        (None, None) => return Err(unknown_user("no SUDO_USER", request.role)),
+        (None, None) => match invoking_user {
+            Some(name) => account::by_name(name)
+                .ok_or_else(|| unknown_user(&format!("no such user {name:?}"), request.role))?,
+            None => return Ok(None),
+        },
     };
 
     let config = match request.config {
@@ -153,11 +183,11 @@ pub fn resolve_target(
             account.name
         ))
     })?;
-    Ok(Target {
+    Ok(Some(Target {
         account,
         config,
         state,
-    })
+    }))
 }
 
 fn ask_user(role: &str, input: &mut impl BufRead, prompt: &mut impl Write) -> Result<Account> {
@@ -172,6 +202,51 @@ fn ask_user(role: &str, input: &mut impl BufRead, prompt: &mut impl Write) -> Re
     }
     let name = answer.trim();
     account::by_name(name).ok_or_else(|| unknown_user(&format!("no such user {name:?}"), role))
+}
+
+/// Consent to retarget, valid only against the registration it was given for.
+///
+/// DEVIATION (needs controller decision): `previous` is `Option<Pin>` so that
+/// consent can be given for a legacy unpinned registration (`None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetargetConsent {
+    pub previous: Option<Pin>,
+    pub proposed: Pin,
+}
+
+/// Whether an install may replace the existing registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetargetDecision {
+    Proceed,
+    Needs {
+        previous: Option<Pin>,
+        proposed: Pin,
+    },
+}
+
+/// Pure retarget policy: nothing installed or the same user proceeds; another
+/// owner (or an unpinned registration) proceeds only with consent that matches
+/// the current registration and the proposed pin.
+pub fn retarget_decision(
+    existing: Option<&str>,
+    target: &Target,
+    consent: Option<&RetargetConsent>,
+) -> RetargetDecision {
+    let Some(body) = existing else {
+        return RetargetDecision::Proceed;
+    };
+    let previous = Pin::find(body);
+    if previous
+        .as_ref()
+        .is_some_and(|p| p.uid == target.account.uid)
+    {
+        return RetargetDecision::Proceed;
+    }
+    let proposed = target.pin();
+    if consent.is_some_and(|c| c.previous == previous && c.proposed == proposed) {
+        return RetargetDecision::Proceed;
+    }
+    RetargetDecision::Needs { previous, proposed }
 }
 
 /// Confirm before replacing an existing system registration that belongs to
@@ -191,16 +266,9 @@ pub fn confirm_retarget(
     input: &mut impl BufRead,
     prompt: &mut impl Write,
 ) -> Result<()> {
-    let Some(body) = existing else {
+    let RetargetDecision::Needs { previous, .. } = retarget_decision(existing, target, None) else {
         return Ok(());
     };
-    let previous = Pin::find(body);
-    if previous
-        .as_ref()
-        .is_some_and(|p| p.uid == target.account.uid)
-    {
-        return Ok(());
-    }
     let owner = match &previous {
         Some(p) => format!(
             "user {} (uid {}, config {})",
@@ -268,6 +336,95 @@ mod tests {
             &mut Cursor::new(answer.to_owned()),
             &mut Vec::new(),
         )
+    }
+
+    fn pinned_body(uid: u32) -> String {
+        format!("# {}\n", target(uid).pin().record())
+    }
+
+    #[test]
+    fn retarget_without_consent_needs_confirmation() {
+        let body = pinned_body(1001);
+        assert_eq!(
+            retarget_decision(Some(&body), &target(1002), None),
+            RetargetDecision::Needs {
+                previous: Some(target(1001).pin()),
+                proposed: target(1002).pin(),
+            }
+        );
+    }
+
+    #[test]
+    fn stale_retarget_consent_is_not_applied() {
+        let consent = RetargetConsent {
+            previous: Some(target(1001).pin()),
+            proposed: target(1002).pin(),
+        };
+        let body = pinned_body(1003);
+        assert_eq!(
+            retarget_decision(Some(&body), &target(1002), Some(&consent)),
+            RetargetDecision::Needs {
+                previous: Some(target(1003).pin()),
+                proposed: target(1002).pin(),
+            }
+        );
+        let body = pinned_body(1001);
+        assert_eq!(
+            retarget_decision(Some(&body), &target(1002), Some(&consent)),
+            RetargetDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn retarget_from_unpinned_registration_matches_existing_policy() {
+        let pinned_other = pinned_body(1001);
+        let pinned_same = pinned_body(1000);
+        let unpinned_consent = RetargetConsent {
+            previous: None,
+            proposed: target(1000).pin(),
+        };
+        let other_consent = RetargetConsent {
+            previous: Some(target(1001).pin()),
+            proposed: target(1000).pin(),
+        };
+        // (existing, consent, expected proceeds) — mirrors confirm_retarget.
+        let cases: [(Option<&str>, Option<&RetargetConsent>, bool); 8] = [
+            (None, None, true),
+            (Some(&pinned_same), None, true),
+            (Some(&pinned_other), None, false),
+            (Some(&pinned_other), Some(&other_consent), true),
+            (Some("[Service]\n"), None, false),
+            (Some("[Service]\n"), Some(&unpinned_consent), true),
+            (Some("[Service]\n"), Some(&other_consent), false),
+            (Some(&pinned_other), Some(&unpinned_consent), false),
+        ];
+        for (existing, consent, proceeds) in cases {
+            let decision = retarget_decision(existing, &target(1000), consent);
+            assert_eq!(
+                decision == RetargetDecision::Proceed,
+                proceeds,
+                "{existing:?} {consent:?}"
+            );
+        }
+        assert_eq!(
+            retarget_decision(Some("[Service]\n"), &target(1000), None),
+            RetargetDecision::Needs {
+                previous: None,
+                proposed: target(1000).pin()
+            }
+        );
+    }
+
+    #[test]
+    fn target_account_needs_invoking_user_instead_of_prompting() {
+        let request = Request {
+            role: "serve",
+            config: None,
+            state: None,
+            sudo_user: None,
+            interactive: true,
+        };
+        assert!(resolve_target_account(&request, None).unwrap().is_none());
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub struct Environment {
     /// The process runs as root / an elevated Administrator.
     pub elevated: bool,
     /// Standard input is a terminal that can answer the scope prompt.
-    pub interactive: bool,
+    pub can_answer: bool,
 }
 
 impl Environment {
@@ -28,7 +28,7 @@ impl Environment {
     pub fn detect() -> Self {
         Self {
             elevated: is_elevated(),
-            interactive: is_interactive(),
+            can_answer: is_interactive(),
         }
     }
 }
@@ -91,11 +91,34 @@ pub fn default_scope(elevated: bool) -> ServiceScope {
     }
 }
 
-/// Decide the install scope.
+/// Outcome of the pure install-scope policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeDecision {
+    Chosen(ServiceScope),
+    /// A person must pick user or system.
+    NeedsChoice,
+}
+
+/// Decide the install scope without any I/O.
 ///
 /// An explicit request wins. Otherwise an elevated process installs a system
-/// service without asking; a non-elevated interactive process is asked; a
-/// non-elevated non-interactive process gets the unprivileged user scope.
+/// service without asking; a non-elevated process that can answer must choose;
+/// a non-elevated process that cannot answer gets the unprivileged user scope.
+pub fn decide_install_scope(requested: Option<ServiceScope>, env: Environment) -> ScopeDecision {
+    if let Some(scope) = requested {
+        return ScopeDecision::Chosen(scope);
+    }
+    if env.elevated {
+        return ScopeDecision::Chosen(ServiceScope::System);
+    }
+    if env.can_answer {
+        ScopeDecision::NeedsChoice
+    } else {
+        ScopeDecision::Chosen(ServiceScope::User)
+    }
+}
+
+/// Decide the install scope, prompting when [`decide_install_scope`] asks.
 ///
 /// # Errors
 ///
@@ -107,32 +130,33 @@ pub fn choose_install_scope(
     input: &mut impl BufRead,
     prompt: &mut impl Write,
 ) -> Result<ServiceScope> {
-    if let Some(scope) = requested {
-        return Ok(scope);
+    match decide_install_scope(requested, env) {
+        ScopeDecision::Chosen(scope) => Ok(scope),
+        ScopeDecision::NeedsChoice => {
+            write!(
+                prompt,
+                "Install as a `user` service (no privileges, runs for your account) \
+                 or a `system` service (needs sudo/root)? [user]: "
+            )?;
+            prompt.flush()?;
+            let mut answer = String::new();
+            if input.read_line(&mut answer)? == 0 {
+                return Err(CliError::Config(
+                    "no answer to the scope prompt; pass --user or --system".into(),
+                )
+                .into());
+            }
+            parse_scope_answer(&answer)
+        }
     }
-    if env.elevated {
-        return Ok(ServiceScope::System);
-    }
-    if !env.interactive {
-        return Ok(ServiceScope::User);
-    }
-    write!(
-        prompt,
-        "Install as a `user` service (no privileges, runs for your account) \
-         or a `system` service (needs sudo/root)? [user]: "
-    )?;
-    prompt.flush()?;
-    let mut answer = String::new();
-    if input.read_line(&mut answer)? == 0 {
-        return Err(CliError::Config(
-            "no answer to the scope prompt; pass --user or --system".into(),
-        )
-        .into());
-    }
-    parse_answer(&answer)
 }
 
-fn parse_answer(answer: &str) -> Result<ServiceScope> {
+/// Map a scope-prompt answer to a scope; empty means user.
+///
+/// # Errors
+///
+/// [`CliError::Config`] for an unrecognised answer.
+pub fn parse_scope_answer(answer: &str) -> Result<ServiceScope> {
     match answer.trim().to_ascii_lowercase().as_str() {
         "" | "u" | "user" => Ok(ServiceScope::User),
         "s" | "system" => Ok(ServiceScope::System),
@@ -188,7 +212,7 @@ mod tests {
 
     const USER_AT_TTY: Environment = Environment {
         elevated: false,
-        interactive: true,
+        can_answer: true,
     };
 
     fn choose(
@@ -203,6 +227,51 @@ mod tests {
             &mut Cursor::new(answer.to_owned()),
             &mut prompt,
         )
+    }
+
+    #[test]
+    fn install_scope_needs_choice_when_caller_can_answer() {
+        for (requested, elevated, can_answer, expected) in [
+            (None, false, true, ScopeDecision::NeedsChoice),
+            (
+                None,
+                false,
+                false,
+                ScopeDecision::Chosen(ServiceScope::User),
+            ),
+            (
+                None,
+                true,
+                true,
+                ScopeDecision::Chosen(ServiceScope::System),
+            ),
+            (
+                None,
+                true,
+                false,
+                ScopeDecision::Chosen(ServiceScope::System),
+            ),
+            (
+                Some(ServiceScope::User),
+                true,
+                true,
+                ScopeDecision::Chosen(ServiceScope::User),
+            ),
+            (
+                Some(ServiceScope::System),
+                false,
+                true,
+                ScopeDecision::Chosen(ServiceScope::System),
+            ),
+        ] {
+            let env = Environment {
+                elevated,
+                can_answer,
+            };
+            assert_eq!(decide_install_scope(requested, env), expected);
+        }
+        assert_eq!(parse_scope_answer("s\n").unwrap(), ServiceScope::System);
+        assert!(parse_scope_answer("maybe").is_err());
     }
 
     #[test]
@@ -222,7 +291,7 @@ mod tests {
     fn elevated_defaults_to_system_without_a_prompt() {
         let env = Environment {
             elevated: true,
-            interactive: true,
+            can_answer: true,
         };
         let mut prompt = Vec::new();
         let scope =
@@ -278,7 +347,7 @@ mod tests {
     fn non_interactive_unprivileged_gets_the_user_scope() {
         let env = Environment {
             elevated: false,
-            interactive: false,
+            can_answer: false,
         };
         assert_eq!(choose(None, env, "").unwrap(), ServiceScope::User);
     }
