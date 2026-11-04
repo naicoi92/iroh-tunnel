@@ -358,7 +358,11 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
     };
 
     // install from CWD `/` with a config path containing a space: it is pinned absolute.
-    ok(&[
+    // `install` and `status` are separate processes with separately captured
+    // pipes, so cross-command stream ordering is not observable here; pin that
+    // install's stdout carries the "Installed and started" line, and (below)
+    // that `status` output is native manager text only.
+    let installed = ok(&[
         "serve",
         "service",
         "install",
@@ -366,6 +370,7 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
         "--config",
         config.to_str().unwrap(),
     ])?;
+    assert!(installed.contains("Installed and started"), "{installed}");
     let registration = std::fs::read_to_string(svc.registration())?;
     assert!(
         registration.contains(config.to_str().unwrap()),
@@ -393,6 +398,8 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
     wait_for("stopped service to remove its status file", || {
         !status_file.exists()
     })?;
+    // `status` of a stopped unit still exits 0 (systemctl's non-zero is informative).
+    ok(&["serve", "service", "status", "--user"])?;
 
     // start again and restart: identity is the configured one throughout.
     ok(&["serve", "service", "start", "--user"])?;

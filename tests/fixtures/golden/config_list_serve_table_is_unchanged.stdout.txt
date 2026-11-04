@@ -1,0 +1,3 @@
+NAME                     PROTO                  HOST               PORT    
+web                      tcp                    127.0.0.1          8080    
+a-much-longer-service-name udp                    10.0.0.7           53      

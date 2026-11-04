@@ -1,0 +1,2 @@
+NodeId: <NODE_ID>
+Serving: echo tcp://127.0.0.1:<PORT>

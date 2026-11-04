@@ -63,3 +63,15 @@ Hits for `src/`, `tests/`, `Cargo.toml`, `[package]`, `version =`, `include_str!
 | docs/agents/rust-coding-standards.md | 33 | `- **RS-15 — Process and network coverage:** For CLI changes affecting arguments, exit codes, output, signals or lifecycle, exercis` | Task 22 |
 | docs/agents/rust-coding-standards.md | 46 | `These rules select and adapt the stack-neutral coding-standards skill and Apollo GraphQL's MIT-licensed [rust-best-practices skill` | Task 22 |
 | tests/quick_run.rs | 825 | `let readme = include_str!("../README.md");` | none (README.md stays at root) |
+
+## Pinned exits
+
+Exit codes already pinned by existing tests (verified passing in Task 2; CLI output goldens are in `tests/cli_golden.rs`):
+
+| Exit | Test |
+| --- | --- |
+| 2 (config error) | `tests/config_paths.rs::invalid_config_reports_path_with_config_error_exit` |
+| 3 (privilege) | `tests/service_user.rs::system_install_without_privilege_stops_with_rerun_guidance`, `tests/service_user.rs::system_scope_operations_without_privilege_are_refused_with_guidance` |
+| 5 (unsupported) | `tests/service_user_windows.rs::system_scope_is_unsupported_on_windows` (Windows only; not run on the macOS host) |
+| 6 (role already owned) | `tests/role_ownership.rs::second_serve_is_refused_across_binaries_overrides_and_start_order` |
+| 1 (status, not running) | `tests/cli_golden.rs::status_not_running_message_is_unchanged` |
