@@ -4,6 +4,7 @@
 //! `~/.config/systemd/user` (user scope). Each action delegates to `systemctl`
 //! with `--user` added automatically for the per-user domain.
 
+use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::pin::Pin;
 use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
@@ -112,19 +113,27 @@ fn quote_arg(arg: &str, line: Expand) -> String {
 }
 
 /// Run `systemctl [--user] <args...>`, bailing on non-zero exit.
-fn run_systemctl(scope: ServiceScope, args: &[&str]) -> Result<()> {
+fn run_systemctl(native: &mut Native, scope: ServiceScope, args: &[&str]) -> Result<()> {
+    let output = systemctl(native, scope, args)
+        .with_context(|| format!("failed to run systemctl {:?}", args))?;
+    if !output.success() {
+        bail!("systemctl {:?} failed with {}", args, output.status_text());
+    }
+    Ok(())
+}
+
+/// Run `systemctl [--user] <args...>` in the caller's output mode.
+fn systemctl(
+    native: &mut Native,
+    scope: ServiceScope,
+    args: &[&str],
+) -> std::io::Result<NativeOutput> {
     let mut cmd = std::process::Command::new("systemctl");
     if scope == ServiceScope::User {
         cmd.arg("--user");
     }
     cmd.args(args);
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run systemctl {:?}", args))?;
-    if !status.success() {
-        bail!("systemctl {:?} failed with {status}", args);
-    }
-    Ok(())
+    native.run(&mut cmd)
 }
 
 /// The installed unit's text, if any (to read its pin).
@@ -132,7 +141,9 @@ pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> 
     super::read_registration(&unit_path(role, scope).ok()?)
 }
 
-pub fn install(
+pub(super) fn install(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
     scope: ServiceScope,
     config: &Path,
@@ -144,63 +155,147 @@ pub fn install(
     let path = unit_path(role, scope)?;
     write_registration(&path, &unit)?;
 
-    let name = unit_name(role);
-    run_systemctl(scope, &["daemon-reload"])?;
-    run_systemctl(scope, &["enable", &name])?;
+    enable_and_start(native, notes, scope, &unit_name(role), &path)
+}
+
+/// Reload, enable and (re)start the written unit, then announce it.
+fn enable_and_start(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    scope: ServiceScope,
+    name: &str,
+    path: &Path,
+) -> Result<()> {
+    run_systemctl(native, scope, &["daemon-reload"])?;
+    run_systemctl(native, scope, &["enable", name])?;
     // `restart`, not `enable --now`: a re-install over a running unit must pick
     // up the new registration instead of leaving the old process running.
-    run_systemctl(scope, &["restart", &name])?;
-    println!("Installed and started {name} at {}", path.display());
+    run_systemctl(native, scope, &["restart", name])?;
+    notes(&ServiceNote::Installed {
+        name: name.to_owned(),
+        at: InstalledAt::Path(path.to_owned()),
+    });
     Ok(())
 }
 
-pub fn uninstall(role: &str, scope: ServiceScope) -> Result<()> {
+pub(super) fn uninstall(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<()> {
     let name = unit_name(role);
     let path = unit_path(role, scope)?;
     // Best-effort stop/disable: the unit may not be loaded yet.
-    let _ = run_systemctl(scope, &["stop", &name]);
-    let _ = run_systemctl(scope, &["disable", &name]);
+    let _ = run_systemctl(native, scope, &["stop", &name]);
+    let _ = run_systemctl(native, scope, &["disable", &name]);
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("failed to remove {}", path.display()))?;
     }
     // Refresh systemd's view of the now-removed unit. A failure here leaves
     // stale state, so surface it rather than reporting success silently.
-    run_systemctl(scope, &["daemon-reload"])?;
-    println!("Uninstalled {name}");
+    run_systemctl(native, scope, &["daemon-reload"])?;
+    notes(&ServiceNote::Uninstalled { name });
     Ok(())
 }
 
-pub fn start(role: &str, scope: ServiceScope) -> Result<()> {
-    run_systemctl(scope, &["start", &unit_name(role)])
+pub(super) fn start(native: &mut Native, role: &str, scope: ServiceScope) -> Result<()> {
+    run_systemctl(native, scope, &["start", &unit_name(role)])
 }
 
-pub fn stop(role: &str, scope: ServiceScope) -> Result<()> {
-    run_systemctl(scope, &["stop", &unit_name(role)])
+pub(super) fn stop(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<()> {
+    run_systemctl(native, scope, &["stop", &unit_name(role)])
 }
 
-pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
-    run_systemctl(scope, &["restart", &unit_name(role)])
+pub(super) fn restart(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<()> {
+    run_systemctl(native, scope, &["restart", &unit_name(role)])
 }
 
-pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
-    // `systemctl status` prints a human-readable status; surface it
-    // directly by inheriting stdio.
-    let mut cmd = std::process::Command::new("systemctl");
-    if scope == ServiceScope::User {
-        cmd.arg("--user");
-    }
-    cmd.args(["status", &unit_name(role)]);
-    let status = cmd.status().context("failed to run systemctl status")?;
-    // systemctl status returns non-zero when the service is stopped; that
-    // is informative, not a hard failure, so don't bail.
-    let _ = status;
-    Ok(())
+pub(super) fn status(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<NativeOutput> {
+    // `systemctl status` prints a human-readable status; in Inherit mode it
+    // reaches the terminal directly, in Capture mode it is returned.
+    // It exits non-zero (3) when the service is stopped; that is informative,
+    // not a hard failure, so the status is not checked.
+    systemctl(native, scope, &["status", &unit_name(role)])
+        .context("failed to run systemctl status")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
+    use crate::service::native::{Native, OutputMode};
+    use crate::service::{InstalledAt, ServiceNote};
+
+    #[test]
+    fn capture_mode_returns_native_output() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![output(0, "active (running)\n", "")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        let out = status(&mut native, &mut |_| {}, "serve", ServiceScope::User).unwrap();
+        assert_eq!(out.stdout, b"active (running)\n");
+        assert_eq!(
+            *events.borrow(),
+            vec![call(
+                "systemctl",
+                &["--user", "status", "iroh-tunnel-serve.service"],
+                OutputMode::Capture
+            )]
+        );
+    }
+
+    #[test]
+    fn stopped_systemd_unit_status_is_not_failure() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![output(3, "inactive (dead)\n", "")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        assert!(status(&mut native, &mut |_| {}, "serve", ServiceScope::System).is_ok());
+    }
+
+    #[test]
+    fn notes_reach_observer_before_native_command() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let mut notes = note_sink(&events);
+        let path = PathBuf::from("/etc/systemd/system/iroh-tunnel-serve.service");
+        enable_and_start(
+            &mut native,
+            &mut notes,
+            ServiceScope::System,
+            "iroh-tunnel-serve.service",
+            &path,
+        )
+        .unwrap();
+        let log = events.borrow();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_eq!(
+            log[3],
+            Event::Note(ServiceNote::Installed {
+                name: "iroh-tunnel-serve.service".into(),
+                at: InstalledAt::Path(path)
+            })
+        );
+    }
 
     #[test]
     fn unit_name_is_stable() {

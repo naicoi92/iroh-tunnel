@@ -283,6 +283,15 @@ fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()>
     }
 }
 
+/// A service call for the CLI: native output goes straight to the terminal and
+/// notes are printed as they happen.
+fn cli_service_call(notes: &mut dyn FnMut(&service::ServiceNote)) -> service::ServiceCall<'_> {
+    service::ServiceCall {
+        output: service::OutputMode::Inherit,
+        notes,
+    }
+}
+
 fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
     use service::scope::{self, Environment};
     use service::ServiceScope;
@@ -338,21 +347,47 @@ fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
             .collect();
             scope::ensure_privilege(scope, env.elevated, &rerun)?;
             check_installable_config(role, &config)?;
-            service::install(role, scope, &config, &state, None)
+            service::install(
+                role,
+                scope,
+                &config,
+                &state,
+                None,
+                &mut cli_service_call(&mut crate::render::print_service_note),
+            )
         }
-        ServiceAction::Uninstall { scope } => {
-            service::uninstall(role, existing("uninstall", &scope)?)
-        }
+        ServiceAction::Uninstall { scope } => service::uninstall(
+            role,
+            existing("uninstall", &scope)?,
+            &mut cli_service_call(&mut crate::render::print_service_note),
+        ),
         ServiceAction::Start { scope } => {
             let scope = existing("start", &scope)?;
             // Refuse here too: the unit would otherwise start and exit
             // after systemd/launchd already reported success (RO-03).
             crate::ownership::ensure_not_running(role_named(role)?)?;
-            service::start(role, scope)
+            service::start(
+                role,
+                scope,
+                &mut cli_service_call(&mut crate::render::print_service_note),
+            )
         }
-        ServiceAction::Stop { scope } => service::stop(role, existing("stop", &scope)?),
-        ServiceAction::Restart { scope } => service::restart(role, existing("restart", &scope)?),
-        ServiceAction::Status { scope } => service::status(role, existing("status", &scope)?),
+        ServiceAction::Stop { scope } => service::stop(
+            role,
+            existing("stop", &scope)?,
+            &mut cli_service_call(&mut crate::render::print_service_note),
+        ),
+        ServiceAction::Restart { scope } => service::restart(
+            role,
+            existing("restart", &scope)?,
+            &mut cli_service_call(&mut crate::render::print_service_note),
+        ),
+        ServiceAction::Status { scope } => service::status(
+            role,
+            existing("status", &scope)?,
+            &mut cli_service_call(&mut crate::render::print_service_note),
+        )
+        .map(|_| ()),
     }
 }
 
@@ -420,6 +455,7 @@ fn install_system(
         &target.config,
         &target.state,
         Some(&target.pin()),
+        &mut cli_service_call(&mut crate::render::print_service_note),
     )
 }
 

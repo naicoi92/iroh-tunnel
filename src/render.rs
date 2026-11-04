@@ -8,6 +8,78 @@ use crate::status::Role;
 
 use crate::ready::{OnReady, ReadyServices};
 use crate::role_run::protocol_str;
+use crate::service::{InstalledAt, ServiceNote};
+
+/// The stream a rendered line belongs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// Render a service note as the text and stream the CLI printed before notes
+/// existed.
+pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
+    match note {
+        ServiceNote::BusyboxSystemWide { .. } => (
+            Stream::Stderr,
+            "note: this host runs BusyBox init (no systemd); the service is a \
+             system-wide /etc/init.d script owned by root.\n"
+                .to_owned(),
+        ),
+        ServiceNote::LaunchdBootstrapHint {
+            target,
+            domain,
+            plist,
+        } => (
+            Stream::Stderr,
+            format!(
+                "Hint: run `launchctl print {target}` or \
+                 `launchctl bootstrap {domain} {}` for richer diagnostics.\n",
+                plist.display()
+            ),
+        ),
+        ServiceNote::Installed {
+            name,
+            at: InstalledAt::Path(path),
+        } => (
+            Stream::Stdout,
+            format!("Installed and started {name} at {}\n", path.display()),
+        ),
+        ServiceNote::Installed {
+            name,
+            at: InstalledAt::WindowsTask,
+        } => (
+            Stream::Stdout,
+            format!("Installed and started task {name} (runs in your logged-in session)\n"),
+        ),
+        ServiceNote::Uninstalled { name } => (Stream::Stdout, format!("Uninstalled {name}\n")),
+        ServiceNote::AlreadyStopped { name } => {
+            (Stream::Stdout, format!("{name} is already stopped.\n"))
+        }
+        ServiceNote::RoleRunning { role, owner } => {
+            (Stream::Stdout, format!("{role} is running ({owner})\n"))
+        }
+        ServiceNote::RoleNotRunning { role } => {
+            (Stream::Stdout, format!("{role} is not running\n"))
+        }
+        ServiceNote::TaskListing { text } => (Stream::Stdout, text.clone()),
+    }
+}
+
+/// The CLI's service-note observer: print each note at once to its stream, so
+/// it stays ordered with the inherited output of native commands.
+pub(crate) fn print_service_note(note: &ServiceNote) {
+    use std::io::Write as _;
+    let (stream, text) = render_service_note(note);
+    match stream {
+        Stream::Stdout => {
+            print!("{text}");
+            let _ = std::io::stdout().flush();
+        }
+        Stream::Stderr => eprint!("{text}"),
+    }
+}
 
 /// Render the operator-facing startup lines.
 pub(crate) fn render_ready(report: &ReadyReport) -> String {
@@ -144,6 +216,85 @@ mod tests {
     use super::*;
     use crate::config::Protocol;
     use crate::ready::{AccessReady, ReadyServices, ServeReady};
+
+    #[test]
+    fn render_service_note_matches_legacy_text() {
+        use crate::service::{InstalledAt, ServiceNote};
+        let check = |note: ServiceNote, stream: Stream, text: &str| {
+            let (got_stream, got) = render_service_note(&note);
+            assert_eq!((got_stream, got.as_str()), (stream, text));
+        };
+        check(
+            ServiceNote::BusyboxSystemWide {
+                script: "/etc/init.d/S96iroh-tunnel-serve".into(),
+            },
+            Stream::Stderr,
+            "note: this host runs BusyBox init (no systemd); the service is a \
+             system-wide /etc/init.d script owned by root.\n",
+        );
+        check(
+            ServiceNote::LaunchdBootstrapHint {
+                target: "gui/501/dev.iroh-tunnel.serve".into(),
+                domain: "gui/501".into(),
+                plist: "/p/x.plist".into(),
+            },
+            Stream::Stderr,
+            "Hint: run `launchctl print gui/501/dev.iroh-tunnel.serve` or \
+             `launchctl bootstrap gui/501 /p/x.plist` for richer diagnostics.\n",
+        );
+        check(
+            ServiceNote::Installed {
+                name: "dev.iroh-tunnel.serve".into(),
+                at: InstalledAt::Path("/p/x.plist".into()),
+            },
+            Stream::Stdout,
+            "Installed and started dev.iroh-tunnel.serve at /p/x.plist\n",
+        );
+        check(
+            ServiceNote::Installed {
+                name: "iroh-tunnel-serve".into(),
+                at: InstalledAt::WindowsTask,
+            },
+            Stream::Stdout,
+            "Installed and started task iroh-tunnel-serve (runs in your logged-in session)\n",
+        );
+        check(
+            ServiceNote::Uninstalled {
+                name: "iroh-tunnel-serve.service".into(),
+            },
+            Stream::Stdout,
+            "Uninstalled iroh-tunnel-serve.service\n",
+        );
+        check(
+            ServiceNote::AlreadyStopped {
+                name: "dev.iroh-tunnel.serve".into(),
+            },
+            Stream::Stdout,
+            "dev.iroh-tunnel.serve is already stopped.\n",
+        );
+        check(
+            ServiceNote::RoleRunning {
+                role: "serve".into(),
+                owner: "pid 7, node_id N".into(),
+            },
+            Stream::Stdout,
+            "serve is running (pid 7, node_id N)\n",
+        );
+        check(
+            ServiceNote::RoleNotRunning {
+                role: "serve".into(),
+            },
+            Stream::Stdout,
+            "serve is not running\n",
+        );
+        check(
+            ServiceNote::TaskListing {
+                text: "a\nb".into(),
+            },
+            Stream::Stdout,
+            "a\nb",
+        );
+    }
 
     #[test]
     fn render_ready_matches_legacy_lines() {

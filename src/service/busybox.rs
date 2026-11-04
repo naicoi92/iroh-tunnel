@@ -20,6 +20,7 @@
 //! both scopes manage the one `/etc/init.d` script — User scope prints a
 //! note rather than failing. Requires root.
 
+use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::pin::Pin;
 use super::{resolve_binary, write_registration, ServiceScope};
 use crate::error::CliError;
@@ -163,14 +164,18 @@ fn require_root() -> Result<()> {
 /// Run the installed init script with `verb` (start/stop/restart), bailing on a
 /// non-zero exit. The script's shebang + executable bit let us invoke it
 /// directly (same path busybox init uses on boot).
-fn run_script(role: &str, verb: &str) -> Result<()> {
+fn run_script(native: &mut Native, role: &str, verb: &str) -> Result<()> {
     let path = script_path(role);
-    let status = std::process::Command::new(&path)
-        .arg(verb)
-        .status()
+    let output = native
+        .run(std::process::Command::new(&path).arg(verb))
         .with_context(|| format!("failed to run {} {}", path.display(), verb))?;
-    if !status.success() {
-        bail!("{} {} failed with {status}", path.display(), verb);
+    if !output.success() {
+        bail!(
+            "{} {} failed with {}",
+            path.display(),
+            verb,
+            output.status_text()
+        );
     }
     Ok(())
 }
@@ -180,7 +185,9 @@ pub fn existing_registration(role: &str) -> Option<String> {
     super::read_registration(&script_path(role))
 }
 
-pub fn install(
+pub(super) fn install(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
     scope: ServiceScope,
     config: &Path,
@@ -189,10 +196,9 @@ pub fn install(
 ) -> Result<()> {
     require_root()?;
     if scope == ServiceScope::User {
-        eprintln!(
-            "note: this host runs BusyBox init (no systemd); the service is a \
-             system-wide /etc/init.d script owned by root."
-        );
+        notes(&ServiceNote::BusyboxSystemWide {
+            script: script_path(role),
+        });
     }
     let binary = resolve_binary()?;
     let script = format_script(role, &binary, config, state, pin);
@@ -203,53 +209,71 @@ pub fn install(
     // the service will come up on the next boot regardless.
     // `restart`, not `start`: a re-install over a running service must pick up
     // the new registration instead of leaving the old process on the old pin.
-    run_script(role, "restart")?;
-    println!(
-        "Installed and started {} at {}",
-        script_name(role),
-        path.display()
-    );
+    run_script(native, role, "restart")?;
+    notes(&ServiceNote::Installed {
+        name: script_name(role),
+        at: InstalledAt::Path(path),
+    });
     Ok(())
 }
 
-pub fn uninstall(role: &str, _scope: ServiceScope) -> Result<()> {
+pub(super) fn uninstall(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    _scope: ServiceScope,
+) -> Result<()> {
     require_root()?;
-    let _ = run_script(role, "stop"); // best-effort: the service may not be running
+    let _ = run_script(native, role, "stop"); // best-effort: the service may not be running
     let path = script_path(role);
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("failed to remove {}", path.display()))?;
     }
-    println!("Uninstalled {}", script_name(role));
+    notes(&ServiceNote::Uninstalled {
+        name: script_name(role),
+    });
     Ok(())
 }
 
-pub fn start(role: &str, _scope: ServiceScope) -> Result<()> {
+pub(super) fn start(native: &mut Native, role: &str, _scope: ServiceScope) -> Result<()> {
     require_root()?;
-    run_script(role, "start")
+    run_script(native, role, "start")
 }
 
-pub fn stop(role: &str, _scope: ServiceScope) -> Result<()> {
+pub(super) fn stop(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    _scope: ServiceScope,
+) -> Result<()> {
     require_root()?;
-    run_script(role, "stop")
+    run_script(native, role, "stop")
 }
 
-pub fn restart(role: &str, _scope: ServiceScope) -> Result<()> {
+pub(super) fn restart(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    _scope: ServiceScope,
+) -> Result<()> {
     require_root()?;
-    run_script(role, "restart")
+    run_script(native, role, "restart")
 }
 
-pub fn status(role: &str, _scope: ServiceScope) -> Result<()> {
+pub(super) fn status(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    _scope: ServiceScope,
+) -> Result<NativeOutput> {
     let path = script_path(role);
-    let status = std::process::Command::new(&path)
-        .arg("status")
-        .status()
-        .context("failed to run init script status")?;
     // The script returns 3 when not running — informative, not a hard error
     // (mirrors how the systemd backend treats `systemctl status` of a stopped
-    // unit), so don't bail on a non-zero exit here.
-    let _ = status;
-    Ok(())
+    // unit), so the status is not checked.
+    native
+        .run(std::process::Command::new(&path).arg("status"))
+        .context("failed to run init script status")
 }
 
 #[cfg(test)]

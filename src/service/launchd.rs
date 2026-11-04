@@ -14,6 +14,7 @@
 //! `launchctl start <label>` searched the *caller's* domain, found nothing, and
 //! returned 3 — even though the job was loaded in the system domain.
 
+use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::pin::Pin;
 use super::{instance_suffix, resolve_binary, write_registration, RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
@@ -147,13 +148,12 @@ fn format_plist_with(
     )
 }
 
-fn run_launchctl(args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("launchctl")
-        .args(args)
-        .status()
+fn run_launchctl(native: &mut Native, args: &[&str]) -> Result<()> {
+    let output = native
+        .run(std::process::Command::new("launchctl").args(args))
         .with_context(|| format!("failed to run launchctl {:?}", args))?;
-    if !status.success() {
-        bail!("launchctl {:?} failed with {status}", args);
+    if !output.success() {
+        bail!("launchctl {:?} failed with {}", args, output.status_text());
     }
     Ok(())
 }
@@ -163,7 +163,9 @@ pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> 
     super::read_registration(&plist_path(role, scope).ok()?)
 }
 
-pub fn install(
+pub(super) fn install(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
     scope: ServiceScope,
     config: &Path,
@@ -174,7 +176,22 @@ pub fn install(
     let plist = format_plist_with(role, &binary, config, state, &RestartPolicy::DEFAULT, pin);
     let path = plist_path(role, scope)?;
     write_registration(&path, &plist)?;
+    load(native, notes, role, scope, &path)?;
+    notes(&ServiceNote::Installed {
+        name: label(role),
+        at: InstalledAt::Path(path),
+    });
+    Ok(())
+}
 
+/// Replace any loaded job with the plist at `path`, hinting on failure.
+fn load(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+    path: &Path,
+) -> Result<()> {
     let target = service_target(role, scope);
     let domain = domain_target(scope);
     let path_str = path.to_string_lossy().into_owned();
@@ -185,49 +202,52 @@ pub fn install(
     // nothing is registered yet, launchctl prints "Boot-out failed: 3: No
     // such process" — expected, so swallow its stderr rather than alarm the
     // user.
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &target])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // Captured whatever the mode, so the expected failure text never reaches
+    // the terminal.
+    let _ = native.output(std::process::Command::new("launchctl").args(["bootout", &target]));
 
     // `bootstrap` reports concrete failures (bad plist, missing binary,
     // etc.) rather than the legacy `load`'s opaque `5: Input/output error`.
-    if let Err(e) = run_launchctl(&["bootstrap", &domain, &path_str]) {
-        eprintln!(
-            "Hint: run `launchctl print {target}` or \
-             `launchctl bootstrap {domain} {path_str}` for richer diagnostics."
-        );
+    if let Err(e) = run_launchctl(native, &["bootstrap", &domain, &path_str]) {
+        notes(&ServiceNote::LaunchdBootstrapHint {
+            target,
+            domain,
+            plist: path.to_owned(),
+        });
         return Err(e).context("failed to load service into launchd");
     }
-
-    println!(
-        "Installed and started {} at {}",
-        label(role),
-        path.display()
-    );
     Ok(())
 }
 
-pub fn uninstall(role: &str, scope: ServiceScope) -> Result<()> {
+pub(super) fn uninstall(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<()> {
     let path = plist_path(role, scope)?;
     // Best-effort bootout: the job may not be loaded.
-    let _ = run_launchctl(&["bootout", &service_target(role, scope)]);
+    let _ = run_launchctl(native, &["bootout", &service_target(role, scope)]);
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("failed to remove {}", path.display()))?;
     }
-    println!("Uninstalled {}", label(role));
+    notes(&ServiceNote::Uninstalled { name: label(role) });
     Ok(())
 }
 
-pub fn start(role: &str, scope: ServiceScope) -> Result<()> {
+pub(super) fn start(native: &mut Native, role: &str, scope: ServiceScope) -> Result<()> {
     // `kickstart` starts the job now if stopped, or restarts it if running.
-    run_launchctl(&["kickstart", &service_target(role, scope)])
+    run_launchctl(native, &["kickstart", &service_target(role, scope)])
         .with_context(|| not_loaded_hint(role, scope))
 }
 
-pub fn stop(role: &str, scope: ServiceScope) -> Result<()> {
+pub(super) fn stop(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<()> {
     // SIGTERM triggers our graceful shutdown (src/shutdown.rs). Because the
     // plist's KeepAlive only respawns on *unsuccessful* exit, a clean
     // exit-0 leaves the service stopped, as intended.
@@ -238,51 +258,55 @@ pub fn stop(role: &str, scope: ServiceScope) -> Result<()> {
     // success (idempotent) rather than an error, so operators can re-run
     // `stop` safely.
     let target = service_target(role, scope);
-    let output = std::process::Command::new("launchctl")
-        .args(["kill", "SIGTERM", &target])
-        .output()
+    // Always captured, even when inheriting: the stderr text decides the
+    // outcome below.
+    let output = native
+        .output(std::process::Command::new("launchctl").args(["kill", "SIGTERM", &target]))
         .with_context(|| format!("failed to run launchctl kill SIGTERM {target}"))?;
-    if output.status.success() {
+    if output.success() {
         return Ok(());
     }
     // exit code 3 = "No process to signal" → already stopped, not an error.
     // macOS encodes launchd errors as 128 + subsystem-code; for `kill` on a
     // loaded-but-stopped job this surfaces as plain 3.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("No process to signal") || output.status.code() == Some(3) {
-        println!("{} is already stopped.", label(role));
+    if stderr.contains("No process to signal") || output.status == Some(3) {
+        notes(&ServiceNote::AlreadyStopped { name: label(role) });
         return Ok(());
     }
     // Genuine failure (e.g. service not loaded at all): distinguish via a
     // probe so the hint is accurate.
-    if !is_loaded(&target)? {
+    if !is_loaded(native, &target)? {
         bail!("{}", not_loaded_hint(role, scope));
     }
     bail!(
         "launchctl kill SIGTERM {target} failed with {status}: {stderr}",
-        status = output.status
+        status = output.status_text()
     )
 }
 
 /// Whether a job is currently registered in launchd for `target` (regardless
 /// of whether it has a running process). Used to distinguish "already
 /// stopped" from "never installed" when interpreting a `kill` failure.
-fn is_loaded(target: &str) -> Result<bool> {
-    let status = std::process::Command::new("launchctl")
-        .args(["print", target])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+fn is_loaded(native: &mut Native, target: &str) -> Result<bool> {
+    // Captured whatever the mode: the probe must stay silent.
+    let output = native
+        .output(std::process::Command::new("launchctl").args(["print", target]))
         .with_context(|| format!("failed to run launchctl print {target}"))?;
-    Ok(status.success())
+    Ok(output.success())
 }
 
-pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
+pub(super) fn restart(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<()> {
     // `kickstart -k` kills any running instance before starting a fresh
     // one. Without `-k`, kickstart is a no-op when the service is already
     // running (it only satisfies the "run now" condition), so a plain
     // `kickstart` would silently fail to restart a live service.
-    run_launchctl(&["kickstart", "-k", &service_target(role, scope)])
+    run_launchctl(native, &["kickstart", "-k", &service_target(role, scope)])
         .with_context(|| not_loaded_hint(role, scope))
 }
 
@@ -303,21 +327,109 @@ fn not_loaded_hint(role: &str, scope: ServiceScope) -> String {
     )
 }
 
-pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
+pub(super) fn status(
+    native: &mut Native,
+    _notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<NativeOutput> {
     // `launchctl print <target>` shows pid/state/last exit code. Read-only,
     // so no root requirement is enforced (system-domain prints may still be
     // partial without root, but that's informational, not fatal).
-    let mut cmd = std::process::Command::new("launchctl");
-    cmd.args(["print", &service_target(role, scope)]);
-    let status = cmd.status().context("failed to run launchctl print")?;
-    // Non-zero typically means the job isn't loaded; informative, not fatal.
-    let _ = status;
-    Ok(())
+    // Non-zero typically means the job isn't loaded; informative, not fatal,
+    // so the status is not checked.
+    native
+        .run(std::process::Command::new("launchctl").args(["print", &service_target(role, scope)]))
+        .context("failed to run launchctl print")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
+    use crate::service::native::{Native, OutputMode};
+    use crate::service::ServiceNote;
+
+    #[test]
+    fn capture_mode_returns_native_output() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![output(0, "state = running\n", "")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        let out = status(&mut native, &mut |_| {}, "serve", ServiceScope::System).unwrap();
+        assert_eq!(out.stdout, b"state = running\n");
+        assert_eq!(
+            *events.borrow(),
+            vec![call(
+                "launchctl",
+                &["print", "system/dev.iroh-tunnel.serve"],
+                OutputMode::Capture
+            )],
+            "no note and no other command"
+        );
+    }
+
+    #[test]
+    fn notes_reach_observer_before_native_command() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![output(0, "", ""), output(5, "", "")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let mut notes = note_sink(&events);
+        let plist = PathBuf::from("/tmp/x.plist");
+        let err = load(
+            &mut native,
+            &mut notes,
+            "serve",
+            ServiceScope::System,
+            &plist,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to load service into launchd"));
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                call(
+                    "launchctl",
+                    &["bootout", "system/dev.iroh-tunnel.serve"],
+                    OutputMode::Capture
+                ),
+                call(
+                    "launchctl",
+                    &["bootstrap", "system", "/tmp/x.plist"],
+                    OutputMode::Inherit
+                ),
+                Event::Note(ServiceNote::LaunchdBootstrapHint {
+                    target: "system/dev.iroh-tunnel.serve".into(),
+                    domain: "system".into(),
+                    plist,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_captures_even_when_inheriting_and_reports_already_stopped() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![output(3, "", "No process to signal")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let mut notes = note_sink(&events);
+        stop(&mut native, &mut notes, "serve", ServiceScope::System).unwrap();
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                call(
+                    "launchctl",
+                    &["kill", "SIGTERM", "system/dev.iroh-tunnel.serve"],
+                    OutputMode::Capture
+                ),
+                Event::Note(ServiceNote::AlreadyStopped {
+                    name: "dev.iroh-tunnel.serve".into()
+                }),
+            ]
+        );
+    }
 
     #[test]
     fn plist_is_valid_xml_and_has_label() {

@@ -12,10 +12,11 @@
 //! `tests/service_user_windows.rs`.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::task_xml::{encode_utf16_le, format_task_xml, task_action};
 use super::{instance_suffix, resolve_binary, RestartPolicy, ServiceScope};
 use crate::error::CliError;
@@ -30,37 +31,42 @@ fn task_name(role: &str) -> String {
 /// `USERNAME`/`USERDOMAIN` are inherited environment and can name another
 /// account than the token (for example after a credentialed launch), which
 /// would bind the logon trigger to the wrong user.
-fn current_user() -> Result<String> {
-    let output = Command::new("whoami")
-        .output()
+fn current_user(native: &mut Native) -> Result<String> {
+    let output = native
+        .output(&mut Command::new("whoami"))
         .context("failed to run whoami")?;
     let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !output.status.success() || name.is_empty() {
+    if !output.success() || name.is_empty() {
         return Err(CliError::Service("whoami did not report the current user".into()).into());
     }
     Ok(name)
 }
 
 /// Run `schtasks` with `args`, returning its output whatever the status.
-fn schtasks(args: &[&str]) -> Result<Output> {
-    Command::new("schtasks")
-        .args(args)
-        .output()
+/// Always captured: its text is parsed or folded into errors.
+fn schtasks(native: &mut Native, args: &[&str]) -> Result<NativeOutput> {
+    native
+        .output(Command::new("schtasks").args(args))
         .with_context(|| format!("failed to run schtasks {}", args.join(" ")))
 }
 
 /// Run `schtasks`, turning a failure into a service error carrying its text.
-fn schtasks_ok(args: &[&str]) -> Result<String> {
-    let output = schtasks(args)?;
+fn schtasks_ok(native: &mut Native, args: &[&str]) -> Result<String> {
+    let output = schtasks(native, args)?;
+    ensure_schtasks_ok(&output, args)
+}
+
+/// The stdout of a successful `schtasks` run, or a service error carrying its text.
+fn ensure_schtasks_ok(output: &NativeOutput, args: &[&str]) -> Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    if output.status.success() {
+    if output.success() {
         return Ok(stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(CliError::Service(format!(
         "schtasks {} failed with {}: {}{}",
         args.join(" "),
-        output.status,
+        output.status_text(),
         stderr.trim(),
         stdout.trim()
     ))
@@ -80,14 +86,14 @@ fn not_installed_hint(role: &str) -> String {
 /// Lists every task and looks for the name: a failed listing (access denied,
 /// Task Scheduler down) is an error, never "not installed", and the answer
 /// does not depend on the localised "not found" text of `/Query /TN`.
-fn is_installed(role: &str) -> Result<bool> {
-    let listing = schtasks_ok(&["/Query", "/FO", "CSV", "/NH"])?;
+fn is_installed(native: &mut Native, role: &str) -> Result<bool> {
+    let listing = schtasks_ok(native, &["/Query", "/FO", "CSV", "/NH"])?;
     let wanted = format!("\\{}\"", task_name(role));
     Ok(listing.lines().any(|line| line.contains(&wanted)))
 }
 
-fn require_installed(role: &str) -> Result<()> {
-    if is_installed(role)? {
+fn require_installed(native: &mut Native, role: &str) -> Result<()> {
+    if is_installed(native, role)? {
         Ok(())
     } else {
         Err(CliError::Service(not_installed_hint(role)).into())
@@ -115,22 +121,38 @@ fn ensure_default_state(state: &Path) -> Result<()> {
     .into())
 }
 
-pub fn install(role: &str, scope: ServiceScope, config: &Path, state: &Path) -> Result<()> {
+pub(super) fn install(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+    config: &Path,
+    state: &Path,
+) -> Result<()> {
     debug_assert_eq!(scope, ServiceScope::User, "system scope is refused earlier");
     let binary = resolve_binary()?;
     ensure_default_state(state)?;
     let action = task_action(role, &binary, config)?;
-    let xml = format_task_xml(role, &current_user()?, &action, &RestartPolicy::DEFAULT);
+    let xml = format_task_xml(
+        role,
+        &current_user(native)?,
+        &action,
+        &RestartPolicy::DEFAULT,
+    );
 
     let definition = TempDefinition::write(&encode_utf16_le(&xml))?;
 
     let name = task_name(role);
     let path = definition.0.to_string_lossy().into_owned();
     // /F replaces an existing task, so re-install is idempotent.
-    schtasks_ok(&["/Create", "/TN", &name, "/XML", &path, "/F"])
+    schtasks_ok(native, &["/Create", "/TN", &name, "/XML", &path, "/F"])
         .map_err(|e| denied_or(e, "registering the scheduled task"))?;
-    schtasks_ok(&["/Run", "/TN", &name]).context("task registered but could not be started")?;
-    println!("Installed and started task {name} (runs in your logged-in session)");
+    schtasks_ok(native, &["/Run", "/TN", &name])
+        .context("task registered but could not be started")?;
+    notes(&ServiceNote::Installed {
+        name,
+        at: InstalledAt::WindowsTask,
+    });
     Ok(())
 }
 
@@ -185,29 +207,39 @@ fn denied_or(error: anyhow::Error, what: &str) -> anyhow::Error {
     }
 }
 
-pub fn uninstall(role: &str, _scope: ServiceScope) -> Result<()> {
+pub(super) fn uninstall(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    _scope: ServiceScope,
+) -> Result<()> {
     let name = task_name(role);
-    if is_installed(role)? {
+    if is_installed(native, role)? {
         // A running instance would keep going after its task is deleted. A
         // failed /End only means nothing was running; /Delete reports the rest.
-        let _ = schtasks(&["/End", "/TN", &name]);
-        schtasks_ok(&["/Delete", "/TN", &name, "/F"])?;
+        let _ = schtasks(native, &["/End", "/TN", &name]);
+        schtasks_ok(native, &["/Delete", "/TN", &name, "/F"])?;
     }
-    println!("Uninstalled {name}");
+    notes(&ServiceNote::Uninstalled { name });
     Ok(())
 }
 
-pub fn start(role: &str, _scope: ServiceScope) -> Result<()> {
-    require_installed(role)?;
-    schtasks_ok(&["/Run", "/TN", &task_name(role)])?;
+pub(super) fn start(native: &mut Native, role: &str, _scope: ServiceScope) -> Result<()> {
+    require_installed(native, role)?;
+    schtasks_ok(native, &["/Run", "/TN", &task_name(role)])?;
     Ok(())
 }
 
-pub fn stop(role: &str, _scope: ServiceScope) -> Result<()> {
-    require_installed(role)?;
+pub(super) fn stop(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    _scope: ServiceScope,
+) -> Result<()> {
+    require_installed(native, role)?;
     let name = task_name(role);
-    let output = schtasks(&["/End", "/TN", &name])?;
-    if output.status.success() {
+    let output = schtasks(native, &["/End", "/TN", &name])?;
+    if output.success() {
         return Ok(());
     }
     // `/End` on a task with no running instance fails; like the other
@@ -215,20 +247,25 @@ pub fn stop(role: &str, _scope: ServiceScope) -> Result<()> {
     if task_is_running(role)? {
         return Err(CliError::Service(format!(
             "schtasks /End /TN {name} failed with {}: {}",
-            output.status,
+            output.status_text(),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
         .into());
     }
-    println!("{name} is already stopped.");
+    notes(&ServiceNote::AlreadyStopped { name });
     Ok(())
 }
 
 /// How long `restart` waits for the old process to release the role.
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
-pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
-    stop(role, scope)?;
+pub(super) fn restart(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    scope: ServiceScope,
+) -> Result<()> {
+    stop(native, notes, role, scope)?;
     // `/End` returns before the process is gone; a start that races the old
     // process would be dropped (IgnoreNew) or refused by role ownership.
     let deadline = std::time::Instant::now() + RESTART_WAIT;
@@ -243,22 +280,32 @@ pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    start(role, scope)
+    start(native, role, scope)
 }
 
-pub fn status(role: &str, _scope: ServiceScope) -> Result<()> {
-    require_installed(role)?;
+pub(super) fn status(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    _scope: ServiceScope,
+) -> Result<NativeOutput> {
+    require_installed(native, role)?;
     // The role lock, not the localised task text, says whether it runs.
     match crate::ownership::probe(status_role(role)?)? {
-        crate::ownership::Liveness::Running { owner, .. } => println!(
-            "{role} is running ({})",
-            crate::ownership::describe_owner(owner.as_ref())
-        ),
-        crate::ownership::Liveness::NotRunning => println!("{role} is not running"),
+        crate::ownership::Liveness::Running { owner, .. } => notes(&ServiceNote::RoleRunning {
+            role: role.to_owned(),
+            owner: crate::ownership::describe_owner(owner.as_ref()),
+        }),
+        crate::ownership::Liveness::NotRunning => notes(&ServiceNote::RoleNotRunning {
+            role: role.to_owned(),
+        }),
     }
-    let out = schtasks_ok(&["/Query", "/TN", &task_name(role), "/FO", "LIST", "/V"])?;
-    print!("{out}");
-    Ok(())
+    let name = task_name(role);
+    let query = ["/Query", "/TN", &name, "/FO", "LIST", "/V"];
+    let output = schtasks(native, &query)?;
+    let text = ensure_schtasks_ok(&output, &query)?;
+    notes(&ServiceNote::TaskListing { text });
+    Ok(output)
 }
 
 fn status_role(role: &str) -> Result<crate::status::StatusRole> {

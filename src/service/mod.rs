@@ -14,12 +14,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::error::CliError;
+#[allow(unused_imports)] // unused on targets without a service backend
+use native::{system_runner, Native};
 
 pub mod account;
 #[cfg(target_os = "linux")]
 mod busybox;
 #[cfg(target_os = "macos")]
 mod launchd;
+mod native;
+pub use native::{InstalledAt, NativeOutput, OutputMode, ServiceCall, ServiceNote};
 pub mod pin;
 pub mod scope;
 #[cfg(unix)]
@@ -101,6 +105,18 @@ pub enum ServiceScope {
 // has to solve all of that generically.
 // ---------------------------------------------------------------------------
 
+/// Run `f` with a [`Native`] in the call's output mode and the call's note
+/// observer.
+#[allow(dead_code)] // unused on targets without a service backend
+fn with_native<T>(
+    call: &mut ServiceCall,
+    f: impl FnOnce(&mut Native, &mut dyn FnMut(&ServiceNote)) -> T,
+) -> T {
+    let mut runner = system_runner;
+    let mut native = Native::new(call.output, &mut runner);
+    f(&mut native, &mut *call.notes)
+}
+
 /// `service install`: write the unit/plist/init-script, enable, and start.
 ///
 /// `config` and `state` must be absolute: they are pinned into the
@@ -115,27 +131,36 @@ pub fn install(
     config: &Path,
     state: &Path,
     pin: Option<&pin::Pin>,
+    call: &mut ServiceCall,
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::install(role, scope, config, state, pin)
+            with_native(call, |n, notes| {
+                systemd::install(n, notes, role, scope, config, state, pin)
+            })
         } else {
-            busybox::install(role, scope, config, state, pin)
+            with_native(call, |n, notes| {
+                busybox::install(n, notes, role, scope, config, state, pin)
+            })
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::install(role, scope, config, state, pin)
+        with_native(call, |n, notes| {
+            launchd::install(n, notes, role, scope, config, state, pin)
+        })
     }
     #[cfg(windows)]
     {
         let _ = pin;
-        windows::install(role, scope, config, state)
+        with_native(call, |n, notes| {
+            windows::install(n, notes, role, scope, config, state)
+        })
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (role, scope, config, state, pin);
+        let _ = (role, scope, config, state, pin, call);
         unsupported()
     }
 }
@@ -164,126 +189,127 @@ pub fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> 
 }
 
 /// `service uninstall`: stop, disable, and remove the unit/plist/init-script.
-pub fn uninstall(role: &str, scope: ServiceScope) -> Result<()> {
+pub fn uninstall(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::uninstall(role, scope)
+            with_native(call, |n, notes| systemd::uninstall(n, notes, role, scope))
         } else {
-            busybox::uninstall(role, scope)
+            with_native(call, |n, notes| busybox::uninstall(n, notes, role, scope))
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::uninstall(role, scope)
+        with_native(call, |n, notes| launchd::uninstall(n, notes, role, scope))
     }
     #[cfg(windows)]
     {
-        windows::uninstall(role, scope)
+        with_native(call, |n, notes| windows::uninstall(n, notes, role, scope))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (role, scope);
+        let _ = (role, scope, call);
         unsupported()
     }
 }
 
 /// `service start`.
-pub fn start(role: &str, scope: ServiceScope) -> Result<()> {
+pub fn start(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::start(role, scope)
+            with_native(call, |n, _| systemd::start(n, role, scope))
         } else {
-            busybox::start(role, scope)
+            with_native(call, |n, _| busybox::start(n, role, scope))
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::start(role, scope)
+        with_native(call, |n, _| launchd::start(n, role, scope))
     }
     #[cfg(windows)]
     {
-        windows::start(role, scope)
+        with_native(call, |n, _| windows::start(n, role, scope))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (role, scope);
+        let _ = (role, scope, call);
         unsupported()
     }
 }
 
 /// `service stop`.
-pub fn stop(role: &str, scope: ServiceScope) -> Result<()> {
+pub fn stop(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::stop(role, scope)
+            with_native(call, |n, notes| systemd::stop(n, notes, role, scope))
         } else {
-            busybox::stop(role, scope)
+            with_native(call, |n, notes| busybox::stop(n, notes, role, scope))
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::stop(role, scope)
+        with_native(call, |n, notes| launchd::stop(n, notes, role, scope))
     }
     #[cfg(windows)]
     {
-        windows::stop(role, scope)
+        with_native(call, |n, notes| windows::stop(n, notes, role, scope))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (role, scope);
+        let _ = (role, scope, call);
         unsupported()
     }
 }
 
 /// `service restart`.
-pub fn restart(role: &str, scope: ServiceScope) -> Result<()> {
+pub fn restart(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::restart(role, scope)
+            with_native(call, |n, notes| systemd::restart(n, notes, role, scope))
         } else {
-            busybox::restart(role, scope)
+            with_native(call, |n, notes| busybox::restart(n, notes, role, scope))
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::restart(role, scope)
+        with_native(call, |n, notes| launchd::restart(n, notes, role, scope))
     }
     #[cfg(windows)]
     {
-        windows::restart(role, scope)
+        with_native(call, |n, notes| windows::restart(n, notes, role, scope))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (role, scope);
+        let _ = (role, scope, call);
         unsupported()
     }
 }
 
-/// `service status`: print running/stopped (+ pid when available).
-pub fn status(role: &str, scope: ServiceScope) -> Result<()> {
+/// `service status`: running/stopped (+ pid when available), shown by the
+/// native tool (inherited) or returned in the [`NativeOutput`] (captured).
+pub fn status(role: &str, scope: ServiceScope, call: &mut ServiceCall) -> Result<NativeOutput> {
     #[cfg(target_os = "linux")]
     {
         if linux_is_systemd() {
-            systemd::status(role, scope)
+            with_native(call, |n, notes| systemd::status(n, notes, role, scope))
         } else {
-            busybox::status(role, scope)
+            with_native(call, |n, notes| busybox::status(n, notes, role, scope))
         }
     }
     #[cfg(target_os = "macos")]
     {
-        launchd::status(role, scope)
+        with_native(call, |n, notes| launchd::status(n, notes, role, scope))
     }
     #[cfg(windows)]
     {
-        windows::status(role, scope)
+        with_native(call, |n, notes| windows::status(n, notes, role, scope))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (role, scope);
+        let _ = (role, scope, call);
         unsupported()
     }
 }
@@ -386,7 +412,7 @@ fn linux_is_systemd() -> bool {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn unsupported() -> Result<()> {
+fn unsupported<T>() -> Result<T> {
     anyhow::bail!(
         "service management is only supported on Linux (systemd/BusyBox init), macOS (launchd) \
          and Windows (user background task)"
