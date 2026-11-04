@@ -1,0 +1,5 @@
+   Compiling iroh-tunnel-engine v0.4.3-rc.3 (/Users/naicoi/Projects/iroh/iroh-tunnel.refactor-codebase-t24/crates/engine)
+   Compiling iroh-tunnel-host v0.4.3-rc.3 (/Users/naicoi/Projects/iroh/iroh-tunnel.refactor-codebase-t24/crates/host)
+   Compiling iroh-tunnel v0.4.3-rc.3 (/Users/naicoi/Projects/iroh/iroh-tunnel.refactor-codebase-t24)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.75s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
