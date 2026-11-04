@@ -3,11 +3,11 @@
 use std::path::Path;
 
 use crate::config_cmd::{GeneratedIdentity, KeygenOutcome, Mutation, ServiceList};
-use crate::ready::ReadyReport;
 use crate::status::Role;
+use iroh_tunnel_engine::ReadyReport;
 
-use crate::ready::{OnReady, ReadyServices};
 use crate::service::{InstalledAt, ServiceNote};
+use iroh_tunnel_engine::{OnReady, ReadyServices};
 
 /// The stream a rendered line belongs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +234,7 @@ pub(crate) fn render_update(outcome: &crate::update::UpdateOutcome, exe_name: &s
 mod tests {
     use super::*;
     use crate::config::Protocol;
-    use crate::ready::{AccessReady, ReadyServices, ServeReady};
+    use iroh_tunnel_engine::{AccessReady, ReadyServices, ServeReady};
 
     #[test]
     fn render_service_note_matches_legacy_text() {

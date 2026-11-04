@@ -46,12 +46,11 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::endpoint;
-use crate::observation::{
-    AccessObservation, AccessServiceObservation, RoleHooks, StatusSink, STATUS_FLUSH_INTERVAL,
-};
+use crate::observation::{AccessObservation, AccessServiceObservation, STATUS_FLUSH_INTERVAL};
 use crate::proto;
-use crate::ready::{AccessReady, ReadyReport, ReadyServices};
-use crate::runtime::{self, RunCompletion};
+use crate::runtime::support;
+use crate::runtime::{AccessReady, ReadyReport, ReadyServices};
+use crate::runtime::{RoleHooks, RunCompletion, RunContext, StatusSink};
 use crate::settings::{AccessServiceSettings, AccessSettings, Protocol, UdpLimits};
 use crate::shutdown;
 
@@ -65,7 +64,7 @@ use crate::shutdown;
 pub async fn run_access(
     ep: iroh::Endpoint,
     settings: AccessSettings,
-    ctx: shutdown::RunContext,
+    ctx: RunContext,
     hooks: RoleHooks<AccessObservation>,
     shutdown: impl Future<Output = ()>,
 ) -> RunCompletion {
@@ -168,7 +167,7 @@ pub async fn run_access(
     // Stop the flush task and bound its join; the run owner removes the
     // status file only when this reports the writer quiesced.
     let status_quiesced = match flush {
-        Some(flush) => runtime::stop_flush(stop_tx, flush).await,
+        Some(flush) => support::stop_flush(stop_tx, flush).await,
         None => true,
     };
     // Test-utils seam: simulate a shutdown stuck in the endpoint close.
@@ -260,7 +259,7 @@ fn build_dialers(
         let dialer = Arc::new(ServiceDialer::new(ep, node_id, svc, &effective, bind_addr));
         status_services.push(AccessStatusServiceRow {
             name: svc.name.clone(),
-            listen_addr: runtime::format_local_addr(&svc.host, svc.port),
+            listen_addr: support::format_local_addr(&svc.host, svc.port),
             // The parsed id, not the raw config string — the status row is
             // normalized exactly like every other rendered id.
             peer: node_id.to_string(),
@@ -461,7 +460,7 @@ impl ServiceDialer {
         if let Some(conn) = self.state.lock().await.conn.as_ref() {
             return Ok(conn.clone());
         }
-        let conn = runtime::connect_with_retry(&self.ep, &self.addr, &self.alpn, deadline).await?;
+        let conn = support::connect_with_retry(&self.ep, &self.addr, &self.alpn, deadline).await?;
         let remote_id = conn.remote_id();
         {
             let mut state = self.state.lock().await;
@@ -469,7 +468,7 @@ impl ServiceDialer {
             // the set stays owned by the state until `stop_auxiliary_tasks`.
             state.tasks.abort_all();
             while state.tasks.try_join_next().is_some() {}
-            state.tasks.spawn(runtime::disconnect_watcher(
+            state.tasks.spawn(support::disconnect_watcher(
                 &conn,
                 remote_id.to_string(),
                 format!(
@@ -801,21 +800,21 @@ async fn handle_local_connection(
     // QUIC shutdown queues FIN; pipe completion alone does not prove final
     // request bytes reached Serve. Keep this task owned until acknowledged.
     let delivered = streams.0.stopped();
-    crate::pipe::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
+    crate::tcp::pipe_tcp_bidirectional(local, (streams.1, streams.0)).await?;
     // Bounded: a peer that never acknowledges must not pin this task (and its
     // status/drain accounting) forever. A missing acknowledgement is NOT
     // success: it may hide a lost delivery, so it is reported as peer loss
     // (AC-TCP-06). Nothing is replayed.
-    match crate::pipe::await_delivery(delivered, crate::pipe::DELIVERY_ACK_GRACE).await {
-        crate::pipe::Delivery::Acknowledged => Ok(()),
-        crate::pipe::Delivery::PeerStopped(code) => {
+    match crate::tcp::await_delivery(delivered, crate::tcp::DELIVERY_ACK_GRACE).await {
+        crate::tcp::Delivery::Acknowledged => Ok(()),
+        crate::tcp::Delivery::PeerStopped(code) => {
             anyhow::bail!("peer stopped client stream: {code}")
         }
-        crate::pipe::Delivery::Unconfirmed => {
+        crate::tcp::Delivery::Unconfirmed => {
             tracing::warn!(svc = %dialer.svc_name, "peer lost: no delivery acknowledgement within grace");
             anyhow::bail!("peer lost: delivery unconfirmed (no acknowledgement within grace)")
         }
-        crate::pipe::Delivery::Lost(error) => {
+        crate::tcp::Delivery::Lost(error) => {
             Err(anyhow::Error::new(error).context("client stream delivery failed"))
         }
     }

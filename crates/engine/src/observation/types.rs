@@ -6,12 +6,7 @@
 //! the host status module) and writes it. Observations carry no timestamp, so
 //! `PartialEq` decides "changed since the last save" on rendered content only.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use std::time::Duration;
-
-use crate::ready::OnReady;
 
 /// How often each role's status flush task re-renders its observation.
 ///
@@ -19,9 +14,6 @@ use crate::ready::OnReady;
 /// operators while keeping the endpoint query and disk write off the hot
 /// path.
 pub(crate) const STATUS_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Boxed, sendable future (local alias; no `futures` dependency).
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What the serve role observes about itself.
 #[derive(Clone, PartialEq, Debug)]
@@ -136,31 +128,4 @@ impl std::fmt::Display for TransportKind {
             TransportKind::Direct => "direct",
         })
     }
-}
-
-/// Publishes observations of type `O`; the host decides where they go.
-pub struct StatusSink<O> {
-    save: Box<dyn FnMut(O) -> BoxFuture<'static, anyhow::Result<()>> + Send>,
-}
-
-impl<O> StatusSink<O> {
-    pub fn new(
-        save: impl FnMut(O) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static,
-    ) -> Self {
-        Self {
-            save: Box::new(save),
-        }
-    }
-
-    /// Persist one observation; resolves once the save has finished.
-    pub fn save(&mut self, observation: O) -> BoxFuture<'static, anyhow::Result<()>> {
-        (self.save)(observation)
-    }
-}
-
-/// Host-provided hooks of one role run.
-pub struct RoleHooks<O> {
-    pub on_ready: OnReady,
-    /// `None` runs the role without publishing status.
-    pub status: Option<StatusSink<O>>,
 }

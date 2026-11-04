@@ -44,7 +44,7 @@ use tokio::net::TcpStream;
 /// Half-close semantics: when one direction finishes (EOF) the matching write
 /// side is shut down, and the function returns once *both* directions have
 /// completed.
-pub async fn pipe_tcp_bidirectional<R, W>(local: TcpStream, remote: (R, W)) -> Result<()>
+pub(crate) async fn pipe_tcp_bidirectional<R, W>(local: TcpStream, remote: (R, W)) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,

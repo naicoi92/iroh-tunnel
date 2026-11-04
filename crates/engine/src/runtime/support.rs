@@ -1,4 +1,4 @@
-//! Runtime mechanics shared by the serve and access role loops.
+//! Crate-private mechanics shared by the serve and access role loops.
 
 use std::future::Future;
 use std::time::Duration;
@@ -9,19 +9,6 @@ use tokio::task::JoinHandle;
 
 /// How long a role waits for its status flush task to stop at shutdown.
 const STATUS_FLUSH_JOIN_BOUND: Duration = Duration::from_secs(5);
-
-/// What a role's run loop reports to the run owner.
-///
-/// `status_quiesced` is `true` only when the status flush task joined within
-/// [`STATUS_FLUSH_JOIN_BOUND`] and returned `Ok`, or when no flush task ever
-/// ran (no sink, or the body failed before spawning one). Only then may the
-/// run owner remove the status file: an unquiesced writer may still have a
-/// save in flight that would recreate it. Every role-body path states it
-/// explicitly; none is inferred from the result.
-pub struct RunCompletion {
-    pub result: Result<()>,
-    pub status_quiesced: bool,
-}
 
 /// Stop a status flush task cooperatively and join it within
 /// [`STATUS_FLUSH_JOIN_BOUND`]; returns whether it quiesced.
@@ -100,11 +87,14 @@ pub(crate) fn disconnect_watcher(
 
 /// Initial backoff (ms) for the access dial retry loop.
 const INITIAL_BACKOFF_MS: u64 = 1_000;
+
 /// First per-attempt dial bound; later attempts get more room (see
 /// [`attempt_timeout`]).
 const DIAL_ATTEMPT_STEP: Duration = Duration::from_secs(5);
+
 /// Ceiling of the per-attempt dial bound.
 const DIAL_ATTEMPT_MAX: Duration = Duration::from_secs(20);
+
 /// Maximum backoff (ms) — the schedule caps here and stays flat.
 const MAX_BACKOFF_MS: u64 = 30_000;
 

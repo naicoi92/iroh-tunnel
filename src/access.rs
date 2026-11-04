@@ -11,9 +11,9 @@ use anyhow::Result;
 
 use crate::config::AccessConfig;
 use crate::role_run::RoleStrategy;
-use iroh_tunnel_engine::observation::{AccessObservation, RoleHooks};
+use iroh_tunnel_engine::observation::AccessObservation;
 use iroh_tunnel_engine::settings::AccessSettings;
-use iroh_tunnel_engine::{self as engine, RunCompletion, RunContext};
+use iroh_tunnel_engine::{self as engine, RoleHooks, RunCompletion, RunContext};
 
 /// Re-export of the engine's path-poller cadence for integration tests.
 #[cfg(feature = "test-utils")]

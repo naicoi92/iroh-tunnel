@@ -11,9 +11,9 @@ use anyhow::Result;
 
 use crate::config::ServeConfig;
 use crate::role_run::RoleStrategy;
-use iroh_tunnel_engine::observation::{RoleHooks, ServeObservation};
+use iroh_tunnel_engine::observation::ServeObservation;
 use iroh_tunnel_engine::settings::ServeSettings;
-use iroh_tunnel_engine::{self as engine, RunCompletion, RunContext};
+use iroh_tunnel_engine::{self as engine, RoleHooks, RunCompletion, RunContext};
 
 /// Run the serve role until interrupted (Ctrl-C).
 ///

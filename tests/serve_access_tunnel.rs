@@ -43,7 +43,6 @@ use iroh::endpoint::presets::Minimal;
 use iroh::endpoint::{RecvStream, RelayMode, SendStream};
 use iroh::SecretKey;
 use iroh_tunnel::config::{encode_secret_key, ServeConfig};
-use iroh_tunnel::proto;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -209,7 +208,7 @@ impl MiniServe {
     async fn start(svc_name: &str) -> Result<Self> {
         let ep = iroh::Endpoint::builder(Minimal)
             .secret_key(SecretKey::generate())
-            .alpns(vec![proto::alpn_for(svc_name)])
+            .alpns(vec![format!("iroh-tunnel/{svc_name}").into_bytes()])
             .relay_mode(RelayMode::Default)
             .bind()
             .await

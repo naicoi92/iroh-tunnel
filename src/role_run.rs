@@ -20,9 +20,9 @@ use crate::ownership::RoleClaim;
 /// Role identity and writer: the host side picks the writer by role; the
 /// engine never sees them.
 pub(crate) use crate::status::{StatusRole, StatusWriter};
-use iroh_tunnel_engine::observation::{RoleHooks, StatusSink};
+
 use iroh_tunnel_engine::settings::NodeSettings;
-use iroh_tunnel_engine::{RunCompletion, RunContext};
+use iroh_tunnel_engine::{RoleHooks, RunCompletion, RunContext, StatusSink};
 
 /// Whether a run enforces role ownership (RO-01..RO-03).
 ///
@@ -64,7 +64,7 @@ pub(crate) async fn finish_run(
 /// default dir). The save runs on the blocking pool (the atomic save fsyncs;
 /// RS-07) and is awaited to completion by the flush loop, never detached.
 pub(crate) fn file_status_hooks<S: RoleStrategy>(
-    on_ready: iroh_tunnel_engine::ready::OnReady,
+    on_ready: iroh_tunnel_engine::OnReady,
     state_dir: Option<&Path>,
 ) -> RoleHooks<S::Observation>
 where
@@ -83,7 +83,7 @@ where
             .context("status save task failed")??;
             tracing::debug!(path = %path.display(), "wrote status file");
             Ok(())
-        }) as iroh_tunnel_engine::observation::BoxFuture<'static, Result<()>>
+        }) as iroh_tunnel_engine::runtime::BoxFuture<'static, Result<()>>
     });
     RoleHooks {
         on_ready,
@@ -294,7 +294,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let claim = crate::ownership::claim(StatusRole::Serve).unwrap();
-            let on_ready: iroh_tunnel_engine::ready::OnReady =
+            let on_ready: iroh_tunnel_engine::OnReady =
                 Box::new(|_| Err(anyhow::anyhow!("ready hook refused")));
             let hooks =
                 file_status_hooks::<crate::serve::ServeStrategy>(on_ready, Some(state_dir.path()));

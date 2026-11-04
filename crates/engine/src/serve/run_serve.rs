@@ -30,12 +30,12 @@ use tokio::task::JoinSet;
 
 use crate::endpoint;
 use crate::observation::{
-    PeerConnectionObservation, RoleHooks, ServeObservation, ServiceObservation, StatusSink,
-    STATUS_FLUSH_INTERVAL,
+    PeerConnectionObservation, ServeObservation, ServiceObservation, STATUS_FLUSH_INTERVAL,
 };
 use crate::proto;
-use crate::ready::{ReadyReport, ReadyServices, ServeReady};
-use crate::runtime::{self, RunCompletion};
+use crate::runtime::support;
+use crate::runtime::{ReadyReport, ReadyServices, ServeReady};
+use crate::runtime::{RoleHooks, RunCompletion, RunContext, StatusSink};
 use crate::settings::{Protocol, ServeSettings, UdpLimits};
 use crate::shutdown;
 
@@ -48,7 +48,7 @@ use crate::shutdown;
 pub async fn run_serve(
     ep: iroh::Endpoint,
     settings: ServeSettings,
-    ctx: shutdown::RunContext,
+    ctx: RunContext,
     hooks: RoleHooks<ServeObservation>,
     shutdown: impl Future<Output = ()>,
 ) -> RunCompletion {
@@ -98,7 +98,7 @@ pub async fn run_serve(
             .map(|s| StatusServiceRow {
                 name: s.name.clone(),
                 protocol: s.protocol.as_str().to_string(),
-                local_addr: runtime::format_local_addr(&s.host, s.port),
+                local_addr: support::format_local_addr(&s.host, s.port),
                 active_streams: targets
                     .get(&proto::alpn_for(&s.name))
                     .map(|t| t.active_streams())
@@ -181,7 +181,7 @@ pub async fn run_serve(
     // Stop the flush task and bound its join; the run owner removes the
     // status file only when this reports the writer quiesced.
     let status_quiesced = match flush {
-        Some(flush) => runtime::stop_flush(stop_tx, flush).await,
+        Some(flush) => support::stop_flush(stop_tx, flush).await,
         None => true,
     };
     ep.close().await;
@@ -519,7 +519,7 @@ async fn accept_loop(
         // weak handle is registered while `conn` is still alive (before the
         // stream-handling task takes it), so iroh guarantees the close event is
         // delivered even if the connection drops before this resolves.
-        watchers.spawn(runtime::disconnect_watcher(
+        watchers.spawn(support::disconnect_watcher(
             &conn,
             remote_id.to_string(),
             format!("peer disconnected (service {name})"),
@@ -630,22 +630,22 @@ async fn handle_connection(
             // wait is bounded: a vanished peer must not pin this task and
             // the active_streams counter.
             let delivered = send.stopped();
-            match crate::pipe::pipe_tcp_bidirectional(local, (recv, send)).await {
+            match crate::tcp::pipe_tcp_bidirectional(local, (recv, send)).await {
                 Ok(()) => {
-                    match crate::pipe::await_delivery(delivered, crate::pipe::DELIVERY_ACK_GRACE)
+                    match crate::tcp::await_delivery(delivered, crate::tcp::DELIVERY_ACK_GRACE)
                         .await
                     {
-                        crate::pipe::Delivery::Acknowledged => {
+                        crate::tcp::Delivery::Acknowledged => {
                             tracing::debug!("stream closed normally")
                         }
-                        crate::pipe::Delivery::PeerStopped(code) => {
+                        crate::tcp::Delivery::PeerStopped(code) => {
                             tracing::debug!(%code, "peer stopped completed stream")
                         }
-                        crate::pipe::Delivery::Unconfirmed => tracing::warn!(
+                        crate::tcp::Delivery::Unconfirmed => tracing::warn!(
                             stream = stream_no,
                             "peer lost: no delivery acknowledgement within grace"
                         ),
-                        crate::pipe::Delivery::Lost(error) => {
+                        crate::tcp::Delivery::Lost(error) => {
                             tracing::warn!("stream delivery error: {error}")
                         }
                     }
@@ -1002,7 +1002,7 @@ impl Drop for ActiveStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoint::bind_serve;
+    use crate::serve::bind_serve;
     use crate::settings::{NodeSettings, ServeServiceSettings};
 
     #[tokio::test]
@@ -1276,15 +1276,9 @@ mod tests {
                 on_ready: Box::new(|_| Ok(())),
                 status: Some(sink),
             };
-            run_serve(
-                ep,
-                settings,
-                shutdown::RunContext::new(),
-                hooks,
-                async move {
-                    let _ = stop_rx.await;
-                },
-            )
+            run_serve(ep, settings, RunContext::new(), hooks, async move {
+                let _ = stop_rx.await;
+            })
             .await
         });
 
@@ -1343,7 +1337,7 @@ mod tests {
             quarantined_upstream(&stats, &stop_rx, &sinks).await;
         }
         assert_eq!(stats.snapshot().quarantined_flows, 3);
-        shutdown::begin(&stop, &shutdown::RunContext::new());
+        shutdown::begin(&stop, &RunContext::new());
         let deadline = shutdown::stopped(&mut stop_rx).await;
         sinks.shutdown(deadline).await;
         tokio::task::yield_now().await;
@@ -1397,7 +1391,7 @@ mod tests {
         let flush = tokio::spawn(body);
         RunCompletion {
             result: Ok(()),
-            status_quiesced: runtime::stop_flush(stop_tx, flush).await,
+            status_quiesced: support::stop_flush(stop_tx, flush).await,
         }
     }
 

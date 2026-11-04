@@ -46,7 +46,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::observation as obs;
+use iroh_tunnel_engine::observation as obs;
 
 /// File name of the serve status file (role-scoped).
 const SERVE_STATUS_FILE_NAME: &str = "serve-status.json";

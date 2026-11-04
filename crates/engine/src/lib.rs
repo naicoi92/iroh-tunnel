@@ -6,18 +6,18 @@ pub mod access;
 pub mod conn_path;
 pub mod endpoint;
 pub mod observation;
-pub mod pipe;
-pub mod proto;
-pub mod ready;
+mod proto;
 pub mod runtime;
 pub mod serve;
 pub mod settings;
-pub mod shutdown;
+mod shutdown;
+mod tcp;
 pub mod testing;
 pub mod udp;
 
-pub use access::run_access;
-pub use endpoint::{bind_access, bind_serve};
-pub use runtime::RunCompletion;
-pub use serve::run_serve;
-pub use shutdown::RunContext;
+pub use access::{bind_access, run_access};
+pub use runtime::{
+    AccessReady, OnReady, ReadyReport, ReadyServices, RoleHooks, RunCompletion, RunContext,
+    ServeReady, StatusSink,
+};
+pub use serve::{bind_serve, run_serve};

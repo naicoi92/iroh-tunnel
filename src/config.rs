@@ -30,7 +30,7 @@ fn name_regex() -> &'static Regex {
 }
 
 /// Maximum service-name length: ALPN must stay ≤ 255 bytes, minus the
-/// [`crate::proto`] prefix (see T-03). 63 keeps names dns-label friendly.
+/// the engine ALPN prefix prefix (see T-03). 63 keeps names dns-label friendly.
 const MAX_NAME_LEN: usize = 63;
 
 /// Valid node_id (PublicKey) string lengths.

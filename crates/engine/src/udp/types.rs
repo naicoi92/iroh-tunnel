@@ -1,12 +1,7 @@
-//! UDP datagram framing shared by Access and Serve (#88).
-//!
-//! Wire contract: `docs/udp-integration-contract.md`. Each tunnel
-//! datagram is `[flow id: u32 big-endian][client payload]`, carried as one
-//! QUIC DATAGRAM. The payload is opaque and may be empty. There is no
-//! fragmentation: a payload larger than the connection's datagram limit
-//! (maximum datagram size minus the header) is never sent.
+//! Shared UDP tunnel types: constants, counters, flow tables and the
+//! admission decision model (kept together so Access and Serve cannot drift).
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 
 /// Bytes of the flow identifier that prefix every tunnel datagram.
 pub const HEADER_LEN: usize = 4;
@@ -228,34 +223,12 @@ impl FlowQueue {
     }
 }
 
-/// Run one flow's writer: hand each queued datagram to `sink` in order, until
-/// every [`FlowQueue`] handle is dropped.
-///
-/// `sink` may wait (a slow target); only this flow's queue backs up behind it.
-pub async fn drain_queue<F, Fut>(mut rx: tokio::sync::mpsc::Receiver<Bytes>, mut sink: F)
-where
-    F: FnMut(Bytes) -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    while let Some(datagram) = rx.recv().await {
-        sink(datagram).await;
-    }
-}
-
 /// How long an expired flow's upstream socket stays open as a sink before it
 /// closes and its slot is released (UDP-06). A fixed constant, not configurable.
 pub const QUARANTINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How often each side looks for idle flows.
 pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// The sweep period for a service with this idle timeout: never longer than
-/// the timeout itself, so a short timeout is honoured promptly.
-pub fn sweep_interval(idle: std::time::Duration) -> std::time::Duration {
-    SWEEP_INTERVAL
-        .min(idle)
-        .max(std::time::Duration::from_millis(100))
-}
 
 /// Identifier of one flow, assigned by Access within a session incarnation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -266,48 +239,6 @@ pub struct FlowId(pub u32);
 pub enum DecodeError {
     /// Shorter than the 4-byte header.
     Malformed,
-}
-
-/// Frame `payload` for `flow`.
-pub fn encode(flow: FlowId, payload: &[u8]) -> Bytes {
-    let mut out = BytesMut::with_capacity(HEADER_LEN + payload.len());
-    out.put_u32(flow.0);
-    out.put_slice(payload);
-    out.freeze()
-}
-
-/// Split a tunnel datagram into its flow and payload.
-pub fn decode(datagram: &Bytes) -> Result<(FlowId, Bytes), DecodeError> {
-    if datagram.len() < HEADER_LEN {
-        return Err(DecodeError::Malformed);
-    }
-    let flow = u32::from_be_bytes([datagram[0], datagram[1], datagram[2], datagram[3]]);
-    Ok((FlowId(flow), datagram.slice(HEADER_LEN..)))
-}
-
-/// Whether a receive error on a UDP socket only reports a lost datagram.
-///
-/// A connected socket reports the target's ICMP answer (port unreachable) on a
-/// later receive. Windows reports it on unconnected sockets too, as
-/// `WSAECONNRESET` (os error 10054), after a send to a port nobody listens on.
-/// Neither means the socket is dead.
-pub fn is_transient_recv_error(error: &std::io::Error) -> bool {
-    use std::io::ErrorKind::{
-        ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted, WouldBlock,
-    };
-    matches!(
-        error.kind(),
-        ConnectionRefused | ConnectionReset | ConnectionAborted | Interrupted | WouldBlock
-    )
-}
-
-/// Largest client payload a connection can carry now, or `None` when the
-/// connection cannot carry datagrams at all (unsupported, disabled, or a
-/// maximum no larger than the header, per the contract).
-pub fn payload_limit(max_datagram_size: Option<usize>) -> Option<usize> {
-    max_datagram_size
-        .and_then(|max| max.checked_sub(HEADER_LEN))
-        .filter(|limit| *limit > 0)
 }
 
 /// Client endpoints and the flow of each, for one session incarnation.
@@ -513,43 +444,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_then_decode_returns_flow_and_unchanged_payload() {
-        let framed = encode(FlowId(0x0102_0304), b"payload");
-        assert_eq!(&framed[..HEADER_LEN], &[1, 2, 3, 4], "big-endian header");
-        let (flow, payload) = decode(&framed).unwrap();
-        assert_eq!(flow, FlowId(0x0102_0304));
-        assert_eq!(payload.as_ref(), b"payload");
-    }
-
-    #[test]
-    fn an_empty_payload_is_valid_and_stays_empty() {
-        let (flow, payload) = decode(&encode(FlowId(7), b"")).unwrap();
-        assert_eq!(flow, FlowId(7));
-        assert!(payload.is_empty());
-    }
-
-    #[test]
-    fn a_datagram_shorter_than_the_header_is_malformed() {
-        for len in 0..HEADER_LEN {
-            let short = Bytes::from(vec![0u8; len]);
-            assert_eq!(decode(&short), Err(DecodeError::Malformed), "len {len}");
-        }
-    }
-
-    #[test]
-    fn payload_limit_subtracts_the_header() {
-        assert_eq!(payload_limit(Some(1162)), Some(1158));
-        assert_eq!(payload_limit(Some(HEADER_LEN + 1)), Some(1));
-    }
-
-    #[test]
-    fn payload_limit_is_none_when_datagrams_are_unusable() {
-        assert_eq!(payload_limit(None), None);
-        assert_eq!(payload_limit(Some(HEADER_LEN - 1)), None);
-        assert_eq!(payload_limit(Some(HEADER_LEN)), None, "contract: 4 or less");
-    }
-
-    #[test]
     fn a_client_keeps_its_flow_while_active() {
         let t0 = Instant::now();
         let mut flows = ClientFlows::default();
@@ -672,24 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn icmp_style_receive_errors_are_transient() {
-        use std::io::{Error, ErrorKind};
-        for kind in [
-            ErrorKind::ConnectionRefused,
-            ErrorKind::ConnectionReset,
-            ErrorKind::ConnectionAborted,
-        ] {
-            assert!(is_transient_recv_error(&Error::from(kind)), "{kind:?}");
-        }
-        assert!(!is_transient_recv_error(&Error::from(
-            ErrorKind::PermissionDenied
-        )));
-        assert!(!is_transient_recv_error(&Error::from(
-            ErrorKind::InvalidInput
-        )));
-    }
-
-    #[test]
     fn stats_count_each_reason_separately_and_report_the_limit() {
         let stats = UdpStats::default();
         stats.record_drop(DropReason::Oversize);
@@ -777,19 +653,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_sweep_never_waits_longer_than_the_idle_timeout() {
-        assert_eq!(sweep_interval(Duration::from_secs(60)), SWEEP_INTERVAL);
-        assert_eq!(
-            sweep_interval(Duration::from_secs(1)),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            sweep_interval(Duration::from_millis(1)),
-            Duration::from_millis(100)
-        );
-    }
-
     #[tokio::test]
     async fn a_full_flow_queue_drops_the_newest_and_keeps_the_oldest() {
         let (queue, mut rx) = FlowQueue::new(2);
@@ -819,49 +682,5 @@ mod tests {
         let (queue, rx) = FlowQueue::new(1);
         drop(rx);
         assert_eq!(queue.push(Bytes::from_static(b"x")), Push::Closed);
-    }
-
-    #[tokio::test]
-    async fn the_flow_writer_drains_its_queue_in_order_through_the_sink() {
-        let (queue, rx) = FlowQueue::new(4);
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink_seen = seen.clone();
-        let writer = tokio::spawn(drain_queue(rx, move |datagram: Bytes| {
-            let sink_seen = sink_seen.clone();
-            async move { sink_seen.lock().unwrap().push(datagram) }
-        }));
-        for word in [&b"a"[..], b"b", b"c"] {
-            assert_eq!(queue.push(Bytes::copy_from_slice(word)), Push::Queued);
-        }
-        drop(queue);
-        writer.await.unwrap();
-        let got: Vec<_> = seen.lock().unwrap().iter().map(|b| b.to_vec()).collect();
-        assert_eq!(got, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
-    }
-
-    #[tokio::test]
-    async fn a_stuck_sink_fills_only_its_own_queue_and_never_blocks_the_producer() {
-        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
-        let (stuck, rx) = FlowQueue::new(2);
-        let sink_gate = gate.clone();
-        let writer = tokio::spawn(drain_queue(rx, move |_datagram: Bytes| {
-            let sink_gate = sink_gate.clone();
-            async move { sink_gate.notified().await }
-        }));
-        // The sink holds the first datagram, two more fill the queue, the rest
-        // are refused at once: the producer never waits on the stuck flow.
-        let mut full = 0;
-        for _ in 0..10 {
-            if stuck.push(Bytes::from_static(b"x")) == Push::Full {
-                full += 1;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(full >= 7, "expected most pushes refused, got {full}");
-        // Another flow's queue is untouched by the stuck one.
-        let (other, mut other_rx) = FlowQueue::new(2);
-        assert_eq!(other.push(Bytes::from_static(b"y")), Push::Queued);
-        assert_eq!(other_rx.recv().await.unwrap().as_ref(), b"y");
-        writer.abort();
     }
 }
