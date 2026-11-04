@@ -103,7 +103,10 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: release-smoke
+          # A fresh key per run: restoring an earlier run's target directory
+          # made the arm64 leg fail with "can't find crate for `iroh`" (run
+          # 41786010540). Build time is worth a result that can be trusted.
+          cache-key: release-smoke-${{ github.run_id }}-${{ matrix.id }}
 
       - name: Forward TCP and UDP through the packaged executables
         shell: bash
