@@ -32,8 +32,8 @@ Owner: `src/shutdown.rs`, `src/udp.rs`, `src/serve.rs`, `src/access.rs`, `src/ro
 Owner: `src/serve.rs`, `src/access.rs`, `src/conn_path.rs`, `src/status.rs`, `src/role_run.rs`, `src/app.rs` (startup rendering only). Depends on: 2.
 
 - [x] 3.1 Replace `println!`/`RoleStrategy::print_services` with a typed ready description delivered to an output hook before forwarding admission; CLI renders the existing text. Traces WB-5 (Startup readiness is reported as a value), `cli-entrypoints`.
-- [ ] 3.2 Make runtime code emit native observation values (service order, stream/UDP counters, peer paths, limits) and inject the async save callback; move JSON DTO mapping to the status adapter. Equality matches rendered-value change detection without timestamps. Traces WB-5 (Status observations carry no file schema), WB-13.
-- [ ] 3.3 Verify through real local-relay Serve/Access runs that status files, logs and stdout are byte-compatible (tests from 1.6, 1.8 and existing `serve_status_conn_path`, `access_status_file`). Traces WB-16.
+- [x] 3.2 Make runtime code emit native observation values (service order, stream/UDP counters, peer paths, limits) and inject the async save callback; move JSON DTO mapping to the status adapter. Equality matches rendered-value change detection without timestamps. Traces WB-5 (Status observations carry no file schema), WB-13.
+- [x] 3.3 Verify through real local-relay Serve/Access runs that status files, logs and stdout are byte-compatible (tests from 1.6, 1.8 and existing `serve_status_conn_path`, `access_status_file`). Traces WB-16.
 
 ## 4. In-package boundaries: management use cases (Migration step 2)
 
