@@ -1,0 +1,133 @@
+schema: superspec
+language: en
+
+context: |
+  Project purpose and business logic
+  - iroh-tunnel exposes a host's existing TCP/UDP services to clients on another
+    host through encrypted peer-to-peer Iroh/QUIC transport. Serve publishes
+    named targets; Access exposes local listeners and dials the Serve identity.
+  - TCP clients use isolated bidirectional streams multiplexed over a shared
+    per-service connection. Preserve byte transparency, half-close behavior,
+    failure isolation, bounded retries and cancellation-aware shutdown.
+  - UDP is experimental: preserve datagram boundaries, per-client Flow identity,
+    Session incarnation boundaries, admission caps and Quarantine. Do not claim
+    reliable delivery, fragmentation, replay or stronger isolation than the
+    approved contract provides. Consult docs/udp-integration-contract.md.
+  - Stable identity, safe configuration management, role ownership, operator
+    diagnostics, platform services, self-update and distribution are product
+    capabilities, not incidental scripts. Changes must account for their
+    security and lifecycle consequences.
+  - A NodeId is public identity, not target authorization. Target services must
+    enforce access protection. Relay authentication is a separate boundary.
+
+  Stack and supported execution environments
+  - Rust 2021, MSRV 1.91, Cargo with the existing Cargo.lock; a library and three
+    executables: iroh-tunnel, iroh-tunnel-serve and iroh-tunnel-access.
+  - Tokio async runtime; Iroh/QUIC networking; clap CLI; serde/serde_json for
+    structured state; toml/toml_edit for configuration; tracing for diagnostics;
+    anyhow plus typed CliError for actionable, classified failures.
+  - HTTP/TLS and update verification use reqwest/rustls, SHA-256 and Sigstore;
+    archives and filesystem replacement are security-sensitive boundaries.
+  - Cargo.toml and Cargo.lock are authoritative for dependency versions. Do not
+    copy version pins into specs or upgrade dependencies incidentally.
+  - Linux, macOS and Windows behavior is platform-specific. Linux supports
+    systemd/BusyBox, macOS launchd, and Windows user Task Scheduler integration.
+    Do not assume a backend supports every scope or verb. Distribution includes
+    standalone archives, Linux packages, Homebrew and container images.
+
+  Domain-driven design policy for new and changed code
+  - Use pragmatic DDD, proportionate to this systems/CLI product. This is a
+    forward-looking design constraint, not a claim that today's modules already
+    implement a layered DDD architecture or an instruction for a blanket rewrite.
+  - Use docs/GLOSSARY.md as the ubiquitous language: Serve, Access, Flow,
+    Session incarnation, Quarantine, Flow cap and Datagram limit. Update the
+    glossary when introducing a genuinely new domain concept.
+  - Identify the affected bounded context before designing a change. Working
+    seams include tunneling, configuration/identity, runtime ownership/status,
+    service management, and update/distribution. The bootstrap capability map
+    describes specification coverage; it is not automatically a context map.
+  - Keep domain invariants and policies cohesive, expressed through meaningful
+    types, value objects and explicit state transitions. Define aggregate
+    boundaries only where consistency invariants require them; do not force
+    every service, connection or flow into an aggregate or invent domain events.
+  - Keep orchestration in application use cases; isolate CLI, Iroh, filesystem,
+    process/service-manager and network effects behind focused adapter seams
+    where that separation improves testability or protects a real boundary.
+    Domain policy must not depend on CLI parsing or platform registration details.
+  - Preserve existing public and wire contracts while improving structure.
+    Do not introduce repositories, traits, extra crates, CQRS, event sourcing or
+    microservices just to satisfy a DDD label. Refactor only the affected seam;
+    broad restructuring needs its own approved change.
+
+  Cross-cutting engineering and security constraints
+  - docs/agents/rust-coding-standards.md (RS-01 through RS-16) is the repository's
+    authoritative Rust policy. Project contracts and security rules take
+    precedence over generic skill advice; explain justified exceptions.
+  - Preserve classified CLI exit codes: success 0, unclassified 1, config 2,
+    permission 3, Iroh 4, service 5 and ownership conflict 6. Preserve typed
+    CliError through wrapping. Never expose keys, relay tokens or credentials
+    in logs, errors, Debug output or generated artifacts.
+  - Respect configured/platform config and state paths, private permissions,
+    locking, atomic persistence and link/race-safe privileged filesystem access.
+    Preserve single-owner runtime behavior and explicit service scope/consent;
+    do not silently elevate, overwrite another owner or bypass update ownership.
+  - Bound tasks, streams, queues, buffers and retries. Make cancellation,
+    partial I/O, task ownership and graceful/forced shutdown semantics explicit.
+    Avoid blocking Tokio workers and holding blocking locks across await points.
+  - test-utils disables relay certificate verification and is test-only. Never
+    enable it for production binaries or use those binaries with public relays.
+    Use verified-TLS production binaries for public-relay release smoke tests.
+  - Source-derived bootstrap specs are drafts until reviewed. Do not turn an
+    implementation detail or documented defect into intended business behavior
+    silently; surface disagreements between code, tests and documentation.
+
+  Skill-assisted implementation workflow
+  - Load applicable skills when available: rust-best-practices for Rust work,
+    rust-review for Rust review, coding-standards for shared code quality, and
+    test-from-spec before designing tests. Use rust-port only for actual ports;
+    tauri-rust-standards does not apply unless Tauri becomes part of the product.
+  - Use systematic-debugging for failures, test-driven-development for code
+    changes, and verification-before-completion before claiming success.
+    Keep skill selection task-specific rather than loading every Rust skill.
+  - Use CodeGraph for structural discovery and impact analysis; initialize its
+    local index in each new worktree. Use direct file reads for docs/configs.
+  - Work in an isolated worktree. Independent scouts/reviews may run in parallel;
+    isolate concurrent writers per worktree and join/review their outputs before
+    integration. Do not push, merge or open a PR without explicit authorization.
+  - Behavior additions or changes start with /opsx-new before brainstorming.
+    Restoring specified behavior, typos and behavior-preserving refactors need
+    no change directory. Keep change artifacts inside their OpenSpec change,
+    never under docs/superpowers/. Preserve approved/done artifacts on resume.
+
+rules:
+  proposal:
+    - Distinguish new product behavior from documentation of existing behavior.
+    - Name affected capabilities, scope, non-goals and compatibility/security impact.
+    - Surface code/test/documentation conflicts instead of selecting intent silently.
+  design:
+    - For substantive changes, identify domain vocabulary, affected bounded contexts, invariants, state transitions, use cases and adapter boundaries; explain why each abstraction is needed.
+    - Address compatibility, resource bounds, cancellation/shutdown, secret hygiene, filesystem trust and affected platform support where relevant.
+    - Do not propose a repository-wide DDD rewrite or new dependency as incidental cleanup.
+  specs:
+    - Describe observable behavior and failure semantics, not a prescribed module layout.
+    - Use the ubiquitous language from docs/GLOSSARY.md and include boundary, isolation and lifecycle scenarios where applicable.
+    - "For source-derived bootstrap requirements, include Evidence and mark code-only behavior Confidence: inferred; retain explicit deviations for review."
+  tasks:
+    - Trace each task and its validation to requirements/scenarios; include failure, boundary and affected-platform coverage.
+    - Group work by cohesive domain/use-case seams, state file ownership and dependencies, and parallelize only independent work with isolated writers.
+  plan:
+    - Reference the applicable RS-01 through RS-16 rules and Rust skills, approved contracts, platform test matrix and exact validation commands.
+    - Keep DDD application incremental and scoped; record any broader migration as separately approved work.
+
+operations:
+  apply:
+    guidance:
+      - Apply rust-best-practices and the repository Rust standards; use rust-review for a fresh review of changed Rust code when available.
+      - Derive tests from approved scenarios and use TDD for code changes. For bugs, reproduce the real user path before fixing and repeat it after the fix.
+      - For affected Rust code, run cargo fmt --all -- --check, cargo clippy --all-targets --all-features --locked -- -D warnings, and cargo test --all-features --locked; verify MSRV with Rust 1.91 rather than assuming a newer compiler proves it.
+      - Exercise real binaries for CLI, networking, signals and lifecycle changes using isolated local-relay fixtures; document unavailable platform/E2E coverage rather than equating unit tests with E2E.
+      - Documentation/config-only work must validate OpenSpec and resolved instructions; do not claim cargo or E2E validation unless actually run.
+  archive:
+    guidance:
+      - Check that implementation and validation receipts match approved requirements and explicitly report unresolved deviations or blocked platform coverage.
+      - Synchronize reviewed delta specs through the normal OpenSpec flow; do not treat inferred bootstrap drafts as approved merely because structural validation passed.
