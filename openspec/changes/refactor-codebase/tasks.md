@@ -74,11 +74,11 @@ Owner: `crates/host/**` (new), moved host modules from `src/`, host-owned tests,
 
 Owner: `src/**` remaining root files, `build.rs`, `.github/workflows/**`, `Dockerfile*`, `docker-compose.yml`, `packaging/**`, `install.sh`, `install.ps1`, `docs/**`, `README.md`, `CONTRIBUTING.md`, `tests/` root real-binary tests and fixtures. Depends on: 6.
 
-- [ ] 7.1 Reduce root `src/` to clap translation, prompts/editor, rendering, tracing, Tokio construction, signal/watchdog and exit mapping, with no duplicated host policy. Traces WB-6 (CLI mutations go through host operations).
-- [ ] 7.2 Keep three binary targets, aliases and `APP_VERSION`; update the build workflow to read the inherited workspace version. Traces WB-21 (both scenarios). Platform: CI build workflow.
-- [ ] 7.3 Update CI path filters, cache-warm/snapshot inputs, Docker build contexts (all member manifests/sources), packaging and release scripts; keep installer URLs and artifact/checksum/signature names. Traces WB-22 (both). Platform: Docker build local; release artifacts blocked-ok.
-- [ ] 7.4 Update fixture `include_*` paths and docs/rustdoc links for moved files; keep root-relative installer and release fixtures. Traces WB-20, WB-22.
-- [ ] 7.5 Write the Rust API and repository-path migration map (`openspec/changes/refactor-codebase/migration-map.md` and a summary in `CONTRIBUTING.md`), covering every entry from 1.3. Traces WB-24.
+- [x] 7.1 Reduce root `src/` to clap translation, prompts/editor, rendering, tracing, Tokio construction, signal/watchdog and exit mapping, with no duplicated host policy. Traces WB-6 (CLI mutations go through host operations).
+- [x] 7.2 Keep three binary targets, aliases and `APP_VERSION`; update the build workflow to read the inherited workspace version. Traces WB-21 (both scenarios). Platform: CI build workflow.
+- [x] 7.3 Update CI path filters, cache-warm/snapshot inputs, Docker build contexts (all member manifests/sources), packaging and release scripts; keep installer URLs and artifact/checksum/signature names. Traces WB-22 (both). Platform: Docker build local; release artifacts blocked-ok.
+- [x] 7.4 Update fixture `include_*` paths and docs/rustdoc links for moved files; keep root-relative installer and release fixtures. Traces WB-20, WB-22.
+- [x] 7.5 Write the Rust API and repository-path migration map (`openspec/changes/refactor-codebase/migration-map.md` and a summary in `CONTRIBUTING.md`), covering every entry from 1.3. Traces WB-24.
 
 ## 8. Verification (Migration step 6)
 
