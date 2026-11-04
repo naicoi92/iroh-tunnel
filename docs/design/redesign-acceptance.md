@@ -405,7 +405,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Client/target packet payload/length/recipient traces, public peer IDs and path proof. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — implementation pending #88; contract in `udp-integration-contract.md` (#78).
+**Execution:** PARTIAL (#88) — loopback evidence in `tests/udp_tunnel.rs` (round trip, interleaved clients, empty/binary payloads, two Access peers) and `tests/quick_run.rs` (real quick-mode processes). Not run: Windows by hand, direct versus forced-relay paths through the real tunnel, and the Linux/macOS/Windows matrix beyond CI; those stay with #97.
 
 <a id="udp-socket-01"></a>
 ### Case UDP-SOCKET-01
@@ -422,7 +422,7 @@ Shared prerequisites: immutable final artifacts, isolated disposable environment
 
 **Evidence/platform:** Socket/packet observations, actual selected connection strategy and exact documentation excerpts. Platform: Supported Linux/macOS/Windows runtime matrix.
 
-**Execution:** BLOCKED — implementation pending #88; contract in `udp-integration-contract.md` (#78); confirmed socket baseline not reopened.
+**Execution:** PARTIAL (#88) — `tests/udp_tunnel.rs::each_flow_has_its_own_stable_upstream_endpoint` shows one upstream endpoint per flow, stable for the flow's life; README documents best effort and Serve-side source. NAT rewriting was not exercised (no NAT fixture); that stays with #97.
 
 <a id="udp-lifecycle-01"></a>
 ### Case UDP-LIFECYCLE-01

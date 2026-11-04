@@ -42,13 +42,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::shutdown;
 
-use crate::config::{AccessConfig, AccessService};
+use crate::config::{AccessConfig, AccessService, Protocol};
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
@@ -506,6 +506,7 @@ struct ServiceDialer {
     /// The service ALPN — unchanged between modes (no negotiation).
     alpn: Vec<u8>,
     svc_name: String,
+    protocol: Protocol,
     listen_addr: String,
     /// The shared multiplexed connection and its poller, behind ONE lock:
     /// the one-connection-and-one-poller-per-service rule is structural —
@@ -550,6 +551,7 @@ impl ServiceDialer {
             addr: endpoint::build_dial_addr(node_id, relay_urls),
             alpn: proto::alpn_for(&svc.name),
             svc_name: svc.name.clone(),
+            protocol: svc.protocol,
             listen_addr,
             state: Mutex::new(ConnState {
                 conn: None,
@@ -664,6 +666,9 @@ impl ServiceDialer {
 /// Stop seals admission before draining owned clients. Per-client errors are
 /// logged, not propagated.
 async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
+    if dialer.protocol == Protocol::Udp {
+        return udp_listen_loop(dialer, stop).await;
+    }
     let listen_addr = dialer.listen_addr.clone();
     let listener = tokio::select! {
         biased;
@@ -707,6 +712,142 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
     };
     drop(listener);
     shutdown::drain(&mut clients, deadline).await;
+}
+
+/// Serve UDP clients of one service over QUIC DATAGRAMs (#88).
+///
+/// Each client address is a flow (UDP-04). All flows share the service's one
+/// connection; when that connection is replaced the flows end with it
+/// (session incarnation). Idle flows expire after `udp::IDLE_TIMEOUT`. Caps,
+/// counters and ending the incarnation on identifier exhaustion belong to #89.
+/// Contract: `docs/design/udp-integration-contract.md`.
+async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
+    let listen_addr = dialer.listen_addr.clone();
+    let socket = match UdpSocket::bind(&listen_addr).await {
+        Ok(socket) => Arc::new(socket),
+        Err(error) => {
+            tracing::error!("failed to bind udp {listen_addr}: {error}");
+            return;
+        }
+    };
+    tracing::info!(%listen_addr, "listening for local udp clients");
+    let flows = Arc::new(std::sync::Mutex::new(crate::udp::ClientFlows::default()));
+    let mut readers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let mut current: Option<usize> = None;
+    let mut buf = vec![0u8; 65535];
+    let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let (n, client) = tokio::select! {
+            biased;
+            _ = shutdown::stopped(&mut stop) => break,
+            _ = sweep.tick() => {
+                let ended = flows
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .expire(std::time::Instant::now(), crate::udp::IDLE_TIMEOUT);
+                if ended > 0 {
+                    tracing::debug!(svc = %dialer.svc_name, ended, "udp flows expired");
+                }
+                continue;
+            }
+            Some(result) = readers.join_next(), if !readers.is_empty() => {
+                shutdown::observe(result);
+                continue;
+            }
+            result = socket.recv_from(&mut buf) => match result {
+                Ok(received) => received,
+                // Windows reports a client's ICMP port-unreachable here after a
+                // reply to a client that has gone away. Nothing is wrong.
+                Err(error) if crate::udp::is_transient_recv_error(&error) => {
+                    tracing::debug!("udp recv on {listen_addr} reported a lost datagram: {error}");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!("udp recv error on {listen_addr}: {error}");
+                    // A persistent error must not spin the loop.
+                    tokio::select! {
+                        _ = shutdown::stopped(&mut stop) => break,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                    continue;
+                }
+            }
+        };
+        let deadline = tokio::time::Instant::now() + CLIENT_CONNECT_DEADLINE;
+        // Dialing can take up to the client deadline; shutdown must not wait.
+        let dialed = tokio::select! {
+            biased;
+            _ = shutdown::stopped(&mut stop) => break,
+            dialed = dialer.get_or_dial(deadline) => dialed,
+        };
+        let conn = match dialed {
+            Ok(conn) => conn,
+            Err(error) => {
+                tracing::warn!(svc = %dialer.svc_name, "udp datagram dropped, no connection: {error}");
+                continue;
+            }
+        };
+        if current != Some(conn.stable_id()) {
+            // A new connection is a new incarnation: no flow survives it.
+            readers.abort_all();
+            while readers.join_next().await.is_some() {}
+            *flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
+            readers.spawn(relay_peer_replies(
+                conn.clone(),
+                socket.clone(),
+                flows.clone(),
+            ));
+            current = Some(conn.stable_id());
+        }
+        let Some(limit) = crate::udp::payload_limit(conn.max_datagram_size()) else {
+            tracing::warn!(svc = %dialer.svc_name, "datagrams unusable on this connection, dropping");
+            continue;
+        };
+        if n > limit {
+            tracing::warn!(svc = %dialer.svc_name, size = n, limit, "dropping oversize udp datagram");
+            continue;
+        }
+        let flow = flows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .touch(client, std::time::Instant::now());
+        let Some(flow) = flow else {
+            tracing::warn!(svc = %dialer.svc_name, "udp flow identifiers exhausted, dropping");
+            continue;
+        };
+        if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
+            tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
+        }
+    }
+    readers.abort_all();
+    shutdown::join(&mut readers).await;
+}
+
+/// Deliver each datagram from the peer to the client of its flow.
+async fn relay_peer_replies(
+    conn: iroh::endpoint::Connection,
+    socket: Arc<UdpSocket>,
+    flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
+) {
+    while let Ok(datagram) = conn.read_datagram().await {
+        let Ok((flow, payload)) = crate::udp::decode(&datagram) else {
+            tracing::debug!("dropping malformed udp datagram from peer");
+            continue;
+        };
+        let client = flows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .client_of(flow, std::time::Instant::now());
+        match client {
+            Some(client) => {
+                if let Err(error) = socket.send_to(&payload, client).await {
+                    tracing::debug!(flow = flow.0, %client, "udp reply to client failed: {error}");
+                }
+            }
+            None => tracing::debug!(flow = flow.0, "dropping reply for unknown udp flow"),
+        }
+    }
 }
 
 // A single budget includes mutex wait, dial, backoff and opening the stream.
@@ -1033,6 +1174,7 @@ mod tests {
             addr,
             alpn,
             svc_name: "t".to_string(),
+            protocol: Protocol::Tcp,
             listen_addr: "127.0.0.1:0".to_string(),
             state: Mutex::new(ConnState {
                 conn: None,

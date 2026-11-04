@@ -19,8 +19,8 @@ ran on your own machine.
 </div>
 
 > **Status:** `v0.2.0` — the multiplexing release. TCP tunneling is
-> production-shaped; UDP framing exists in the codebase but is **not yet wired
-> into the run path**. Binaries are not Cosign-signed yet — Cosign/SBOM/AUR/
+> production-shaped; UDP forwarding is **experimental** (see
+> [UDP](#udp-experimental)). Binaries are not Cosign-signed yet — Cosign/SBOM/AUR/
 > macOS-Intel land in later releases.
 
 ---
@@ -34,6 +34,7 @@ ran on your own machine.
 - [How it compares](#how-it-compares)
 - [Use cases](#use-cases)
 - [Configuration](#configuration)
+- [UDP (experimental)](#udp-experimental)
 - [Multiplexing (0.2.0)](#multiplexing-020)
 - [Version compatibility](#version-compatibility)
 - [Run as a system service](#run-as-a-system-service)
@@ -183,7 +184,8 @@ iroh-tunnel access --name postgres --listen 127.0.0.1:15432 --node-id <SERVE_NOD
 
 Short equivalents: `serve -n postgres -t 127.0.0.1:5432` and
 `access -n postgres -l 127.0.0.1:15432 -N <SERVE_NODE_ID>`.
-TCP is default (`-p tcp` / `--protocol tcp`); quick UDP is not supported.
+TCP is default (`-p tcp` / `--protocol tcp`); `-p udp` forwards UDP datagrams
+(experimental, see [UDP](#udp-experimental)).
 Target/listen accept numeric IPv4 or bracketed IPv6 sockets, e.g.
 `--target '[::1]:5432'` and `--listen '[::1]:15432'`.
 Use `--relay-url https://your-relay.example` on both roles for a custom relay.
@@ -325,7 +327,7 @@ before deciding.
 | Transport model              | P2P QUIC, relay fallback | hosted TCP/HTTP tunnels | Cloudflare edge       | WireGuard mesh       | proxy via `frps`     | TCP relay            |
 | Needs your own public-IP server | no               | no                   | no                    | no                   | **yes**              | yes (or their cloud) |
 | Forwards arbitrary TCP       | yes                  | yes                  | via WARP client       | L3 routes (any IP)   | yes                  | yes                  |
-| UDP                          | groundwork only, not wired yet | limited, paid tiers | no                    | L3 routes (any IP)   | yes                  | no                   |
+| UDP                          | experimental, best effort | limited, paid tiers | no                    | L3 routes (any IP)   | yes                  | no                   |
 | Identity / auth              | `node_id`, no accounts | account + token    | Cloudflare account + domain | SSO / MagicDNS  | shared token         | shared key           |
 | Client side needs            | the same static binary | a URL (or their CLI for raw TCP) | `cloudflared` / WARP | join the tailnet | `frpc` config        | the `bore` client    |
 
@@ -370,6 +372,44 @@ Status files (written by `run`, for monitoring):
 
 Sample files ship in [`examples/`](examples/) — `serve.toml` and `access.toml`
 with a throwaway demo key so the compose demo runs as-is.
+
+## UDP (experimental)
+
+Set `protocol = "udp"` on a Serve and an Access service (or pass `-p udp` in
+quick mode) to forward UDP datagrams to a fixed target.
+
+```sh
+iroh-tunnel serve  -n dns -t 127.0.0.1:5353 -p udp
+iroh-tunnel access -n dns -l 127.0.0.1:5353 -N <SERVE_NODE_ID> -p udp
+```
+
+What to expect:
+
+- **Best effort.** Datagrams may be lost, reordered or duplicated, as with plain
+  UDP. The tunnel adds no reliability, ordering or deduplication.
+- **Boundaries and payload are preserved.** Each datagram is delivered whole and
+  unchanged, or not at all. The tunnel never parses the payload.
+- **Per-client flows.** Each client address and port is one flow with its own
+  upstream socket on Serve, so replies reach the client that asked. A client
+  that changes its source port starts a new flow, and a flow ends after 60
+  seconds without traffic in either direction.
+- **The target does not see the client.** The target sees Serve's upstream
+  socket, which NAT may rewrite, and it is stable only while that flow lives.
+  Original client IPs are not forwarded, so ACLs or sessions keyed on the
+  client address will not work.
+- **Single reply source.** Serve accepts replies only from the configured
+  target address and port. Protocols that answer from a different address or
+  port are not supported.
+- **Size limit.** A datagram larger than the connection's current limit is
+  dropped, never fragmented or sent in part. The limit depends on the path
+  (about 1.1 KiB on a relay path in measurements) and can change during a
+  session.
+- **No resource limits yet.** Flow counts, queues and expiry quarantine are not
+  bounded. Do not expose a UDP service to untrusted clients.
+- **Not verified under impairment.** Behavior under packet loss, delay,
+  congestion and path migration has not been measured.
+
+Details: [`docs/design/udp-integration-contract.md`](docs/design/udp-integration-contract.md).
 
 ## Multiplexing (0.2.0)
 
@@ -807,9 +847,8 @@ Pre-0.2.0 Serve peers accept only one stream per connection. Upgrade Serve;
 See [Multiplexing](#multiplexing-020).
 
 **Is UDP supported?**
-Not yet. The framing codec (`[len][payload]`) and UDP pipe are in the
-codebase, but they are not wired into the run path. TCP is the supported
-protocol today.
+Experimentally. TCP is the supported protocol; UDP forwarding works end to end
+but is best effort and has known limits. See [UDP](#udp-experimental).
 
 **How do I see what the tunnel is doing?**
 `-v`/`-vv` for debug/trace, `RUST_LOG=iroh_tunnel=debug` for full control,
@@ -853,6 +892,7 @@ For reporting vulnerabilities and the full policy, see
 | `src/pipe.rs`              | byte-copy pipes between Iroh streams and local sockets |
 | `src/endpoint.rs`          | Iroh endpoint construction + transport tuning          |
 | `src/proto.rs`             | ALPN protocol constants (`iroh-tunnel/{name}`)         |
+| `src/udp.rs`               | UDP framing and flow tables (QUIC DATAGRAM forwarding) |
 | `src/config.rs`, `src/config_cmd.rs` | config model + `config` subcommands           |
 | `src/service/`             | service backends: `systemd`, `launchd`, BusyBox init   |
 | `src/conn_path.rs`         | peer connection-path reports for status files          |

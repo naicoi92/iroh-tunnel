@@ -28,12 +28,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::task::JoinSet;
 
 use crate::shutdown;
 
-use crate::config::ServeConfig;
+use crate::config::{Protocol, ServeConfig};
 use crate::endpoint;
 use crate::proto;
 use crate::role_run::RoleStrategy;
@@ -162,7 +162,7 @@ impl ServeStrategy {
         // streams.
         let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
         for svc in &cfg.services {
-            let target = ServiceTarget::new(format!("{}:{}", svc.host, svc.port));
+            let target = ServiceTarget::new(format!("{}:{}", svc.host, svc.port), svc.protocol);
             targets.insert(proto::alpn_for(&svc.name), target);
         }
 
@@ -302,13 +302,15 @@ impl ServeStrategy {
 #[derive(Clone)]
 struct ServiceTarget {
     local_addr: String,
+    protocol: Protocol,
     active_streams: Arc<AtomicU64>,
 }
 
 impl ServiceTarget {
-    fn new(local_addr: String) -> Self {
+    fn new(local_addr: String, protocol: Protocol) -> Self {
         Self {
             local_addr,
+            protocol,
             active_streams: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -681,6 +683,9 @@ where
 
 /// Own stream admission and pipe tasks for one multiplexed connection.
 async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
+    if target.protocol == Protocol::Udp {
+        return handle_udp_connection(conn, target, stop).await;
+    }
     let mut streams = JoinSet::new();
     let mut stream_no: u64 = 0;
     let deadline = loop {
@@ -755,6 +760,175 @@ async fn handle_connection(conn: &Connection, target: ServiceTarget, mut stop: s
         // Peer loss cannot drain and must never replay partially copied data.
         streams.abort_all();
         shutdown::join(&mut streams).await;
+    }
+}
+
+/// Per flow: the upstream socket and the handle that ends its reply relay.
+type UdpUpstream = (Arc<UdpSocket>, tokio::task::AbortHandle);
+
+/// One peer connection's live UDP flows, shared with the reply relays.
+type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpUpstream>>>;
+
+/// Carry one peer's UDP flows over QUIC DATAGRAMs (#88).
+///
+/// Each flow gets its own connected upstream socket, so a reply is attributed
+/// to a flow by the socket it arrives on, never by inspecting the payload.
+/// Contract: `docs/design/udp-integration-contract.md`. Idle flows expire after
+/// `udp::IDLE_TIMEOUT` and close at once. Caps, quarantine and counters are not
+/// implemented yet; they belong to #89.
+async fn handle_udp_connection(conn: &Connection, target: ServiceTarget, mut stop: shutdown::Stop) {
+    use crate::udp::Admission;
+    let flows = UdpFlowTable::default();
+    let mut readers = JoinSet::new();
+    let mut sweep = tokio::time::interval(crate::udp::SWEEP_INTERVAL);
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let datagram = tokio::select! {
+            biased;
+            _ = shutdown::stopped(&mut stop) => break,
+            _ = sweep.tick() => {
+                let ended = flows
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .expire(std::time::Instant::now(), crate::udp::IDLE_TIMEOUT);
+                for (_, relay) in &ended {
+                    relay.abort();
+                }
+                if !ended.is_empty() {
+                    tracing::debug!(count = ended.len(), "udp upstream flows expired");
+                }
+                continue;
+            }
+            Some(result) = readers.join_next(), if !readers.is_empty() => {
+                shutdown::observe(result);
+                continue;
+            }
+            result = conn.read_datagram() => match result {
+                Ok(datagram) => datagram,
+                Err(error) => {
+                    tracing::debug!("udp connection closed: {error}");
+                    break;
+                }
+            }
+        };
+        let Ok((flow, payload)) = crate::udp::decode(&datagram) else {
+            tracing::debug!("dropping malformed udp datagram");
+            continue;
+        };
+        let now = std::time::Instant::now();
+        let admission = flows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .admit(flow, now);
+        let upstream = match admission {
+            Admission::Unknown => {
+                tracing::debug!(flow = flow.0, "dropping datagram for unknown udp flow");
+                continue;
+            }
+            Admission::Live => {
+                let table = flows.lock().unwrap_or_else(|p| p.into_inner());
+                match table.get(flow) {
+                    Some((socket, _)) => socket.clone(),
+                    None => continue,
+                }
+            }
+            Admission::New => {
+                let opened = tokio::select! {
+                    biased;
+                    _ = shutdown::stopped(&mut stop) => break,
+                    opened = open_upstream(&target.local_addr) => opened,
+                };
+                let socket = match opened {
+                    Ok(socket) => Arc::new(socket),
+                    Err(error) => {
+                        tracing::warn!(flow = flow.0, "cannot open udp upstream: {error}");
+                        continue;
+                    }
+                };
+                let relay = readers.spawn(relay_upstream_replies(
+                    conn.clone(),
+                    flow,
+                    socket.clone(),
+                    flows.clone(),
+                ));
+                flows.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                    flow,
+                    (socket.clone(), relay),
+                    now,
+                );
+                socket
+            }
+        };
+        if let Err(error) = upstream.send(&payload).await {
+            tracing::debug!(flow = flow.0, "udp upstream send failed: {error}");
+        }
+    }
+    readers.abort_all();
+    shutdown::join(&mut readers).await;
+}
+
+/// Bind a fresh socket of the target's address family and connect it, so the
+/// kernel drops replies from any other source.
+async fn open_upstream(local_addr: &str) -> Result<UdpSocket> {
+    let target = tokio::net::lookup_host(local_addr)
+        .await
+        .with_context(|| format!("cannot resolve {local_addr}"))?
+        .next()
+        .with_context(|| format!("{local_addr} resolved to no address"))?;
+    let bind: std::net::SocketAddr = if target.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let socket = UdpSocket::bind(bind).await?;
+    socket.connect(target).await?;
+    Ok(socket)
+}
+
+/// Forward each reply on `upstream` to the peer as a datagram of `flow`.
+/// A reply counts as traffic for the flow's idle timer.
+async fn relay_upstream_replies(
+    conn: Connection,
+    flow: crate::udp::FlowId,
+    upstream: Arc<UdpSocket>,
+    flows: UdpFlowTable,
+) {
+    let mut buf = vec![0u8; 65535];
+    loop {
+        let n = match upstream.recv(&mut buf).await {
+            Ok(n) => n,
+            // A connected UDP socket reports an ICMP error from the target
+            // (for example port unreachable while the target is not up yet)
+            // on a later call. The datagram is lost; the flow stays.
+            Err(error) if crate::udp::is_transient_recv_error(&error) => {
+                tracing::debug!(flow = flow.0, "udp upstream receive failed: {error}");
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(flow = flow.0, "udp upstream receive ended: {error}");
+                break;
+            }
+        };
+        flows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .refresh(flow, std::time::Instant::now());
+        let Some(limit) = crate::udp::payload_limit(conn.max_datagram_size()) else {
+            tracing::warn!(flow = flow.0, "datagrams unusable, dropping reply");
+            continue;
+        };
+        if n > limit {
+            tracing::warn!(
+                flow = flow.0,
+                size = n,
+                limit,
+                "dropping oversize udp reply"
+            );
+            continue;
+        }
+        if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
+            tracing::debug!(flow = flow.0, "udp reply not sent: {error}");
+        }
     }
 }
 

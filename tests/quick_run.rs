@@ -4,7 +4,7 @@
 //! Production builds must not enable that feature.
 //!
 //! Quick flags: -n/--name, -t/--target, -l/--listen, -N/--node-id,
-//! -p/--protocol (TCP default), and --relay-url.
+//! -p/--protocol (tcp default, or udp), and --relay-url.
 
 mod common;
 
@@ -603,6 +603,122 @@ fn mixed_quick_flags_and_subcommands_are_rejected() -> Result<()> {
     Ok(())
 }
 
+/// #88: real quick-run processes forward UDP datagrams to a fixed UDP target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quick_udp_forwards_datagrams_to_fixed_target() -> Result<()> {
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let target_addr = target.local_addr()?.to_string();
+    let fixture = async {
+        let mut buf = [0u8; 64];
+        loop {
+            let (n, from) = match target.recv_from(&mut buf).await {
+                Ok(received) => received,
+                // Windows reports an earlier reply's ICMP error here.
+                Err(error) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if &buf[..n] == b"request" {
+                target.send_to(b"response", from).await?;
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::select! {
+            result = fixture => result,
+            result = udp_session(&target_addr) => result,
+        }
+    })
+    .await?
+}
+
+async fn udp_session(target_addr: &str) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let relay = relay.to_string();
+    let mut serve = role(
+        temp.path(),
+        temp.path(),
+        &[
+            "serve",
+            "--name",
+            "dns",
+            "--target",
+            target_addr,
+            "--protocol",
+            "udp",
+            "--relay-url",
+            &relay,
+        ],
+    )?;
+    let serve_status = status(&temp.path().join("serve-status.json"), &mut serve).await?;
+    let node = serve_status["node_id"].as_str().context("serve node id")?;
+
+    let reservation = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let listen = reservation.local_addr()?;
+    drop(reservation);
+    let address = listen.to_string();
+    let log_path = temp.path().join("access-udp.log");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    isolated(&mut command, temp.path());
+    let access = Process(
+        command
+            .args([
+                "access",
+                "--name",
+                "dns",
+                "--listen",
+                &address,
+                "--node-id",
+                node,
+                "--protocol",
+                "udp",
+                "--relay-url",
+                &relay,
+            ])
+            .env("IROH_TUNNEL_STATE_DIR", temp.path())
+            .stdout(std::fs::File::create(&log_path)?)
+            .stderr(Stdio::null())
+            .spawn()?,
+        None,
+    );
+    let mut access = access;
+    let ready = Instant::now() + Duration::from_secs(30);
+    loop {
+        let log = std::fs::read_to_string(&log_path)?;
+        if log
+            .lines()
+            .any(|line| line.contains("listening for local udp clients") && line.contains(&address))
+        {
+            break;
+        }
+        if let Some(exit) = access.0.try_wait()? {
+            anyhow::bail!("access exited before its udp listener was ready: {exit}; {log}");
+        }
+        anyhow::ensure!(Instant::now() < ready, "access udp listener timeout: {log}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // UDP gives no connect signal: resend until the tunnel has dialed.
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let mut buf = [0u8; 64];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        client.send_to(b"request", listen).await?;
+        if let Ok(Ok((n, _))) =
+            tokio::time::timeout(Duration::from_millis(500), client.recv_from(&mut buf)).await
+        {
+            assert_eq!(&buf[..n], b"response");
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "no udp response through quick roles"
+        );
+    }
+}
+
 #[test]
 fn invalid_quick_inputs_fail_without_config_or_key_writes() -> Result<()> {
     let peer = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -633,8 +749,8 @@ fn invalid_quick_inputs_fail_without_config_or_key_writes() -> Result<()> {
         args[2] = "bad name";
         rejected(&args, "name")?;
         let mut args = valid.clone();
-        args.extend(["--protocol", "udp"]);
-        rejected(&args, "tcp")?;
+        args.extend(["--protocol", "sctp"]);
+        rejected(&args, "tcp or udp")?;
         let mut args = valid.clone();
         args.extend(["--relay-url", "http://localhost:1"]);
         rejected(&args, "https://")?;
@@ -661,8 +777,8 @@ fn invalid_quick_inputs_fail_without_config_or_key_writes() -> Result<()> {
 
 #[test]
 fn quick_config_errors_use_existing_exit_classification() -> Result<()> {
-    rejected(&["serve", "-p", "udp"], "tcp")?;
-    rejected(&["access", "-p", "udp"], "tcp")?;
+    rejected(&["serve", "-p", "sctp"], "tcp or udp")?;
+    rejected(&["access", "-p", "sctp"], "tcp or udp")?;
     Ok(())
 }
 
