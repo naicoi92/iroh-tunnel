@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::config_cmd::{GeneratedIdentity, Mutation, ServiceList};
+use crate::config_cmd::{GeneratedIdentity, KeygenOutcome, Mutation, ServiceList};
 use crate::ready::ReadyReport;
 use crate::status::Role;
 
@@ -77,6 +77,18 @@ pub(crate) fn render_identity(identity: &GeneratedIdentity) -> String {
         identity.secret(),
         identity.node_id
     )
+}
+
+/// `config keygen` output for a written key. Empty for `ConsentNeeded`, which
+/// the caller turns into an error.
+pub(crate) fn render_keygen(outcome: &KeygenOutcome) -> String {
+    match outcome {
+        KeygenOutcome::Generated { node_id, .. } => format!(
+            "Generated new secret_key.\nNew NodeId: {node_id}\n\
+             WARNING: configs that reference this node's node_id must be updated to match.\n"
+        ),
+        KeygenOutcome::ConsentNeeded { .. } => String::new(),
+    }
 }
 
 /// `config list` output: the role's table, or the "No services configured"

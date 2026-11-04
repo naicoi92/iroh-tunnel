@@ -273,7 +273,7 @@ fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()>
             config,
             yes,
             mode: None,
-        } => config_cmd::keygen(role, config.as_deref(), yes),
+        } => config_cmd::keygen_cli(role, config.as_deref(), yes),
         ConfigAction::Add(args) => config_cmd::add(role, &args),
         ConfigAction::Remove { config, name } => config_cmd::remove(role, config.as_deref(), &name),
         ConfigAction::List { config } => config_cmd::list(role, config.as_deref()),

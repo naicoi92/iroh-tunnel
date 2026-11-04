@@ -36,44 +36,110 @@ const REDACTED: &str = "<redacted>";
 /// `[node]` keys `config show` hides unless `--reveal` is given.
 const SECRET_FIELDS: [&str; 2] = ["secret_key", "relay_token"];
 
-/// `config keygen`: generate a new SecretKey, write it into `[node].secret_key`.
+/// Whether the role's config already holds a `[node].secret_key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityState {
+    NoKey,
+    HasKey,
+}
+
+/// Whether the caller agreed to replace an existing key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotationConsent {
+    NotGiven,
+    Given,
+}
+
+/// Result of [`keygen`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeygenOutcome {
+    /// A new key was written; `rotated` is true when it replaced an old one.
+    Generated {
+        path: PathBuf,
+        node_id: String,
+        rotated: bool,
+    },
+    /// A key exists and consent was not given; the file is untouched.
+    /// `current_node_id` is `None` when the stored key cannot be decoded.
+    ConsentNeeded {
+        path: PathBuf,
+        current_node_id: Option<String>,
+    },
+}
+
+/// Unlocked pre-check used to decide whether to ask before taking the lock.
+/// A missing or unparsable file reads as [`IdentityState::NoKey`]; a read
+/// error propagates.
+pub fn identity_state(role: Role, config: Option<&Path>) -> Result<IdentityState> {
+    let path = resolve_target(&resolve_config_path(role, config)?);
+    let has_key = read_optional(&path)?
+        .and_then(|text| text.parse::<DocumentMut>().ok())
+        .is_some_and(|doc| existing_secret_key(&doc).is_some());
+    Ok(if has_key {
+        IdentityState::HasKey
+    } else {
+        IdentityState::NoKey
+    })
+}
+
+/// Generate a new SecretKey and write it into `[node].secret_key`.
 ///
 /// Works for both roles: serve pins the node identity that access peers dial,
-/// and access pins its own identity so the serve side sees a stable peer. Either
-/// way, downstream configs that reference this node's NodeId must be updated to
-/// match the newly generated key.
-///
-/// Replacing an existing key changes the NodeId, so it needs confirmation
-/// (D1): `yes` skips the prompt; without a terminal and without `yes` the
-/// command fails and the key is kept. A first key needs no confirmation.
-pub fn keygen(role: Role, config: Option<&Path>, yes: bool) -> Result<()> {
+/// and access pins its own identity so the serve side sees a stable peer.
+/// Replacing an existing key changes the NodeId, so without
+/// [`RotationConsent::Given`] the decision (made under the writer lock) is
+/// [`KeygenOutcome::ConsentNeeded`] and the file is left byte-identical.
+pub fn keygen(
+    role: Role,
+    config: Option<&Path>,
+    consent: RotationConsent,
+) -> Result<KeygenOutcome> {
     let path = resolve_target(&resolve_config_path(role, config)?);
-    let mut confirmed = yes;
-    // Ask before taking the lock so a slow answer does not stall other
-    // writers; the decision is re-checked under the lock below.
-    if !confirmed
-        && read_optional(&path)?
-            .and_then(|text| text.parse::<DocumentMut>().ok())
-            .is_some_and(|doc| existing_secret_key(&doc).is_some())
-    {
-        confirm_rotation(&path)?;
-        confirmed = true;
-    }
-
     let key = iroh::SecretKey::generate();
     let key_str = crate::config::encode_secret_key(&key);
-    mutate(role, &path, |doc| {
-        if !confirmed && existing_secret_key(doc).is_some() {
-            return Err(rotation_refused(&path));
+    let outcome = mutate_deciding(role, &path, |doc| {
+        let existing = existing_secret_key(doc);
+        if existing.is_some() && consent == RotationConsent::NotGiven {
+            let current_node_id = existing
+                .and_then(|s| crate::config::resolve_secret_key(s).ok())
+                .map(|(k, _)| k.public().to_string());
+            return Ok(Edit::Keep(KeygenOutcome::ConsentNeeded {
+                path: path.clone(),
+                current_node_id,
+            }));
         }
+        let rotated = existing.is_some();
         ensure_node_table(doc, &path)?;
         doc["node"]["secret_key"] = toml_edit::value(key_str.as_str());
-        Ok(())
+        Ok(Edit::Apply(KeygenOutcome::Generated {
+            path: path.clone(),
+            node_id: key.public().to_string(),
+            rotated,
+        }))
     })?;
+    Ok(outcome)
+}
 
-    println!("Generated new secret_key.");
-    println!("New NodeId: {}", key.public());
-    println!("WARNING: configs that reference this node's node_id must be updated to match.");
+/// CLI wrapper: prompt (or refuse without a terminal) before rotating, then
+/// print the result.
+pub fn keygen_cli(role: Role, config: Option<&Path>, yes: bool) -> Result<()> {
+    let mut consent = if yes {
+        RotationConsent::Given
+    } else {
+        RotationConsent::NotGiven
+    };
+    // Ask before taking the lock so a slow answer does not stall other
+    // writers; the decision is re-checked under the lock in `keygen`.
+    if !yes && identity_state(role, config)? == IdentityState::HasKey {
+        let path = resolve_target(&resolve_config_path(role, config)?);
+        confirm_rotation(&path)?;
+        consent = RotationConsent::Given;
+    }
+    let outcome = keygen(role, config, consent)?;
+    if let KeygenOutcome::ConsentNeeded { path, .. } = &outcome {
+        return Err(rotation_refused(path));
+    }
+    print!("{}", render::render_keygen(&outcome));
     Ok(())
 }
 
@@ -535,14 +601,35 @@ fn mutate(
     path: &Path,
     change: impl FnOnce(&mut DocumentMut) -> Result<()>,
 ) -> Result<()> {
+    mutate_deciding(role, path, |doc| change(doc).map(|()| Edit::Apply(())))
+}
+
+/// What a [`mutate_deciding`] closure decided about the document.
+enum Edit<T> {
+    /// Validate and write the edited document.
+    Apply(T),
+    /// Leave the file untouched.
+    Keep(T),
+}
+
+/// [`mutate`] where the closure may decide, under the lock, to write nothing.
+fn mutate_deciding<T>(
+    role: Role,
+    path: &Path,
+    change: impl FnOnce(&mut DocumentMut) -> Result<Edit<T>>,
+) -> Result<T> {
     let _lock = ConfigLock::acquire(path)?;
     let text = read_optional(path)?.unwrap_or_default();
     let mut doc = parse_doc(&text, path)?;
-    change(&mut doc)?;
+    let value = match change(&mut doc)? {
+        Edit::Keep(value) => return Ok(value),
+        Edit::Apply(value) => value,
+    };
     strip_retired_fields(&mut doc);
     let rendered = doc.to_string();
     validate_role_doc(role, &rendered, path)?;
-    write_atomic(path, rendered.as_bytes())
+    write_atomic(path, rendered.as_bytes())?;
+    Ok(value)
 }
 
 /// Return the first `[[services]]` table whose `name` matches, if any.
@@ -675,6 +762,70 @@ mod tests {
         let (key, _) = crate::config::resolve_secret_key(identity.secret()).unwrap();
         assert_eq!(identity.node_id, key.public().to_string());
         assert!(!format!("{identity:?}").contains(identity.secret()));
+    }
+
+    const KEYED: &str = "[node]\nsecret_key = \"\"\n";
+
+    fn write_keyed(path: &Path) -> String {
+        let key = iroh::SecretKey::generate();
+        let text = format!(
+            "[node]\nsecret_key = \"{}\"\n",
+            crate::config::encode_secret_key(&key)
+        );
+        std::fs::write(path, &text).unwrap();
+        key.public().to_string()
+    }
+
+    #[test]
+    fn keygen_without_consent_returns_consent_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        let old_id = write_keyed(&path);
+        let before = std::fs::read(&path).unwrap();
+        let outcome = keygen(Role::Serve, Some(&path), RotationConsent::NotGiven).unwrap();
+        assert_eq!(
+            outcome,
+            KeygenOutcome::ConsentNeeded {
+                path: path.clone(),
+                current_node_id: Some(old_id)
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn keygen_with_consent_rotates_and_returns_new_node_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        let old_id = write_keyed(&path);
+        let KeygenOutcome::Generated {
+            node_id, rotated, ..
+        } = keygen(Role::Serve, Some(&path), RotationConsent::Given).unwrap()
+        else {
+            panic!("expected Generated");
+        };
+        assert!(rotated);
+        assert_ne!(node_id, old_id);
+        assert_eq!(
+            identity_state(Role::Serve, Some(&path)).unwrap(),
+            IdentityState::HasKey
+        );
+    }
+
+    #[test]
+    fn first_keygen_needs_no_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        std::fs::write(&path, KEYED).unwrap();
+        assert_eq!(
+            identity_state(Role::Serve, Some(&path)).unwrap(),
+            IdentityState::NoKey
+        );
+        let outcome = keygen(Role::Serve, Some(&path), RotationConsent::NotGiven).unwrap();
+        assert!(matches!(
+            outcome,
+            KeygenOutcome::Generated { rotated: false, .. }
+        ));
     }
 
     #[cfg(unix)]
