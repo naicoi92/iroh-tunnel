@@ -708,6 +708,59 @@ mod tests {
     }
 
     #[test]
+    fn unknown_fields_and_legacy_multiplex_still_load() {
+        let serve = tmpfile(
+            "serve.toml",
+            "[node]\nfoo = 1\n\n[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nport = 5432\n",
+        );
+        assert!(ServeConfig::load(serve.path()).is_ok());
+
+        let node = "0".repeat(64);
+        let access = tmpfile(
+            "access.toml",
+            &format!(
+                "[[services]]\nname = \"db\"\nnode_id = \"{node}\"\nprotocol = \"tcp\"\nport = 5432\nmultiplex = true\n"
+            ),
+        );
+        assert!(AccessConfig::load(access.path()).is_ok());
+    }
+
+    #[test]
+    fn hostname_target_still_loads() {
+        let f = tmpfile(
+            "serve.toml",
+            "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nhost = \"example.internal\"\nport = 5432\n",
+        );
+        let cfg = ServeConfig::load(f.path()).unwrap();
+        assert_eq!(cfg.services[0].host, "example.internal");
+    }
+
+    #[test]
+    fn access_node_id_length_checked_at_load_full_parse_at_runtime() {
+        let access = |node_id: &str| {
+            tmpfile(
+                "access.toml",
+                &format!(
+                    "[[services]]\nname = \"db\"\nnode_id = \"{node_id}\"\nprotocol = \"tcp\"\nport = 5432\n"
+                ),
+            )
+        };
+        // Right length but not a parseable key: load only checks the length.
+        let non_hex = "z".repeat(64);
+        assert!(AccessConfig::load(access(&non_hex).path()).is_ok());
+
+        let short = "0".repeat(10);
+        let err = format!(
+            "{:#}",
+            AccessConfig::load(access(&short).path()).unwrap_err()
+        );
+        assert!(
+            err.contains("must be 52 (base32) or 64 (hex) chars"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn serve_load_valid() {
         let f = tmpfile(
             "serve.toml",

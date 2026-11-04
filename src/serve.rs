@@ -1218,4 +1218,145 @@ mod tests {
         assert_eq!(got, expected);
         drop(guards);
     }
+
+    // --- status publishing characterization (flush loop + initial write) ---
+
+    type SaveLog = Arc<std::sync::Mutex<Vec<crate::status::StatusFile>>>;
+
+    async fn local_endpoint() -> iroh::Endpoint {
+        let node = crate::config::NodeConfig {
+            relay_urls: vec!["https://relay.invalid".to_string()],
+            ..Default::default()
+        };
+        crate::endpoint::create_serve_endpoint(&node, &[])
+            .await
+            .expect("bind local endpoint")
+    }
+
+    fn empty_snapshot() -> StatusSnapshot {
+        StatusSnapshot {
+            node_id: "flush-test".to_string(),
+            home_relay: None,
+            pid: 1,
+            started_at: 0,
+            services: Vec::new(),
+            state_dir: None,
+        }
+    }
+
+    /// Runs the flush loop for ~3 ticks of virtual time, then stops it and
+    /// returns the files `save` was called with. `fail_first` makes the
+    /// first save return `Err`.
+    async fn run_flush_for_three_ticks(
+        last: Option<crate::status::StatusFile>,
+        fail_first: bool,
+    ) -> Vec<crate::status::StatusFile> {
+        let ep = local_endpoint().await;
+        tokio::time::pause();
+        let interval = Duration::from_secs(5);
+        let log: SaveLog = Arc::default();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let log_for_save = log.clone();
+        let flush = tokio::spawn(status_flush_loop(
+            empty_snapshot(),
+            ep,
+            PeerTracker::default(),
+            last,
+            stop_rx,
+            interval,
+            move |file, _dir| {
+                let log = log_for_save.clone();
+                async move {
+                    let mut log = log.lock().unwrap();
+                    log.push(file);
+                    if fail_first && log.len() == 1 {
+                        Err(anyhow::anyhow!("first save fails"))
+                    } else {
+                        Ok(std::path::PathBuf::from("recorded"))
+                    }
+                }
+            },
+        ));
+        tokio::time::sleep(interval * 3 + Duration::from_secs(1)).await;
+        let _ = stop_tx.send(());
+        flush.await.expect("flush task must not panic");
+        let saved = log.lock().unwrap().clone();
+        saved
+    }
+
+    #[tokio::test]
+    async fn unchanged_status_is_not_rewritten() {
+        let saved = run_flush_for_three_ticks(None, false).await;
+        assert_eq!(
+            saved.len(),
+            1,
+            "equal renders must be saved once: {saved:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_unchanged_status_is_never_rewritten() {
+        let seed = empty_snapshot().render(Vec::new());
+        let saved = run_flush_for_three_ticks(Some(seed), false).await;
+        assert!(saved.is_empty(), "{saved:?}");
+    }
+
+    #[tokio::test]
+    async fn failed_status_write_is_retried_next_tick() {
+        let saved = run_flush_for_three_ticks(None, true).await;
+        assert_eq!(
+            saved.len(),
+            2,
+            "failure retried once, then settled: {saved:?}"
+        );
+        assert_eq!(saved[0], saved[1], "the retry saves the same file");
+    }
+
+    /// Seam: in-process serve (no client ever connects). The initial write
+    /// happens in the run loop before `accept_loop` is spawned, so the file
+    /// must already be present with no connections.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initial_status_written_before_first_admission() {
+        let (_relay_map, relay_url, _server) =
+            iroh::test_utils::run_relay_server().await.expect("relay");
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_dir.path().join("serve.toml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "[node]\nrelay_urls = [\"{relay_url}\"]\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n"
+            ),
+        )
+        .unwrap();
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let state = state_dir.path().to_path_buf();
+        let role = tokio::spawn(async move {
+            run_with_shutdown_with_state_dir(&state, &cfg, async move {
+                let _ = stop_rx.await;
+            })
+            .await
+        });
+
+        let status_path = state_dir.path().join("serve-status.json");
+        let mut parsed = None;
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(&status_path) {
+                parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let status = parsed.expect("status file written without any client");
+        assert_eq!(
+            status["connections"],
+            serde_json::json!([]),
+            "no admission has happened yet"
+        );
+        assert_eq!(status["services"][0]["name"], "echo");
+
+        let _ = stop_tx.send(());
+        role.await.unwrap().unwrap();
+    }
 }
