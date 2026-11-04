@@ -617,7 +617,7 @@ The Path column gives each item's **final** location. Until Tasks 19–20 move t
 - Slot released on sink failure → `serve::tests::failed_quarantine_sink_releases_its_slot` + `udp_tunnel::quarantine_holds_the_slot_and_then_releases_it` (Task 5)
 - Writer joins in time → `serve::tests::run_completion_reports_unquiesced_writer` (fast case) + `serve_status_conn_path::serve_status_file_reports_connected_peer_paths` (file removed at stop) (Task 6)
 - Writer does not quiesce → `serve::tests::status_file_kept_when_flush_join_times_out` (Task 3) + `run_completion_reports_unquiesced_writer` (Task 6)
-- Initial snapshot precedes admission → `serve::tests::initial_status_written_before_first_admission` (Task 3)
+- Initial snapshot precedes admission → `run_serve::tests::initial_status_saved_before_accept_loop` (Task 9; replaced the Task 3 `initial_status_written_before_first_admission`, removed in Task 20a)
 - Unchanged observation is not rewritten → `serve::tests::unchanged_status_is_not_rewritten` (Task 3) + `observation_equality_ignores_nothing_rendered` (Task 9)
 - Failed write is retried → `serve::tests::failed_status_write_is_retried_next_tick` (Task 3)
 - Debug of a loaded configuration → `config::tests::config_debug_redacts_secret_key` (Task 7)

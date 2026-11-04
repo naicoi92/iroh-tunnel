@@ -67,6 +67,13 @@ Parallel lanes ran in temporary sibling worktrees (`refactor-codebase-{t16,t17,s
 - Root `[lib]` target kept (the plan preferred removal): the three binaries share it, and `tests/access_status_file.rs` uses the root status renderers.
 - Engine `settings` is a flat `settings.rs` (the plan listed `settings/{mod,types}.rs`).
 
+Recorded during finalize, from verify warnings W3–W6. These are contract drift with no behaviour change:
+
+- `config::{ServeConfig, AccessConfig}` (W3): these DTOs keep `load`, `save` and `resolve_and_save_key`, which design Decision 3 says DTOs should not have. Only internal host callers use them (`runtime/skeleton.rs`, `service/install.rs`, `service/trust.rs`, `service/platform.rs`), and they are not part of the management surface root uses. A follow-up can move them into `config` store free functions.
+- Engine `testing` module (W4): the module is always compiled. Its insecure items (`set_relay_only`, the env-driven `hang_point`) are `#[cfg(feature = "test-utils")]`, and a production no-op `hang_point` keeps callers cfg-free. No test bypass is reachable without `test-utils`.
+- `service::Environment::detect` (W5): it lives in root as `cli_service::detect_environment`, because host must not probe stdin (Task 14/20a rulings). Host keeps only the `Environment { elevated, can_answer }` value.
+- Root `render` (W6): `render_serve_status` and `render_access_status` stay in `src/status_cmd.rs` (the Task 16 parallel-lane file constraint). The output is unchanged.
+
 ### Observable differences (accepted, not contract changes)
 
 - Access startup: stderr log lines (relay resolution, "nothing to expose") are now emitted before the stdout `NodeId:` line. These are separate streams; stdout bytes are unchanged.
