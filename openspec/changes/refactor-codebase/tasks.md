@@ -14,8 +14,8 @@ Owner: `openspec/changes/refactor-codebase/baseline/**` (new), new characterizat
 - [x] 1.4 Inventory path assumptions in `.github/workflows/*.yml`, `Dockerfile*`, `packaging/`, `install.sh`, `install.ps1`, `build.rs`, docs and fixtures (`include_*`, literal `src/`/`tests/` paths, root `[package].version` reads). Traces WB-21, WB-22.
 - [x] 1.5 Add process-level characterization tests pinning exit codes 2/3/5/6 and stderr guidance for: invalid config, unprivileged `service install --system`, Windows `--system`, ownership conflict. Traces WB-15 (all three scenarios), FIM-10 (Windows remains user-only), `cli-entrypoints`. Platform: all; Windows case windows-native.
 - [x] 1.6 Add characterization tests pinning CLI output byte-for-byte for `config list`, `config show` (redacted), `config path`, `status --json` raw passthrough and the `service status` note/native-output ordering (fake backend where native is unavailable). Traces WB-16, FIM-19, FIM-22, `config-management-commands`, `connection-path-status`. Platform: all; ordering on systemd linux-native.
-- [ ] 1.7 Add acceptance characterization for unknown fields, legacy `multiplex`, hostname targets and NodeId-length-at-load validation stage. Traces WB-17 (Previously accepted configuration still loads), `tunnel-configuration`.
-- [ ] 1.8 Add status-publishing characterization: initial write before first admission, unchanged observation not rewritten, retry after failed write, file kept when the flush join times out. Traces WB-12 (both scenarios), WB-13 (all three scenarios), `connection-path-status`.
+- [x] 1.7 Add acceptance characterization for unknown fields, legacy `multiplex`, hostname targets and NodeId-length-at-load validation stage. Traces WB-17 (Previously accepted configuration still loads), `tunnel-configuration`.
+- [x] 1.8 Add status-publishing characterization: initial write before first admission, unchanged observation not rewritten, retry after failed write, file kept when the flush join times out. Traces WB-12 (both scenarios), WB-13 (all three scenarios), `connection-path-status`.
 
 ## 2. In-package boundaries: drain context, ownership and redaction (Migration step 2)
 
