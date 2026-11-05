@@ -54,3 +54,9 @@ Deviation (user policy in AGENTS.md overrides step 6): worktrees are managed wit
 ## Next step
 
 Wait for the PR run to complete task 4.4 (six test jobs, `e2e (linux)` relay healthy and `serve_access_tunnel` 4 passed, `e2e (windows)` Task Scheduler log), tick 4.4, then the owner reviews. After approval, run `/opsx-archive` on `spec/split-unit-e2e-tests`, push the archive commits, then merge the PR.
+
+## Task 4.4 evidence (PR #173 run 42039703639, head a4ca04f, all success)
+
+- `unit (linux)` 151 s, `unit (macos)` 231 s, `unit (windows)` 264 s; `e2e (linux)` 441 s, `e2e (macos)` 466 s, `e2e (windows)` 708 s; `lint` 29 s, `scripts` 22 s, `ci-ok` success.
+- `e2e (linux)`: pulled `n0computer/iroh-relay:v1.4.1`, relay healthy; `Relay e2e (self-hosted relay)` → `test result: ok. 4 passed; 0 failed` (76.20 s).
+- `e2e (windows)`: `Service lifecycle (Task Scheduler)` → `test user_background_task_lifecycle ... ok`, `6 passed; 0 failed`.
