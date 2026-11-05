@@ -5,10 +5,10 @@ Single writer, single worktree. Run in order 1 → 4. Platforms: Linux, macOS an
 Owns: `tests/serve_access_tunnel.rs`.
 Scenarios: "Local run without a relay", "Relay suite in CI" (test side).
 
-- [ ] 1.1 Add `fn test_relay_url() -> Option<String>` reading `IROH_TUNNEL_TEST_RELAY_URL` (design D3)
-- [ ] 1.2 When set, write `[node] relay_urls = ["<url>"]` into every generated serve and access config, and build `MiniServe` with `RelayMode::Custom` from that URL plus `CaTlsConfig::insecure_skip_verify()` (it bypasses the engine); when unset, keep today's behaviour exactly
-- [ ] 1.3 Keep every `#[ignore]`; update the module doc to describe both runs (public relays by hand, self-hosted relay via the variable)
-- [ ] 1.4 Verify: `cargo test --all-features --locked --test serve_access_tunnel` reports 4 ignored, 0 run; `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` clean
+- [x] 1.1 Add `fn test_relay_url() -> Option<String>` reading `IROH_TUNNEL_TEST_RELAY_URL` (design D3)
+- [x] 1.2 When set, write `[node] relay_urls = ["<url>"]` into every generated serve and access config, and build `MiniServe` with `RelayMode::Custom` from that URL plus `CaTlsConfig::insecure_skip_verify()` (it bypasses the engine); when unset, keep today's behaviour exactly
+- [x] 1.3 Keep every `#[ignore]`; update the module doc to describe both runs (public relays by hand, self-hosted relay via the variable)
+- [x] 1.4 Verify: `cargo test --all-features --locked --test serve_access_tunnel` reports 4 ignored, 0 run; `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` clean
 
 ## 2. PR jobs (`.github/workflows/ci.yml`)
 
