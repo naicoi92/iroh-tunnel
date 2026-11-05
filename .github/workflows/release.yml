@@ -1,30 +1,28 @@
-# Release pipeline — on a `v*` tag push builds, signs and VERIFIES the real
-# artifacts and uploads them to a DRAFT release (ADR-0002, issue #100).
-# Nothing becomes public here: publishing the release, the Homebrew cask and the
-# images is `promote.yml`, run by hand only after the final #97 evidence exists.
+# Release stage — a `v*` tag push runs the whole pipeline and ends in
+# deployment (OpenSpec change optimize-ci-cd).
 #
-# Building is native + parallel (build.yml), packaging is standalone nFPM, and
-# the checksums are signed keyless with cosign (Sigstore) by THIS workflow, so
+#   preflight ─ build (8 targets ∥) ─ package ─ sign + verify ─┬─ github-release
+#                                                              ├─ images
+#                                                              └─ homebrew
+#
+# preflight refuses anything but a vX.Y.Z[-pre] tag on a commit reachable from
+# main whose merged PR head passed the `ci-ok` check.
+#
+# The checksums are signed keyless with cosign (Sigstore) by THIS workflow, so
 # the certificate identity is
 #   https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/<tag>
 # issuer https://token.actions.githubusercontent.com — what `update` pins.
+# Only the signing job requests an OIDC token; it runs release.yml itself (not
+# a reusable workflow) so that identity stays exact.
 #
-#   gate (fmt ∥ clippy ∥ test) ──────────────────────────────┐
-#   build (8 targets ∥) ─┬─ package ─ sign ─ verify ─ draft ──┘
-#                        └─ docker (rehearsal, not pushed)
-#
-# `verify` runs the shipped SigstoreVerifier (#95) on the signed files, incl.
-# wrong identity, changed payload and missing/invalid material.
-# Re-running (workflow_dispatch on a tag ref or "Re-run jobs") replaces the
-# assets of an existing DRAFT; a published release is never modified.
+# This file currently holds preflight, build and package; the sign, verify and
+# publish jobs are appended by the following change task.
 
 name: release
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+    tags: ["v*"]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -34,47 +32,196 @@ permissions:
   contents: read
 
 jobs:
-  # Safety net run in parallel with the build (no wall-clock cost). Windows is
-  # skipped: the tagged commit already passed the full PR matrix.
-  gate:
-    uses: ./.github/workflows/checks.yml
-    with:
-      windows: false
-
-  build:
-    uses: ./.github/workflows/build.yml
-
-  package:
-    needs: build
-    uses: ./.github/workflows/package.yml
-    with:
-      version: ${{ needs.build.outputs.version }}
-
-  # Image rehearsal only: pushing to ghcr.io is public promotion and is done by
-  # promote.yml, not by a tag (#141).
-  docker:
-    needs: [gate, build]
-    uses: ./.github/workflows/docker.yml
-    with:
-      push: false
-      version: ${{ needs.build.outputs.version }}
-    permissions:
-      contents: read
-
-  # Checksums and keyless signatures. This is the only job with `id-token`, and
-  # it runs release.yml itself (not a reusable workflow), so the certificate
-  # identity is exactly
-  #   https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/<tag>
-  # which is what the updater pins (crates/host/src/update/, #95).
-  sign:
-    name: checksums + keyless signature
-    needs: [gate, build, package]
+  preflight:
+    name: preflight
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      checks: read
+      pull-requests: read
+    outputs:
+      version: ${{ steps.pf.outputs.version }}
+      prerelease: ${{ steps.pf.outputs.prerelease }}
     env:
-      VERSION: ${{ needs.build.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag, main ancestry and ci-ok
+        id: pf
+        run: |
+          set -euo pipefail
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          if [[ ! "$GITHUB_REF_NAME" =~ $re ]]; then
+            echo "tag $GITHUB_REF_NAME is not vX.Y.Z[-pre]" >&2
+            exit 1
+          fi
+
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$GITHUB_SHA is not reachable from main" >&2
+            exit 1
+          fi
+
+          pr_head=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq "[.[] | select(.merge_commit_sha == \"$GITHUB_SHA\")][0].head.sha // empty")
+          if [[ -z "$pr_head" ]]; then
+            echo "no merged pull request for $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          concl=$(gh api "repos/$GITHUB_REPOSITORY/commits/$pr_head/check-runs?check_name=ci-ok" \
+            --jq '[.check_runs[]] | sort_by(.completed_at) | last | .conclusion // empty')
+          if [[ "$concl" != "success" ]]; then
+            echo "ci-ok on $pr_head is '${concl:-missing}', expected success" >&2
+            exit 1
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release \`$GITHUB_REF_NAME\` (prerelease: $prerelease): PR head \`$pr_head\` passed ci-ok." >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build (${{ matrix.id }})
+    needs: [preflight]
+    runs-on: ${{ matrix.runner }}
+    # The steps below are bash; Windows runners default to PowerShell.
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      # One broken target fails the whole build, so stop the siblings instead of
+      # burning runner minutes on a build that cannot be used.
+      fail-fast: true
+      matrix:
+        include:
+          - { id: gnu-amd64,     runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,      os: linux,  arch: amd64,   suffix: "" }
+          - { id: gnu-arm64,     runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu,     os: linux,  arch: arm64,   suffix: "" }
+          - { id: musl-amd64,    runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,     os: linux,  arch: amd64,   suffix: "-musl", musl: true }
+          - { id: musl-arm64,    runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl,    os: linux,  arch: arm64,   suffix: "-musl", musl: true }
+          - { id: musl-riscv64,  runner: ubuntu-latest,    target: riscv64gc-unknown-linux-musl,  os: linux,  arch: riscv64gc, suffix: "-musl", zig: true }
+          - { id: darwin-arm64,  runner: macos-15,         target: aarch64-apple-darwin,          os: darwin, arch: arm64,   suffix: "" }
+          - { id: windows-amd64, runner: windows-latest,   target: x86_64-pc-windows-msvc,        os: windows, arch: amd64,  suffix: "", ext: ".exe" }
+          - { id: windows-arm64, runner: windows-11-arm,   target: aarch64-pc-windows-msvc,       os: windows, arch: arm64,  suffix: "", ext: ".exe" }
+    env:
+      # Statically link PCRE2 for the `regex` crate so binaries are portable
+      # across distros without a libpcre2 shared library at runtime.
+      PCRE2_SYS_STATIC: "1"
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      # Full history: build.rs resolves APP_VERSION via `git describe`.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.target }}
+          cache-key: release-${{ matrix.id }}
+
+      - name: Install musl toolchain
+        if: matrix.musl
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+          # cc-rs (C deps such as ring) and the final link must both use musl.
+          key="${TARGET//-/_}"
+          echo "CC_${key}=musl-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${key^^}_LINKER=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Install zig + cargo-zigbuild
+        if: matrix.zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.zig
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          ZIG: ${{ matrix.zig }}
+        run: |
+          if [ "$ZIG" = "true" ]; then sub=zigbuild; else sub=build; fi
+          cargo "$sub" --release --locked --target "$TARGET" --bins
+
+      - name: Smoke test (native binaries)
+        if: ${{ !matrix.zig }}
+        env:
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          echo "runner: $RUNNER_OS $RUNNER_ARCH"
+          out="$("target/$TARGET/release/iroh-tunnel${EXT}" --version)"
+          echo "$out"
+          [[ "$out" == *"$VERSION"* ]] || { echo "version mismatch: expected $VERSION"; exit 1; }
+          for b in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
+            "target/$TARGET/release/${b}${EXT}" --help >/dev/null
+            echo "ok: $b starts on $RUNNER_OS $RUNNER_ARCH"
+          done
+
+      # One tarball per executable (issue #94); each holds only that binary.
+      - name: Archive
+        if: matrix.os != 'windows'
+        env:
+          TARGET: ${{ matrix.target }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          mkdir -p out
+          for b in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
+            cp "target/$TARGET/release/$b" "out/$b"
+            tar -czf "out/${b}-${VERSION}-${OS}-${ARCH}${SUFFIX}.tar.gz" \
+              -C out "$b" -C .. README.md LICENSE-APACHE LICENSE-MIT
+          done
+
+      # One .zip per executable (issue #124), holding only that .exe plus the
+      # README and licenses, flat (no directory inside).
+      - name: Archive (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out | Out-Null
+          foreach ($b in 'iroh-tunnel','iroh-tunnel-serve','iroh-tunnel-access') {
+            $stage = "stage/$b"
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Copy-Item "target/$env:TARGET/release/$b.exe" $stage
+            Copy-Item README.md,LICENSE-APACHE,LICENSE-MIT $stage
+            Compress-Archive -Path "$stage/*" -DestinationPath "out/$b-$env:VERSION-windows-$env:ARCH.zip"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: target-${{ matrix.id }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: package (deb + apk)
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,121 +231,50 @@ jobs:
         with:
           pattern: target-*
           path: in/
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: packages*
-          path: dist/
-          merge-multiple: true
 
-      - name: Collect assets and checksums
+      - name: Install nFPM
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo goreleaser/nfpm --pattern 'nfpm_*_Linux_x86_64.tar.gz' --dir /tmp/nfpm
+          tar -xzf /tmp/nfpm/nfpm_*_Linux_x86_64.tar.gz -C /tmp/nfpm nfpm
+          sudo install /tmp/nfpm/nfpm /usr/local/bin/nfpm
+
+      - name: Build packages
         run: |
           mkdir -p dist
-          cp in/*/*.tar.gz in/*/*.zip dist/
-          cd dist
-          # Linux and Windows archives + packages, and darwin on its own.
-          sha256sum ./*.tar.gz ./*.zip ./*.deb ./*.apk | grep -v -- '-darwin-' | sed 's# \./# #' > checksums.txt
-          sha256sum ./*-darwin-*.tar.gz | sed 's# \./# #' > checksums-darwin.txt
-          cat checksums.txt checksums-darwin.txt
-
-      - uses: sigstore/cosign-installer@v4.1.2
-        with:
-          cosign-release: v3.1.4
-
-      # Keyless: the certificate is issued to this workflow run's OIDC token and
-      # logged in the Sigstore transparency log. The bundle is the verification
-      # material the updater fetches as <checksums file>.sigstore.json.
-      - name: Sign checksums (keyless)
-        working-directory: dist
-        run: |
-          for f in checksums.txt checksums-darwin.txt; do
-            cosign sign-blob --yes --new-bundle-format \
-              --bundle "$f.sigstore.json" "$f"
-          done
-
-      - name: Verify the complete artifact set
-        run: packaging/verify-release-set.sh dist "$VERSION"
+          pack() { # <artifact-id> <pkg-arch> <format> <name> <alias> <description>
+            export NAME="$4" ALIAS="$5" DESCRIPTION="$6" ARCH="$2" \
+              BINARY="$PWD/in/target-$1/$4"
+            # nFPM does not expand env vars in file paths, so render first.
+            # shellcheck disable=SC2016 # the literal ${VAR} list is envsubst's argument
+            envsubst '${NAME} ${ALIAS} ${ARCH} ${BINARY} ${VERSION} ${DESCRIPTION}' \
+              < packaging/nfpm.yaml > "$RUNNER_TEMP/nfpm.yaml"
+            nfpm package --config "$RUNNER_TEMP/nfpm.yaml" --packager "$3" \
+              --target "dist/${4}_${VERSION}_$2.$3"
+          }
+          while IFS=: read -r name alias desc; do
+            pack gnu-amd64 amd64 deb "$name" "$alias" "$desc"
+            pack gnu-arm64 arm64 deb "$name" "$alias" "$desc"
+            pack musl-amd64 amd64 apk "$name" "$alias" "$desc"
+            pack musl-arm64 arm64 apk "$name" "$alias" "$desc"
+            pack musl-riscv64 riscv64 apk "$name" "$alias" "$desc"
+          done <<'LIST'
+          iroh-tunnel:it:P2P port-forwarding tunnel (TCP/UDP) via Iroh (all-in-one: Serve and Access).
+          iroh-tunnel-serve:its:P2P port-forwarding tunnel (TCP/UDP) via Iroh (Serve role only).
+          iroh-tunnel-access:ita:P2P port-forwarding tunnel (TCP/UDP) via Iroh (Access role only).
+          LIST
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-set
-          path: dist/
+          name: packages
+          path: dist/*.deb
           if-no-files-found: error
-          retention-days: 30
-
-  # Verifies the REAL signed artifacts with the verifier the updater ships
-  # (SigstoreVerifier, #95): pinned issuer and exact identity of this run, plus
-  # wrong identity, changed payload and missing/invalid material.
-  verify:
-    name: verify signed artifacts
-    needs: [build, sign]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      RELEASE_DIST: ${{ github.workspace }}/release-set
-      RELEASE_TAG: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@v7
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
         with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache-key: release-verify
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-set
-          path: release-set/
-      - name: Verify with the shipped verifier
-        run: |
-          cargo test --locked --test release_artifacts -- --ignored --nocapture --test-threads=1 \
-            | tee "$RUNNER_TEMP/verify.log"
-          {
-            echo "### Signed release set \`$RELEASE_TAG\`"
-            echo "Issuer \`https://token.actions.githubusercontent.com\`, identity" \
-                 "\`https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/$RELEASE_TAG\`"
-            echo
-            echo '```'
-            grep '^sha256:' "$RUNNER_TEMP/verify.log"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # Uploads to a DRAFT and stops. Publishing is `promote.yml`, run only after
-  # the final #97 evidence exists; nothing public changes here.
-  draft:
-    name: upload draft release
-    needs: [gate, build, verify]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.build.outputs.version }}
-      TAG: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-set
-          path: dist/
-
-      # Draft first so a half-uploaded release is never visible. Re-running
-      # replaces the assets of an existing DRAFT; a published release is never
-      # modified by this workflow.
-      - name: Create draft release and upload assets
-        run: |
-          if gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null | grep -q false; then
-            echo "release $TAG is already published; refusing to modify it" >&2
-            exit 1
-          fi
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            prerelease=()
-            [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
-            gh release create "$TAG" --draft --verify-tag --title "$TAG" \
-              --generate-notes "${prerelease[@]}"
-          fi
-          gh release upload "$TAG" dist/* --clobber
-          gh release view "$TAG" --json assets \
-            --jq '.assets[] | "\(.digest)  \(.name)"' | sort -k2 >> "$GITHUB_STEP_SUMMARY"
-
+          name: packages-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 7
