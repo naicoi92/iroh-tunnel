@@ -48,6 +48,7 @@ Answer yes to every question.
 Print what would be installed and change nothing.
 #>
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Parameters are read from script scope inside the helper functions; the analyzer cannot see across function bodies.')]
 param(
     [string]$Version = '',
     [string]$BinDir = '',
@@ -134,7 +135,11 @@ function Get-MachinePath {
     finally { $key.Close() }
 }
 
-function Set-MachinePath([string]$Value) {
+function Set-MachinePath {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Private helper; the caller already asks for confirmation (Confirm-Step) and honours -DryRun.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'The environment-change broadcast is best effort; failure must not abort the install.')]
+    param([string]$Value)
+
     if ($env:IROH_TUNNEL_PATH_FILE) {
         Set-Content -LiteralPath $env:IROH_TUNNEL_PATH_FILE -Value $Value -NoNewline
     }
