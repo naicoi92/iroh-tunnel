@@ -128,7 +128,9 @@ fn backend_status(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::super::fixtures::{in_isolated_home, run_status};
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

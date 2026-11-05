@@ -148,6 +148,8 @@ pub(crate) type Runner<'a> = dyn FnMut(&mut Command, OutputMode) -> io::Result<N
 
 /// Runs native commands for a backend, in the caller's [`OutputMode`].
 pub(crate) struct Native<'a> {
+    // Only `run` reads it; the Windows backend always captures.
+    #[cfg_attr(all(windows, not(test)), allow(dead_code))]
     mode: OutputMode,
     runner: &'a mut Runner<'a>,
     applied: Vec<AppliedEffect>,
@@ -166,6 +168,7 @@ impl<'a> Native<'a> {
 
     /// Run `command` in the caller's mode: inherited for the CLI, captured
     /// otherwise. The output is also kept for the operation's report.
+    #[cfg(any(unix, test))]
     pub(crate) fn run(&mut self, command: &mut Command) -> io::Result<NativeOutput> {
         let output = (self.runner)(command, self.mode)?;
         self.outputs.push(output.clone());
@@ -185,6 +188,7 @@ impl<'a> Native<'a> {
     /// Run `command` and always capture, whatever the caller's mode. For
     /// commands whose output the backend must read (launchctl `kill`'s
     /// "No process to signal", `schtasks` listings, `whoami`).
+    #[cfg(any(target_os = "macos", windows, test))]
     pub(crate) fn output(&mut self, command: &mut Command) -> io::Result<NativeOutput> {
         (self.runner)(command, OutputMode::Capture)
     }

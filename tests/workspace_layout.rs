@@ -7,6 +7,12 @@ use std::process::Command;
 use serde_json::Value;
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
+
+/// A source file with line endings normalized: a Windows checkout may
+/// convert to CRLF, and the checks below match LF-joined lines.
+fn read_source(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+}
 const MEMBERS: [&str; 3] = ["iroh-tunnel", "iroh-tunnel-host", "iroh-tunnel-engine"];
 /// Internal packages that must carry `publish = false`.
 const INTERNAL_PACKAGES: [&str; 2] = ["iroh-tunnel-host", "iroh-tunnel-engine"];
@@ -154,7 +160,7 @@ fn engine_sources_have_no_exit_signal_or_print() {
         if file_name(&file) == "testing.rs" {
             continue;
         }
-        let text = std::fs::read_to_string(&file).unwrap();
+        let text = read_source(&file);
         for (n, line) in non_test_lines(&text) {
             if line.trim_start().starts_with("//") {
                 continue;
@@ -201,7 +207,7 @@ fn host_offenders(forbidden: &[&str]) -> Vec<String> {
         if ["testing.rs", "fixtures.rs"].contains(&file_name(&file)) {
             continue;
         }
-        let text = std::fs::read_to_string(&file).unwrap();
+        let text = read_source(&file);
         for (n, line) in non_test_lines(&text) {
             if line.trim_start().starts_with("//") {
                 continue;
@@ -253,7 +259,7 @@ fn host_sources_open_no_listener() {
 #[test]
 fn ownership_bypass_is_test_utils_gated() {
     let gate = "#[cfg(feature = \"test-utils\")]";
-    let lib = std::fs::read_to_string(Path::new(ROOT).join("crates/host/src/lib.rs")).unwrap();
+    let lib = read_source(&Path::new(ROOT).join("crates/host/src/lib.rs"));
     assert!(
         lib.contains(&format!("{gate}\npub mod testing;")),
         "testing module is not test-utils gated in lib.rs"
@@ -263,7 +269,7 @@ fn ownership_bypass_is_test_utils_gated() {
         if file_name(&file) == "testing.rs" {
             continue;
         }
-        let text = std::fs::read_to_string(&file).unwrap();
+        let text = read_source(&file);
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let code = line.trim_start();
@@ -337,10 +343,7 @@ fn root_has_no_self_dev_dependency() {
 
 #[test]
 fn udp_decision_model_lives_in_engine() {
-    let text: String = engine_files()
-        .iter()
-        .map(|f| std::fs::read_to_string(f).unwrap())
-        .collect();
+    let text: String = engine_files().iter().map(|f| read_source(f)).collect();
     for needle in [
         "pub struct FlowId",
         "pub enum Admission",
@@ -368,7 +371,7 @@ fn engine_files_export_at_most_one_operation() {
         if ["lib.rs", "mod.rs", "types.rs", "testing.rs"].contains(&name) {
             continue;
         }
-        let text = std::fs::read_to_string(&file).unwrap();
+        let text = read_source(&file);
         let count = non_test_lines(&text)
             .iter()
             .filter(|(_, l)| l.starts_with("pub fn ") || l.starts_with("pub async fn "))
@@ -408,7 +411,7 @@ fn host_files_export_at_most_one_operation() {
         if ["lib.rs", "mod.rs", "types.rs", "testing.rs"].contains(&name) || in_backend {
             continue;
         }
-        let text = std::fs::read_to_string(&file).unwrap();
+        let text = read_source(&file);
         // Distinct names: a `cfg(unix)` / `cfg(not(unix))` twin is one operation.
         let count = non_test_lines(&text)
             .iter()

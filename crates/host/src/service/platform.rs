@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+#[cfg(unix)]
 use super::types::ServiceScope;
 
 /// Load a role config for `run`, enforcing the privileged trust policy when a
@@ -25,7 +26,9 @@ pub(crate) fn load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
 }
 
 /// The text of the currently installed system registration, if any: where a
-/// previous install's pin is read from to detect a retarget (SM-02).
+/// previous install's pin is read from to detect a retarget (SM-02). Only
+/// system installs read it, and those exist on Unix only.
+#[cfg(unix)]
 pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
     #[cfg(target_os = "linux")]
     {

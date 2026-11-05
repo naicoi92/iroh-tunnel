@@ -1,14 +1,17 @@
 //! Shared fixtures of the service unit tests.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use super::install::install_via;
 use super::native::fake::{Event, Events, FakeRunner};
 use super::native::{NativeOutput, ServiceCall};
+#[cfg(unix)]
 use super::status::status_via;
-use super::types::{
-    Environment, InstallOutcome, InstallRequest, ServiceFailure, ServiceScope, ServiceStatusReport,
-};
+#[cfg(unix)]
+use super::types::ServiceStatusReport;
+use super::types::{Environment, InstallOutcome, InstallRequest, ServiceFailure, ServiceScope};
 use crate::role::Role;
 
 pub(crate) fn tunnel_exe() -> PathBuf {
@@ -32,6 +35,7 @@ pub(crate) fn request(scope: Option<ServiceScope>) -> InstallRequest {
     }
 }
 
+#[cfg(unix)]
 pub(crate) const CAN_ANSWER: Environment = Environment {
     elevated: false,
     can_answer: true,
@@ -67,6 +71,7 @@ pub(crate) fn commands(log: &[Event]) -> Vec<&Event> {
 /// Re-run the named test in a child process whose `HOME` is a fresh
 /// directory, because registration paths and role locks are keyed by
 /// `HOME` and this process is multi-threaded.
+#[cfg(unix)]
 pub(crate) fn in_isolated_home(name: &str, body: impl FnOnce(&Path)) {
     const CHILD_MARKER: &str = "IROH_TUNNEL_SERVICE_TEST_CHILD";
     if std::env::var_os(CHILD_MARKER).is_none() {
@@ -90,6 +95,7 @@ pub(crate) fn in_isolated_home(name: &str, body: impl FnOnce(&Path)) {
     println!("IROH_CHILD_BODY_RAN {name}");
 }
 
+#[cfg(unix)]
 pub(crate) fn write_valid_config(dir: &Path) -> PathBuf {
     let path = dir.join("serve.toml");
     std::fs::write(
@@ -100,6 +106,7 @@ pub(crate) fn write_valid_config(dir: &Path) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
 pub(crate) fn run_status(
     responses: Vec<NativeOutput>,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
