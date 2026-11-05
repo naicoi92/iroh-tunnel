@@ -36,12 +36,12 @@ Scenarios: preflight scenarios ("Commit passed CI", "Pre-release tag", "Commit w
 - [x] 4.1 `preflight` job: tag format, ancestry of `origin/main`, PR-of-merge-commit lookup, latest `ci-ok` on the PR head, outputs `version`/`prerelease` (design D4)
 - [x] 4.2 `build` job: move the 8-target matrix from `build.yml` unchanged except version from preflight and 1-day retention (D5)
 - [x] 4.3 `package` job: move nFPM packaging from `package.yml` without the `verify-dist.sh` steps (D6)
-- [ ] 4.4 `sign` job: expected-set check, checksums, keyless signing, non-empty bundle check, `cosign verify-blob` with the pinned identity/issuer, upload `release-set` (D7)
-- [ ] 4.5 `github-release` job: fail if a release exists, create as a transient draft with all assets (pre-release when `-`), then publish it (D8)
-- [ ] 4.6 `images` job: 3-image matrix from the `target-gnu-*` artifacts, push to ghcr.io with today's tag rules (D8)
-- [ ] 4.7 `homebrew` job: stable only, after `github-release`, render cask from `checksums-darwin.txt` in `release-set`, push to the tap (D8)
+- [x] 4.4 `sign` job: expected-set check, checksums, keyless signing, non-empty bundle check, `cosign verify-blob` with the pinned identity/issuer, upload `release-set` (D7)
+- [x] 4.5 `github-release` job: fail if a release exists, create as a transient draft with all assets (pre-release when `-`), then publish it (D8)
+- [x] 4.6 `images` job: 3-image matrix from the `target-gnu-*` artifacts, push to ghcr.io with today's tag rules (D8)
+- [x] 4.7 `homebrew` job: stable only, after `github-release`, render cask from `checksums-darwin.txt` in `release-set`, push to the tap (D8)
 - [x] 4.8 Trigger only on `v*` tag push, keep `concurrency` with `cancel-in-progress: false`, `id-token: write` only on `sign`
-- [ ] 4.9 Delete `checks.yml`, `build.yml`, `package.yml`, `docker.yml`, `snapshot.yml`, `promote.yml`, `release-smoke.yml`
+- [x] 4.9 Delete `checks.yml`, `build.yml`, `package.yml`, `docker.yml`, `snapshot.yml`, `promote.yml`, `release-smoke.yml`
 
 ## 5. Docs and whole-change verification
 
