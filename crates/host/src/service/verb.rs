@@ -171,7 +171,19 @@ mod tests {
         let report = blocking_runtime().block_on(async {
             tokio::task::spawn_blocking(|| {
                 let mut runner = |c: &mut std::process::Command, _| {
-                    Ok(ok_output(c.get_program().to_string_lossy().into_owned()))
+                    #[allow(unused_mut)] // only Windows fills the listing
+                    let mut out = ok_output(c.get_program().to_string_lossy().into_owned());
+                    // Windows status first lists the tasks and refuses an
+                    // unregistered role, so the listing must name the task.
+                    #[cfg(windows)]
+                    {
+                        out.stdout = format!(
+                            "\"\\iroh-tunnel-serve{}\",\"N/A\",\"Ready\"\n",
+                            super::super::registration::instance_suffix()
+                        )
+                        .into_bytes();
+                    }
+                    Ok(out)
                 };
                 let mut notes = |_: &ServiceNote| {};
                 let mut call = ServiceCall::capture(&mut notes);
