@@ -16,7 +16,9 @@
 - **Branch**: `spec/optimize-ci-cd`
 - **Base branch**: `main`
 - **Final state**: `pr-open`
-- **PR URL**: `PENDING`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/172`
+
+Push note: the SSH key on this machine authenticates as `ttdua`, so `git push origin` was refused; the branch was pushed over HTTPS with the `gh` credential of `naicoi92` (owner of the remote), without changing the remote or tokens.
 
 No PR existed before finalize (no spec pre-review PR), so the feature branch was pushed for the first time and the PR was opened at the owner's explicit request ("Push và mở PR \"ci: optimize-ci-cd\"" in the Inbox thread `optimize-ci-cd`). Outcome is therefore `pr-created` rather than `pr-updated`.
 
@@ -33,7 +35,7 @@ Deviation (user policy in AGENTS.md overrides step 6): worktrees are managed wit
 
 ## PR comment
 
-- **PR comment status**: `PENDING`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/172#issuecomment-6654947558)
 
 ---
 
