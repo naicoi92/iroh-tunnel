@@ -1,2 +1,4 @@
 # Signed fixtures are verified byte for byte; never convert line endings.
 tests/fixtures/sigstore/* -text
+# CLI goldens pin exact bytes, LF included; a CRLF checkout breaks them.
+tests/fixtures/golden/* -text

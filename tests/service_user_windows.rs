@@ -74,7 +74,8 @@ impl Fixture {
     fn state(&self) -> PathBuf {
         iroh_tunnel_host::paths::default_state_dir().expect("default state dir")
     }
-    fn write_config(&self, relay: &str) -> Result<()> {
+    /// Write a config with a fresh key; returns the node id it runs as.
+    fn write_config(&self, relay: &str) -> Result<String> {
         let key = iroh::SecretKey::generate();
         std::fs::create_dir_all(self.config().parent().unwrap())?;
         std::fs::write(
@@ -85,7 +86,16 @@ impl Fixture {
                 iroh_tunnel_host::config::encode_secret_key(&key)
             ),
         )?;
-        Ok(())
+        Ok(key.public().to_string())
+    }
+    /// Wait for the status file of THIS fixture's node. The state directory
+    /// is the real per-user one, shared by every test, and a hard `/End`
+    /// leaves an earlier test's snapshot behind, so any status file is not
+    /// enough.
+    fn wait_for_own_status(&self, status_file: &Path, node_id: &str) -> Result<()> {
+        wait_for("status file from this test's task", || {
+            node_id_of(status_file).as_deref() == Some(node_id)
+        })
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
@@ -206,7 +216,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
-    fx.write_config(relay.as_ref())?;
+    let first_id = fx.write_config(relay.as_ref())?;
     let config = fx.config();
     let config = config.to_str().unwrap();
     let status_file = fx.state().join("serve-status.json");
@@ -214,10 +224,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
     // install registers a task for the current user and starts it.
     fx.ok(&["serve", "service", "install", "--user", "--config", config])?;
     assert!(fx.task_exists(), "task not registered");
-    wait_for("status file from the task", || {
-        node_id_of(&status_file).is_some()
-    })?;
-    let first_id = node_id_of(&status_file).unwrap();
+    fx.wait_for_own_status(&status_file, &first_id)?;
 
     // status reports the task.
     let status = fx.ok(&["serve", "service", "status", "--user"])?;
@@ -375,7 +382,7 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
-    fx.write_config(relay.as_ref())?;
+    let node_id = fx.write_config(relay.as_ref())?;
     let config = fx.config();
     let status_file = fx.state().join("serve-status.json");
 
@@ -390,9 +397,7 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
     assert!(installed.contains("Installed"), "{installed}");
     // The caller has exited; the task and the role remain.
     assert!(fx.task_exists(), "task not registered");
-    wait_for("status file from the task", || {
-        node_id_of(&status_file).is_some()
-    })?;
+    fx.wait_for_own_status(&status_file, &node_id)?;
     let status = fx.ok(&["serve", "status"])?;
     assert!(
         status.contains("serve is running") || status.contains("node_id"),
@@ -401,7 +406,8 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
 
     let pid = pid_of(&status_file).expect("pid in status file");
     let removed = fx.caller(&["--action", "uninstall"])?;
-    assert!(removed.contains("RegistrationRemoved"), "{removed}");
+    // A scheduled task has no registration file: deleting it is `Disabled`.
+    assert!(removed.contains("Disabled"), "{removed}");
     assert!(!fx.task_exists(), "task still registered");
     wait_for("the uninstalled task's process to exit", || !pid_alive(pid))?;
     Ok(())
@@ -415,7 +421,7 @@ async fn captured_schtasks_status_is_returned() -> Result<()> {
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
-    fx.write_config(relay.as_ref())?;
+    let node_id = fx.write_config(relay.as_ref())?;
     let config = fx.config();
     let status_file = fx.state().join("serve-status.json");
 
@@ -427,9 +433,7 @@ async fn captured_schtasks_status_is_returned() -> Result<()> {
         "--exe",
         BIN,
     ])?;
-    wait_for("status file from the task", || {
-        node_id_of(&status_file).is_some()
-    })?;
+    fx.wait_for_own_status(&status_file, &node_id)?;
     // `caller` pins an empty stderr: the native text comes back in the report.
     let report = fx.caller(&["--action", "status"])?;
     assert!(
