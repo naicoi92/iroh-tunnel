@@ -5,7 +5,7 @@
 **P2P port-forwarding tunnels over [Iroh](https://iroh.computer) — no public IP,
 no port forwarding, no relay to rent.**
 
-[![snapshot](https://github.com/naicoi92/iroh-tunnel/actions/workflows/snapshot.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/snapshot.yml)
+[![ci](https://github.com/naicoi92/iroh-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/ci.yml) [![release](https://github.com/naicoi92/iroh-tunnel/actions/workflows/release.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/release.yml)
 [![release](https://img.shields.io/github/v/release/naicoi92/iroh-tunnel)](https://github.com/naicoi92/iroh-tunnel/releases)
 [![rust](https://img.shields.io/badge/rust-1.91%2B-dea584?logo=rust)](Cargo.toml)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE-MIT)
@@ -932,8 +932,8 @@ For reporting vulnerabilities and the full policy, see
 | `crates/host/src/status/`  | atomic per-role status-file writers (`StatusWriter`)   |
 | `src/status_cmd.rs`        | `<role> status`: read the file, render the table       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
-| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |
-| `packaging/`               | nFPM config, Homebrew cask, `verify-dist.sh` checks    |
+| `.github/workflows/`       | CI (`ci`), cache warming (`cache`), release (`release`) |
+| `packaging/`               | nFPM config, Homebrew cask                             |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Releases

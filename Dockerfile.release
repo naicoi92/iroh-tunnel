@@ -1,4 +1,4 @@
-# Release image: packages prebuilt binaries (built by build.yml, packaged by docker.yml).
+# Release image: packages the prebuilt release binaries from the `release` workflow.
 #
 # Unlike the top-level `Dockerfile` (multi-stage, rebuilds from source for the
 # `docker-compose` demo / local builds), this image does NOT compile anything.

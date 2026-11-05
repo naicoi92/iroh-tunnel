@@ -20,6 +20,7 @@
   - `remove`, `list`, `show`, `edit` and `path` accept `--config`.
   - Windows: owner-only ACL equivalent for the config file is not enforced
     (unverified).
+- Releases publish automatically on a version tag (GitHub release, container images, Homebrew cask); draft/promote steps are gone.
 
 ### Added
 
