@@ -3,16 +3,13 @@
 #   changes ─┬─ lint          (fmt + clippy)                  if code changed
 #            ├─ unit (linux|macos|windows)
 #            │                (--lib --bins + doctests)       if code changed
-#            ├─ e2e (linux|macos|windows)
-#            │                (tests/*; windows adds the Task Scheduler
-#            │                 step, linux a self-hosted iroh-relay
-#            │                 container)                     if code changed
 #            ├─ scripts       (shellcheck + actionlint + PSScriptAnalyzer)
 #            │                                                if scripts/workflows changed
 #            └─ ci-ok         (single required check; always reports)
 #
-# Release build, packages and images are NOT run on PRs. They run only on `v*`
-# tags (release.yml); cache.yml warms caches on main. There is no pre-merge
+# e2e tests are NOT run on PRs: they run on every push to main (e2e.yml) and
+# gate releases. Release build, packages and images run only on `v*` tags
+# (release.yml); cache.yml warms caches on main. There is no pre-merge
 # rehearsal.
 #
 # The workflow itself has no path filter so `ci-ok` always reports: a docs-only
@@ -104,82 +101,6 @@ jobs:
       - run: cargo test --workspace --all-features --locked --lib --bins
       - run: cargo test --workspace --all-features --locked --doc
 
-  e2e:
-    name: e2e (${{ matrix.name }})
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            os: ubuntu-latest
-          - name: macos
-            os: macos-15
-          - name: windows
-            os: windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache-key: e2e
-      - run: cargo test --workspace --all-features --locked --test '*'
-      - name: Service lifecycle (Task Scheduler)
-        if: matrix.name == 'windows'
-        shell: pwsh
-        env:
-          IROH_TUNNEL_E2E_SERVICE: "1"
-        run: cargo test --all-features --locked --test service_user_windows -- --nocapture --test-threads=1
-      # The image tag must match the `iroh` version in Cargo.lock.
-      - name: Start self-hosted relay
-        if: ${{ !cancelled() && matrix.name == 'linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          relay="$RUNNER_TEMP/relay"
-          mkdir -p "$relay/certs"
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-            -subj /CN=localhost \
-            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
-            -keyout "$relay/certs/default.key" -out "$relay/certs/default.crt"
-          cat > "$relay/config.toml" <<'EOF'
-          enable_relay = true
-          http_bind_addr = "0.0.0.0:3340"
-          enable_quic_addr_discovery = false
-          enable_metrics = false
-          [tls]
-          https_bind_addr = "0.0.0.0:3443"
-          cert_mode = "Manual"
-          cert_dir = "/certs"
-          EOF
-          # Throwaway key: readable regardless of the container uid.
-          chmod 755 "$relay/certs"
-          chmod 644 "$relay/certs/default.crt" "$relay/certs/default.key" "$relay/config.toml"
-          docker run -d --name iroh-relay -p 127.0.0.1:3443:3443 \
-            -v "$relay/certs:/certs:ro" \
-            -v "$relay/config.toml:/config.toml:ro" \
-            n0computer/iroh-relay:v1.4.1 --config-path /config.toml
-          ok=0
-          for _ in $(seq 1 30); do
-            [ "$(docker inspect -f '{{.State.Running}}' iroh-relay)" = true ] || break
-            if curl -fsk https://127.0.0.1:3443/healthz >/dev/null; then ok=1; break; fi
-            sleep 2
-          done
-          [ "$ok" = 1 ] || { docker ps -a; docker logs iroh-relay; exit 1; }
-      - name: Relay e2e (self-hosted relay)
-        if: ${{ !cancelled() && matrix.name == 'linux' }}
-        env:
-          IROH_TUNNEL_TEST_RELAY_URL: https://127.0.0.1:3443
-        run: cargo test --workspace --all-features --locked --test serve_access_tunnel -- --ignored --test-threads=1
-      - name: Stop relay
-        if: ${{ always() && matrix.name == 'linux' }}
-        shell: bash
-        run: |
-          docker logs iroh-relay || true
-          docker rm -f iroh-relay || true
 
   # Static checks for shell scripts and workflows; seconds, no build needed.
   scripts:
@@ -203,7 +124,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, lint, unit, e2e, scripts]
+    needs: [changes, lint, unit, scripts]
     runs-on: ubuntu-latest
     steps:
       # `skipped` is fine (path filter); `failure` / `cancelled` is not.

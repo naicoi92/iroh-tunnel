@@ -6,7 +6,8 @@
 #                                                              └─ homebrew
 #
 # preflight refuses anything but a vX.Y.Z[-pre] tag on a commit reachable from
-# main whose merged PR head passed the `ci-ok` check.
+# main whose merged PR head passed `ci-ok` and whose own commit passed the
+# `e2e-ok` check from e2e.yml (tag only after e2e is green on main).
 #
 # The checksums are signed keyless with cosign (Sigstore) by THIS workflow, so
 # the certificate identity is
@@ -51,7 +52,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check tag, main ancestry and ci-ok
+      - name: Check tag, main ancestry, ci-ok and e2e-ok
         id: pf
         run: |
           set -euo pipefail
@@ -81,13 +82,20 @@ jobs:
             exit 1
           fi
 
+          e2e=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=e2e-ok" \
+            --jq '[.check_runs[]] | sort_by(.completed_at) | last | .conclusion // empty')
+          if [[ "$e2e" != "success" ]]; then
+            echo "e2e-ok on $GITHUB_SHA is '${e2e:-missing}', expected success (tag after e2e.yml is green on main)" >&2
+            exit 1
+          fi
+
           version="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; else prerelease=false; fi
           {
             echo "version=$version"
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
-          echo "Release \`$GITHUB_REF_NAME\` (prerelease: $prerelease): PR head \`$pr_head\` passed ci-ok." >> "$GITHUB_STEP_SUMMARY"
+          echo "Release \`$GITHUB_REF_NAME\` (prerelease: $prerelease): PR head \`$pr_head\` passed ci-ok and \`$GITHUB_SHA\` passed e2e-ok." >> "$GITHUB_STEP_SUMMARY"
 
   build:
     name: build (${{ matrix.id }})

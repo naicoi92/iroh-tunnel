@@ -1,10 +1,11 @@
 # Seeds the Rust build caches that PR jobs restore from.
 #
 # GitHub scopes caches by ref: a PR can read main's cache but not another PR's.
-# This workflow only compiles (never runs tests) on main, warming the lint,
-# unit and e2e caches on Linux, macOS and Windows with the same cache keys and
-# test selectors as ci.yml, so PRs start from a warm target/. It runs only when
-# dependencies or the toolchain/cache setup change.
+# This workflow only compiles (never runs tests) on main, warming the lint and
+# unit caches on Linux, macOS and Windows with the same cache keys and test
+# selectors as ci.yml, so PRs start from a warm target/. The e2e caches are
+# saved by e2e.yml itself. It runs only when dependencies or the toolchain/cache
+# setup change.
 
 name: cache
 
@@ -39,13 +40,12 @@ jobs:
           cache-key: lint
       - run: cargo clippy --workspace --all-targets --all-features --locked
 
-  build:
-    name: cache (${{ matrix.kind }}, ${{ matrix.os }})
+  unit:
+    name: cache (unit, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        kind: [unit, e2e]
         os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v7
@@ -53,9 +53,6 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: ${{ matrix.kind }}
+          cache-key: unit
       # Doctests are compiled at test time, so they need no warm-up.
-      - if: matrix.kind == 'unit'
-        run: cargo test --workspace --all-features --locked --lib --bins --no-run
-      - if: matrix.kind == 'e2e'
-        run: cargo test --workspace --all-features --locked --test '*' --no-run
+      - run: cargo test --workspace --all-features --locked --lib --bins --no-run
