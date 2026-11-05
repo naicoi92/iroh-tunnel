@@ -164,7 +164,7 @@ Confidence: inferred
 
 ### Requirement: Build version derived from git tag
 The system SHALL set the compile-time `APP_VERSION` to the version of a valid semver tag (optional `v` stripped) at HEAD, and otherwise to `<CARGO_PKG_VERSION>-dev`, including when there is no `.git`, the tag is not at HEAD, or the tag is not valid semver. The release stage SHALL take the artifact version from the tag, so file names match `--version`.
-Evidence: build.rs:3-14, build.rs:32-62, .github/workflows/release.yml (preflight)
+Evidence: build.rs:3-14, build.rs:32-62, .github/workflows/release.yml:36-90 (preflight), .github/workflows/release.yml:92-218 (build)
 Confidence: inferred
 
 #### Scenario: Tagged build
@@ -177,7 +177,7 @@ Confidence: inferred
 
 ### Requirement: Release build matrix and archives
 The system SHALL build and archive each of the three executables for all eight release targets in the release stage, with README and licenses in each role archive, and smoke-test version/help on non-zig targets on their native runners.
-Evidence: .github/workflows/build.yml:73-187 (moved into release.yml, design.md D5). Archive contents beyond the native smoke check are not verified by CI (owner decision: tooling is not tested).
+Evidence: .github/workflows/release.yml:92-218 (build job, design.md D5). Archive contents beyond the native smoke check are not verified by CI (owner decision: tooling is not tested).
 Confidence: inferred
 
 #### Scenario: Supported targets and naming
@@ -215,7 +215,7 @@ Confidence: inferred
 
 ### Requirement: Role container images
 The system SHALL build one distroless image per executable for amd64/arm64 from the signed glibc release binaries and publish it on every release, and SHALL direct in-container updates to redeploy instead of replacement.
-Evidence: Dockerfile.release:14-28, Dockerfile.release.serve:7-17, Dockerfile.release.access:7-17, design.md D8. Image contents are not verified by CI (owner decision: tooling is not tested).
+Evidence: Dockerfile.release:14-28, Dockerfile.release.serve:7-17, Dockerfile.release.access:7-17, .github/workflows/release.yml:426-515 (images job, design.md D8). Image contents are not verified by CI (owner decision: tooling is not tested).
 Confidence: inferred
 
 #### Scenario: Runtime and promotion tags
@@ -232,7 +232,7 @@ Confidence: inferred
 
 ### Requirement: Signed, complete release set
 The system SHALL produce `checksums.txt` (Linux and Windows archives and packages) and `checksums-darwin.txt` (Darwin archives) on version tags, require the expected set (three role archives for each of the eight targets, three .deb for each of two glibc targets, three .apk for each of three musl targets, and nothing else), check every listed file against them, and sign both keyless with cosign before any publication; each signature bundle SHALL be non-empty.
-Evidence: .github/workflows/release.yml:93-126 (kept in the sign job, design.md D7)
+Evidence: .github/workflows/release.yml:286-379 (sign job, design.md D7)
 Confidence: inferred
 
 #### Scenario: Signing identity and checksum names
@@ -249,7 +249,7 @@ Confidence: inferred
 
 ### Requirement: Signature verification of real release artifacts
 The system SHALL, in the release run and before any publication, verify each signature bundle with `cosign verify-blob` against the pinned issuer `https://token.actions.githubusercontent.com` and the exact identity `https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/<tag>` that the shipped updater pins, and SHALL fail the release when verification fails.
-Evidence: .github/workflows/release.yml:128-163 (replaced by cosign in the sign job, design.md D7); the shipped verifier's own accept/reject logic stays covered by unit tests in crates/host/src/update/
+Evidence: .github/workflows/release.yml:286-379 (cosign verify-blob in the sign job, design.md D7); the shipped verifier's own accept/reject logic stays covered by unit tests in crates/host/src/update/
 Confidence: inferred
 
 #### Scenario: Valid bundle
@@ -262,7 +262,7 @@ Confidence: inferred
 
 ### Requirement: Homebrew cask rendering
 The system SHALL render a Homebrew cask for `iroh-tunnel` that downloads the `darwin-arm64` tarball of the given version, requires arm64, links the `iroh-tunnel` binary, clears the quarantine attribute, creates the `it` symlink after install and removes it on uninstall.
-Evidence: packaging/homebrew-cask.sh:1-42, .github/workflows/release.yml (homebrew job)
+Evidence: packaging/homebrew-cask.sh:1-42, .github/workflows/release.yml:519-561 (homebrew job)
 Confidence: inferred
 
 #### Scenario: Render
