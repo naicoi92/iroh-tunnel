@@ -16,7 +16,7 @@
 - **Branch**: `spec/split-unit-e2e-tests`
 - **Base branch**: `main`
 - **Final state**: `pr-open`
-- **PR URL**: `PENDING`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/173`
 
 No PR existed before finalize, so the feature branch was pushed for the first time and the PR was opened at the owner's explicit request ("Push và mở PR \"ci: split unit and e2e test jobs\"" in the Inbox thread `split-unit-e2e-tests`).
 
@@ -33,7 +33,7 @@ Deviation (user policy in AGENTS.md overrides step 6): worktrees are managed wit
 
 ## PR comment
 
-- **PR comment status**: `PENDING`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/173#issuecomment-6659716974)
 
 ---
 
