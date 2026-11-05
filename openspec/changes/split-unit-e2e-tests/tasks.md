@@ -15,11 +15,11 @@ Scenarios: "Local run without a relay", "Relay suite in CI" (test side).
 Owns: `.github/workflows/ci.yml`.
 Scenarios: "Code change", "A check fails", "Unit failure reported early", "New integration test file", "Exact coverage", "Doctest added", "Lifecycle runs on Windows", "Linux unaffected", "Relay suite in CI", "Relay does not start"; unchanged: "Installer script change only", "Workflow change only", "Docs-only change", "Superseded push".
 
-- [ ] 2.1 Replace `test-linux` / `test-windows` with `unit` and `e2e` jobs, each a matrix over Linux (`ubuntu-latest`), macOS (`macos-15`) and Windows (`windows-latest`), selectors (unit adds a `--doc` step), `fail-fast: false` and cache keys per design D1
-- [ ] 2.2 Move the Task Scheduler step (unchanged command and env) into the Windows cell of `e2e`
-- [ ] 2.3 Add the self-hosted relay steps to the Linux cell of `e2e` (certificate, config, `docker run n0computer/iroh-relay:v1.4.1`, health wait, `--ignored` run with `IROH_TUNNEL_TEST_RELAY_URL`, always-logs-and-remove; run even if the e2e suite failed) per design D4, with a comment tying the image tag to the `iroh` version in `Cargo.lock`
-- [ ] 2.4 Update `ci-ok.needs` to `[changes, lint, unit, e2e, scripts]` (body unchanged) and the header diagram
-- [ ] 2.5 Verify: `actionlint` clean; extract the relay shell steps and `shellcheck -s bash` them
+- [x] 2.1 Replace `test-linux` / `test-windows` with `unit` and `e2e` jobs, each a matrix over Linux (`ubuntu-latest`), macOS (`macos-15`) and Windows (`windows-latest`), selectors (unit adds a `--doc` step), `fail-fast: false` and cache keys per design D1
+- [x] 2.2 Move the Task Scheduler step (unchanged command and env) into the Windows cell of `e2e`
+- [x] 2.3 Add the self-hosted relay steps to the Linux cell of `e2e` (certificate, config, `docker run n0computer/iroh-relay:v1.4.1`, health wait, `--ignored` run with `IROH_TUNNEL_TEST_RELAY_URL`, always-logs-and-remove; run even if the e2e suite failed) per design D4, with a comment tying the image tag to the `iroh` version in `Cargo.lock`
+- [x] 2.4 Update `ci-ok.needs` to `[changes, lint, unit, e2e, scripts]` (body unchanged) and the header diagram
+- [x] 2.5 Verify: `actionlint` clean; extract the relay shell steps and `shellcheck -s bash` them
 
 ## 3. Cache stage (`.github/workflows/cache.yml`)
 
