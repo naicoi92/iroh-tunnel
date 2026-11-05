@@ -1,13 +1,26 @@
 ## MODIFIED Requirements
 
+### Requirement: Three single-purpose pipeline stages
+The system SHALL organise CI/CD into exactly four workflows, each started by one kind of event and none by manual dispatch: `ci.yml` on pull requests (unit test stage), `e2e.yml` on every push to `main` (end-to-end stage), `cache.yml` on pushes to `main` that change dependencies or toolchain setup (cache stage), and `release.yml` on `v*` tag pushes (release stage, which ends in deployment). No job SHALL run in more than one stage, and no other workflow SHALL exist in `.github/workflows/`.
+Evidence: design.md D1, D7
+Confidence: inferred
+
+#### Scenario: Workflow inventory
+- **WHEN** `.github/workflows/` is listed
+- **THEN** it contains `ci.yml`, `e2e.yml`, `cache.yml` and `release.yml` and nothing else
+
+#### Scenario: Merge to main
+- **WHEN** a pull request is merged into `main`
+- **THEN** `e2e.yml` runs on the merge commit; `cache.yml` runs only when its paths changed; no build, package or publish job runs
+
 ### Requirement: Pull-request test gate
-The system SHALL run, for every pull request and in parallel, only the checks its changed paths need: `lint`, the unit jobs and the e2e jobs for code paths, and `scripts` for script and workflow paths. Test job names SHALL identify the kind and the operating system (`unit (linux)`, `e2e (windows)`, ...), and a failing test job SHALL NOT cancel any other test job. A single `ci-ok` check SHALL always report and SHALL fail when any check failed or was cancelled. The pull-request stage SHALL NOT build release artifacts.
-Evidence: .github/workflows/ci.yml (changes, lint, unit, e2e, scripts, ci-ok), design.md D1
+The system SHALL run, for every pull request and in parallel, only the checks its changed paths need: `lint` and the unit jobs for code paths, and `scripts` for script and workflow paths. Pull requests SHALL NOT run end-to-end tests or build release artifacts. Unit job names SHALL identify the operating system (`unit (linux)`, `unit (macos)`, `unit (windows)`), and a failing unit job SHALL NOT cancel the others. A single `ci-ok` check SHALL always report and SHALL fail when any check failed or was cancelled.
+Evidence: .github/workflows/ci.yml (changes, lint, unit, scripts, ci-ok), design.md D1
 Confidence: inferred
 
 #### Scenario: Code change
 - **WHEN** a pull request changes a code path: `src/**`, `crates/**`, `tests/**`, `examples/**`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.github/actions/**` or `.github/workflows/ci.yml`
-- **THEN** `lint` (rustfmt check, clippy with warnings denied), the unit jobs on Linux, macOS and Windows, and the e2e jobs on Linux, macOS and Windows run in parallel and `ci-ok` reflects their results
+- **THEN** `lint` (rustfmt check, clippy with warnings denied) and the unit jobs on Linux, macOS and Windows run in parallel, no e2e test runs, and `ci-ok` reflects their results
 
 #### Scenario: Installer script change only
 - **WHEN** a pull request changes only `install.sh` or `install.ps1`
@@ -22,7 +35,7 @@ Confidence: inferred
 - **THEN** every check is skipped and `ci-ok` passes
 
 #### Scenario: A check fails
-- **WHEN** `lint`, any unit job, any e2e job or `scripts` fails or is cancelled
+- **WHEN** `lint`, any unit job or `scripts` fails or is cancelled
 - **THEN** `ci-ok` fails
 
 #### Scenario: Superseded push
@@ -30,8 +43,8 @@ Confidence: inferred
 - **THEN** the older run is cancelled
 
 ### Requirement: Windows test job includes the user-service lifecycle
-The system SHALL, in `e2e (windows)`, run the `service_user_windows` tests with `IROH_TUNNEL_E2E_SERVICE=1` after the e2e suite in the same job, reusing its build, so the tests gated on that variable drive the real Task Scheduler. The opt-in variable SHALL NOT be set for the Linux or macOS jobs, or for any unit job.
-Evidence: tests/service_user_windows.rs:1-20, tests/service_user.rs:336, design.md D1, D2
+The system SHALL, in `e2e (windows)` of `e2e.yml`, run the `service_user_windows` tests with `IROH_TUNNEL_E2E_SERVICE=1` after the e2e suite in the same job, reusing its build, so the tests gated on that variable drive the real Task Scheduler. The opt-in variable SHALL NOT be set for any Linux or macOS job, or for any unit job.
+Evidence: tests/service_user_windows.rs:1-20, tests/service_user.rs:336, design.md D1, D2, D7
 Confidence: inferred
 
 #### Scenario: Lifecycle runs on Windows
@@ -43,32 +56,61 @@ Confidence: inferred
 - **THEN** `IROH_TUNNEL_E2E_SERVICE` is not set, so `tests/service_user.rs` does not drive the host service manager
 
 ### Requirement: Cache stage compiles without running tests
-The system SHALL, on a push to `main` that changes a Cargo manifest, `Cargo.lock`, the `setup-rust` action or `cache.yml`, compile the lint target on Linux and the unit and e2e targets on Linux, macOS and Windows, with the same flags and cache keys as the pull-request jobs, and save the caches, without running any test.
+The system SHALL, on a push to `main` that changes a Cargo manifest, `Cargo.lock`, the `setup-rust` action or `cache.yml`, compile the lint target on Linux and the unit targets on Linux, macOS and Windows, with the same flags and cache keys as the pull-request jobs, and save the caches, without running any test.
 Evidence: .github/actions/setup-rust/action.yml, .github/workflows/cache.yml, design.md D5
 Confidence: inferred
 
 #### Scenario: Dependency bump merged
 - **WHEN** a change to `Cargo.lock` is pushed to `main`
-- **THEN** clippy compiles on Linux, the unit targets and the e2e targets compile with `--no-run` on Linux, macOS and Windows, and the caches are saved
+- **THEN** clippy compiles on Linux, the unit targets compile with `--no-run` on Linux, macOS and Windows, and the caches are saved
 
 #### Scenario: Source-only change merged
 - **WHEN** a push to `main` changes only files under `src/`
 - **THEN** `cache.yml` does not run
 
+### Requirement: Release preflight requires a passed test gate
+The system SHALL, before building a release, require a `vX.Y.Z[-<pre>]` tag on a commit reachable from `main` that is the merge commit of a pull request whose most recent `ci-ok` check run on its head commit succeeded, and whose own most recent `e2e-ok` check run succeeded. It SHALL NOT rerun lint or tests, and a failed preflight SHALL stop the release before any build. The aggregate checks SHALL keep the names `ci-ok` and `e2e-ok`.
+Evidence: .github/workflows/release.yml (preflight), design.md D8
+Confidence: inferred
+
+#### Scenario: Commit passed CI
+- **WHEN** `v1.2.3` is pushed on a merge commit whose pull request head has a successful `ci-ok` and which itself has a successful `e2e-ok`
+- **THEN** preflight passes and outputs version `1.2.3` and pre-release `false`
+
+#### Scenario: Pre-release tag
+- **WHEN** `v1.2.3-rc.1` passes preflight
+- **THEN** pre-release is `true`
+
+#### Scenario: Commit without a green gate
+- **WHEN** the tagged commit is not the merge commit of a pull request, or that pull request's most recent `ci-ok` did not succeed
+- **THEN** the release fails at preflight and nothing is built or published
+
+#### Scenario: E2E red or missing on the tagged commit
+- **WHEN** the tagged commit's most recent `e2e-ok` failed, was cancelled, or does not exist yet
+- **THEN** the release fails at preflight with a message naming `e2e-ok`, and nothing is built or published
+
+#### Scenario: Tag off main
+- **WHEN** the tagged commit is not reachable from `main`
+- **THEN** the release fails at preflight
+
+#### Scenario: Malformed tag
+- **WHEN** a tag such as `v1.2` is pushed
+- **THEN** the release fails at preflight
+
 ## ADDED Requirements
 
 ### Requirement: Unit and end-to-end tests are separate jobs
-The system SHALL run unit tests (`--lib --bins`: tests inside the crates' library and binary targets) and end-to-end tests (`--test '*'`: every integration test under `tests/`) as separate jobs on Linux, macOS and Windows. The selectors SHALL be disjoint and together cover every library, binary and integration-test target; doctests, if added, SHALL run in the unit jobs.
+The system SHALL run unit tests (`--lib --bins`) in the pull-request stage and end-to-end tests (`--test '*'`, every file under `tests/`) in the end-to-end stage, each on Linux, macOS and Windows. The selectors SHALL be disjoint and together cover every library, binary and integration-test target; doctests SHALL run with the unit tests.
 Evidence: design.md D1; local run 2026-11-05: 324 unit + 174 e2e = 498, the full workspace count
 Confidence: inferred
 
 #### Scenario: Unit failure reported early
 - **WHEN** a pull request breaks a unit test under `crates/*/src` or `src`
-- **THEN** `unit (<os>)` fails for each affected operating system, and the e2e jobs and the other unit jobs keep running to completion
+- **THEN** `unit (<os>)` fails for each affected operating system, and the other unit jobs keep running to completion
 
 #### Scenario: New integration test file
 - **WHEN** a new file is added under `tests/`
-- **THEN** it runs in the e2e jobs without any workflow change, and not in the unit jobs
+- **THEN** it runs in the e2e jobs on `main` without any workflow change, and not in the unit jobs
 
 #### Scenario: Exact coverage
 - **WHEN** the unit and e2e selectors are run on a commit without doctests
@@ -78,13 +120,30 @@ Confidence: inferred
 - **WHEN** a doctest is added to a crate
 - **THEN** the unit jobs run it (`--doc`), and the e2e jobs do not
 
+### Requirement: End-to-end stage on main
+The system SHALL, on every push to `main` and without a path filter, run `e2e (linux)`, `e2e (macos)` and `e2e (windows)` in parallel without one cancelling another, and report an always-present `e2e-ok` check on that commit that fails when any e2e job failed or was cancelled. A newer push SHALL NOT cancel the run for an older commit.
+Evidence: .github/workflows/e2e.yml, design.md D7
+Confidence: inferred
+
+#### Scenario: Merge runs e2e
+- **WHEN** a pull request is merged into `main`
+- **THEN** the e2e jobs run on the merge commit and `e2e-ok` reports their combined result on it
+
+#### Scenario: Docs-only merge
+- **WHEN** a merge to `main` changes only documentation
+- **THEN** the e2e jobs still run, so the commit has an `e2e-ok` and can be tagged
+
+#### Scenario: Back-to-back merges
+- **WHEN** a second merge lands while `e2e.yml` is still running for the first
+- **THEN** both commits complete their own e2e run and get their own `e2e-ok`
+
 ### Requirement: Relay e2e runs against a self-hosted relay
 The system SHALL, in `e2e (linux)` and regardless of the e2e suite result, run `tests/serve_access_tunnel.rs` against a self-hosted `n0computer/iroh-relay` container (tag = the `iroh` version in `Cargo.lock`, HTTPS, job-generated certificate) named by `IROH_TUNNEL_TEST_RELAY_URL`. This suite SHALL NOT use public relays in CI; without the variable it SHALL behave as before.
 Evidence: design.md D3, D4; crates/engine/src/endpoint/create.rs:32-35
 Confidence: inferred
 
 #### Scenario: Relay suite in CI
-- **WHEN** the Linux e2e job runs
+- **WHEN** `e2e (linux)` runs
 - **THEN** the relay container reports healthy, every `serve_access_tunnel` test runs with `--ignored` against the self-hosted relay and passes, and the container is removed afterwards
 
 #### Scenario: Relay does not start

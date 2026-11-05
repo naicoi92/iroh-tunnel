@@ -123,3 +123,30 @@
 - Relay suite in CI → Task 4 step 4 (`e2e (linux)` log)
 - Relay does not start → Task 2 step 3 (health wait with logs), reviewed in diff; not exercised by a failing run (recorded as not verified at runtime)
 - Local run without a relay → Task 1 step 4 (`4 ignored`)
+
+---
+
+## Task 5: Revision — e2e on main, unit-only PRs, release gate — implements 5.1, 5.2, 5.3, 5.4, 5.5, 5.6
+
+Owner revision after PR #173's first run (design D1 revision note, D5, D7, D8). The e2e job body proven on run 42039703639 moves unchanged.
+
+**Files:** Create `.github/workflows/e2e.yml`. Modify `.github/workflows/ci.yml`, `.github/workflows/cache.yml`, `.github/workflows/release.yml` (preflight step only), `CONTRIBUTING.md`, `CHANGELOG.md`.
+
+**Contracts (additions):**
+
+| Name | new / modified | Shape | public |
+|---|---|---|---|
+| `e2e.yml` | new | `on: push: branches: [main]` (no paths); `concurrency: { group: e2e-${{ github.sha }}, cancel-in-progress: false }`; `permissions: contents: read`; jobs `e2e` (matrix as before) → `e2e-ok` | no |
+| `e2e-ok` check | new | job id/name `e2e-ok`; `if: always()`; `needs: [e2e]`; body identical to `ci-ok` | yes — release preflight depends on the name |
+| `ci-ok` check | modified | `needs: [changes, lint, unit, scripts]` | yes |
+| release preflight | modified | adds `e2e-ok` latest-conclusion check on `$GITHUB_SHA` | no |
+
+- [ ] **Step 1:** Create `e2e.yml` with the header (what runs, why on main, that release preflight requires `e2e-ok`, tag only after it is green). Cut the whole `e2e:` job from `ci.yml` and paste it under `jobs:` unchanged except: no `needs: changes` and no `if: needs.changes...` (main has no path filter). Add `e2e-ok` (ubuntu-latest, `if: always()`, `needs: [e2e]`, steps copied byte-for-byte from `ci-ok`).
+- [ ] **Step 2:** `ci.yml`: `ci-ok.needs: [changes, lint, unit, scripts]`; header diagram drops e2e and says e2e runs on main in `e2e.yml`.
+- [ ] **Step 3:** `cache.yml`: replace the `build` kind×os matrix with `unit` over `os: [ubuntu-latest, macos-15, windows-latest]`, key `unit`, `cargo test --workspace --all-features --locked --lib --bins --no-run`; header says e2e caches are saved by `e2e.yml`.
+- [ ] **Step 4:** `release.yml` preflight, after the `ci-ok` check: `e2e=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=e2e-ok" --jq '[.check_runs[]] | sort_by(.completed_at) | last | .conclusion // empty')`; fail unless `success` with `e2e-ok on $GITHUB_SHA is '${e2e:-missing}', expected success (tag after e2e.yml is green on main)`. Rename the step to `Check tag, main ancestry, ci-ok and e2e-ok`; summary line mentions both. Header comment: preflight requires `ci-ok` and `e2e-ok`.
+- [ ] **Step 5:** CONTRIBUTING: CI paragraph says PRs run `lint`, `unit (linux|macos|windows)` and `scripts`; e2e runs on every push to `main` (`e2e.yml`) and releases require its `e2e-ok`; "Releasing" says tag only after `e2e-ok` is green on the commit (otherwise preflight fails; re-run the release run once it is green). CHANGELOG line: PRs run unit tests; e2e runs on `main` and gates releases.
+- [ ] **Step 6:** `actionlint` clean; extract and `shellcheck -s bash` the preflight script; `ls .github/workflows` = `cache.yml ci.yml e2e.yml release.yml`; dry-run the `e2e-ok` query against a commit without it (expect empty → fail branch) — `gh api "repos/naicoi92/iroh-tunnel/commits/$(git rev-parse main)/check-runs?check_name=e2e-ok"`.
+- [ ] **Step 7:** Commit: `ci: run e2e on main and gate releases on e2e-ok; PRs run unit tests only`
+
+Scenario → test (Task 5): Workflow inventory → step 6; Merge to main / Merge runs e2e / Docs-only merge / Back-to-back merges → first merge after landing (trigger and concurrency reviewed in diff); E2E red or missing on the tagged commit → step 6 dry-run (missing) + step 4 reviewed; Commit passed CI → first tag after merge; Code change / A check fails → PR run (no e2e jobs, `ci-ok` green); Lifecycle runs on Windows / Relay suite in CI / Relay does not start → job body unchanged from run 42039703639 (proven), re-proven on the first push to `main`.
