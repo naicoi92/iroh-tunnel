@@ -54,6 +54,8 @@ fn node_id_of(status_file: &Path) -> Option<String> {
 struct Fixture {
     root: tempfile::TempDir,
     suffix: String,
+    /// The node id of the last config written, to find this fixture's process.
+    node_id: std::cell::RefCell<Option<String>>,
 }
 
 impl Fixture {
@@ -61,6 +63,7 @@ impl Fixture {
         Ok(Self {
             root: tempfile::tempdir()?,
             suffix: format!("-e2e{}", std::process::id()),
+            node_id: std::cell::RefCell::new(None),
         })
     }
     fn base(&self) -> PathBuf {
@@ -86,7 +89,9 @@ impl Fixture {
                 iroh_tunnel_host::config::encode_secret_key(&key)
             ),
         )?;
-        Ok(key.public().to_string())
+        let node_id = key.public().to_string();
+        *self.node_id.borrow_mut() = Some(node_id.clone());
+        Ok(node_id)
     }
     /// Wait for the status file of THIS fixture's node. The state directory
     /// is the real per-user one, shared by every test, and a hard `/End`
@@ -133,10 +138,22 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
+    /// Remove the task and wait for its process to exit: `/End` returns before
+    /// the process is gone, and the next test would see the role as running.
     fn drop(&mut self) {
+        let status_file = self.state().join("serve-status.json");
+        let own_pid = self
+            .node_id
+            .borrow()
+            .as_deref()
+            .filter(|id| node_id_of(&status_file).as_deref() == Some(id))
+            .and_then(|_| pid_of(&status_file));
         let _ = self
             .command(&["serve", "service", "uninstall", "--user"])
             .output();
+        if let Some(pid) = own_pid {
+            let _ = wait_for("this test's task process to exit", || !pid_alive(pid));
+        }
     }
 }
 
