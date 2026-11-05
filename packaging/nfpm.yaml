@@ -1,5 +1,6 @@
 # Standalone nFPM config (rendered with envsubst; nFPM does not expand env in file paths) for the binary-only .deb (glibc) and .apk (musl)
-# packages. Invoked from .github/workflows/package.yml with:
+# packages. Rendered with envsubst and invoked by the `package` job in
+# .github/workflows/release.yml with:
 #   NAME=<iroh-tunnel[-serve|-access]> ALIAS=<it|its|ita> ARCH=<amd64|arm64|riscv64>
 #   BINARY=<path to the executable> VERSION=<x.y.z> DESCRIPTION=<text>
 #   nfpm package --config packaging/nfpm.yaml --packager <deb|apk> --target <file>

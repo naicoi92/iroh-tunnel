@@ -48,9 +48,10 @@ when it is relevant to a change.
 Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
-CI runs these three commands on every pull request, in a `lint` and a `test`
-job, plus a `scripts` job that runs `shellcheck` and `actionlint`. Run
-the three commands locally before pushing:
+CI runs these three commands on pull requests that change code, in the `lint`,
+`test-linux` and `test-windows` jobs, plus a `scripts` job (shellcheck,
+PSScriptAnalyzer, actionlint) when scripts or workflows change. Run the three
+commands locally before pushing:
 
 ```sh
 cargo fmt --all -- --check
