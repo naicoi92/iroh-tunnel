@@ -434,32 +434,3 @@ fn host_files_export_at_most_one_operation() {
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
-
-#[test]
-fn no_external_crate_added_since_baseline() {
-    let lock = std::fs::read_to_string(Path::new(ROOT).join("Cargo.lock")).unwrap();
-    let mut current = BTreeSet::new();
-    for block in lock.split("[[package]]").skip(1) {
-        if !block.contains("source = ") {
-            continue;
-        }
-        let name = block
-            .lines()
-            .find_map(|l| l.strip_prefix("name = \""))
-            .and_then(|l| l.strip_suffix('"'))
-            .unwrap();
-        current.insert(name.to_string());
-    }
-    let baseline = std::fs::read_to_string(
-        Path::new(ROOT).join("openspec/changes/refactor-codebase/baseline/external-crates.txt"),
-    )
-    .unwrap();
-    let baseline: BTreeSet<String> = baseline
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
-    let added: Vec<_> = current.difference(&baseline).collect();
-    assert!(added.is_empty(), "external crates added: {added:?}");
-}

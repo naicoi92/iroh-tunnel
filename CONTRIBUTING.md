@@ -124,7 +124,7 @@ way, root → host → engine:
   and typed observations. Knows nothing about files, services or signals.
 
 Old `iroh_tunnel::<module>::<item>` paths and the old-to-new source layout are
-mapped in [openspec/changes/refactor-codebase/migration-map.md](openspec/changes/refactor-codebase/migration-map.md).
+mapped in [openspec/changes/archive/2026-11-05-refactor-codebase/migration-map.md](openspec/changes/archive/2026-11-05-refactor-codebase/migration-map.md).
 
 ## Compatibility rules
 
