@@ -7,9 +7,9 @@
 #            │                                                if scripts/workflows changed
 #            └─ ci-ok         (single required check; always reports)
 #
-# Release build matrix, packages and images are NOT run on PRs. They run after
-# merge (snapshot.yml, push to main) and on tags (release.yml). To rehearse
-# them on a branch, run the `snapshot` workflow manually.
+# Release build, packages and images are NOT run on PRs. They run only on `v*`
+# tags (release.yml); cache.yml warms caches on main. There is no pre-merge
+# rehearsal.
 #
 # The workflow itself has no path filter so `ci-ok` always reports: a docs-only
 # PR skips every heavy job and still goes green. New pushes to a PR cancel the
