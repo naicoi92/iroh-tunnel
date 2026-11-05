@@ -20,6 +20,7 @@
   - `remove`, `list`, `show`, `edit` and `path` accept `--config`.
   - Windows: owner-only ACL equivalent for the config file is not enforced
     (unverified).
+- CI runs unit and end-to-end tests as separate jobs on Linux, macOS and Windows; the relay end-to-end suite runs against a self-hosted iroh-relay in CI.
 - Releases publish automatically on a version tag (GitHub release, container images, Homebrew cask); there is no manual draft or promote step any more.
 
 ### Added

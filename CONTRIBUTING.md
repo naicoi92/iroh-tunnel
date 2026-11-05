@@ -48,10 +48,9 @@ when it is relevant to a change.
 Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
-CI runs these three commands on pull requests that change code, in the `lint`,
-`test-linux` and `test-windows` jobs, plus a `scripts` job (shellcheck,
-PSScriptAnalyzer, actionlint) when scripts or workflows change. Run the three
-commands locally before pushing:
+CI runs `lint`, plus separate `unit` and `e2e` test jobs on Linux, macOS and
+Windows, and a `scripts` job (shellcheck, PSScriptAnalyzer, actionlint) when
+scripts or workflows change. Run these commands locally before pushing:
 
 ```sh
 cargo fmt --all -- --check
@@ -61,6 +60,34 @@ cargo test --all-features
 
 `clippy -D warnings` means zero warnings — fix or suppress with a comment
 explaining why.
+
+### Running tests
+
+New tests go in `src/` (`#[cfg(test)]`) for unit tests or in `tests/` for
+end-to-end tests. CI runs the same selectors:
+
+```sh
+# unit tests (plus doctests)
+cargo test --workspace --all-features --locked --lib --bins
+cargo test --workspace --all-features --locked --doc
+
+# end-to-end tests
+cargo test --workspace --all-features --locked --test '*'
+```
+
+The relay suite in `tests/serve_access_tunnel.rs` runs in CI against a
+self-hosted `n0computer/iroh-relay:v1.4.1` on Linux:
+
+```sh
+IROH_TUNNEL_TEST_RELAY_URL=https://127.0.0.1:3443 \
+  cargo test --workspace --all-features --locked --test serve_access_tunnel -- --ignored --test-threads=1
+```
+
+See [docs/self-hosted-relay.md](docs/self-hosted-relay.md) for starting the
+relay locally.
+
+Coverage check: the unit and e2e passed counts must add up to the passed count
+of the full `cargo test --workspace --all-features --locked`.
 
 ## Project layout
 
