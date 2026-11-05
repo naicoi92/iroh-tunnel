@@ -2,8 +2,8 @@
 //!
 //! In-process cases use the `owner` of `UpdateContext`; the process-level case
 //! runs the real binary with `IROH_TUNNEL_CONTAINER=1`, the variable the
-//! project's images set. Real package managers and images are exercised by
-//! `packaging/verify-dist.sh` and the final-artifact run (#97).
+//! project's images set. Real package managers and images are not exercised by
+//! the test suite.
 #![cfg(unix)]
 
 mod common;

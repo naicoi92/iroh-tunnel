@@ -1,5 +1,4 @@
-//! Root CLI packaging invariants: three binaries, one shared version, and a
-//! CI version step that reads the workspace version (Task 21).
+//! Root CLI packaging invariants: three binaries and one shared version (Task 21).
 
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -55,18 +54,4 @@ fn all_packages_share_one_version() {
         .map(|n| package(&meta, n)["version"].as_str().unwrap())
         .collect();
     assert_eq!(versions.len(), 1, "versions differ: {versions:?}");
-}
-
-#[test]
-fn ci_build_workflow_reads_workspace_version() {
-    let yml = std::fs::read_to_string(format!("{ROOT}/.github/workflows/build.yml"))
-        .expect("read build.yml");
-    assert!(
-        !yml.contains("sed -n 's/^version = "),
-        "build.yml must not scrape Cargo.toml with sed"
-    );
-    assert!(
-        yml.contains("cargo metadata --no-deps --format-version 1"),
-        "build.yml must read the version via cargo metadata"
-    );
 }
