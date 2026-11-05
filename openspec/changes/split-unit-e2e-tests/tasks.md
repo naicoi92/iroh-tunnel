@@ -26,8 +26,8 @@ Scenarios: "Code change", "A check fails", "Unit failure reported early", "New i
 Owns: `.github/workflows/cache.yml`.
 Scenarios: "Dependency bump merged", "Source-only change merged".
 
-- [ ] 3.1 Keep `lint`; replace `test` with a matrix `{kind: unit, e2e} × {os: ubuntu-latest, macos-15, windows-latest}` compiling the matching selector with `--no-run` under key `unit` / `e2e` (design D5); paths unchanged
-- [ ] 3.2 Verify: `actionlint` clean
+- [x] 3.1 Keep `lint`; replace `test` with a matrix `{kind: unit, e2e} × {os: ubuntu-latest, macos-15, windows-latest}` compiling the matching selector with `--no-run` under key `unit` / `e2e` (design D5); paths unchanged
+- [x] 3.2 Verify: `actionlint` clean
 
 ## 4. Docs and whole-change verification
 
