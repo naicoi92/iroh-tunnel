@@ -5,10 +5,10 @@ Single writer, single worktree. Run groups in order 1 → 5: group 2 keeps `chec
 Owns: `tests/installer.rs`, `tests/installer_ps.rs`, `tests/layout_distribution.rs`, `tests/release_artifacts.rs`, `tests/release_smoke.rs`, `tests/layout_cli.rs`, `tests/update_ownership.rs` (doc comment only), `packaging/verify-dist.sh`, `packaging/verify-release-set.sh`, `Cargo.toml` (only if a dev-dependency becomes unused).
 Scenarios: ci-cd-pipeline "Suite contents".
 
-- [ ] 1.1 Delete `tests/installer.rs`, `tests/installer_ps.rs`, `tests/layout_distribution.rs`, `tests/release_artifacts.rs`, `tests/release_smoke.rs`
-- [ ] 1.2 Remove `ci_build_workflow_reads_workspace_version` from `tests/layout_cli.rs` and update its module doc
-- [ ] 1.3 Delete `packaging/verify-dist.sh` and `packaging/verify-release-set.sh`; reword the `verify-dist.sh` reference in the `tests/update_ownership.rs` doc comment
-- [ ] 1.4 Check that no remaining test reads `.github/`, `packaging/`, `install.sh` or `install.ps1`, and that `cargo test --workspace --all-features --locked --no-run` and `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` pass (unused dev-dependencies or helpers removed if any)
+- [x] 1.1 Delete `tests/installer.rs`, `tests/installer_ps.rs`, `tests/layout_distribution.rs`, `tests/release_artifacts.rs`, `tests/release_smoke.rs`
+- [x] 1.2 Remove `ci_build_workflow_reads_workspace_version` from `tests/layout_cli.rs` and update its module doc
+- [x] 1.3 Delete `packaging/verify-dist.sh` and `packaging/verify-release-set.sh`; reword the `verify-dist.sh` reference in the `tests/update_ownership.rs` doc comment
+- [x] 1.4 Check that no remaining test reads `.github/`, `packaging/`, `install.sh` or `install.ps1`, and that `cargo test --workspace --all-features --locked --no-run` and `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` pass (unused dev-dependencies or helpers removed if any)
 
 ## 2. Pull-request stage (`ci.yml`)
 
