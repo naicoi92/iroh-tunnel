@@ -25,8 +25,8 @@ Scenarios: "Code change", "Installer script change only", "Workflow change only"
 Owns: `.github/workflows/cache.yml` (new), deletion of `cache-warm.yml`.
 Scenarios: "Dependency bump merged", "Source-only change merged".
 
-- [ ] 3.1 Create `cache.yml` (push to `main`, paths per design D3) with compile-only `lint` and `test` jobs (ubuntu, windows) using the same cache keys and flags as `ci.yml`
-- [ ] 3.2 Delete `cache-warm.yml`
+- [x] 3.1 Create `cache.yml` (push to `main`, paths per design D3) with compile-only `lint` and `test` jobs (ubuntu, windows) using the same cache keys and flags as `ci.yml`
+- [x] 3.2 Delete `cache-warm.yml`
 
 ## 4. Release stage (`release.yml`)
 
