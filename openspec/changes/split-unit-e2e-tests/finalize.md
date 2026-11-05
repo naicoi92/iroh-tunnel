@@ -60,3 +60,10 @@ Wait for the PR run to complete task 4.4 (six test jobs, `e2e (linux)` relay hea
 - `unit (linux)` 151 s, `unit (macos)` 231 s, `unit (windows)` 264 s; `e2e (linux)` 441 s, `e2e (macos)` 466 s, `e2e (windows)` 708 s; `lint` 29 s, `scripts` 22 s, `ci-ok` success.
 - `e2e (linux)`: pulled `n0computer/iroh-relay:v1.4.1`, relay healthy; `Relay e2e (self-hosted relay)` → `test result: ok. 4 passed; 0 failed` (76.20 s).
 - `e2e (windows)`: `Service lifecycle (Task Scheduler)` → `test user_background_task_lifecycle ... ok`, `6 passed; 0 failed`.
+
+## Iteration 2 (owner revision: e2e on main, unit-only PRs, release gate on e2e-ok)
+
+- Revised artifacts approved at the gate; apply iteration 2 `427be3b..0ee4522`, receipts `406d7ab` (apply) and `2278393` (verify, PASS_WITH_WARNINGS). Code review of iteration 2: task review approved; owner's earlier approval and push permission for PR #173 cover the update.
+- Merged `--ff-only` into `spec/split-unit-e2e-tests` and pushed; worktree `split-unit-e2e-tests` removed after the merge.
+- PR #173 run 42045396274 (head 2278393, success): `unit (linux)` 166 s, `unit (macos)` 198 s, `unit (windows)` 240 s, `lint` 30 s, `scripts` 25 s, `ci-ok` success; no e2e job ran on the PR (only the `ci` workflow triggered). PR wall clock about 4 minutes, down from 11.8 minutes in iteration 1.
+- Not observable before merge: `e2e.yml` runs only on `main`. Its job body is the one proven green on run 42039703639. The first `e2e-ok` appears on the merge commit; the first tag must wait for it.

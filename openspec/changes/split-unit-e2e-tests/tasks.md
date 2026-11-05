@@ -49,4 +49,4 @@ Scenarios: "Workflow inventory", "Merge to main", "Code change", "A check fails"
 - [x] 5.3 `cache.yml`: `unit` matrix only (design D5)
 - [x] 5.4 `release.yml` preflight: also require the most recent `e2e-ok` on `$GITHUB_SHA` to be `success` (design D8); update the header and the step summary line
 - [x] 5.5 CONTRIBUTING/CHANGELOG: PRs run unit only, e2e runs on `main`, tag only after `e2e-ok` is green on the commit
-- [ ] 5.6 Verify: actionlint, shellcheck (preflight + relay scripts), `openspec validate --strict`; live `gh api` dry-check of the `e2e-ok` query; on the PR run: `ci-ok` green with only `unit`/`lint`/`scripts`, no e2e jobs
+- [x] 5.6 Verify: actionlint, shellcheck (preflight + relay scripts), `openspec validate --strict`; live `gh api` dry-check of the `e2e-ok` query; on the PR run: `ci-ok` green with only `unit`/`lint`/`scripts`, no e2e jobs
