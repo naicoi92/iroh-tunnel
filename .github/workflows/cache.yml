@@ -1,0 +1,55 @@
+# Seeds the Rust build caches that PR jobs restore from.
+#
+# GitHub scopes caches by ref: a PR can read main's cache but not another PR's.
+# This workflow only compiles (never runs tests) on main, using the same cache
+# keys and flags as ci.yml, so PRs start from a warm target/. It runs only when
+# dependencies or the toolchain/cache setup change.
+
+name: cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/cache.yml"
+
+concurrency:
+  group: cache
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: cache (lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          cache-key: lint
+      - run: cargo clippy --workspace --all-targets --all-features --locked
+
+  test:
+    name: cache (test, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test
+      - run: cargo test --workspace --all-features --locked --no-run
