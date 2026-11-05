@@ -50,7 +50,8 @@ changes and cite applicable rule IDs in Standards reviews.
 
 PRs run `lint`, `unit (linux|macos|windows)` and a `scripts` job (shellcheck,
 PSScriptAnalyzer, actionlint) when scripts or workflows change. The e2e tests
-run on every push to `main` (`e2e.yml`), and releases require its `e2e-ok`. Run these commands locally before pushing:
+run on every push to `main` (`e2e.yml`), and releases require its `e2e-ok`.
+Run these commands locally before pushing:
 
 ```sh
 cargo fmt --all -- --check
@@ -131,8 +132,8 @@ of the full `cargo test --workspace --all-features --locked`.
    where the scope is usually the module or area (`config`, `service`, `ci`,
    `release`, `role-run`, …).
 3. `ci-ok` must pass. A PR runs only what its changes need: lint and
-   unit tests on Linux/macOS/Windows for code, shellcheck, PSScriptAnalyzer and actionlint
-   for scripts and workflows. Release artifacts are built only on tags.
+   unit tests on Linux/macOS/Windows for code, shellcheck, PSScriptAnalyzer
+   and actionlint for scripts and workflows. Release artifacts are built only on tags.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
 

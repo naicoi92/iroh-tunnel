@@ -104,7 +104,8 @@ jobs:
     needs: [e2e]
     runs-on: ubuntu-latest
     steps:
-      # `skipped` is fine (path filter); `failure` / `cancelled` is not.
+      # `e2e` can only be success, failure or cancelled here;
+      # `failure` / `cancelled` fail the check.
       - name: Verify upstream results
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}

@@ -101,7 +101,6 @@ jobs:
       - run: cargo test --workspace --all-features --locked --lib --bins
       - run: cargo test --workspace --all-features --locked --doc
 
-
   # Static checks for shell scripts and workflows; seconds, no build needed.
   scripts:
     name: scripts (shellcheck + actionlint + PSScriptAnalyzer)
