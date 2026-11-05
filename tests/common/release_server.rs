@@ -1,5 +1,4 @@
-//! Local HTTP server standing in for GitHub Releases, shared by the installer
-//! tests (#93).
+//! Local HTTP server standing in for GitHub Releases, shared by the update tests.
 use anyhow::Result;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

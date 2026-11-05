@@ -1,4 +1,4 @@
-# Role-only image for `iroh-tunnel-access` (issue #94), built by docker.yml.
+# Role-only image for `iroh-tunnel-access` (issue #94), built by the `release` workflow.
 # Same layout as `Dockerfile.release` (read its header for
 # how the prebuilt binary is staged), but it ships ONLY the standalone
 # `iroh-tunnel-access` executable, so the image runs without any other binary.

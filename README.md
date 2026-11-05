@@ -5,7 +5,7 @@
 **P2P port-forwarding tunnels over [Iroh](https://iroh.computer) — no public IP,
 no port forwarding, no relay to rent.**
 
-[![snapshot](https://github.com/naicoi92/iroh-tunnel/actions/workflows/snapshot.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/snapshot.yml)
+[![ci](https://github.com/naicoi92/iroh-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/ci.yml) [![release](https://github.com/naicoi92/iroh-tunnel/actions/workflows/release.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/release.yml)
 [![release](https://img.shields.io/github/v/release/naicoi92/iroh-tunnel)](https://github.com/naicoi92/iroh-tunnel/releases)
 [![rust](https://img.shields.io/badge/rust-1.91%2B-dea584?logo=rust)](Cargo.toml)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE-MIT)
@@ -932,8 +932,8 @@ For reporting vulnerabilities and the full policy, see
 | `crates/host/src/status/`  | atomic per-role status-file writers (`StatusWriter`)   |
 | `src/status_cmd.rs`        | `<role> status`: read the file, render the table       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
-| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |
-| `packaging/`               | nFPM config, Homebrew cask, `verify-dist.sh` checks    |
+| `.github/workflows/`       | CI (`ci`), cache warming (`cache`), release (`release`) |
+| `packaging/`               | nFPM config, Homebrew cask                             |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Releases
@@ -941,11 +941,20 @@ For reporting vulnerabilities and the full policy, see
 One git tag `vX.Y.Z` produces, via native parallel GitHub Actions builds
 (`.github/workflows/release.yml`):
 
-- **Binaries:** `linux/amd64`, `linux/arm64` (glibc + musl), `darwin/arm64`
-  (+ checksums), `riscv64gc` musl
-- **Linux packages:** `.deb` (glibc) + `.apk` (musl/Alpine) — amd64 + arm64
-- **Docker:** `ghcr.io/naicoi92/iroh-tunnel` multi-arch (amd64 + arm64)
+- **Archives:** the three role executables (`iroh-tunnel`, `iroh-tunnel-serve`,
+  `iroh-tunnel-access`), each in its own archive: Linux amd64/arm64 (glibc),
+  Linux amd64/arm64/riscv64gc (musl), macOS arm64, Windows amd64/arm64 (`.zip`)
+- **Checksums:** `checksums.txt` and `checksums-darwin.txt`, signed keyless
+  with cosign
+- **Linux packages:** per role, `.deb` (glibc, amd64/arm64) and `.apk`
+  (musl, amd64/arm64/riscv64)
+- **Docker:** `ghcr.io/naicoi92/iroh-tunnel`, `-serve` and `-access`, each
+  multi-arch (amd64 + arm64)
 - **Homebrew cask:** published to [`naicoi92/homebrew-tap`](https://github.com/naicoi92/homebrew-tap)
+  on stable releases only
+
+Pre-release tags (`vX.Y.Z-rc.N`) are marked as pre-release, get no `latest`
+image tag and do not update the cask.
 
 See the [Releases page](https://github.com/naicoi92/iroh-tunnel/releases).
 

@@ -48,9 +48,10 @@ when it is relevant to a change.
 Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
-CI runs these three commands on every pull request, in a `lint` and a `test`
-job, plus a `scripts` job that runs `shellcheck` and `actionlint`. Run
-the three commands locally before pushing:
+CI runs these three commands on pull requests that change code, in the `lint`,
+`test-linux` and `test-windows` jobs, plus a `scripts` job (shellcheck,
+PSScriptAnalyzer, actionlint) when scripts or workflows change. Run the three
+commands locally before pushing:
 
 ```sh
 cargo fmt --all -- --check
@@ -91,8 +92,8 @@ explaining why.
 | `crates/engine/src/settings.rs` | engine settings                                   |
 | `crates/engine/src/proto.rs` | ALPN protocol constants (`iroh-tunnel/{name}`)       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
-| `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |
-| `packaging/`               | nFPM config, Homebrew cask, `verify-dist.sh` checks    |
+| `.github/workflows/`       | CI (`ci`), cache warming (`cache`), release (`release`) |
+| `packaging/`               | nFPM config, Homebrew cask                             |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
 ## Pull requests
@@ -102,14 +103,23 @@ explaining why.
    `feat(scope): …`, `fix(scope): …`, `refactor(scope): …`, `chore: …` —
    where the scope is usually the module or area (`config`, `service`, `ci`,
    `release`, `role-run`, …).
-3. CI (`ci-ok`) must pass. A PR runs only what its changes need: fmt, clippy
-   and tests for code changes, shellcheck and actionlint for scripts and
-   workflows; docs-only PRs skip them. Release builds, packages and images are
-   not part of PR CI: they run after a merge that touches dependencies or
-   packaging (`snapshot`) and on tags (`release`). To rehearse them on your
-   branch, run the `snapshot` workflow manually.
+3. `ci-ok` must pass. A PR runs only what its changes need: lint and
+   Linux/Windows tests for code, shellcheck, PSScriptAnalyzer and actionlint
+   for scripts and workflows. Release artifacts are built only on tags.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
+
+## Releasing
+
+Push a `vX.Y.Z` (or `vX.Y.Z-rc.N`) tag on a merged commit on `main` whose PR
+passed `ci-ok`. The tag run publishes the GitHub release, the ghcr.io images
+and (stable tags only) the Homebrew cask.
+
+- If the run fails in `github-release`, delete the leftover draft
+  (`gh release delete <tag>`, keeping the tag) and re-run all jobs.
+- A bad release is superseded by a new tag, not edited.
+- Any change to `release.yml` ships first as an `-rc` tag.
+- Known gap: `main` moving between a PR's CI and its merge is not re-tested.
 
 ## Workspace layout and Rust API migration
 
