@@ -15,10 +15,10 @@ Scenarios: ci-cd-pipeline "Suite contents".
 Owns: `.github/workflows/ci.yml`, deletion of `windows-service-e2e.yml`, `windows-update-e2e.yml`; `install.ps1` only for PSScriptAnalyzer findings.
 Scenarios: "Code change", "Installer script change only", "Workflow change only", "Docs-only change", "A check fails", "Superseded push", "Script lint", "Lifecycle runs on Windows", "Linux unaffected".
 
-- [ ] 2.1 Rewrite `ci.yml` with jobs `changes`, `lint`, `test-linux`, `test-windows`, `scripts`, `ci-ok` per design D1, path sets per D1, inlining the steps from `checks.yml`
-- [ ] 2.2 Add the service-lifecycle step to `test-windows` (`IROH_TUNNEL_E2E_SERVICE=1`, `--test service_user_windows -- --test-threads=1`) per design D2
-- [ ] 2.3 Add PSScriptAnalyzer to `scripts` per design D9; run it locally on `install.ps1` and fix or justify-suppress every Warning/Error finding
-- [ ] 2.4 Delete `windows-service-e2e.yml`, `windows-update-e2e.yml` (`checks.yml` is deleted in 4.9, after its last caller is gone)
+- [x] 2.1 Rewrite `ci.yml` with jobs `changes`, `lint`, `test-linux`, `test-windows`, `scripts`, `ci-ok` per design D1, path sets per D1, inlining the steps from `checks.yml`
+- [x] 2.2 Add the service-lifecycle step to `test-windows` (`IROH_TUNNEL_E2E_SERVICE=1`, `--test service_user_windows -- --test-threads=1`) per design D2
+- [x] 2.3 Add PSScriptAnalyzer to `scripts` per design D9; run it locally on `install.ps1` and fix or justify-suppress every Warning/Error finding
+- [x] 2.4 Delete `windows-service-e2e.yml`, `windows-update-e2e.yml` (`checks.yml` is deleted in 4.9, after its last caller is gone)
 
 ## 3. Cache stage (`cache.yml`)
 
