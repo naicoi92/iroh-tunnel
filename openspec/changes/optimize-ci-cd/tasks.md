@@ -48,8 +48,8 @@ Scenarios: preflight scenarios ("Commit passed CI", "Pre-release tag", "Commit w
 Owns: `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, header comments of `Dockerfile.release*`, doc comment of `tests/common/release_server.rs`.
 Scenarios: "Workflow inventory", "Merge to main".
 
-- [ ] 5.1 README: replace the `snapshot` badge with `ci`/`release`, drop `verify-dist.sh` from the layout table
-- [ ] 5.2 CONTRIBUTING: rewrite the PR/CI paragraph and layout table for the three stages; add a short "Releasing" section (tag → automatic publish, recovery by deleting a partial release and re-running, a bad release is superseded by a new tag)
-- [ ] 5.3 Update stale comments: `Dockerfile.release*` line 1 (no `build.yml`/`docker.yml`), `tests/common/release_server.rs` doc (no installer tests)
-- [ ] 5.4 CHANGELOG `[Unreleased]`: note that releases now publish automatically on tag
+- [x] 5.1 README: replace the `snapshot` badge with `ci`/`release`, drop `verify-dist.sh` from the layout table
+- [x] 5.2 CONTRIBUTING: rewrite the PR/CI paragraph and layout table for the three stages; add a short "Releasing" section (tag → automatic publish, recovery by deleting a partial release and re-running, a bad release is superseded by a new tag)
+- [x] 5.3 Update stale comments: `Dockerfile.release*` line 1 (no `build.yml`/`docker.yml`), `tests/common/release_server.rs` doc (no installer tests)
+- [x] 5.4 CHANGELOG `[Unreleased]`: note that releases now publish automatically on tag
 - [ ] 5.5 Run actionlint and shellcheck on the result, check `.github/workflows/` holds exactly `ci.yml`, `cache.yml`, `release.yml`, run the full local test suite, and run `openspec validate optimize-ci-cd --strict`
