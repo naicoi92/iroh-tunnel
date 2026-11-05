@@ -12,11 +12,12 @@
 # the certificate identity is
 #   https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/<tag>
 # issuer https://token.actions.githubusercontent.com — what `update` pins.
-# Only the signing job requests an OIDC token; it runs release.yml itself (not
-# a reusable workflow) so that identity stays exact.
+# Only the signing job may mint a Sigstore token; it runs release.yml itself
+# (not a reusable workflow) so that identity stays exact.
 #
-# This file currently holds preflight, build and package; the sign, verify and
-# publish jobs are appended by the following change task.
+# Nothing is published until sign has checked the exact asset set, signed the
+# checksums and verified the bundles; the three publish jobs then run in
+# parallel (homebrew waits for the GitHub Release it points at).
 
 name: release
 
@@ -278,3 +279,256 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 7
+
+  # Checksums and keyless signatures. The only job allowed to mint a Sigstore
+  # token; the certificate identity is exactly the workflow ref above, which is
+  # what the updater pins (crates/host/src/update/, #95).
+  sign:
+    name: checksums + keyless signature
+    needs: [preflight, build, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: target-*
+          path: in/
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages*
+          path: dist/
+          merge-multiple: true
+
+      - name: Collect assets and check the exact set
+        run: |
+          set -euo pipefail
+          cp in/*/*.tar.gz in/*/*.zip dist/
+
+          # Expected names, built from the contract: 3 roles x (8 archives +
+          # 2 .deb + 3 .apk) = 39 files, and nothing else.
+          expected=()
+          for role in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
+            for t in linux-amd64 linux-arm64 linux-amd64-musl linux-arm64-musl \
+                     linux-riscv64gc-musl darwin-arm64; do
+              expected+=("${role}-${VERSION}-${t}.tar.gz")
+            done
+            for t in windows-amd64 windows-arm64; do
+              expected+=("${role}-${VERSION}-${t}.zip")
+            done
+            for a in amd64 arm64; do expected+=("${role}_${VERSION}_${a}.deb"); done
+            for a in amd64 arm64 riscv64; do expected+=("${role}_${VERSION}_${a}.apk"); done
+          done
+          printf '%s\n' "${expected[@]}" | LC_ALL=C sort > "$RUNNER_TEMP/expected.txt"
+          (cd dist && printf '%s\n' *) | LC_ALL=C sort > "$RUNNER_TEMP/actual.txt"
+          bad=0
+          while IFS= read -r n; do echo "FAIL missing $n"; bad=1; done \
+            < <(comm -23 "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/actual.txt")
+          while IFS= read -r n; do echo "FAIL unexpected $n"; bad=1; done \
+            < <(comm -13 "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/actual.txt")
+          [[ "$bad" == 0 ]] || exit 1
+          echo "asset set ok: ${#expected[@]} files"
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # Linux and Windows archives + packages, and darwin on its own.
+          sha256sum ./*.tar.gz ./*.zip ./*.deb ./*.apk | grep -v -- '-darwin-' | sed 's# \./# #' > checksums.txt
+          sha256sum ./*-darwin-*.tar.gz | sed 's# \./# #' > checksums-darwin.txt
+          cat checksums.txt checksums-darwin.txt
+
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.4
+
+      # Keyless: the certificate is issued to this workflow run's OIDC token and
+      # logged in the Sigstore transparency log. The bundle is the verification
+      # material the updater fetches as <checksums file>.sigstore.json.
+      - name: Sign checksums (keyless)
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for f in checksums.txt checksums-darwin.txt; do
+            cosign sign-blob --yes --new-bundle-format \
+              --bundle "$f.sigstore.json" "$f"
+          done
+
+      - name: Verify bundles and checksums
+        run: |
+          set -euo pipefail
+          for f in checksums.txt checksums-darwin.txt; do
+            test -s "dist/$f.sigstore.json"
+          done
+          (cd dist && sha256sum -c checksums.txt && sha256sum -c checksums-darwin.txt)
+          for f in checksums.txt checksums-darwin.txt; do
+            cosign verify-blob --bundle "dist/$f.sigstore.json" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "dist/$f"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-set
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The draft exists for seconds inside this one job, so a half-uploaded release
+  # is never public and releases/latest/download/* never misses an asset.
+  github-release:
+    name: GitHub Release
+    needs: [preflight, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-set
+          path: dist/
+
+      - name: Create and publish the release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; refusing to modify it" >&2
+            exit 1
+          fi
+          args=()
+          [[ "$PRERELEASE" == true ]] && args+=(--prerelease)
+          gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+            --generate-notes "${args[@]}" dist/*
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "\(.digest)  \(.name)"' | sort -k2 >> "$GITHUB_STEP_SUMMARY"
+
+  # Role images from the same glibc binaries that were checksummed and signed.
+  # Nothing is compiled here; buildx only assembles layers.
+  images:
+    name: image (${{ matrix.image }})
+    needs: [preflight, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: iroh-tunnel,        dockerfile: Dockerfile.release }
+          - { image: iroh-tunnel-serve,  dockerfile: Dockerfile.release.serve }
+          - { image: iroh-tunnel-access, dockerfile: Dockerfile.release.access }
+    steps:
+      # The Dockerfiles are the build context.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Stage binaries at $TARGETPLATFORM/<binary> (see the Dockerfiles).
+      - uses: actions/download-artifact@v4
+        with:
+          name: target-gnu-amd64
+          path: linux/amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: target-gnu-arm64
+          path: linux/arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/naicoi92/${{ matrix.image }}
+          tags: |
+            type=raw,value=v${{ needs.preflight.outputs.version }}
+            type=raw,value=${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}},value=v${{ needs.preflight.outputs.version }}
+            type=semver,pattern=v{{major}},value=v${{ needs.preflight.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.preflight.outputs.prerelease != 'true' }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            org.opencontainers.image.version=${{ needs.preflight.outputs.version }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+
+      - name: Record image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ matrix.image }}
+        run: echo "ghcr.io/naicoi92/${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+  # Pre-releases must not move the stable cask. Needs github-release so the
+  # cask never points at a release that does not exist.
+  homebrew:
+    name: update Homebrew tap
+    needs: [preflight, github-release]
+    if: ${{ needs.preflight.outputs.prerelease != 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-set
+          path: release-set/
+
+      - name: Render cask from the signed checksums
+        run: |
+          set -euo pipefail
+          sha="$(awk -v n="iroh-tunnel-${VERSION}-darwin-arm64.tar.gz" '$2 == n { print $1 }' release-set/checksums-darwin.txt)"
+          [[ -n "$sha" ]] || { echo "no darwin checksum for iroh-tunnel" >&2; exit 1; }
+          mkdir -p tap-out
+          bash packaging/homebrew-cask.sh "$VERSION" "$sha" > tap-out/iroh-tunnel.rb
+          cat tap-out/iroh-tunnel.rb
+
+      - name: Push to naicoi92/homebrew-tap
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/naicoi92/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp tap-out/iroh-tunnel.rb tap/Casks/iroh-tunnel.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/iroh-tunnel.rb
+          if git diff --cached --quiet; then
+            echo "cask already up to date"
+          else
+            git commit -m "iroh-tunnel ${VERSION}"
+            git push origin HEAD:main
+          fi
