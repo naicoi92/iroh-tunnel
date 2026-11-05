@@ -29,7 +29,7 @@
 
 ## Tasks
 
-- **Completed**: `15 of 16` checkboxes in tasks.md flipped to `- [x]`
+- **Completed**: `14 of 15` checkboxes in tasks.md flipped to `- [x]`
 - **Remaining**: `4.4` — verify on the PR run (six test jobs in parallel, `e2e (windows)` Task Scheduler log, `e2e (linux)` relay healthy and `serve_access_tunnel` 4 passed). Needs the owner's permission to push; done in finalize.
 
 Verification at `0ddd56b` (fresh):
