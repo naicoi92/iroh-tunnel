@@ -44,9 +44,9 @@ Scenarios: "Exact coverage" (local evidence).
 Owns: `.github/workflows/ci.yml`, `.github/workflows/e2e.yml` (new), `.github/workflows/cache.yml`, `.github/workflows/release.yml` (preflight step only), `CONTRIBUTING.md`, `CHANGELOG.md`.
 Scenarios: "Workflow inventory", "Merge to main", "Code change", "A check fails", "Lifecycle runs on Windows", "Dependency bump merged", "E2E red or missing on the tagged commit", "Commit passed CI", "Merge runs e2e", "Docs-only merge", "Back-to-back merges", "Relay suite in CI", "Relay does not start", "New integration test file".
 
-- [ ] 5.1 Create `e2e.yml` (design D7): move the `e2e` matrix job from `ci.yml` unchanged (selectors, Task Scheduler step, relay steps), add `e2e-ok` aggregate; trigger push to `main` without paths; concurrency per commit, no cancel
-- [ ] 5.2 `ci.yml`: remove the `e2e` job; `ci-ok.needs: [changes, lint, unit, scripts]` (body unchanged); update header
-- [ ] 5.3 `cache.yml`: `unit` matrix only (design D5)
-- [ ] 5.4 `release.yml` preflight: also require the most recent `e2e-ok` on `$GITHUB_SHA` to be `success` (design D8); update the header and the step summary line
-- [ ] 5.5 CONTRIBUTING/CHANGELOG: PRs run unit only, e2e runs on `main`, tag only after `e2e-ok` is green on the commit
+- [x] 5.1 Create `e2e.yml` (design D7): move the `e2e` matrix job from `ci.yml` unchanged (selectors, Task Scheduler step, relay steps), add `e2e-ok` aggregate; trigger push to `main` without paths; concurrency per commit, no cancel
+- [x] 5.2 `ci.yml`: remove the `e2e` job; `ci-ok.needs: [changes, lint, unit, scripts]` (body unchanged); update header
+- [x] 5.3 `cache.yml`: `unit` matrix only (design D5)
+- [x] 5.4 `release.yml` preflight: also require the most recent `e2e-ok` on `$GITHUB_SHA` to be `success` (design D8); update the header and the step summary line
+- [x] 5.5 CONTRIBUTING/CHANGELOG: PRs run unit only, e2e runs on `main`, tag only after `e2e-ok` is green on the commit
 - [ ] 5.6 Verify: actionlint, shellcheck (preflight + relay scripts), `openspec validate --strict`; live `gh api` dry-check of the `e2e-ok` query; on the PR run: `ci-ok` green with only `unit`/`lint`/`scripts`, no e2e jobs
