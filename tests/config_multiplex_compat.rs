@@ -2,7 +2,7 @@
 //! on app-owned saves. Exercise public config boundaries and real commands.
 
 use anyhow::Result;
-use iroh_tunnel::config::{encode_secret_key, AccessConfig, ServeConfig};
+use iroh_tunnel_host::config::{encode_secret_key, AccessConfig, ServeConfig};
 
 #[test]
 fn legacy_multiplex_values_are_ignored_and_removed_on_save() -> Result<()> {

@@ -81,7 +81,7 @@ const RELAY_TOKEN: &str = "tok3n-secret-value";
 
 /// A valid serve config with a known key and relay token.
 fn write_valid(path: &Path) -> String {
-    let key = iroh_tunnel::config::encode_secret_key(&iroh::SecretKey::generate());
+    let key = iroh_tunnel_host::config::encode_secret_key(&iroh::SecretKey::generate());
     std::fs::write(
         path,
         format!(

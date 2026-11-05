@@ -7,32 +7,48 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::{
-    AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ScopeArgs, ServeCli, ServiceAction,
-};
+use crate::cli;
+use crate::cli::{AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ServeCli};
 use crate::config_cmd;
-use crate::error::CliError;
-use crate::shutdown;
-use crate::status::{self, StatusRole};
+use crate::lifecycle;
 use crate::status_cmd;
-use crate::update;
-use crate::{access, cli, serve, service};
 use anyhow::Context as _;
 use clap::Parser;
+use iroh_tunnel_host::config as config_ops;
+use iroh_tunnel_host::error::CliError;
+use iroh_tunnel_host::runtime;
+use iroh_tunnel_host::update;
+use iroh_tunnel_host::Role as StatusRole;
+use iroh_tunnel_host::RunContext;
 
 /// Entry point of the all-in-one `iroh-tunnel` (`it`) binary.
 pub fn main_all_in_one() -> ! {
+    install_migration_notice();
     execute(Cli::parse(), Packaging::AllInOne)
 }
 
 /// Entry point of the standalone `iroh-tunnel-serve` (`its`) binary.
 pub fn main_serve() -> ! {
+    install_migration_notice();
     execute(ServeCli::parse().into_cli(), Packaging::Standalone)
 }
 
 /// Entry point of the standalone `iroh-tunnel-access` (`ita`) binary.
 pub fn main_access() -> ! {
+    install_migration_notice();
     execute(AccessCli::parse().into_cli(), Packaging::Standalone)
+}
+
+/// Show the operator the macOS legacy-configuration copy on stderr; the host
+/// only reports it through this observer. Runs before any path resolution.
+fn install_migration_notice() {
+    iroh_tunnel_host::paths::set_migration_notice(|legacy, dest| {
+        eprintln!(
+            "migrated configuration {} -> {} (original kept)",
+            legacy.display(),
+            dest.display()
+        );
+    });
 }
 
 /// Which executable is running. Service units run `<exe> <role> run`, which
@@ -66,10 +82,13 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     };
     // Racing the run future means a forced exit first DROPS it: owned tasks
     // and the endpoint are cancelled before the process status is decided.
+    // One drain context per invocation. Management commands never begin a
+    // drain, so `forced_exit` stays pending and installs no signal handler.
+    let ctx = RunContext::new();
     let outcome = rt.block_on(async {
         tokio::select! {
-            result = run(parsed, packaging) => Ok(result),
-            forced = shutdown::forced_exit() => Err(forced),
+            result = run(parsed, packaging, ctx.clone()) => Ok(result),
+            forced = lifecycle::forced_exit(&ctx) => Err(forced),
         }
     });
     let outcome = match outcome {
@@ -79,7 +98,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
             // CHANGELOG). Own-state cleanup is still attempted here.
             eprintln!("error: shutdown abandoned ({forced:?}), exiting");
             if let Some(role) = status_role {
-                status::remove_own_status_file_for_exit(role);
+                runtime::remove_own_status_file_for_exit(role);
             }
             std::process::exit(forced.exit_code());
         }
@@ -101,7 +120,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     }
 }
 
-async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
+async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<()> {
     // The typed role tag comes from ONE match on the CLI enum; the dispatch
     // string is derived from it — an invalid role is unrepresentable, and
     // the two can never disagree.
@@ -109,13 +128,13 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
         Role::Serve { .. } => StatusRole::Serve,
         Role::Access { .. } => StatusRole::Access,
         Role::Update(args) => {
-            return update::run(args.clone(), "iroh-tunnel", env!("APP_VERSION")).await;
+            return run_update_cli(args, "iroh-tunnel").await;
         }
     };
     match cli.role {
         Role::Update(_) => unreachable!("handled above"),
         Role::Serve { cmd: Some(cmd), .. } | Role::Access { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd, packaging).await
+            dispatch_role_cmd(status_role, cmd, packaging, ctx).await
         }
         Role::Serve { quick, cmd: None } => {
             let protocol = quick_protocol("serve", &quick.protocol)?;
@@ -123,13 +142,13 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                 CliError::Config("serve quick mode: --target IP:PORT is required".into())
             })?;
             let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = crate::config::ServeConfig {
-                node: crate::config::NodeConfig {
+            let cfg = iroh_tunnel_host::config::ServeConfig {
+                node: iroh_tunnel_host::config::NodeConfig {
                     secret_key,
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
-                services: vec![crate::config::ServeService {
+                services: vec![iroh_tunnel_host::config::ServeService {
                     name: quick.name.ok_or_else(|| {
                         CliError::Config("serve quick mode: --name is required".into())
                     })?,
@@ -139,7 +158,13 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                     udp: Default::default(),
                 }],
             };
-            serve::run_quick(cfg).await
+            runtime::run_quick_serve(
+                cfg,
+                ctx,
+                crate::render::print_ready(),
+                lifecycle::wait_for_signal(),
+            )
+            .await
         }
         Role::Access { quick, cmd: None } => {
             let protocol = quick_protocol("access", &quick.protocol)?;
@@ -153,13 +178,13 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                 CliError::Config(format!("access quick mode: invalid --node-id: {e}"))
             })?;
             let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = crate::config::AccessConfig {
-                node: crate::config::NodeConfig {
+            let cfg = iroh_tunnel_host::config::AccessConfig {
+                node: iroh_tunnel_host::config::NodeConfig {
                     secret_key,
                     relay_urls: quick.relay_url.into_iter().collect(),
                     ..Default::default()
                 },
-                services: vec![crate::config::AccessService {
+                services: vec![iroh_tunnel_host::config::AccessService {
                     name: quick.name.ok_or_else(|| {
                         CliError::Config("access quick mode: --name is required".into())
                     })?,
@@ -171,16 +196,86 @@ async fn run(cli: Cli, packaging: Packaging) -> anyhow::Result<()> {
                     udp: Default::default(),
                 }],
             };
-            access::run_quick(cfg).await
+            runtime::run_quick_access(
+                cfg,
+                ctx,
+                crate::render::print_ready(),
+                lifecycle::wait_for_signal(),
+            )
+            .await
         }
     }
 }
 
+/// `update`: map the CLI options to a request, resolve the running
+/// executable, honour its owner, then print the outcome.
+async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Result<()> {
+    let request = update::UpdateRequest {
+        to: args.to.clone(),
+        verification: if args.insecure {
+            update::Verification::Insecure
+        } else {
+            update::Verification::Verified
+        },
+        overwrite: if args.yes {
+            update::OverwritePolicy::ReplacePackageOwned
+        } else {
+            update::OverwritePolicy::RespectOwner
+        },
+    };
+    let target = update::current_target()?;
+    let install_path = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("cannot locate the running executable")?;
+    let base_url =
+        std::env::var(update::BASE_URL_ENV).unwrap_or_else(|_| update::DEFAULT_BASE_URL.to_owned());
+    let ctx = update::UpdateContext {
+        base_url,
+        exe_name,
+        target,
+        current_version: env!("APP_VERSION"),
+        owner: iroh_tunnel_host::update::detect(&install_path),
+        install_path,
+        verifier: &update::SigstoreVerifier::release(),
+    };
+    match update::check_owner(&ctx, request.overwrite) {
+        update::OwnerDecision::Delegate {
+            guidance,
+            overridable,
+        } => {
+            println!("{guidance}");
+            if overridable {
+                println!("to replace the file anyway, run again with --yes");
+            }
+            return Ok(());
+        }
+        update::OwnerDecision::Proceed {
+            overriding_package: true,
+        } => eprintln!(
+            "warning: replacing {} although it is managed by a package manager; \
+             the package database will no longer match the file",
+            ctx.install_path.display()
+        ),
+        update::OwnerDecision::Proceed {
+            overriding_package: false,
+        } => {}
+    }
+    if request.verification == update::Verification::Insecure {
+        eprintln!(
+            "warning: --insecure skips signature and checksum verification; \
+             you accept responsibility for the installed file"
+        );
+    }
+    let outcome = update::update(&request, &ctx).await?;
+    print!("{}", crate::render::render_update(&outcome, exe_name));
+    Ok(())
+}
+
 /// Parse a quick-mode `--protocol` value.
-fn quick_protocol(role: &str, value: &str) -> Result<crate::config::Protocol, CliError> {
+fn quick_protocol(role: &str, value: &str) -> Result<iroh_tunnel_host::config::Protocol, CliError> {
     match value {
-        "tcp" => Ok(crate::config::Protocol::Tcp),
-        "udp" => Ok(crate::config::Protocol::Udp),
+        "tcp" => Ok(iroh_tunnel_host::config::Protocol::Tcp),
+        "udp" => Ok(iroh_tunnel_host::config::Protocol::Udp),
         other => Err(CliError::Config(format!(
             "{role} quick mode supports tcp or udp protocol, got '{other}'; use --protocol tcp or --protocol udp"
         ))),
@@ -191,25 +286,40 @@ async fn dispatch_role_cmd(
     status_role: StatusRole,
     cmd: RoleCmd,
     packaging: Packaging,
+    ctx: RunContext,
 ) -> anyhow::Result<()> {
     let role = status_role.name();
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
-            config_cmd::require_existing(role, &path)?;
+            config_ops::require_existing(status_role, &path)?;
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
-            match status_role {
-                StatusRole::Serve => serve::run(&path).await,
-                StatusRole::Access => access::run(&path).await,
-            }
+            runtime::run_foreground(
+                status_role,
+                &path,
+                ctx,
+                crate::render::print_ready(),
+                lifecycle::wait_for_signal(),
+            )
+            .await
         }
-        RoleCmd::Config { action } => dispatch_config(role, action),
-        RoleCmd::Status { json } => status_cmd::run(status_role, json),
+        // Host operations are synchronous (and may prompt on stdin), so they
+        // run on blocking workers, never on a runtime thread (RS-07).
+        RoleCmd::Config { action } => {
+            tokio::task::spawn_blocking(move || dispatch_config(status_role, action))
+                .await
+                .context("config command task failed")?
+        }
+        RoleCmd::Status { json } => {
+            tokio::task::spawn_blocking(move || status_cmd::run(status_role, json))
+                .await
+                .context("status command task failed")?
+        }
         RoleCmd::Update(args) => match packaging {
             Packaging::Standalone => {
                 let exe = format!("iroh-tunnel-{role}");
-                update::run(args, &exe, env!("APP_VERSION")).await
+                run_update_cli(&args, &exe).await
             }
             Packaging::AllInOne => Err(CliError::Config(
                 "update acts on the invoked executable; run `iroh-tunnel update`".into(),
@@ -223,34 +333,30 @@ async fn dispatch_role_cmd(
             ))
             .into())
         }
-        RoleCmd::Service { action } => dispatch_service(role, action),
+        RoleCmd::Service { action } => {
+            tokio::task::spawn_blocking(move || crate::cli_service::dispatch(status_role, action))
+                .await
+                .context("service command task failed")?
+        }
     }
 }
 
 /// Resolve the config path: explicit `--config` wins, otherwise the
-/// platform default from [`config_cmd::resolve_config_path`].
+/// platform default from [`config_ops::resolve_config_path`].
 fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    config_cmd::resolve_config_path(role, config.as_deref())
+    config_ops::resolve_config_path(role_named(role)?, config.as_deref())
 }
 
-/// Make `path` absolute for embedding in a system service file.
-///
-/// Installed services run with a different working directory, so a relative
-/// `--config` path must be resolved against the current CWD before it is
-/// written into the unit/plist. Falls back to joining the CWD if the path
-/// can't be canonicalized (e.g. it doesn't exist yet).
-fn absolutize_config_path(path: &Path) -> anyhow::Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
+/// The typed role for a CLI role name.
+fn role_named(name: &str) -> anyhow::Result<StatusRole> {
+    match name {
+        "serve" => Ok(StatusRole::Serve),
+        "access" => Ok(StatusRole::Access),
+        other => anyhow::bail!("unknown role {other:?}"),
     }
-    if let Ok(abs) = std::fs::canonicalize(path) {
-        return Ok(abs);
-    }
-    let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    Ok(cwd.join(path))
 }
 
-fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
+fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()> {
     match action {
         ConfigAction::Keygen {
             mode: Some(KeygenMode::Random),
@@ -260,211 +366,14 @@ fn dispatch_config(role: &str, action: ConfigAction) -> anyhow::Result<()> {
             config,
             yes,
             mode: None,
-        } => config_cmd::keygen(role, config.as_deref(), yes),
+        } => config_cmd::keygen_cli(role, config.as_deref(), yes),
         ConfigAction::Add(args) => config_cmd::add(role, &args),
         ConfigAction::Remove { config, name } => config_cmd::remove(role, config.as_deref(), &name),
         ConfigAction::List { config } => config_cmd::list(role, config.as_deref()),
         ConfigAction::Show { config, reveal } => config_cmd::show(role, config.as_deref(), reveal),
-        ConfigAction::Edit { config } => config_cmd::edit(role, config.as_deref()),
+        ConfigAction::Edit { config } => config_cmd::edit_cli(role, config.as_deref()),
         ConfigAction::Path { config } => config_cmd::path(role, config.as_deref()),
     }
-}
-
-fn dispatch_service(role: &str, action: ServiceAction) -> anyhow::Result<()> {
-    use service::scope::{self, Environment};
-    use service::ServiceScope;
-
-    let env = Environment::detect();
-    let explicit = |args: &ScopeArgs| match (args.user, args.system) {
-        (_, true) => Some(ServiceScope::System),
-        (true, _) => Some(ServiceScope::User),
-        _ => None,
-    };
-    let flag = |scope: ServiceScope| match scope {
-        ServiceScope::System => "--system",
-        ServiceScope::User => "--user",
-    };
-    // Verbs on an existing service: no prompt, and the scope follows privilege
-    // when it is not given.
-    let existing = |verb: &str, args: &ScopeArgs| -> anyhow::Result<ServiceScope> {
-        let scope = explicit(args).unwrap_or_else(|| scope::default_scope(env.elevated));
-        scope::ensure_supported(scope)?;
-        let rerun = ["iroh-tunnel", role, "service", verb, flag(scope)].map(str::to_owned);
-        scope::ensure_privilege(scope, env.elevated, &rerun)?;
-        Ok(scope)
-    };
-    match action {
-        ServiceAction::Install { config, scope } => {
-            // Windows has only the user scope, so there is nothing to ask.
-            let requested = explicit(&scope).or(cfg!(windows).then_some(ServiceScope::User));
-            let scope = scope::choose_install_scope(
-                requested,
-                env,
-                &mut std::io::stdin().lock(),
-                &mut std::io::stderr(),
-            )?;
-            scope::ensure_supported(scope)?;
-            if scope == ServiceScope::System {
-                return install_system(role, config, env);
-            }
-            // Persist absolute paths: the installed service runs with a
-            // different CWD and home, so nothing may stay relative (SM-02).
-            let config = absolutize_config_path(&resolve_config_path(role, config)?)?;
-            let state = pinned_state_dir()?;
-            let rerun: Vec<String> = [
-                "iroh-tunnel",
-                role,
-                "service",
-                "install",
-                flag(scope),
-                "--config",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .chain([config.to_string_lossy().into_owned()])
-            .collect();
-            scope::ensure_privilege(scope, env.elevated, &rerun)?;
-            check_installable_config(role, &config)?;
-            service::install(role, scope, &config, &state, None)
-        }
-        ServiceAction::Uninstall { scope } => {
-            service::uninstall(role, existing("uninstall", &scope)?)
-        }
-        ServiceAction::Start { scope } => {
-            let scope = existing("start", &scope)?;
-            // Refuse here too: the unit would otherwise start and exit
-            // after systemd/launchd already reported success (RO-03).
-            let status_role = match role {
-                "serve" => StatusRole::Serve,
-                "access" => StatusRole::Access,
-                other => anyhow::bail!("unknown role {other:?}"),
-            };
-            crate::ownership::ensure_not_running(status_role)?;
-            service::start(role, scope)
-        }
-        ServiceAction::Stop { scope } => service::stop(role, existing("stop", &scope)?),
-        ServiceAction::Restart { scope } => service::restart(role, existing("restart", &scope)?),
-        ServiceAction::Status { scope } => service::status(role, existing("status", &scope)?),
-    }
-}
-
-/// Install a system service for the invoking user's files (SM-01, SM-02,
-/// SM-04). Unprivileged callers are refused with rerun guidance; an elevated
-/// caller must name a real user, never root's own home.
-#[cfg(unix)]
-fn install_system(
-    role: &str,
-    config: Option<PathBuf>,
-    env: service::scope::Environment,
-) -> anyhow::Result<()> {
-    use service::{system, trust, ServiceScope};
-
-    if !env.elevated {
-        // Same guidance as before: absolute path, no elevation, no fallback.
-        let config = absolutize_config_path(&resolve_config_path(role, config)?)?;
-        let rerun: Vec<String> = [
-            "iroh-tunnel",
-            role,
-            "service",
-            "install",
-            "--system",
-            "--config",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .chain([config.to_string_lossy().into_owned()])
-        .collect();
-        return service::scope::ensure_privilege(ServiceScope::System, false, &rerun);
-    }
-
-    let sudo_user = std::env::var("SUDO_USER").ok();
-    let state_override = std::env::var_os("IROH_TUNNEL_STATE_DIR")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from);
-    let config_abs = config.as_deref().map(absolutize_config_path).transpose()?;
-    let mut input = std::io::stdin().lock();
-    let mut prompt = std::io::stderr();
-    let target = system::resolve_target(
-        &system::Request {
-            role,
-            config: config_abs.as_deref(),
-            state: state_override.as_deref(),
-            sudo_user: sudo_user.as_deref(),
-            interactive: env.interactive,
-        },
-        &mut input,
-        &mut prompt,
-    )?;
-    // Fail closed before registering anything root would later refuse to run.
-    trust::verify_dir(&target.state, target.account.uid)?;
-    let text = trust::read_verified(&target.config, target.account.uid)?;
-    check_installable_text(role, &text, &target.config)?;
-    system::confirm_retarget(
-        service::existing_registration(role, ServiceScope::System).as_deref(),
-        &target,
-        env.interactive,
-        &mut input,
-        &mut prompt,
-    )?;
-    service::install(
-        role,
-        ServiceScope::System,
-        &target.config,
-        &target.state,
-        Some(&target.pin()),
-    )
-}
-
-#[cfg(not(unix))]
-fn install_system(
-    _role: &str,
-    _config: Option<PathBuf>,
-    _env: service::scope::Environment,
-) -> anyhow::Result<()> {
-    service::scope::ensure_supported(service::ServiceScope::System)
-}
-
-/// The state directory the installed service will write to, as an absolute
-/// path: `IROH_TUNNEL_STATE_DIR` when set, otherwise the platform default.
-fn pinned_state_dir() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os("IROH_TUNNEL_STATE_DIR").filter(|d| !d.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => crate::paths::default_state_dir()?,
-    };
-    std::path::absolute(&dir)
-        .with_context(|| format!("cannot make state directory {} absolute", dir.display()))
-}
-
-/// Refuse to register a service that could only fail at start: the pinned
-/// config must exist and be valid for the role.
-fn check_installable_config(role: &str, config: &Path) -> anyhow::Result<()> {
-    let loaded = match role {
-        "serve" => crate::config::ServeConfig::load(config).map(drop),
-        _ => crate::config::AccessConfig::load(config).map(drop),
-    };
-    installable(role, config, loaded)
-}
-
-/// [`check_installable_config`] for text already read from a verified handle.
-#[cfg(unix)]
-fn check_installable_text(role: &str, text: &str, config: &Path) -> anyhow::Result<()> {
-    use crate::config::RoleDoc;
-    let loaded = match role {
-        "serve" => crate::config::ServeConfig::from_toml(text, config).map(drop),
-        _ => crate::config::AccessConfig::from_toml(text, config).map(drop),
-    };
-    installable(role, config, loaded)
-}
-
-fn installable(role: &str, config: &Path, loaded: anyhow::Result<()>) -> anyhow::Result<()> {
-    loaded.map_err(|e| {
-        CliError::Config(format!(
-            "cannot install the service: {e:#}. Create or fix the config first \
-             (`iroh-tunnel {role} config keygen --config {path}`), or pass --config",
-            path = config.display()
-        ))
-        .into()
-    })
 }
 
 /// Read the persistent secret key supplied with `-k/--key-file`.
@@ -486,7 +395,7 @@ fn read_key_file(path: Option<&Path>) -> anyhow::Result<String> {
             CliError::Config(format!("--key-file {}: file is empty", path.display())).into(),
         );
     }
-    crate::config::resolve_secret_key(key).map_err(|_| {
+    iroh_tunnel_host::config::resolve_secret_key(key).map_err(|_| {
         CliError::Config(format!(
             "--key-file {}: not a valid base64 32-byte secret key",
             path.display()

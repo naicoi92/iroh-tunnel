@@ -21,6 +21,7 @@ on:
     branches: [main]
     paths:
       - "Cargo.toml"
+      - "crates/*/Cargo.toml"
       - "Cargo.lock"
       - "build.rs"
       - "packaging/**"

@@ -1,0 +1,3 @@
+NAME                     NODE_ID        PROTO                  PORT    
+web                      abcdef0123456789abcdef tcp                    8080    
+dns                      0123456789abcdef udp                    5353    

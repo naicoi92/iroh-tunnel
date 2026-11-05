@@ -456,7 +456,7 @@ async fn ephemeral_restarts(home: &std::path::Path, relay: &str) -> Result<()> {
 // Synthetic fixtures only; seed the actual test-feature default config path.
 fn existing_user_files(home: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>> {
     let mut files = Vec::new();
-    let key = iroh_tunnel::config::encode_secret_key(&iroh::SecretKey::from_bytes(&[42; 32]));
+    let key = iroh_tunnel_host::config::encode_secret_key(&iroh::SecretKey::from_bytes(&[42; 32]));
     let dir = home.join("iroh-tunnel");
     std::fs::create_dir_all(&dir)?;
     for name in ["serve.toml", "access.toml", "identity.key"] {
@@ -614,7 +614,7 @@ async fn quick_udp_forwards_datagrams_to_fixed_target() -> Result<()> {
             let (n, from) = match target.recv_from(&mut buf).await {
                 Ok(received) => received,
                 // Windows reports an earlier reply's ICMP error here.
-                Err(error) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+                Err(error) if iroh_tunnel_engine::udp::is_transient_recv_error(&error) => continue,
                 Err(error) => return Err(error.into()),
             };
             if &buf[..n] == b"request" {

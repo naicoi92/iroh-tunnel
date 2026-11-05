@@ -54,6 +54,8 @@ fn node_id_of(status_file: &Path) -> Option<String> {
 struct Fixture {
     root: tempfile::TempDir,
     suffix: String,
+    /// The node id of the last config written, to find this fixture's process.
+    node_id: std::cell::RefCell<Option<String>>,
 }
 
 impl Fixture {
@@ -61,6 +63,7 @@ impl Fixture {
         Ok(Self {
             root: tempfile::tempdir()?,
             suffix: format!("-e2e{}", std::process::id()),
+            node_id: std::cell::RefCell::new(None),
         })
     }
     fn base(&self) -> PathBuf {
@@ -72,9 +75,10 @@ impl Fixture {
     /// The task cannot carry `IROH_TUNNEL_STATE_DIR`, so the real per-user
     /// default is used (the test is opt-in and removes its task on exit).
     fn state(&self) -> PathBuf {
-        iroh_tunnel::paths::default_state_dir().expect("default state dir")
+        iroh_tunnel_host::paths::default_state_dir().expect("default state dir")
     }
-    fn write_config(&self, relay: &str) -> Result<()> {
+    /// Write a config with a fresh key; returns the node id it runs as.
+    fn write_config(&self, relay: &str) -> Result<String> {
         let key = iroh::SecretKey::generate();
         std::fs::create_dir_all(self.config().parent().unwrap())?;
         std::fs::write(
@@ -82,10 +86,21 @@ impl Fixture {
             format!(
                 "[node]\nsecret_key = {:?}\nrelay_urls = [{relay:?}]\n\n\
                  [[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
-                iroh_tunnel::config::encode_secret_key(&key)
+                iroh_tunnel_host::config::encode_secret_key(&key)
             ),
         )?;
-        Ok(())
+        let node_id = key.public().to_string();
+        *self.node_id.borrow_mut() = Some(node_id.clone());
+        Ok(node_id)
+    }
+    /// Wait for the status file of THIS fixture's node. The state directory
+    /// is the real per-user one, shared by every test, and a hard `/End`
+    /// leaves an earlier test's snapshot behind, so any status file is not
+    /// enough.
+    fn wait_for_own_status(&self, status_file: &Path, node_id: &str) -> Result<()> {
+        wait_for("status file from this test's task", || {
+            node_id_of(status_file).as_deref() == Some(node_id)
+        })
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
@@ -123,10 +138,22 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
+    /// Remove the task and wait for its process to exit: `/End` returns before
+    /// the process is gone, and the next test would see the role as running.
     fn drop(&mut self) {
+        let status_file = self.state().join("serve-status.json");
+        let own_pid = self
+            .node_id
+            .borrow()
+            .as_deref()
+            .filter(|id| node_id_of(&status_file).as_deref() == Some(id))
+            .and_then(|_| pid_of(&status_file));
         let _ = self
             .command(&["serve", "service", "uninstall", "--user"])
             .output();
+        if let Some(pid) = own_pid {
+            let _ = wait_for("this test's task process to exit", || !pid_alive(pid));
+        }
     }
 }
 
@@ -206,7 +233,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
-    fx.write_config(relay.as_ref())?;
+    let first_id = fx.write_config(relay.as_ref())?;
     let config = fx.config();
     let config = config.to_str().unwrap();
     let status_file = fx.state().join("serve-status.json");
@@ -214,10 +241,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
     // install registers a task for the current user and starts it.
     fx.ok(&["serve", "service", "install", "--user", "--config", config])?;
     assert!(fx.task_exists(), "task not registered");
-    wait_for("status file from the task", || {
-        node_id_of(&status_file).is_some()
-    })?;
-    let first_id = node_id_of(&status_file).unwrap();
+    fx.wait_for_own_status(&status_file, &first_id)?;
 
     // status reports the task.
     let status = fx.ok(&["serve", "service", "status", "--user"])?;
@@ -300,4 +324,138 @@ fn pid_of(status_file: &Path) -> Option<u64> {
     let bytes = std::fs::read(status_file).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     json.get("pid")?.as_u64()
+}
+
+// ---------------------------------------------------------------------------
+// The host service API driven by a caller with no terminal (the
+// `manage_service` example), rather than by the CLI.
+// ---------------------------------------------------------------------------
+
+/// The `manage_service` example binary, built once with the host's
+/// `test-utils` feature (the suffix seam). Asking cargo for the executable
+/// path from its JSON messages stays correct under `CARGO_TARGET_DIR`.
+fn manage_service_binary() -> &'static Path {
+    static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BINARY.get_or_init(|| {
+        let out = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--locked",
+                "-p",
+                "iroh-tunnel-host",
+                "--features",
+                "test-utils",
+                "--example",
+                "manage_service",
+                "--message-format=json",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .expect("run cargo build");
+        assert!(out.status.success(), "building manage_service failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|message| message["reason"] == "compiler-artifact")
+            .filter(|message| message["target"]["name"] == "manage_service")
+            .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+            .expect("cargo reported no manage_service executable")
+    })
+}
+
+impl Fixture {
+    /// The example, run as a caller with no terminal; stdout and stderr are
+    /// captured. A successful run must leave stderr empty.
+    fn caller(&self, args: &[&str]) -> Result<String> {
+        let out = Command::new(manage_service_binary())
+            .args(["--role", "serve", "--scope", "user"])
+            .args(args)
+            .env_remove("IROH_TUNNEL_STATE_DIR")
+            .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
+            .stdin(std::process::Stdio::null())
+            .current_dir(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\".into()))
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "caller {args:?} failed: {}{}",
+            stdout(&out),
+            stderr(&out)
+        );
+        anyhow::ensure!(
+            out.stderr.is_empty(),
+            "the caller leaked output to its stderr: {}",
+            stderr(&out)
+        );
+        Ok(stdout(&out))
+    }
+}
+
+#[tokio::test]
+async fn caller_exit_leaves_user_service_running() -> Result<()> {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new()?;
+    let node_id = fx.write_config(relay.as_ref())?;
+    let config = fx.config();
+    let status_file = fx.state().join("serve-status.json");
+
+    let installed = fx.caller(&[
+        "--action",
+        "install",
+        "--config",
+        config.to_str().unwrap(),
+        "--exe",
+        BIN,
+    ])?;
+    assert!(installed.contains("Installed"), "{installed}");
+    // The caller has exited; the task and the role remain.
+    assert!(fx.task_exists(), "task not registered");
+    fx.wait_for_own_status(&status_file, &node_id)?;
+    let status = fx.ok(&["serve", "status"])?;
+    assert!(
+        status.contains("serve is running") || status.contains("node_id"),
+        "{status}"
+    );
+
+    let pid = pid_of(&status_file).expect("pid in status file");
+    let removed = fx.caller(&["--action", "uninstall"])?;
+    // A scheduled task has no registration file: deleting it is `Disabled`.
+    assert!(removed.contains("Disabled"), "{removed}");
+    assert!(!fx.task_exists(), "task still registered");
+    wait_for("the uninstalled task's process to exit", || !pid_alive(pid))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn captured_schtasks_status_is_returned() -> Result<()> {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new()?;
+    let node_id = fx.write_config(relay.as_ref())?;
+    let config = fx.config();
+    let status_file = fx.state().join("serve-status.json");
+
+    fx.caller(&[
+        "--action",
+        "install",
+        "--config",
+        config.to_str().unwrap(),
+        "--exe",
+        BIN,
+    ])?;
+    fx.wait_for_own_status(&status_file, &node_id)?;
+    // `caller` pins an empty stderr: the native text comes back in the report.
+    let report = fx.caller(&["--action", "status"])?;
+    assert!(
+        report.contains("program: \"schtasks"),
+        "no captured schtasks output in: {report}"
+    );
+    Ok(())
 }

@@ -1,0 +1,2 @@
+Secret key: <SECRET>
+Node ID: <NODE_ID>

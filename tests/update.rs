@@ -17,8 +17,9 @@ mod common;
 
 use anyhow::{Context, Result};
 use common::release_server::ReleaseServer;
-use iroh_tunnel::cli::UpdateArgs;
-use iroh_tunnel::update::{update, SignatureVerifier, UpdateContext};
+use iroh_tunnel_host::update::{
+    update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
+};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -258,7 +259,7 @@ fn in_process(
     server: &ReleaseServer,
     verifier: &dyn SignatureVerifier,
     install: &Path,
-    args: &UpdateArgs,
+    args: &UpdateRequest,
 ) -> Result<()> {
     let ctx = UpdateContext {
         base_url: server.url.clone(),
@@ -267,16 +268,22 @@ fn in_process(
         current_version: "0.0.1",
         install_path: install.to_owned(),
         verifier,
-        owner: iroh_tunnel::update_owner::Owner::Standalone,
+        owner: iroh_tunnel_host::update::Owner::Standalone,
     };
-    tokio::runtime::Runtime::new()?.block_on(update(args, &ctx))
+    tokio::runtime::Runtime::new()?
+        .block_on(update(args, &ctx))
+        .map(|_| ())
 }
 
-fn args(to: Option<&str>, insecure: bool) -> UpdateArgs {
-    UpdateArgs {
+fn args(to: Option<&str>, insecure: bool) -> UpdateRequest {
+    UpdateRequest {
         to: to.map(str::to_owned),
-        insecure,
-        yes: false,
+        verification: if insecure {
+            Verification::Insecure
+        } else {
+            Verification::Verified
+        },
+        overwrite: OverwritePolicy::RespectOwner,
     }
 }
 
@@ -373,7 +380,7 @@ fn latest_never_downgrades_a_newer_installed_version() -> Result<()> {
         current_version: "0.1.0",
         install_path: exe.clone(),
         verifier: &Accept,
-        owner: iroh_tunnel::update_owner::Owner::Standalone,
+        owner: iroh_tunnel_host::update::Owner::Standalone,
     };
 
     tokio::runtime::Runtime::new()?.block_on(update(&args(None, false), &ctx))?;

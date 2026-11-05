@@ -1904,15 +1904,52 @@ dependencies = [
  "data-encoding",
  "dirs",
  "edit",
- "flate2",
  "iroh",
  "iroh-relay",
- "iroh-tunnel",
+ "iroh-tunnel-engine",
+ "iroh-tunnel-host",
+ "libc",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+ "vergen-gitcl",
+ "which 8.0.5",
+ "zip",
+]
+
+[[package]]
+name = "iroh-tunnel-engine"
+version = "0.4.3-rc.3"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "iroh",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "iroh-tunnel-host"
+version = "0.4.3-rc.3"
+dependencies = [
+ "anyhow",
+ "data-encoding",
+ "dirs",
+ "flate2",
+ "iroh",
+ "iroh-tunnel-engine",
  "libc",
  "regex",
  "reqwest",
  "rustls",
- "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -1926,9 +1963,6 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
- "tracing-subscriber",
- "vergen-gitcl",
- "which 8.0.5",
  "zip",
 ]
 

@@ -3,7 +3,7 @@
 //! verification: never use this artifact with public relays or real secrets.
 
 use anyhow::{Context, Result};
-use iroh_tunnel::config::{encode_secret_key, AccessConfig};
+use iroh_tunnel_host::config::{encode_secret_key, AccessConfig};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1065,15 +1065,20 @@ async fn access_reports_peer_stop_as_tunnel_error() -> Result<()> {
     let home = temp.path();
     let (_map, relay, server) = iroh::test_utils::run_relay_server().await?;
     let key = iroh::SecretKey::generate();
-    let node = iroh_tunnel::config::NodeConfig {
-        secret_key: encode_secret_key(&key),
-        relay_urls: vec![relay.to_string()],
-        ..Default::default()
-    };
-    let peer = iroh_tunnel::endpoint::create_serve_endpoint(
-        &node,
-        &[iroh_tunnel::proto::alpn_for("echo")],
-    )
+    let peer = iroh_tunnel_engine::bind_serve(&iroh_tunnel_engine::settings::ServeSettings {
+        node: iroh_tunnel_engine::settings::NodeSettings {
+            secret_key: Some(key.clone()),
+            relay_urls: vec![relay.to_string()],
+            ..Default::default()
+        },
+        services: vec![iroh_tunnel_engine::settings::ServeServiceSettings {
+            name: "echo".to_string(),
+            protocol: iroh_tunnel_engine::settings::Protocol::Tcp,
+            host: "127.0.0.1".to_string(),
+            port: 9,
+            udp: Default::default(),
+        }],
+    })
     .await?;
     let reservation = TcpListener::bind("127.0.0.1:0").await?;
     let listen = reservation.local_addr()?;

@@ -1,0 +1,23 @@
+[package]
+name = "iroh-tunnel-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Runtime engine of iroh-tunnel: endpoint binding, role loops and tunnels"
+license.workspace = true
+publish = false
+
+[features]
+# Insecure relay-TLS trust override for in-process test relays. Never enable
+# in production builds.
+test-utils = ["iroh/test-utils"]
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+iroh.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

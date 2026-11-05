@@ -1,0 +1,47 @@
+[package]
+name = "iroh-tunnel-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Host operations of iroh-tunnel: config, status, OS services, update and role runtime"
+license.workspace = true
+publish = false
+
+[features]
+# Role-ownership bypass and the insecure relay-TLS trust override for
+# in-process tests. Never enable in production builds.
+test-utils = ["iroh-tunnel-engine/test-utils"]
+
+[dependencies]
+iroh-tunnel-engine = { path = "../engine" }
+anyhow.workspace = true
+tokio.workspace = true
+iroh.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+thiserror = "2.0"
+dirs = "6"
+data-encoding = "2.11"
+regex = "1.13"
+# `update`: release download, checksum and archive extraction (issue #95).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.11"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+sigstore-verify = { version = "0.15", default-features = false, features = ["aws-lc-rs"] }
+sigstore-trust-root = { version = "0.15", default-features = false }
+sigstore-types = { version = "0.15", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` and fd-relative ownership/trust checks. Already in the
+# dependency tree via iroh/tokio on every platform; non-unix builds never
+# compile that code and never link libc.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

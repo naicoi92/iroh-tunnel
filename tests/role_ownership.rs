@@ -84,7 +84,7 @@ impl World {
 fn write_key(dir: &Path, name: &str) -> Result<(PathBuf, String)> {
     let key = iroh::SecretKey::generate();
     let path = dir.join(name);
-    std::fs::write(&path, iroh_tunnel::config::encode_secret_key(&key))?;
+    std::fs::write(&path, iroh_tunnel_host::config::encode_secret_key(&key))?;
     Ok((path, key.public().to_string()))
 }
 

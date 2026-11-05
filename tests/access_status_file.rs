@@ -4,7 +4,7 @@
 //! against an IN-PROCESS relay (`iroh::test_utils::run_relay_server`,
 //! self-signed cert trusted via the crate's `test-utils` feature) — no
 //! Internet, no n0 relay network, CI-safe. BOTH roles get the same injected
-//! state dir (`run_with_shutdown_with_state_dir` — no process-global env
+//! state dir (`testing::run_unowned` — no process-global env
 //! mutation), so the test reads real `serve-status.json` and
 //! `access-status.json` files exactly as an operator would.
 //!
@@ -30,9 +30,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use iroh::SecretKey;
-use iroh_tunnel::config::encode_secret_key;
-use iroh_tunnel::status::{AccessStatusFile, StatusFile};
 use iroh_tunnel::status_cmd::{render_access_status, render_serve_status};
+use iroh_tunnel_host::config::encode_secret_key;
+use iroh_tunnel_host::status::{AccessStatusFile, StatusFile};
 
 /// Bytes the tunnel must transport unchanged in each direction.
 const PAYLOAD: &[u8] = b"hello-through-the-access-status-file";
@@ -97,7 +97,7 @@ port = {port}
         ),
     )?;
 
-    // Bind the access port up front (access rebinds inside run_with_shutdown).
+    // Bind the access port up front (access rebinds inside testing::run_unowned).
     let access_listener = TcpListener::bind("127.0.0.1:0").await?;
     let access_addr = access_listener.local_addr()?;
     drop(access_listener);
@@ -130,9 +130,14 @@ multiplex = true
         let path = serve_cfg.clone();
         let state = state_dir.clone();
         tokio::spawn(async move {
-            iroh_tunnel::serve::run_with_shutdown_with_state_dir(&state, &path, async move {
-                let _ = serve_rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Serve,
+                &path,
+                Some(&state),
+                async move {
+                    let _ = serve_rx.await;
+                },
+            )
             .await
         })
     };
@@ -140,9 +145,14 @@ multiplex = true
         let path = access_cfg.clone();
         let state = state_dir.clone();
         tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown_with_state_dir(&state, &path, async move {
-                let _ = access_rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Access,
+                &path,
+                Some(&state),
+                async move {
+                    let _ = access_rx.await;
+                },
+            )
             .await
         })
     };

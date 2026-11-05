@@ -76,7 +76,7 @@ impl Fixture {
             format!(
                 "[node]\nsecret_key = {:?}\nrelay_urls = [{relay:?}]\n\n\
                  [[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
-                iroh_tunnel::config::encode_secret_key(&key)
+                iroh_tunnel_host::config::encode_secret_key(&key)
             ),
         )?;
         Ok(())
@@ -358,7 +358,11 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
     };
 
     // install from CWD `/` with a config path containing a space: it is pinned absolute.
-    ok(&[
+    // `install` and `status` are separate processes with separately captured
+    // pipes, so cross-command stream ordering is not observable here; pin that
+    // install's stdout carries the "Installed and started" line, and (below)
+    // that `status` output is native manager text only.
+    let installed = ok(&[
         "serve",
         "service",
         "install",
@@ -366,6 +370,7 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
         "--config",
         config.to_str().unwrap(),
     ])?;
+    assert!(installed.contains("Installed and started"), "{installed}");
     let registration = std::fs::read_to_string(svc.registration())?;
     assert!(
         registration.contains(config.to_str().unwrap()),
@@ -393,6 +398,8 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
     wait_for("stopped service to remove its status file", || {
         !status_file.exists()
     })?;
+    // `status` of a stopped unit still exits 0 (systemctl's non-zero is informative).
+    ok(&["serve", "service", "status", "--user"])?;
 
     // start again and restart: identity is the configured one throughout.
     ok(&["serve", "service", "start", "--user"])?;
@@ -410,5 +417,156 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
     ok(&["serve", "service", "uninstall", "--user"])?;
     assert!(!svc.registration().exists());
     wait_for("uninstalled service to stop", || !status_file.exists())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The host service API driven by a caller with no terminal (the
+// `manage_service` example), rather than by the CLI.
+// ---------------------------------------------------------------------------
+
+/// The `manage_service` example binary, built once with the host's
+/// `test-utils` feature (the suffix seam). Asking cargo for the executable
+/// path from its JSON messages stays correct under `CARGO_TARGET_DIR` and
+/// cross-target layouts, which a hard-coded `target/debug/examples` would not.
+fn manage_service_binary() -> &'static Path {
+    static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BINARY.get_or_init(|| {
+        let out = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--locked",
+                "-p",
+                "iroh-tunnel-host",
+                "--features",
+                "test-utils",
+                "--example",
+                "manage_service",
+                "--message-format=json",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("run cargo build");
+        assert!(out.status.success(), "building manage_service failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|message| message["reason"] == "compiler-artifact")
+            .filter(|message| message["target"]["name"] == "manage_service")
+            .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+            .expect("cargo reported no manage_service executable")
+    })
+}
+
+impl Registered<'_> {
+    /// The example, run as a caller with no terminal: stdin closed, output
+    /// captured by this test.
+    fn caller(&self, action: &str) -> Command {
+        let mut command = Command::new(manage_service_binary());
+        command
+            .args(["--role", "serve", "--action", action, "--scope", "user"])
+            .env("HOME", real_home())
+            .env("IROH_TUNNEL_STATE_DIR", self.fx.state())
+            .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .stdin(Stdio::null())
+            .current_dir("/");
+        command
+    }
+    fn caller_ok(&self, mut command: Command) -> Result<String> {
+        let out = command.output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "caller failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            stderr(&out)
+        );
+        anyhow::ensure!(
+            out.stderr.is_empty(),
+            "the caller leaked output to its stderr: {}",
+            stderr(&out)
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+#[tokio::test]
+async fn caller_exit_leaves_user_service_running() -> Result<()> {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() || is_root() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 as a non-root user to drive the real service manager");
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new()?;
+    fx.write_config(relay.as_ref())?;
+    let svc = Registered {
+        fx: &fx,
+        suffix: format!("-e2ec{}", std::process::id()),
+    };
+    let status_file = fx.state().join("serve-status.json");
+
+    let mut install = svc.caller("install");
+    install
+        .args(["--config", fx.config().to_str().unwrap()])
+        .args(["--exe", BIN]);
+    let installed = svc.caller_ok(install)?;
+    assert!(installed.contains("Installed"), "{installed}");
+    // The caller process has exited; the registration and the role remain.
+    assert!(svc.registration().exists());
+    wait_for("status file from the installed service", || {
+        node_id_of(&status_file).is_some()
+    })?;
+    let status = svc.cmd(&["serve", "status", "--json"]).output()?;
+    assert!(status.status.success(), "{}", stderr(&status));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(
+        status["node_id"].as_str(),
+        node_id_of(&status_file).as_deref()
+    );
+
+    let removed = svc.caller_ok(svc.caller("uninstall"))?;
+    assert!(removed.contains("RegistrationRemoved"), "{removed}");
+    assert!(!svc.registration().exists());
+    wait_for("uninstalled service to stop", || !status_file.exists())?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn captured_systemctl_status_is_returned() -> Result<()> {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() || is_root() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 as a non-root user to drive the real service manager");
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new()?;
+    fx.write_config(relay.as_ref())?;
+    let svc = Registered {
+        fx: &fx,
+        suffix: format!("-e2es{}", std::process::id()),
+    };
+    let status_file = fx.state().join("serve-status.json");
+
+    let mut install = svc.caller("install");
+    install
+        .args(["--config", fx.config().to_str().unwrap()])
+        .args(["--exe", BIN]);
+    svc.caller_ok(install)?;
+    wait_for("status file from the installed service", || {
+        node_id_of(&status_file).is_some()
+    })?;
+
+    // `caller_ok` also pins that the native tool's text never reached the
+    // example's stderr; it comes back inside the returned report.
+    let report = svc.caller_ok(svc.caller("status"))?;
+    let manager = if cfg!(target_os = "macos") {
+        "launchctl"
+    } else {
+        "systemctl"
+    };
+    assert!(
+        report.contains(&format!("program: {manager:?}")),
+        "no captured {manager} output in: {report}"
+    );
     Ok(())
 }

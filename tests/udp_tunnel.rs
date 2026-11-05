@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use iroh::test_utils::run_relay_server;
 use iroh::SecretKey;
-use iroh_tunnel::config::encode_secret_key;
+use iroh_tunnel_host::config::encode_secret_key;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 
@@ -54,7 +54,7 @@ async fn try_recv(client: &UdpSocket, limit: Duration) -> Result<Option<Vec<u8>>
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, client.recv_from(&mut buf)).await {
             Ok(Ok((n, _))) => return Ok(Some(buf[..n].to_vec())),
-            Ok(Err(error)) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+            Ok(Err(error)) if iroh_tunnel_engine::udp::is_transient_recv_error(&error) => continue,
             Ok(Err(error)) => return Err(error.into()),
             Err(_) => return Ok(None),
         }
@@ -187,9 +187,10 @@ port = {port}
         let serve = {
             let state = serve_state.path().to_path_buf();
             tokio::spawn(async move {
-                iroh_tunnel::serve::run_with_shutdown_with_state_dir(
-                    &state,
+                iroh_tunnel_host::testing::run_unowned(
+                    iroh_tunnel_host::Role::Serve,
                     &serve_cfg,
+                    Some(&state),
                     async move {
                         let _ = serve_rx.await;
                     },
@@ -200,9 +201,10 @@ port = {port}
         let access = {
             let state = access_state.path().to_path_buf();
             tokio::spawn(async move {
-                iroh_tunnel::access::run_with_shutdown_with_state_dir(
-                    &state,
+                iroh_tunnel_host::testing::run_unowned(
+                    iroh_tunnel_host::Role::Access,
                     &access_cfg,
+                    Some(&state),
                     async move {
                         let _ = access_rx.await;
                     },
@@ -256,9 +258,14 @@ port = {port}
         let (tx, rx) = oneshot::channel::<()>();
         self.stop.push(tx);
         self.roles.push(tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown(&path, async move {
-                let _ = rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Access,
+                &path,
+                None,
+                async move {
+                    let _ = rx.await;
+                },
+            )
             .await
         }));
         Ok(addr)
@@ -321,9 +328,14 @@ port = {port}
         self.roles.insert(
             0,
             tokio::spawn(async move {
-                iroh_tunnel::serve::run_with_shutdown_with_state_dir(&state, &path, async move {
-                    let _ = rx.await;
-                })
+                iroh_tunnel_host::testing::run_unowned(
+                    iroh_tunnel_host::Role::Serve,
+                    &path,
+                    Some(&state),
+                    async move {
+                        let _ = rx.await;
+                    },
+                )
                 .await
             }),
         );
@@ -357,7 +369,7 @@ async fn udp_echo(sock: UdpSocket, sources: Arc<Mutex<Vec<SocketAddr>>>) {
                 let _ = sock.send_to(&buf[..n], from).await;
             }
             // Windows reports an earlier reply's ICMP error here; keep serving.
-            Err(error) if iroh_tunnel::udp::is_transient_recv_error(&error) => continue,
+            Err(error) if iroh_tunnel_engine::udp::is_transient_recv_error(&error) => continue,
             Err(_) => break,
         }
     }
@@ -934,11 +946,11 @@ async fn udp_round_trips_on_a_relay_only_path_and_on_a_direct_path() -> Result<(
     // `start` only spawns the roles; they build their endpoints a moment
     // later. Keep the switch on until the first round trip has proved both
     // endpoints exist, then turn it off so phase 2 gets default endpoints.
-    iroh_tunnel::endpoint::set_relay_only_for_tests(true);
+    iroh_tunnel_engine::testing::set_relay_only(true);
     let relay_only = UdpTunnel::start().await?;
     let client = UdpSocket::bind("127.0.0.1:0").await?;
     let first = relay_only.roundtrip(&client, b"over-relay").await;
-    iroh_tunnel::endpoint::set_relay_only_for_tests(false);
+    iroh_tunnel_engine::testing::set_relay_only(false);
     assert_eq!(first?, b"over-relay");
     let status =
         UdpTunnel::status_when(relay_only.access_state.path(), "access-status.json", |s| {

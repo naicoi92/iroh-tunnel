@@ -1,0 +1,11 @@
+# operator comment
+[node]
+secret_key = "<redacted>"
+relay_urls = ["https://relay.example"]
+relay_token = "<redacted>"
+
+[[services]]
+name = "web"
+protocol = "tcp"
+host = "127.0.0.1"
+port = 8080

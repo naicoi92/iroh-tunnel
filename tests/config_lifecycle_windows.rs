@@ -35,7 +35,7 @@ fn p(path: &Path) -> &str {
 const TOKEN: &str = "tok3n-secret-value";
 
 fn write_valid(path: &Path) -> String {
-    let key = iroh_tunnel::config::encode_secret_key(&iroh::SecretKey::generate());
+    let key = iroh_tunnel_host::config::encode_secret_key(&iroh::SecretKey::generate());
     std::fs::write(
         path,
         format!(

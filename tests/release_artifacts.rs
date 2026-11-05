@@ -11,7 +11,7 @@
 //!   `RELEASE_TAG` set (`cargo test --test release_artifacts -- --ignored`).
 
 use anyhow::{Context, Result};
-use iroh_tunnel::update::{SignatureVerifier, SigstoreVerifier};
+use iroh_tunnel_host::update::{SignatureVerifier, SigstoreVerifier};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 

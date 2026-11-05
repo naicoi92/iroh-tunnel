@@ -24,7 +24,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use iroh::SecretKey;
-use iroh_tunnel::config::encode_secret_key;
+use iroh_tunnel_host::config::encode_secret_key;
 
 /// Bytes the tunnel must transport unchanged in each direction.
 const PAYLOAD: &[u8] = b"hello-through-the-path-logs";
@@ -34,7 +34,7 @@ const LOG_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Poller cadence — the real one from the crate (`test-utils` exposes it),
 /// so the derived windows below can never drift from production timing.
-use iroh_tunnel::access::PATH_POLL_INTERVAL;
+use iroh_tunnel_engine::access::PATH_POLL_INTERVAL;
 
 /// Quiet window for [`wait_for_quiet`]: one poller tick plus slack.
 const QUIET_WINDOW: Duration = Duration::from_secs(PATH_POLL_INTERVAL.as_secs() + 1);
@@ -150,7 +150,7 @@ port = {port}
         ),
     )?;
 
-    // Bind the access ports up front (access rebinds inside run_with_shutdown).
+    // Bind the access ports up front (access rebinds inside testing::run_unowned).
     let mux_listener = TcpListener::bind("127.0.0.1:0").await?;
     let mux_addr = mux_listener.local_addr()?;
     drop(mux_listener);
@@ -195,18 +195,28 @@ multiplex = false
         let path = serve_cfg.clone();
         let state_dir = state_tmp.path().to_path_buf();
         tokio::spawn(async move {
-            iroh_tunnel::serve::run_with_shutdown_with_state_dir(&state_dir, &path, async move {
-                let _ = serve_rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Serve,
+                &path,
+                Some(&state_dir),
+                async move {
+                    let _ = serve_rx.await;
+                },
+            )
             .await
         })
     };
     let access_spawn = {
         let path = access_cfg.clone();
         tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown(&path, async move {
-                let _ = access_rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Access,
+                &path,
+                None,
+                async move {
+                    let _ = access_rx.await;
+                },
+            )
             .await
         })
     };

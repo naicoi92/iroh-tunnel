@@ -42,8 +42,7 @@ use anyhow::{Context, Result};
 use iroh::endpoint::presets::Minimal;
 use iroh::endpoint::{RecvStream, RelayMode, SendStream};
 use iroh::SecretKey;
-use iroh_tunnel::config::{encode_secret_key, ServeConfig};
-use iroh_tunnel::proto;
+use iroh_tunnel_host::config::{encode_secret_key, ServeConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -77,7 +76,7 @@ async fn serve_access_tunnel_roundtrips_bytes() -> Result<()> {
 
     // 2. Write a serve config that points at the echo server. We pin a stable
     //    serve secret key up front so we can read the NodeId before launching
-    //    serve::run_with_shutdown — access.toml needs that NodeId.
+    //    testing::run_unowned — access.toml needs that NodeId.
     let serve_cfg_path = tmp.path().join("serve.toml");
     let serve_key = SecretKey::generate();
     let serve_node_id = serve_key.public().to_string();
@@ -102,7 +101,7 @@ port = {port}
 
     // 3. Bind the access listener port up front so we can write it into
     //    access.toml. Drop immediately — access rebinds from inside
-    //    run_with_shutdown.
+    //    testing::run_unowned.
     let access_listener = TcpListener::bind("127.0.0.1:0").await?;
     let access_addr = access_listener.local_addr()?;
     drop(access_listener);
@@ -134,18 +133,28 @@ multiplex = false
     let serve_handle = {
         let path = serve_cfg_path.clone();
         tokio::spawn(async move {
-            iroh_tunnel::serve::run_with_shutdown(&path, async move {
-                let _ = serve_rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Serve,
+                &path,
+                None,
+                async move {
+                    let _ = serve_rx.await;
+                },
+            )
             .await
         })
     };
     let access_handle = {
         let path = access_cfg_path.clone();
         tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown(&path, async move {
-                let _ = access_rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Access,
+                &path,
+                None,
+                async move {
+                    let _ = access_rx.await;
+                },
+            )
             .await
         })
     };
@@ -209,7 +218,7 @@ impl MiniServe {
     async fn start(svc_name: &str) -> Result<Self> {
         let ep = iroh::Endpoint::builder(Minimal)
             .secret_key(SecretKey::generate())
-            .alpns(vec![proto::alpn_for(svc_name)])
+            .alpns(vec![format!("iroh-tunnel/{svc_name}").into_bytes()])
             .relay_mode(RelayMode::Default)
             .bind()
             .await
@@ -277,7 +286,7 @@ async fn echo_stream(mut recv: RecvStream, mut send: SendStream, streams: Arc<At
     streams.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// Boot a real `access::run_with_shutdown` against `serve_node_id`, exposing
+/// Boot a real `testing::run_unowned` against `serve_node_id`, exposing
 /// the service locally on a fresh port. Returns the local listen address, the
 /// shutdown sender, and the task handle.
 #[allow(clippy::type_complexity)]
@@ -316,9 +325,14 @@ multiplex = {multiplex}
     let handle = {
         let path = cfg_path.clone();
         tokio::spawn(async move {
-            iroh_tunnel::access::run_with_shutdown(&path, async move {
-                let _ = rx.await;
-            })
+            iroh_tunnel_host::testing::run_unowned(
+                iroh_tunnel_host::Role::Access,
+                &path,
+                None,
+                async move {
+                    let _ = rx.await;
+                },
+            )
             .await
         })
     };
@@ -498,7 +512,7 @@ async fn echo_server(listener: TcpListener) {
 
 /// Retry TCP connect to `addr` until success or `deadline` elapses.
 ///
-/// The access listener is bound asynchronously inside `run_with_shutdown`,
+/// The access listener is bound asynchronously inside `testing::run_unowned`,
 /// and the first dial through the relay takes time. We retry the connect so
 /// the test isn't racy on startup ordering.
 async fn retry_connect(addr: std::net::SocketAddr, deadline: Duration) -> Result<TcpStream> {

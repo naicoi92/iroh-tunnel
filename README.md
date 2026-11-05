@@ -919,17 +919,17 @@ For reporting vulnerabilities and the full policy, see
 | Path                       | Purpose                                                |
 |----------------------------|--------------------------------------------------------|
 | `src/cli.rs`               | clap CLI surface (`<role> <command>`)                  |
-| `src/serve.rs`             | serve role: publish local services into Iroh           |
-| `src/access.rs`            | access role: dial a remote node_id to a local port     |
-| `src/role_run.rs`          | shared run skeleton: dial with retry/backoff, watchers |
-| `src/pipe.rs`              | byte-copy pipes between Iroh streams and local sockets |
-| `src/endpoint.rs`          | Iroh endpoint construction + transport tuning          |
-| `src/proto.rs`             | ALPN protocol constants (`iroh-tunnel/{name}`)         |
-| `src/udp.rs`               | UDP framing and flow tables (QUIC DATAGRAM forwarding) |
-| `src/config.rs`, `src/config_cmd.rs` | config model + `config` subcommands           |
-| `src/service/`             | service backends: `systemd`, `launchd`, BusyBox init   |
-| `src/conn_path.rs`         | peer connection-path reports for status files          |
-| `src/status.rs`            | atomic per-role status-file writers (`StatusWriter`)   |
+| `crates/engine/src/serve/` | serve role: publish local services into Iroh           |
+| `crates/engine/src/access/`| access role: dial a remote node_id to a local port     |
+| `crates/host/src/runtime/` | shared run skeleton: dial with retry/backoff, watchers |
+| `crates/engine/src/tcp.rs` | byte-copy pipes between Iroh streams and local sockets |
+| `crates/engine/src/endpoint/` | Iroh endpoint construction + transport tuning          |
+| `crates/engine/src/proto.rs` | ALPN protocol constants (`iroh-tunnel/{name}`)         |
+| `crates/engine/src/udp/`   | UDP framing and flow tables (QUIC DATAGRAM forwarding) |
+| `crates/host/src/config/`, `src/config_cmd.rs` | config model + `config` subcommands |
+| `crates/host/src/service/` | service backends: `systemd`, `launchd`, BusyBox init   |
+| `crates/engine/src/conn_path/` | peer connection-path reports for status files          |
+| `crates/host/src/status/`  | atomic per-role status-file writers (`StatusWriter`)   |
 | `src/status_cmd.rs`        | `<role> status`: read the file, render the table       |
 | `tests/`                   | integration tests (network suite, `--ignored`)         |
 | `.github/workflows/`       | CI (`ci`), native build matrix (`build`), release      |

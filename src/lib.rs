@@ -1,36 +1,14 @@
-//! iroh-tunnel library: P2P port-forwarding tunnel (TCP/UDP) over Iroh.
+//! iroh-tunnel command-line frontend: argument parsing, prompts, rendering,
+//! signals and exit-code mapping around the `iroh-tunnel-host` operations.
 //!
-//! The crate is shaped as a library + binary pair so that integration tests
-//! (under `tests/`) can drive the serve/access roles end-to-end without
-//! spawning a subprocess. The binary in [`main.rs`](../main.rs) is a thin
-//! wrapper around [`serve::run`] / [`access::run`].
-//!
-//! Most modules carry `#![allow(dead_code)]` because the single-crate layout
-//! would otherwise flag every symbol as unused by the binary alone. Exposing
-//! them via the library target makes that suppression accurate: they ARE used,
-//! by integration tests and by future downstream consumers.
+//! The library target exists so the three binaries share one compiled copy of
+//! the CLI and so `tests/access_status_file.rs` can check the status
+//! renderers; it re-exports nothing from the host or engine packages.
 
-pub mod access;
 pub mod app;
 pub mod cli;
-pub mod config;
+pub(crate) mod cli_service;
 pub mod config_cmd;
-pub(crate) mod config_store;
-pub mod conn_path;
-pub mod endpoint;
-pub mod error;
-pub(crate) mod ownership;
-pub mod paths;
-pub mod pipe;
-pub mod proto;
-/// `pub(crate)` — internal seam between serve/access, not a public extension
-/// point. See `src/role_run.rs` module docs.
-pub(crate) mod role_run;
-pub mod serve;
-pub mod service;
-pub mod shutdown;
-pub mod status;
+pub(crate) mod lifecycle;
+pub(crate) mod render;
 pub mod status_cmd;
-pub mod udp;
-pub mod update;
-pub mod update_owner;
