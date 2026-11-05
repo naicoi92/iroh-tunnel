@@ -4,11 +4,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-#[cfg(not(windows))]
-use super::locations::home_dir;
 #[cfg(windows)]
 use super::locations::local_app_data;
-use super::locations::APP_DIR;
+#[cfg(not(windows))]
+use super::locations::{home_dir, APP_DIR};
 
 /// Default directory holding the `<role>-status.json` files.
 ///
@@ -25,6 +24,7 @@ pub fn default_state_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
     use super::*;
 
     #[cfg(not(windows))]

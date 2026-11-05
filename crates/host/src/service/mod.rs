@@ -10,6 +10,7 @@
 //! private; the operations (`install`, `uninstall`, `start`, `stop`,
 //! `restart`, `status`) are the only way in.
 
+#[cfg(unix)]
 pub(crate) mod account;
 mod account_name;
 mod backend;

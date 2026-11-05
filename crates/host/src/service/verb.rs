@@ -126,13 +126,16 @@ fn backend_verb(
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::commands;
-    use super::super::fixtures::{blocking_runtime, in_isolated_home, ok_output, BATCH};
+    use super::super::fixtures::{blocking_runtime, ok_output, BATCH};
+    #[cfg(unix)]
+    use super::super::fixtures::{commands, in_isolated_home};
+    #[cfg(unix)]
     use super::super::native::fake::{Events, FakeRunner};
     use super::super::native::ServiceCall;
     use super::super::native::ServiceNote;
     use super::super::status::status_via;
     use super::*;
+    #[cfg(unix)]
     use crate::error::CliError;
 
     #[cfg(unix)]

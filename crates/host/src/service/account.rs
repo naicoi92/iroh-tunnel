@@ -79,16 +79,6 @@ fn lookup(
     }
 }
 
-#[cfg(not(unix))]
-pub fn by_name(_name: &str) -> Option<Account> {
-    None
-}
-
-#[cfg(not(unix))]
-pub fn by_uid(_uid: u32) -> Option<Account> {
-    None
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

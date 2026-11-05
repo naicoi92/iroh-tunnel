@@ -51,6 +51,7 @@ pub(super) fn default_config_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
     use super::*;
 
     #[cfg(not(windows))]

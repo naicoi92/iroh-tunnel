@@ -60,7 +60,7 @@ items() { # items <file> <modpath>
 }
 
 walk() { # walk <file> <modpath> <dir containing child module files>
-  local file="$1" mp="$2" dir="$3" m child
+  local file="$1" mp="$2" dir="$3" m
   echo "$mp"
   [ "$mp" = iroh_tunnel ] || items "$file" "$mp"
   for m in $(grep -E '^[[:space:]]*pub[[:space:]]+mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*;' "$file" \

@@ -8,6 +8,7 @@ pub fn is_elevated() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// See the Unix variant; there is no root account to compare against here.
 #[cfg(not(unix))]
 pub fn is_elevated() -> bool {
     false

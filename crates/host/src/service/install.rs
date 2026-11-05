@@ -293,12 +293,14 @@ fn backend_install(
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::{
-        commands, in_isolated_home, request, run_install, write_valid_config, BATCH, CAN_ANSWER,
-    };
+    use super::super::fixtures::{commands, request, run_install, BATCH};
+    #[cfg(unix)]
+    use super::super::fixtures::{in_isolated_home, write_valid_config, CAN_ANSWER};
+    #[cfg(unix)]
     use super::super::platform::existing_registration;
     #[cfg(target_os = "linux")]
     use super::super::platform::linux_is_systemd;
+    #[cfg(unix)]
     use super::super::types::AppliedEffect;
     use super::*;
     use std::path::PathBuf;
