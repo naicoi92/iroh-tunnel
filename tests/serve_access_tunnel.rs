@@ -25,14 +25,25 @@
 //!
 //! ## Why `#[ignore]`
 //!
-//! iroh's `Minimal` preset requires a relay server to dial a peer, and we use
-//! the n0 default public relays as the fallback when `relay_urls` is empty.
-//! That makes these tests depend on the public Internet and the n0 relay
-//! network, which would be flaky in CI. Run them locally with:
+//! These tests need a real relay server to dial a peer, so they are
+//! `#[ignore]`d by default. Run them by hand against the public n0 relays
+//! with:
 //!
 //! ```sh
-//! cargo test --test serve_access_tunnel -- --ignored --nocapture
+//! cargo test --test serve_access_tunnel -- --ignored
 //! ```
+//!
+//! or against a self-hosted relay by naming it in `IROH_TUNNEL_TEST_RELAY_URL`
+//! (CI does this in `e2e (linux)`):
+//!
+//! ```sh
+//! IROH_TUNNEL_TEST_RELAY_URL=https://127.0.0.1:3443 cargo test --workspace --all-features --locked --test serve_access_tunnel -- --ignored --test-threads=1
+//! ```
+//!
+//! Note: serve/access (engine `test-utils`) and the test's own `MiniServe`
+//! endpoint (explicit `insecure_skip_verify` when the variable is set) skip
+//! relay TLS verification, so only a local, self-hosted relay may be named by
+//! the variable.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -50,6 +61,28 @@ use tokio::sync::oneshot;
 /// Bytes the tunnel must transport unchanged in each direction. Small enough
 /// to fit one copy_buf flush, large enough to exercise the real path.
 const PAYLOAD_OUT: &[u8] = b"hello-through-the-tunnel";
+
+/// Relay URL override from `IROH_TUNNEL_TEST_RELAY_URL` (unset/empty → n0 defaults).
+fn test_relay_url() -> Option<String> {
+    std::env::var("IROH_TUNNEL_TEST_RELAY_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// A `[node]` section carrying the relay override, or empty when unset.
+fn node_section() -> String {
+    match relay_urls_toml() {
+        r if r.is_empty() => String::new(),
+        r => format!("\n[node]\n{r}"),
+    }
+}
+
+/// `relay_urls = ["<url>"]\n` for a `[node]` section, or empty when unset.
+fn relay_urls_toml() -> String {
+    test_relay_url()
+        .map(|url| format!("relay_urls = [\"{url}\"]\n"))
+        .unwrap_or_default()
+}
 
 // ---------------------------------------------------------------------------
 // Suite 1 — pre-0.2.0 single-channel behavior pinned
@@ -85,7 +118,7 @@ async fn serve_access_tunnel_roundtrips_bytes() -> Result<()> {
             r#"
 [node]
 secret_key = "{key}"
-
+{relay}
 [[services]]
 name = "echo"
 protocol = "tcp"
@@ -93,6 +126,7 @@ host = "{host}"
 port = {port}
 "#,
             key = encode_secret_key(&serve_key),
+            relay = relay_urls_toml(),
             host = echo_addr.ip(),
             port = echo_addr.port(),
         );
@@ -112,7 +146,7 @@ port = {port}
     std::fs::write(
         &access_cfg_path,
         format!(
-            r#"
+            r#"{node}
 [[services]]
 name = "echo"
 node_id = "{node_id}"
@@ -121,6 +155,7 @@ host = "127.0.0.1"
 port = {port}
 multiplex = false
 "#,
+            node = node_section(),
             node_id = serve_node_id,
             port = access_addr.port(),
         ),
@@ -216,13 +251,22 @@ struct MiniServe {
 impl MiniServe {
     /// Start a mini-serve under the service's (single, unchanged) ALPN.
     async fn start(svc_name: &str) -> Result<Self> {
-        let ep = iroh::Endpoint::builder(Minimal)
+        let mut builder = iroh::Endpoint::builder(Minimal)
             .secret_key(SecretKey::generate())
-            .alpns(vec![format!("iroh-tunnel/{svc_name}").into_bytes()])
-            .relay_mode(RelayMode::Default)
-            .bind()
-            .await
-            .context("mini-serve bind")?;
+            .alpns(vec![format!("iroh-tunnel/{svc_name}").into_bytes()]);
+        builder = match test_relay_url() {
+            // Self-hosted test relay: custom map + accept its self-signed
+            // certificate (the engine's `test-utils` bypass does not cover
+            // this bare endpoint).
+            Some(url) => builder
+                .relay_mode(RelayMode::Custom(iroh::RelayMap::from(
+                    url.parse::<iroh::RelayUrl>()
+                        .context("IROH_TUNNEL_TEST_RELAY_URL is not a valid relay URL")?,
+                )))
+                .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify()),
+            None => builder.relay_mode(RelayMode::Default),
+        };
+        let ep = builder.bind().await.context("mini-serve bind")?;
 
         let conns = Arc::new(AtomicUsize::new(0));
         let streams = Arc::new(AtomicUsize::new(0));
@@ -307,7 +351,7 @@ async fn boot_access(
     std::fs::write(
         &cfg_path,
         format!(
-            r#"
+            r#"{node}
 [[services]]
 name = "echo"
 node_id = "{node_id}"
@@ -316,6 +360,7 @@ host = "127.0.0.1"
 port = {port}
 multiplex = {multiplex}
 "#,
+            node = node_section(),
             node_id = serve_node_id,
             port = access_addr.port(),
         ),
