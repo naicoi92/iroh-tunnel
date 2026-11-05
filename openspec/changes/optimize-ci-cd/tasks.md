@@ -33,14 +33,14 @@ Scenarios: "Dependency bump merged", "Source-only change merged".
 Owns: `.github/workflows/release.yml`, deletion of `checks.yml`, `build.yml`, `package.yml`, `docker.yml`, `snapshot.yml`, `promote.yml`, `release-smoke.yml`.
 Scenarios: preflight scenarios ("Commit passed CI", "Pre-release tag", "Commit without a green gate", "Tag off main", "Malformed tag"); release scenarios ("Stable tag", "Pre-release tag", "Signature verification fails", "Build target fails", "Release already exists", "Signing identity unchanged", "Concurrent runs"); install-release-packaging "Tagged build", "Supported targets and naming", "Archive contents", "Native smoke check", "Package targets", "Complete set", "Defective set", "Signing identity and checksum names", "Valid bundle", "Tampered input", "Runtime and promotion tags", "Pre-release tag" (images), "Render".
 
-- [ ] 4.1 `preflight` job: tag format, ancestry of `origin/main`, PR-of-merge-commit lookup, latest `ci-ok` on the PR head, outputs `version`/`prerelease` (design D4)
-- [ ] 4.2 `build` job: move the 8-target matrix from `build.yml` unchanged except version from preflight and 1-day retention (D5)
-- [ ] 4.3 `package` job: move nFPM packaging from `package.yml` without the `verify-dist.sh` steps (D6)
+- [x] 4.1 `preflight` job: tag format, ancestry of `origin/main`, PR-of-merge-commit lookup, latest `ci-ok` on the PR head, outputs `version`/`prerelease` (design D4)
+- [x] 4.2 `build` job: move the 8-target matrix from `build.yml` unchanged except version from preflight and 1-day retention (D5)
+- [x] 4.3 `package` job: move nFPM packaging from `package.yml` without the `verify-dist.sh` steps (D6)
 - [ ] 4.4 `sign` job: expected-set check, checksums, keyless signing, non-empty bundle check, `cosign verify-blob` with the pinned identity/issuer, upload `release-set` (D7)
 - [ ] 4.5 `github-release` job: fail if a release exists, create as a transient draft with all assets (pre-release when `-`), then publish it (D8)
 - [ ] 4.6 `images` job: 3-image matrix from the `target-gnu-*` artifacts, push to ghcr.io with today's tag rules (D8)
 - [ ] 4.7 `homebrew` job: stable only, after `github-release`, render cask from `checksums-darwin.txt` in `release-set`, push to the tap (D8)
-- [ ] 4.8 Trigger only on `v*` tag push, keep `concurrency` with `cancel-in-progress: false`, `id-token: write` only on `sign`
+- [x] 4.8 Trigger only on `v*` tag push, keep `concurrency` with `cancel-in-progress: false`, `id-token: write` only on `sign`
 - [ ] 4.9 Delete `checks.yml`, `build.yml`, `package.yml`, `docker.yml`, `snapshot.yml`, `promote.yml`, `release-smoke.yml`
 
 ## 5. Docs and whole-change verification
