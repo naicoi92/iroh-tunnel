@@ -11,6 +11,10 @@
 # preflight (release.yml) requires `e2e-ok` on the tagged commit: tag only after
 # this run is green on main. There is no path filter, so every push to main
 # reports `e2e-ok`. Runs for different commits are not cancelled.
+#
+# Before merge, run it on a branch with `gh workflow run e2e.yml --ref <branch>`
+# (the branch must contain this trigger). That run reports `e2e-ok (manual)`,
+# which release preflight ignores.
 
 name: e2e
 
