@@ -68,8 +68,6 @@ jobs:
               - 'access/**'
               - 'serve/**'
               - 'action-src/**'
-              - 'docs/github-actions.md'
-              - 'README.md'
               - '.github/workflows/ci.yml'
               - 'Cargo.toml'
 

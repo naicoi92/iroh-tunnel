@@ -1,4 +1,9 @@
-export type Declared = { access: Set<string>; serve: Set<string> };
+export type Declared = {
+  access: Set<string>;
+  serve: Set<string>;
+  /** Inputs with `required: true`; omitted means no requirement check. */
+  required?: { access: Set<string>; serve: Set<string> };
+};
 
 const PREFIX = 'naicoi92/iroh-tunnel';
 const INTERNAL = new Set(['job-status']);
@@ -13,12 +18,13 @@ export function yamlBlocks(md: string): string[] {
   return out;
 }
 
-function role(uses: string): 'access' | 'serve' | undefined {
-  if (!uses.startsWith(PREFIX)) return undefined;
+/** `null` means the path is under this repo but names no known action. */
+function role(uses: string): 'access' | 'serve' | null | undefined {
+  if (uses !== PREFIX && !uses.startsWith(`${PREFIX}/`) && !uses.startsWith(`${PREFIX}@`)) return undefined;
   const rest = uses.slice(PREFIX.length).split('@')[0]!;
   if (rest === '' || rest === '/access') return 'access';
   if (rest === '/serve') return 'serve';
-  return undefined;
+  return null;
 }
 
 function walk(v: unknown, f: (o: Record<string, unknown>) => void): void {
@@ -29,7 +35,7 @@ function walk(v: unknown, f: (o: Record<string, unknown>) => void): void {
   }
 }
 
-/** Returns one error per undeclared or internal `with:` key, or per unparsable block. */
+/** Returns one error per undeclared or internal `with:` key, missing required input, unknown action path, or unparsable block. */
 export function checkMarkdown(md: string, declared: Declared): string[] {
   const errors: string[] = [];
   yamlBlocks(md).forEach((block, i) => {
@@ -43,9 +49,15 @@ export function checkMarkdown(md: string, declared: Declared): string[] {
     walk(doc, (o) => {
       if (typeof o.uses !== 'string') return;
       const r = role(o.uses);
-      if (!r) return;
-      const w = o.with;
-      if (!w || typeof w !== 'object') return;
+      if (r === undefined) return;
+      if (r === null) {
+        errors.push(`${o.uses}: unknown action path (expected ${PREFIX}, ${PREFIX}/access or ${PREFIX}/serve)`);
+        return;
+      }
+      const w = o.with && typeof o.with === 'object' ? (o.with as Record<string, unknown>) : {};
+      for (const req of declared.required?.[r] ?? []) {
+        if (!(req in w)) errors.push(`${o.uses}: required input '${req}' is missing`);
+      }
       for (const key of Object.keys(w)) {
         if (INTERNAL.has(key)) errors.push(`${o.uses}: input '${key}' is internal`);
         else if (!declared[r].has(key)) errors.push(`${o.uses}: input '${key}' is not declared in the ${r} action.yml`);

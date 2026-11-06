@@ -44,13 +44,35 @@ steps:
   - run: echo "Dial ${{ steps.tunnel.outputs.node-id }}"
 ```
 
-With a `container:` job or service container, `target` is a hostname reachable
-from the runner, such as the service label:
+A hostname `target` such as a service label resolves only in a `container:`
+job. A job that runs directly on the host maps `ports:` and uses
+`127.0.0.1:<port>` instead.
+
+```yaml
+jobs:
+  serve-host:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+    steps:
+      - uses: naicoi92/iroh-tunnel/serve@v0
+        with:
+          name: postgres
+          target: 127.0.0.1:5432
+```
+
+In a `container:` job, use the service label as the hostname:
 
 ```yaml
 jobs:
   serve:
     runs-on: ubuntu-latest
+    container: ubuntu:24.04
     services:
       postgres:
         image: postgres:17
@@ -99,6 +121,17 @@ steps:
 ```
 
 `relay-url` takes `https` URLs, one per line. Pass `relay-token` from a secret.
+Serve takes the same `relay-url` and `relay-token` inputs:
+
+```yaml
+steps:
+  - uses: naicoi92/iroh-tunnel/serve@v0
+    with:
+      name: postgres
+      target: 127.0.0.1:5432
+      relay-url: https://relay.example.com
+      relay-token: ${{ secrets.IROH_RELAY_TOKEN }}
+```
 
 ## Serve and Access in one job
 
@@ -156,6 +189,8 @@ steps:
   should retry dials for a few seconds
   ([#177](https://github.com/naicoi92/iroh-tunnel/issues/177)). There is no
   `home-relay` output.
+- **Timeout.** If the 60 s limit is reached, the step fails and prints the
+  last status and the end of the log.
 - **Access, TCP.** The step binds the listener, opens and closes one probe
   connection to trigger the dial, then waits for an active transport.
 - **Access, UDP.** Ready means the listener is bound.

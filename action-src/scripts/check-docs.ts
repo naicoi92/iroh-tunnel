@@ -4,12 +4,21 @@ import { checkMarkdown, type Declared } from './check-docs-lib';
 
 const root = resolve(import.meta.dir, '../..');
 
-async function inputs(file: string): Promise<Set<string>> {
-  const meta = Bun.YAML.parse(await readFile(join(root, file), 'utf8')) as { inputs: Record<string, unknown> };
-  return new Set(Object.keys(meta.inputs));
-}
+type Meta = { inputs: Record<string, { required?: boolean }> };
 
-const declared: Declared = { access: await inputs('access/action.yml'), serve: await inputs('serve/action.yml') };
+async function meta(file: string): Promise<Meta> {
+  return Bun.YAML.parse(await readFile(join(root, file), 'utf8')) as Meta;
+}
+const names = (m: Meta) => new Set(Object.keys(m.inputs));
+const required = (m: Meta) => new Set(Object.entries(m.inputs).filter(([, v]) => v?.required === true).map(([k]) => k));
+
+const access = await meta('access/action.yml');
+const serve = await meta('serve/action.yml');
+const declared: Declared = {
+  access: names(access),
+  serve: names(serve),
+  required: { access: required(access), serve: required(serve) },
+};
 const files = ['docs/github-actions.md', 'README.md'];
 const errors: string[] = [];
 for (const f of files) {
