@@ -263,7 +263,7 @@ const ACCESS_QUICK: &[&str] = &["name", "listen", "node_id"];
 /// Build the clap command tree of `binary` with the runtime adjustments the
 /// derive cannot express (required quick flags, protocol default).
 pub fn build_command(binary: Binary) -> clap::Command {
-    let mut cmd = match binary {
+    let cmd = match binary {
         Binary::AllInOne => Cli::command()
             .mut_subcommand("serve", |c| {
                 examples(
@@ -290,6 +290,9 @@ pub fn build_command(binary: Binary) -> clap::Command {
             true,
         ),
     };
+    // Pin the root name so help never echoes argv[0] (e.g. `iroh-tunnel.exe`).
+    let name = cmd.get_name().to_owned();
+    let mut cmd = cmd.bin_name(name);
     cmd.build();
     cmd
 }
@@ -544,6 +547,37 @@ pub fn init_tracing(verbose: u8, quiet: bool) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn bare_help_uses_stable_bin_name_with_exe_argv0() {
+        let cases: [(Binary, &[&str], &str); 3] = [
+            (
+                Binary::AllInOne,
+                &["iroh-tunnel.exe", "serve"],
+                "Usage: iroh-tunnel serve",
+            ),
+            (
+                Binary::Serve,
+                &["iroh-tunnel-serve.exe"],
+                "Usage: iroh-tunnel-serve",
+            ),
+            (
+                Binary::Access,
+                &["C:\\bin\\iroh-tunnel-access.exe", "config"],
+                "Usage: iroh-tunnel-access config",
+            ),
+        ];
+        for (binary, argv, expected) in cases {
+            let err = parse_cli(binary, argv.iter().map(OsString::from)).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            );
+            let text = err.render().to_string();
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains(".exe"), "{text}");
+        }
+    }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
