@@ -57,7 +57,9 @@ iroh-tunnel serve config set -n postgres -t db.internal:5433   # update: prints 
 `config set -n NAME` creates or updates one service. Serve takes
 `-t`, `--target [HOST:]PORT`; Access takes `-l`, `--listen [HOST:]PORT` and
 `-N`, `--node-id`. Both take `-p`, `--protocol` (`tcp` default, or `udp`). A
-bare `PORT` means `127.0.0.1`; `HOST` may be an IPv4 address, a hostname or a
+bare `PORT` means `127.0.0.1` when creating an entry (and in quick mode); when
+updating an existing service it keeps the current host, while `HOST:PORT`
+replaces both. `HOST` may be an IPv4 address, a hostname or a
 bracketed IPv6 address (`[::1]:5432`). Creating a service needs its address
 (and the NodeId for Access); on update, only the options you pass change, and
 `set` prints `Updated service ...` with `field: old -> new` lines, or
@@ -128,7 +130,8 @@ A node's identity is its NodeId, the public key of `secret_key`.
   existing key changes the NodeId, so it asks first; `--yes` skips the
   question, and without a terminal it fails and keeps the key.
 - `config keygen --print` prints a `Secret key:` and its `Node ID:` and writes
-  nothing (it cannot be combined with `-c` or `-y`). Use it for a secret store or a `--key-file`.
+  nothing (it cannot be combined with `-c` or `-y`). Use it for a secret store
+  or a `--key-file`.
 - When `run` finds no key, it generates one and saves it into the file
   (owner-only), so the NodeId stays the same across restarts. If the file
   cannot be written (for example a read-only mount), `run` fails; generate the

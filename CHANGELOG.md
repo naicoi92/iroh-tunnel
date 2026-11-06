@@ -29,7 +29,12 @@ The `config` command line is reworked. Config files are unchanged.
 - Usage errors print `error: ...` and the help of the failing subcommand, and
   exit `2`; bare `it`, `its`, `ita`, role, `config` and `service` print help.
 - Targets and listeners accept `[HOST:]PORT`, including hostnames and bracketed
-  IPv6; a bare port means `127.0.0.1`.
+  IPv6; a bare port means `127.0.0.1` when creating an entry (and in quick
+  mode), while `config set` on an existing service keeps the current host for a
+  bare port and replaces both for `HOST:PORT`.
+- `--protocol` and `--color` are validated (`tcp|udp`, `auto|always|never`); an
+  invalid value is a usage error listing the possible values.
+- Every command and option now has help text with defaults and examples.
 - `-r` is a short option for `--relay-url`; short options for `-c`, `-n`, `-t`,
   `-l`, `-N`, `-p`, `-k` and `-y` are consistent across commands.
 
