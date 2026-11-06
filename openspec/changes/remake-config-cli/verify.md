@@ -6,11 +6,11 @@
 > Failed checks must be fixed in the corresponding artifact, then re-run verify.
 
 **Change**: `remake-config-cli`
-**Verified at**: `2026-11-06 19:20`
-**Iteration**: `1`
-**Verifier**: parent session. Independent evidence came from `superspec.verifier` (run `cc46c5dd`). The parent re-ran the tests itself and inspected the cited files.
+**Verified at**: `2026-11-06 22:30`
+**Iteration**: `2` (post-PR fix; iteration 1 verified at `2026-11-06 19:20`)
+**Verifier**: the parent session. Iteration 1 also had independent evidence from `superspec.verifier` (run `cc46c5dd`). For iteration 2, the parent re-ran the local gate and collected CI e2e evidence on all three operating systems.
 
-All evidence below was collected in this run, in the worktree `/Users/naicoi/Projects/iroh/iroh-tunnel.remake-config-cli` at HEAD `4a5052f`.
+Iteration 2 evidence was collected in the worktree `/Users/naicoi/Projects/iroh/iroh-tunnel.remake-config-cli` at HEAD `5ba750d`, rebased onto `origin/main` `d7afe53`. Sections 1–3 and 5 from iteration 1 still hold. The only code change in iteration 2 is `444c0bf`, which pins the root `bin_name` in `build_command` and adds a unit test.
 
 ---
 
@@ -73,8 +73,18 @@ Change 'remake-config-cli' is valid          (exit 0)
 - [x] Every scenario maps to a test
 - [x] The project test command was run fresh in this step
 
-**Test command**: `CARGO_TARGET_DIR=target/verify-parent cargo test --workspace --all-features`. The `--all-features` flag matches CI in `ci.yml`/`e2e.yml`. A separate target dir forces a fresh build.
-**Result**: exit 0. Summed over 34 `test result` lines: **586 passed, 0 failed, 4 ignored**. The verifier's independent run gave the same totals: exit 0, 586 / 0 / 4.
+**Test command (iteration 2, fresh)**: `cargo test --workspace --all-features`, which matches CI. `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` also pass.
+**Result**: exit 0, **587 passed, 0 failed, 4 ignored**. That is iteration 1's 586 plus the new `cli::bare_help_uses_stable_bin_name_with_exe_argv0`.
+
+**CI end-to-end on all operating systems.** Dispatch run https://github.com/naicoi92/iroh-tunnel/actions/runs/42239371375 on `5ba750d`:
+- Attempt 1: `e2e (linux)` and `e2e (windows)` succeeded. `e2e (macos)` was cancelled before it started: "The job was not acquired by Runner of type hosted", a GitHub macOS arm64 capacity problem with no steps run. See the WARNING below.
+- Attempt 2, re-run of the failed jobs: `e2e (macos)` and `e2e (action in container)` succeeded, and so did `e2e-ok (manual)`.
+- The Windows log shows `tests\cli_usage.rs`, `tests\config_lifecycle_windows.rs`, `tests\config_paths_windows.rs`, `tests\quick_run.rs` and `tests\cli_golden.rs` all ran: 144 passed, 0 failed.
+- The previous dispatch, run `42234561860`, failed on Windows at `cli_usage::bare_invocations_print_help` (help printed `iroh-tunnel.exe`). That failure is now fixed.
+
+PR CI (`ci.yml`) on #179 is green: `lint`, `unit (linux)`, `unit (macos)`, `unit (windows)` and `ci-ok`.
+
+*Iteration 1 result for reference:* 586 passed, 0 failed, 4 ignored, confirmed by the verifier's independent run.
 
 The full scenario-to-test mapping is in `plan.md` § "Scenario → test". The verifier grepped every mapped test function name in `src/`, `crates/` and `tests/` and found all of them. The only names without a direct match were module or file names (`cli_args`, `cli_usage`, `config_cmd`, `config_multiplex_compat`), and those exist as files. Scenarios under the 3 REMOVED requirements are skipped.
 
@@ -85,7 +95,7 @@ The full scenario-to-test mapping is in `plan.md` § "Scenario → test". The ve
 | frontend-independent-management (7) | `set_service.rs`, `check_config.rs`, `config_lifecycle::concurrent_sets_serialize_without_losing_updates`, `config_paths::keygen_print_*` |
 | tunnel-configuration (3) | `config_paths::macos_migration::copy_failure_never_creates_a_substitute_identity`, `config_paths::keygen_print_*` |
 | workspace-boundaries (2) | `workspace_layout::host_depends_neither_on_root_nor_clap`, `set_service::create_serve_requires_target`, `config_lifecycle::set_without_target_shows_set_help_and_writes_nothing` |
-| Windows-only variants | **Not verified**. The `cfg(windows)` tests were neither compiled nor run on this macOS host: the msvc cross-check fails on `ring` with `cargo check` and on `aws-lc-sys` with `cargo xwin`. CI covers them |
+| Windows-only variants | **Pass (CI)**. `tests/config_lifecycle_windows.rs`, `tests/config_paths_windows.rs`, `tests/cli_usage.rs` and the other `cfg(windows)` tests ran in `e2e (windows)` of run `42239371375`: 144 passed, 0 failed. `unit (windows)` on PR #179 passed |
 
 ---
 
@@ -123,7 +133,7 @@ The full scenario-to-test mapping is in `plan.md` § "Scenario → test". The ve
 
 - [x] Working tree is clean. `git status --porcelain` printed nothing. The SDD workspace `.superpowers/sdd/` is self-gitignored.
 
-**Commit range**: `af6c312..4a5052f`. That is 26 commits: the 25 implementation and task-tick commits `af6c312..a872fbe` recorded in apply.md, plus receipt commit `4a5052f`. The base is `main` at `9b8f301`.
+**Commit range**: `origin/main(d7afe53)..5ba750d`, 32 commits. That is the rebased iteration-1 history (30 commits, ending at `93d87f3`), plus fix `444c0bf` and the apply receipt `5ba750d`. Iteration 1 was originally `af6c312..4a5052f` on `9b8f301`.
 
 ---
 
@@ -133,7 +143,11 @@ The full scenario-to-test mapping is in `plan.md` § "Scenario → test". The ve
 - None.
 
 **WARNING**
-- **Windows tests not verified.** The `cfg(windows)` tests (`tests/config_lifecycle_windows.rs` and the Windows parts of `tests/config_paths_windows.rs`) were edited in apply Tasks 5 and 8, but they have never been compiled. Recommendation: make the Windows CI job (`e2e.yml` and `ci.yml` on `windows-latest`) a required, green check before merge. If it fails, run `/opsx-apply` for a fix iteration.
+- **macOS e2e needed a re-run, and the aggregate did not catch the cancellation.**
+  - In attempt 1, `e2e (macos)` was never picked up by a runner because of GitHub capacity. GitHub reported its result as `abandoned`. The `e2e-ok (manual)` step logged `results: abandoned skipped` and passed, because its `case` checks only `failure` and `cancelled`.
+  - The re-run (attempt 2) is green, so this change is verified.
+  - The aggregate gap is a defect in the existing `e2e.yml`, outside this change. It affects push runs (`e2e-ok`) too, and so the release gate.
+  - Recommendation: open a separate change that makes the `e2e-ok` aggregate fail on any result other than `success`.
 - **Two flaky tests.** `udp_tunnel::one_peer_cannot_take_the_slots_of_another` and `configured_multiplex::access_reports_peer_stop_as_tunnel_error` each failed once during apply under load. Both passed in this fresh run. They predate this change. Recommendation: mention both in the PR description so a CI flake is not attributed to this change, and track them separately.
 
 **SUGGESTION**
@@ -150,14 +164,22 @@ The full scenario-to-test mapping is in `plan.md` § "Scenario → test". The ve
 ## Overall Decision
 
 - [ ] PASS: proceed with `/opsx-continue` to finalize
-- [x] PASS_WITH_WARNINGS: proceed, noting that the Windows-only tests are not verified locally (CI must be green before merge) and that two pre-existing flaky tests should be noted in the PR. There are no CRITICAL issues, and the fresh tests are green: 586 passed, 0 failed.
+- [x] PASS_WITH_WARNINGS: proceed. There are no CRITICAL issues.
+  - The fresh local tests pass (587/0).
+  - The e2e suite is green on Linux, macOS and Windows.
+  - The warnings are non-blocking:
+    - the pre-existing aggregate-result gap in `e2e.yml`, which belongs in a separate change;
+    - two pre-existing flaky tests.
 - [ ] FAIL: fix the cause, then re-apply (iteration N+1)
 
 Any check recorded as Not verified caps the outcome at PASS_WITH_WARNINGS.
 
 **Next step**:
 
-Run `/opsx-continue remake-config-cli` with the worktree as the working directory to create the finalize artifact, then `/opsx-archive`.
+1. `finalize.md` already exists: PR #179 is open. Update it for iteration 2: the commit range, the code review gate over the fix commit `444c0bf`, and the e2e evidence.
+2. Run `/opsx-archive` on the branch.
+3. Push.
+4. Merge #179, with the user's approval.
 
 > **Convergence loop reminder**:
 > - PASS / PASS_WITH_WARNINGS: `/opsx-continue` advances to the finalize artifact.
