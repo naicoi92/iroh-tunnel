@@ -527,7 +527,7 @@ fn help_lists_role_options_aliases_and_defaults() -> Result<()> {
     ];
     for (label, form, options, alias) in &cases {
         let text = help(form)?;
-        for option in options.iter().chain(&["--relay-url", "[default: tcp]"]) {
+        for option in options.iter().chain(&["-r, --relay-url", "[default: tcp]"]) {
             assert!(text.contains(option), "{label} help lacks {option}: {text}");
         }
         for command in ["run", "config", "status", "service"] {

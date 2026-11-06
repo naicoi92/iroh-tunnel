@@ -1,4 +1,4 @@
-//! `config remove`: delete a `[[services]]` entry by name.
+//! `config rm`: delete a `[[services]]` entry by name.
 
 use std::path::Path;
 
@@ -49,9 +49,9 @@ mod tests {
     fn removing_a_service_drops_its_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("serve.toml");
-        super::super::add_service::add_service(
+        super::super::set_service::set_service(
             Role::Serve,
-            &super::super::fixtures::add_web(&path),
+            &super::super::fixtures::set_web(&path),
         )
         .unwrap();
         let outcome = remove_service(Role::Serve, Some(&path), "web").unwrap();

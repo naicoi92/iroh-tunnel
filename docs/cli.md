@@ -21,18 +21,18 @@ iroh-tunnel-access (ita) [OPTIONS] [COMMAND]    # same as `iroh-tunnel access`
 A role with flags and no command runs one service with no config file:
 
 ```sh
-iroh-tunnel serve  -n NAME -t IP:PORT [-p tcp|udp] [--relay-url URL] [-k KEY_FILE]
-iroh-tunnel access -n NAME -l IP:PORT -N NODE_ID [-p tcp|udp] [--relay-url URL] [-k KEY_FILE]
+iroh-tunnel serve  -n NAME -t [HOST:]PORT [-p tcp|udp] [-r URL] [-k KEY_FILE]
+iroh-tunnel access -n NAME -l [HOST:]PORT -N NODE_ID [-p tcp|udp] [-r URL] [-k KEY_FILE]
 ```
 
 | Flag | Role | Meaning |
 |---|---|---|
 | `-n`, `--name` | both | Service name; must match on both sides |
-| `-t`, `--target` | Serve | Target socket, numeric IPv4 or bracketed IPv6 (`'[::1]:5432'`) |
-| `-l`, `--listen` | Access | Local listen socket |
+| `-t`, `--target` | Serve | Target `[HOST:]PORT`; a bare port means `127.0.0.1`; `HOST` may be an IP, a hostname or bracketed IPv6 (`'[::1]:5432'`) |
+| `-l`, `--listen` | Access | Local listen `[HOST:]PORT` (same forms as `--target`) |
 | `-N`, `--node-id` | Access | Serve NodeId |
 | `-p`, `--protocol` | both | `tcp` (default) or `udp` ([experimental](udp.md)) |
-| `--relay-url` | both | Use this relay instead of the n0 public relays |
+| `-r`, `--relay-url` | both | Use this relay instead of the n0 public relays |
 | `-k`, `--key-file` | both | File holding a base64 secret key, for a stable NodeId |
 
 Without `--key-file`, each start uses a fresh identity, and nothing is written
@@ -50,20 +50,45 @@ to disk. Quick flags cannot be mixed with a command such as `run` or `config`.
 
 ## `config`
 
-All subcommands accept `-c`, `--config PATH` except `keygen random`.
+All subcommands accept `-c`, `--config PATH` except `keygen --print`.
 
 | Subcommand | Purpose |
 |---|---|
 | `keygen [-y]` | Generate or replace the node's `secret_key`; asks before replacing |
-| `keygen random` | Print a new secret key and its NodeId; writes nothing |
-| `add --name N --protocol P --port N [--host H] [--node-id ID]` | Add a service; `--node-id` is required for Access |
-| `remove --name N` | Remove a service |
+| `keygen --print` | Print a new secret key and its NodeId; writes nothing; conflicts with `-c` and `-y` |
+| `set -n N -t [HOST:]PORT [-p P]` (Serve) | Create or update a service; prints what changed |
+| `set -n N -l [HOST:]PORT -N ID [-p P]` (Access) | Create or update a service; creating needs `-l` and `-N` |
+| `rm -n N` | Remove a service |
+| `check` | Validate the file without changing it; prints `OK: <path> is a valid <role> config.` |
 | `list` | List services |
 | `show [--reveal]` | Print the file; `secret_key` and `relay_token` are hidden unless `--reveal` |
 | `edit` | Edit in `$EDITOR`; the result is validated before it is saved |
 | `path` | Print the config file path |
 
 See [Configuration](configuration.md).
+
+### Short options
+
+| Short | Long | Meaning |
+|---|---|---|
+| `-c` | `--config` | Config file |
+| `-n` | `--name` | Service name |
+| `-t` | `--target` | Serve target `[HOST:]PORT` |
+| `-l` | `--listen` | Access listen `[HOST:]PORT` |
+| `-N` | `--node-id` | Serve NodeId |
+| `-p` | `--protocol` | `tcp` or `udp` |
+| `-r` | `--relay-url` | Relay URL (quick mode) |
+| `-k` | `--key-file` | Secret key file (quick mode) |
+| `-y` | `--yes` | Skip confirmation |
+| | `--reveal`, `--print`, `--system`, `--user` | Long-only |
+
+### Usage errors
+
+Unknown, missing or invalid arguments (including a missing address when
+creating a service) print `error: ...`, a blank line and the help of the failing
+subcommand to stderr, and exit with code `2`. A bare `iroh-tunnel`, `its`,
+`ita`, role, `config` or `service` prints help and exits `2`. Runtime and
+config-file errors print only the error.
 
 ## `service`
 

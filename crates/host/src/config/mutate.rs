@@ -53,13 +53,27 @@ pub(super) fn mutate_deciding<T>(
     Ok(value)
 }
 
-/// Return the first `[[services]]` table whose `name` matches, if any.
-/// (Used only for the duplicate check in `add`.)
-pub(super) fn find_service<'a>(doc: &'a DocumentMut, name: &str) -> Option<&'a toml_edit::Table> {
-    doc.get("services")
-        .and_then(|i| i.as_array_of_tables())?
+/// Index of the `[[services]]` entry named `name`.
+///
+/// `services` absent is `Ok(None)`; present but not an array of tables is a
+/// config error naming `path`.
+pub(super) fn find_service_index(
+    doc: &DocumentMut,
+    name: &str,
+    path: &Path,
+) -> Result<Option<usize>> {
+    let Some(item) = doc.get("services") else {
+        return Ok(None);
+    };
+    let services = item.as_array_of_tables().ok_or_else(|| {
+        CliError::Config(format!(
+            "invalid config at {}: [services] must be an array of tables",
+            path.display()
+        ))
+    })?;
+    Ok(services
         .iter()
-        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+        .position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name)))
 }
 
 /// Re-parse `content` through the role's schema to enforce all validation rules
@@ -125,12 +139,5 @@ mod tests {
         assert!(!text.contains("S3CRET"));
         assert!(text.contains("# keep"));
         assert!(text.contains(REDACTED));
-    }
-
-    #[test]
-    fn find_service_matches_by_name() {
-        let doc: DocumentMut = "[[services]]\nname = \"web\"\n".parse().unwrap();
-        assert!(find_service(&doc, "web").is_some());
-        assert!(find_service(&doc, "other").is_none());
     }
 }

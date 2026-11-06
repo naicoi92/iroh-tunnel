@@ -65,25 +65,17 @@ fn invalid_mutation_fails_and_leaves_file_bytes_unchanged() {
         vec![
             "serve",
             "config",
-            "add",
+            "set",
             "--config",
             p(&cfg),
-            "--name",
+            "-n",
             "ok",
-            "--protocol",
+            "-p",
             "tcp",
-            "--port",
+            "-t",
             "3",
         ],
-        vec![
-            "serve",
-            "config",
-            "remove",
-            "--config",
-            p(&cfg),
-            "--name",
-            "X",
-        ],
+        vec!["serve", "config", "rm", "--config", p(&cfg), "-n", "X"],
         vec!["serve", "config", "keygen", "--config", p(&cfg), "--yes"],
     ] {
         let o = run(&args);
@@ -93,7 +85,7 @@ fn invalid_mutation_fails_and_leaves_file_bytes_unchanged() {
 }
 
 #[test]
-fn concurrent_adds_serialize_without_losing_updates() {
+fn concurrent_sets_serialize_without_losing_updates() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("serve.toml");
     write_valid(&cfg);
@@ -106,14 +98,14 @@ fn concurrent_adds_serialize_without_losing_updates() {
             tunnel(&[
                 "serve",
                 "config",
-                "add",
+                "set",
                 "--config",
                 p(&cfg),
-                "--name",
+                "-n",
                 name,
-                "--protocol",
+                "-p",
                 "tcp",
-                "--port",
+                "-t",
                 &port,
             ])
             .stdout(Stdio::null())
@@ -149,14 +141,14 @@ fn lock_held_by_another_writer_times_out_with_a_clear_error() {
     let o = tunnel(&[
         "serve",
         "config",
-        "add",
+        "set",
         "--config",
         p(&cfg),
-        "--name",
+        "-n",
         "x",
-        "--protocol",
+        "-p",
         "tcp",
-        "--port",
+        "-t",
         "1",
     ])
     .env("IROH_TUNNEL_TEST_CONFIG_LOCK_TIMEOUT_MS", "300")
@@ -227,6 +219,7 @@ fn read_commands_without_config_share_one_error_and_create_nothing() {
         vec!["serve", "run"],
         vec!["serve", "config", "list"],
         vec!["serve", "config", "show"],
+        vec!["serve", "config", "check"],
     ] {
         let o = tunnel(&args)
             .env("IROH_TUNNEL_TEST_CONFIG_DIR", &base)
@@ -236,7 +229,7 @@ fn read_commands_without_config_share_one_error_and_create_nothing() {
         messages.push(err(&o));
     }
     assert!(messages.windows(2).all(|w| w[0] == w[1]), "{messages:?}");
-    assert!(messages[0].contains("config add"), "{}", messages[0]);
+    assert!(messages[0].contains("config set"), "{}", messages[0]);
     assert_eq!(
         std::fs::read_dir(&base).unwrap().count(),
         0,
@@ -250,15 +243,120 @@ fn every_config_subcommand_honors_config() {
     let cfg = dir.path().join("custom.toml");
     for rest in [
         vec!["keygen"],
-        vec!["add", "--name", "web", "--protocol", "tcp", "--port", "80"],
+        vec!["set", "-n", "web", "-p", "tcp", "-t", "80"],
         vec!["list"],
         vec!["show"],
         vec!["path"],
-        vec!["remove", "--name", "web"],
+        vec!["check"],
+        vec!["rm", "-n", "web"],
     ] {
         let mut args = vec!["serve", "config", rest[0], "--config", p(&cfg)];
         args.extend(&rest[1..]);
         let o = run(&args);
         assert!(o.status.success(), "{args:?}: {}", err(&o));
     }
+}
+
+#[test]
+fn set_creates_and_updates_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("c.toml");
+    let created = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3000",
+    ]);
+    assert_eq!(created.status.code(), Some(0), "{}", err(&created));
+    assert_eq!(
+        out(&created),
+        format!("Created service 'web' in {}.\n", p(&cfg))
+    );
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("protocol = \"tcp\""), "{text}");
+    assert!(text.contains("host = \"127.0.0.1\""), "{text}");
+
+    let updated = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3001",
+        "-p",
+        "udp",
+    ]);
+    assert_eq!(updated.status.code(), Some(0), "{}", err(&updated));
+    assert_eq!(
+        out(&updated),
+        format!(
+            "Updated service 'web' in {}:\n  target: 127.0.0.1:3000 -> 127.0.0.1:3001\n  protocol: tcp -> udp\n",
+            p(&cfg)
+        )
+    );
+}
+
+#[test]
+fn set_unchanged_keeps_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("c.toml");
+    let created = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3000",
+    ]);
+    assert!(created.status.success(), "{}", err(&created));
+    let before = std::fs::read(&cfg).unwrap();
+    let o = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3000",
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("Service 'web' unchanged ({}).\n", p(&cfg)));
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+}
+
+#[test]
+fn check_valid_and_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("serve.toml");
+    write_valid(&cfg);
+    let ok = run(&["serve", "config", "check", "-c", p(&cfg)]);
+    assert_eq!(ok.status.code(), Some(0), "{}", err(&ok));
+    assert_eq!(
+        out(&ok),
+        format!("OK: {} is a valid serve config.\n", p(&cfg))
+    );
+
+    let bad = dir.path().join("bad.toml");
+    std::fs::write(
+        &bad,
+        "[[services]]\nname = \"X\"\nprotocol = \"tcp\"\nport = 1\n",
+    )
+    .unwrap();
+    let o = run(&["serve", "config", "check", "-c", p(&bad)]);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert!(err(&o).starts_with("error: "), "{}", err(&o));
+    assert!(!err(&o).contains("Usage:"), "{}", err(&o));
 }

@@ -123,25 +123,17 @@ fn invalid_mutations_fail_and_leave_file_bytes_unchanged() {
         vec![
             "serve",
             "config",
-            "add",
+            "set",
             "--config",
             p(&cfg),
-            "--name",
+            "-n",
             "ok",
-            "--protocol",
+            "-p",
             "tcp",
-            "--port",
+            "-t",
             "2",
         ],
-        vec![
-            "serve",
-            "config",
-            "remove",
-            "--config",
-            p(&cfg),
-            "--name",
-            "X",
-        ],
+        vec!["serve", "config", "rm", "--config", p(&cfg), "-n", "X"],
         vec!["serve", "config", "keygen", "--config", p(&cfg), "--yes"],
         vec!["serve", "config", "edit", "--config", p(&cfg)],
     ];
@@ -216,7 +208,7 @@ fn edit_conflicting_with_a_concurrent_change_is_rejected() {
     write_valid(&cfg);
     // The editor, while "open", lets another writer add a service.
     let body = format!(
-        "{BIN} serve config add --config {cfg} --name other --protocol tcp --port 7 >/dev/null || exit 9\nsed 's/8080/9090/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"",
+        "{BIN} serve config set --config {cfg} -n other -p tcp -t 7 >/dev/null || exit 9\nsed 's/8080/9090/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"",
         cfg = p(&cfg)
     );
     let editor = editor_script(&world, &body);
@@ -235,7 +227,7 @@ fn edit_conflicting_with_a_concurrent_change_is_rejected() {
 // --- AC-CFG-06 / AC-CFG-10 -------------------------------------------------
 
 #[test]
-fn concurrent_adds_serialize_without_losing_updates() {
+fn concurrent_sets_serialize_without_losing_updates() {
     let world = World::new();
     let cfg = world.file("serve.toml");
     write_valid(&cfg);
@@ -249,14 +241,14 @@ fn concurrent_adds_serialize_without_losing_updates() {
                 .command(&[
                     "serve",
                     "config",
-                    "add",
+                    "set",
                     "--config",
                     p(&cfg),
-                    "--name",
+                    "-n",
                     name,
-                    "--protocol",
+                    "-p",
                     "tcp",
-                    "--port",
+                    "-t",
                     &port,
                 ])
                 .stdout(Stdio::null())
@@ -299,14 +291,14 @@ fn killed_or_concurrent_saves_never_expose_a_truncated_file() {
             .command(&[
                 "serve",
                 "config",
-                "add",
+                "set",
                 "--config",
                 p(&cfg),
-                "--name",
+                "-n",
                 &name,
-                "--protocol",
+                "-p",
                 "tcp",
-                "--port",
+                "-t",
                 "5000",
             ])
             .spawn()
@@ -324,14 +316,14 @@ fn killed_or_concurrent_saves_never_expose_a_truncated_file() {
     let output = world.run(&[
         "serve",
         "config",
-        "add",
+        "set",
         "--config",
         p(&cfg),
-        "--name",
+        "-n",
         "final",
-        "--protocol",
+        "-p",
         "tcp",
-        "--port",
+        "-t",
         "1",
     ]);
     assert!(output.status.success(), "{}", err(&output));
@@ -355,14 +347,14 @@ fn lock_held_by_another_writer_times_out_with_a_clear_error() {
         .command(&[
             "serve",
             "config",
-            "add",
+            "set",
             "--config",
             p(&cfg),
-            "--name",
+            "-n",
             "x",
-            "--protocol",
+            "-p",
             "tcp",
-            "--port",
+            "-t",
             "1",
         ])
         .env("IROH_TUNNEL_TEST_CONFIG_LOCK_TIMEOUT_MS", "300")
@@ -459,7 +451,7 @@ fn show_redacts_secrets_unless_revealed() {
 fn read_commands_without_config_share_one_guidance_error_and_create_nothing() {
     let world = World::new();
     let mut messages = Vec::new();
-    for command in ["run", "list", "show"] {
+    for command in ["run", "list", "show", "check"] {
         let args: Vec<&str> = if command == "run" {
             vec!["serve", "run"]
         } else {
@@ -474,7 +466,7 @@ fn read_commands_without_config_share_one_guidance_error_and_create_nothing() {
     let path = world.default_serve();
     assert!(message.contains(p(&path)), "{message}");
     assert!(
-        message.contains("config add") && message.contains("config keygen"),
+        message.contains("config set") && message.contains("config keygen"),
         "{message}"
     );
     assert!(!path.exists());
@@ -558,17 +550,28 @@ fn parse_errors_never_echo_secret_lines() {
 fn remove_on_a_missing_config_creates_nothing() {
     let world = World::new();
     let cfg = world.file("sub/serve.toml");
-    let output = world.run(&[
-        "serve",
-        "config",
-        "remove",
-        "--config",
-        p(&cfg),
-        "--name",
-        "x",
-    ]);
+    let output = world.run(&["serve", "config", "rm", "--config", p(&cfg), "-n", "x"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!world.file("sub").exists());
+}
+
+#[test]
+fn missing_for_create_exits_2() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    let output = world.run(&["serve", "config", "set", "--config", p(&cfg), "-n", "web"]);
+    assert_eq!(output.status.code(), Some(2), "{}", err(&output));
+    assert!(
+        err(&output).contains("creating service 'web' requires --target"),
+        "{}",
+        err(&output)
+    );
+    assert!(
+        err(&output).contains("Usage: iroh-tunnel serve config set"),
+        "{}",
+        err(&output)
+    );
+    assert!(!cfg.exists());
 }
 
 // --- AC-CFG-11 -------------------------------------------------------------
@@ -581,14 +584,12 @@ fn every_config_subcommand_honors_config_and_ignores_the_default() {
 
     let steps: Vec<(Vec<&str>, bool)> = vec![
         (vec!["keygen"], true),
-        (
-            vec!["add", "--name", "web", "--protocol", "tcp", "--port", "80"],
-            true,
-        ),
+        (vec!["set", "-n", "web", "-p", "tcp", "-t", "80"], true),
         (vec!["list"], true),
         (vec!["show"], true),
         (vec!["path"], true),
-        (vec!["remove", "--name", "web"], true),
+        (vec!["check"], true),
+        (vec!["rm", "-n", "web"], true),
     ];
     for (rest, _) in &steps {
         let mut args = vec!["serve", "config"];
@@ -614,16 +615,16 @@ fn every_config_subcommand_honors_config_and_ignores_the_default() {
     let added = world.run(&[
         "access",
         "config",
-        "add",
+        "set",
         "--config",
         p(&acfg),
-        "--name",
+        "-n",
         "db",
-        "--protocol",
+        "-p",
         "tcp",
-        "--port",
+        "-l",
         "5432",
-        "--node-id",
+        "-N",
         &peer,
     ]);
     assert!(added.status.success(), "{}", err(&added));
@@ -633,4 +634,298 @@ fn every_config_subcommand_honors_config_and_ignores_the_default() {
         !world.home().join(".config").exists(),
         "default directory touched"
     );
+}
+
+// --- config set / check ----------------------------------------------------
+
+fn set_args<'a>(cfg: &'a Path, rest: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["serve", "config", "set", "-c", p(cfg)];
+    args.extend(rest);
+    args
+}
+
+fn write_udp(path: &Path, extra: &str) {
+    std::fs::write(
+        path,
+        format!(
+            "[[services]]\nname = \"web\"\nprotocol = \"udp\"\nhost = \"10.0.0.5\"\nport = 3000\n{extra}"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn set_creates_serve_entry_with_defaults() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "3000"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(
+        out(&output),
+        format!("Created service 'web' in {}.\n", p(&cfg))
+    );
+    assert_eq!(err(&output), "");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("protocol = \"tcp\""), "{text}");
+    assert!(text.contains("host = \"127.0.0.1\""), "{text}");
+    assert!(text.contains("port = 3000"), "{text}");
+}
+
+#[test]
+fn set_creates_access_entry() {
+    let world = World::new();
+    let cfg = world.file("a.toml");
+    let peer = iroh::SecretKey::generate().public().to_string();
+    let output = world.run(&[
+        "access",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-l",
+        "0.0.0.0:8080",
+        "-N",
+        &peer,
+        "-p",
+        "udp",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(
+        out(&output),
+        format!("Created service 'web' in {}.\n", p(&cfg))
+    );
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains(&format!("node_id = \"{peer}\"")), "{text}");
+    assert!(text.contains("protocol = \"udp\""), "{text}");
+    assert!(text.contains("host = \"0.0.0.0\""), "{text}");
+    assert!(text.contains("port = 8080"), "{text}");
+}
+
+#[test]
+fn set_accepts_hostname_target() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "db.internal:5432"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("host = \"db.internal\""), "{text}");
+    assert!(text.contains("port = 5432"), "{text}");
+}
+
+#[test]
+fn set_create_on_missing_file() {
+    let world = World::new();
+    let cfg = world.file("fresh.toml");
+    assert!(!cfg.exists());
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "3000"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert!(cfg.exists());
+    let check = world.run(&["serve", "config", "check", "-c", p(&cfg)]);
+    assert_eq!(check.status.code(), Some(0), "{}", err(&check));
+}
+
+#[test]
+fn set_without_target_shows_set_help_and_writes_nothing() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    let output = world.run(&set_args(&cfg, &["-n", "web"]));
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(out(&output), "");
+    let e = err(&output);
+    assert!(
+        e.starts_with("error: creating service 'web' requires --target"),
+        "{e}"
+    );
+    assert!(e.contains("Usage: iroh-tunnel serve config set"), "{e}");
+    assert!(!cfg.exists());
+}
+
+#[test]
+fn access_set_with_name_only_names_listen_and_node_id() {
+    let world = World::new();
+    let cfg = world.file("a.toml");
+    let output = world.run(&["access", "config", "set", "-c", p(&cfg), "-n", "web"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(out(&output), "");
+    assert!(
+        err(&output).contains("requires --listen and --node-id"),
+        "{}",
+        err(&output)
+    );
+    assert!(!cfg.exists());
+}
+
+#[test]
+fn set_bare_port_update_keeps_host() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    write_udp(&cfg, "");
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "3001"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("host = \"10.0.0.5\""), "{text}");
+    assert!(text.contains("port = 3001"), "{text}");
+    assert!(text.contains("protocol = \"udp\""), "{text}");
+}
+
+#[test]
+fn set_host_port_update_replaces_both() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    write_udp(&cfg, "");
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "127.0.0.1:4000"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("host = \"127.0.0.1\""), "{text}");
+    assert!(text.contains("port = 4000"), "{text}");
+}
+
+#[test]
+fn set_update_keeps_udp_settings() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    write_udp(&cfg, "max_flows = 5\n");
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "3001"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("max_flows = 5"), "{text}");
+    assert!(text.contains("port = 3001"), "{text}");
+}
+
+#[test]
+fn set_udp_to_tcp_with_udp_settings_fails_unchanged() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    write_udp(&cfg, "max_flows = 5\n");
+    let before = std::fs::read(&cfg).unwrap();
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-p", "tcp"]));
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(out(&output), "");
+    assert!(err(&output).starts_with("error: "), "{}", err(&output));
+    assert!(!err(&output).contains("Usage:"), "{}", err(&output));
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+}
+
+#[test]
+fn set_reports_changes() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    let created = world.run(&set_args(&cfg, &["-n", "web", "-t", "3000"]));
+    assert!(created.status.success(), "{}", err(&created));
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "3001", "-p", "udp"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(
+        out(&output),
+        format!(
+            "Updated service 'web' in {}:\n  target: 127.0.0.1:3000 -> 127.0.0.1:3001\n  protocol: tcp -> udp\n",
+            p(&cfg)
+        )
+    );
+}
+
+#[test]
+fn set_unchanged_keeps_bytes_and_mtime() {
+    use std::os::unix::fs::MetadataExt;
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    let created = world.run(&set_args(&cfg, &["-n", "web", "-t", "3000"]));
+    assert!(created.status.success(), "{}", err(&created));
+    std::thread::sleep(Duration::from_millis(1100));
+    let bytes = std::fs::read(&cfg).unwrap();
+    let meta = std::fs::metadata(&cfg).unwrap();
+    let (mtime, ino) = (meta.modified().unwrap(), meta.ino());
+
+    let output = world.run(&set_args(&cfg, &["-n", "web", "-t", "3000", "-p", "tcp"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(
+        out(&output),
+        format!("Service 'web' unchanged ({}).\n", p(&cfg))
+    );
+    let after = std::fs::metadata(&cfg).unwrap();
+    assert_eq!(std::fs::read(&cfg).unwrap(), bytes);
+    assert_eq!(after.modified().unwrap(), mtime);
+    assert_eq!(after.ino(), ino);
+}
+
+#[test]
+fn set_name_only_on_existing_is_unchanged() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    write_valid(&cfg);
+    let before = std::fs::read(&cfg).unwrap();
+    let output = world.run(&set_args(&cfg, &["-n", "web"]));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(
+        out(&output),
+        format!("Service 'web' unchanged ({}).\n", p(&cfg))
+    );
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+}
+
+#[test]
+fn set_invalid_name_has_no_help() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    let output = world.run(&set_args(&cfg, &["-n", "Bad!", "-t", "1"]));
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(out(&output), "");
+    assert!(err(&output).starts_with("error: "), "{}", err(&output));
+    assert!(!err(&output).contains("Usage:"), "{}", err(&output));
+    assert!(!cfg.exists());
+}
+
+#[test]
+fn check_valid() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    write_valid(&cfg);
+    let before = std::fs::read(&cfg).unwrap();
+    let output = world.run(&["serve", "config", "check", "-c", p(&cfg)]);
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(
+        out(&output),
+        format!("OK: {} is a valid serve config.\n", p(&cfg))
+    );
+    assert_eq!(err(&output), "");
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+}
+
+#[test]
+fn check_invalid_exits_2() {
+    let world = World::new();
+    let cfg = world.file("c.toml");
+    write_invalid(&cfg);
+    let before = std::fs::read(&cfg).unwrap();
+    let output = world.run(&["serve", "config", "check", "-c", p(&cfg)]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(out(&output), "");
+    assert!(err(&output).starts_with("error: "), "{}", err(&output));
+    assert!(!err(&output).contains("Usage:"), "{}", err(&output));
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+}
+
+#[test]
+fn check_under_held_lock_does_not_wait_or_write() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    std::fs::write(
+        &cfg,
+        "[[services]]\nname = \"web\"\nprotocol = \"tcp\"\nhost = \"127.0.0.1\"\nport = 80\nmultiplex = true\n",
+    )
+    .unwrap();
+    let before = std::fs::read(&cfg).unwrap();
+    let lock = File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(world.file("serve.toml.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let started = Instant::now();
+    let output = world.run(&["serve", "config", "check", "-c", p(&cfg)]);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
 }

@@ -207,28 +207,50 @@ fn config_path_prints_resolved_path() {
 }
 
 #[test]
-fn config_add_and_remove_messages_are_unchanged() {
+fn config_set_created_message() {
+    let world = World::new();
+    let cfg = world.file("cfg.toml", "[node]\nsecret_key = \"\"\n");
+    let cfg = cfg.to_str().unwrap();
+    let set = world.run(&[
+        "serve", "config", "set", "-c", cfg, "-n", "web", "-t", "8080", "-p", "tcp",
+    ]);
+    check(&world, "config_set_created_message", &set, 0);
+}
+
+#[test]
+fn config_set_updated_report() {
+    let world = World::new();
+    let cfg = world.file("cfg.toml", "[node]\nsecret_key = \"\"\n");
+    let cfg = cfg.to_str().unwrap();
+    let create = world.run(&[
+        "serve", "config", "set", "-c", cfg, "-n", "web", "-t", "8080",
+    ]);
+    assert_eq!(create.status.code(), Some(0));
+    let update = world.run(&[
+        "serve", "config", "set", "-c", cfg, "-n", "web", "-t", "8081", "-p", "udp",
+    ]);
+    check(&world, "config_set_updated_report", &update, 0);
+}
+
+#[test]
+fn config_rm_message() {
     let world = World::new();
     let cfg = world.file("cfg.toml", "[node]\nsecret_key = \"\"\n");
     let cfg = cfg.to_str().unwrap();
     let add = world.run(&[
-        "serve",
-        "config",
-        "add",
-        "--config",
-        cfg,
-        "--name",
-        "web",
-        "--protocol",
-        "tcp",
-        "--port",
-        "8080",
+        "serve", "config", "set", "-c", cfg, "-n", "web", "-t", "8080",
     ]);
-    check(&world, "config_add_message_is_unchanged", &add, 0);
-    let remove = world.run(&[
-        "serve", "config", "remove", "--config", cfg, "--name", "web",
-    ]);
-    check(&world, "config_remove_message_is_unchanged", &remove, 0);
+    assert_eq!(add.status.code(), Some(0));
+    let rm = world.run(&["serve", "config", "rm", "-c", cfg, "-n", "web"]);
+    check(&world, "config_rm_message", &rm, 0);
+}
+
+#[test]
+fn config_check_ok_message() {
+    let world = World::new();
+    let cfg = world.file("cfg.toml", "[node]\nsecret_key = \"\"\n");
+    let out = world.run(&["serve", "config", "check", "-c", cfg.to_str().unwrap()]);
+    check(&world, "config_check_ok_message", &out, 0);
 }
 
 #[test]
@@ -246,15 +268,10 @@ fn keygen_messages_are_unchanged() {
 }
 
 #[test]
-fn keygen_random_prints_key_and_node_id_lines() {
+fn keygen_print_prints_key_and_node_id_lines() {
     let world = World::new();
-    let out = world.run(&["serve", "config", "keygen", "random"]);
-    check(
-        &world,
-        "keygen_random_prints_key_and_node_id_lines",
-        &out,
-        0,
-    );
+    let out = world.run(&["serve", "config", "keygen", "--print"]);
+    check(&world, "keygen_print_prints_key_and_node_id_lines", &out, 0);
 }
 
 #[test]

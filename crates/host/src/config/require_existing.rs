@@ -17,8 +17,8 @@ use crate::role::Role;
 pub fn require_existing(role: Role, path: &Path) -> Result<String> {
     read_optional(path)?.ok_or_else(|| {
         CliError::Config(format!(
-            "no configuration at {path}. Create one with `config add` or `config keygen` \
-             (`iroh-tunnel {role} config add`, or `iroh-tunnel-{role} config add`), or pass --config",
+            "no configuration at {path}. Create one with `config set` or `config keygen` \
+             (`iroh-tunnel {role} config set`, or `iroh-tunnel-{role} config set`), or pass --config",
             path = path.display(),
             role = role.name()
         ))
@@ -39,7 +39,7 @@ mod tests {
             panic!("expected Config, got {err:?}");
         };
         assert!(msg.contains(&path.display().to_string()));
-        assert!(msg.contains("config add"));
+        assert!(msg.contains("config set"));
         assert!(!path.exists(), "nothing may be created");
     }
 }

@@ -20,7 +20,7 @@ docker run --rm ghcr.io/naicoi92/iroh-tunnel-serve:v0.5.0 \
 ```
 
 With a config file, mount it read-only. It must already contain a
-`secret_key` (`config keygen random` prints one), because `run` cannot save a
+`secret_key` (`config keygen --print` prints one), because `run` cannot save a
 generated key into a read-only file:
 
 ```sh
@@ -59,7 +59,7 @@ Generate a key once and keep the whole config in a Secret, so the NodeId
 survives restarts and rollouts:
 
 ```sh
-iroh-tunnel serve config keygen random
+iroh-tunnel serve config keygen --print
 # Secret key: <base64>
 # Node ID: <hex>     <- the NodeId clients dial
 ```
@@ -72,7 +72,7 @@ metadata:
 stringData:
   serve.toml: |
     [node]
-    secret_key = "<base64 from keygen random>"
+    secret_key = "<base64 from keygen --print>"
 
     [[services]]
     name = "postgres"

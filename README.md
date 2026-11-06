@@ -94,7 +94,7 @@ Clients now connect to `127.0.0.1:15432`. The standalone executables take
 the same flags without the role word: `its -n postgres -t 127.0.0.1:5432`.
 Add `-p udp` for [UDP](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/udp.md). Quick mode uses a fresh NodeId on every
 start. To keep it, save the `Secret key:` value printed by
-`iroh-tunnel serve config keygen random` to a private file and pass
+`iroh-tunnel serve config keygen --print` to a private file and pass
 `-k FILE`.
 
 **NodeId is public identity, not target authorization.** Anyone who knows a
@@ -108,15 +108,14 @@ On the Serve host:
 
 ```sh
 iroh-tunnel serve config keygen               # create a stable identity
-iroh-tunnel serve config add --name postgres --protocol tcp --port 5432
+iroh-tunnel serve config set -n postgres -t 5432
 iroh-tunnel serve run                         # prints NodeId: <hex>
 ```
 
 On the Access host:
 
 ```sh
-iroh-tunnel access config add --name postgres --protocol tcp \
-  --node-id <SERVE_NODE_ID> --port 15432
+iroh-tunnel access config set -n postgres -l 15432 -N <SERVE_NODE_ID>
 iroh-tunnel access run
 ```
 

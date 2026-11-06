@@ -89,18 +89,8 @@ multiplex = false
 "#
     );
     for args in [
-        vec![
-            "add",
-            "--name",
-            "added",
-            "--protocol",
-            "tcp",
-            "--port",
-            "5434",
-            "--node-id",
-            &peer,
-        ],
-        vec!["remove", "--name", "remove-me"],
+        vec!["set", "-n", "added", "-p", "tcp", "-l", "5434", "-N", &peer],
+        vec!["rm", "-n", "remove-me"],
         vec!["keygen", "--yes"],
     ] {
         std::fs::write(&path, &source)?;
@@ -164,7 +154,7 @@ fn keygen_drops_multiplex_from_inline_services() -> Result<()> {
 }
 
 #[test]
-fn rejected_config_add_preserves_legacy_file_and_key() -> Result<()> {
+fn rejected_config_set_preserves_legacy_file_and_key() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("access.toml");
     let source = format!(
@@ -173,17 +163,17 @@ fn rejected_config_add_preserves_legacy_file_and_key() -> Result<()> {
     );
     std::fs::write(&path, &source)?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
-        .args(["access", "config", "add", "--config"])
+        .args(["access", "config", "set", "--config"])
         .arg(&path)
         .args([
-            "--name",
+            "-n",
             "echo",
-            "--protocol",
+            "-p",
             "tcp",
-            "--port",
+            "-l",
             "5433",
-            "--node-id",
-            &iroh::SecretKey::generate().public().to_string(),
+            "-N",
+            "not-a-node-id",
         ])
         .output()?;
     assert!(!output.status.success());

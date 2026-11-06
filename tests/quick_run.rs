@@ -290,6 +290,112 @@ async fn quick_ipv6_listener_forwards_bytes() -> Result<()> {
     tcp_roundtrip(true, false, true).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quick_bare_port_target_forwards() -> Result<()> {
+    let target = TcpListener::bind("127.0.0.1:0").await?;
+    let port = target.local_addr()?.port().to_string();
+    let fixture = async {
+        let (mut stream, _) = target.accept().await?;
+        let mut request = [0u8; 7];
+        stream.read_exact(&mut request).await?;
+        anyhow::ensure!(&request == b"request", "wrong target request");
+        stream.write_all(b"response").await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::try_join!(
+            fixture,
+            tcp_session(true, false, &port, b"request", b"response")
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quick_hostname_target_forwards() -> Result<()> {
+    let v4 = TcpListener::bind("127.0.0.1:0").await?;
+    let port = v4.local_addr()?.port();
+    // Same port on ::1 so either resolution order of `localhost` works.
+    let v6 = TcpListener::bind(("::1", port)).await.ok();
+    let target = format!("localhost:{port}");
+    let serve_one = |listener: TcpListener| async move {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = [0u8; 7];
+        stream.read_exact(&mut request).await?;
+        anyhow::ensure!(&request == b"request", "wrong target request");
+        stream.write_all(b"response").await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    let fixture = async {
+        match v6 {
+            Some(v6) => tokio::select! {
+                result = serve_one(v4) => result,
+                result = serve_one(v6) => result,
+            },
+            None => serve_one(v4).await,
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(90), async {
+        tokio::try_join!(
+            fixture,
+            tcp_session(true, false, &target, b"request", b"response")
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[test]
+fn quick_to_stored_entry_matches() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let config = home.path().join("c.toml");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+    isolated(&mut command, home.path());
+    let output = command
+        .args(["serve", "config", "set", "-c"])
+        .arg(&config)
+        .args(["-n", "web", "-t", "3000"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: toml::Value = toml::from_str(&std::fs::read_to_string(&config)?)?;
+    let text = doc.to_string();
+    let found = find_entry(&doc).with_context(|| format!("no stored entry: {text}"))?;
+    assert_eq!(
+        found.get("host").and_then(|v| v.as_str()),
+        Some("127.0.0.1"),
+        "{text}"
+    );
+    assert_eq!(
+        found.get("port").and_then(|v| v.as_integer()),
+        Some(3000),
+        "{text}"
+    );
+    assert_eq!(
+        found.get("protocol").and_then(|v| v.as_str()),
+        Some("tcp"),
+        "{text}"
+    );
+    Ok(())
+}
+
+fn find_entry(value: &toml::Value) -> Option<&toml::Value> {
+    let table = value.as_table()?;
+    if table.get("port").is_some() && table.get("host").is_some() {
+        return Some(value);
+    }
+    table.values().find_map(|child| match child {
+        toml::Value::Array(items) => items.iter().find_map(find_entry),
+        other => find_entry(other),
+    })
+}
+
 async fn tcp_roundtrip(short: bool, ipv6_target: bool, ipv6_listen: bool) -> Result<()> {
     if ipv6_target || ipv6_listen {
         match TcpListener::bind("[::1]:0").await {
@@ -506,7 +612,7 @@ fn file_snapshot(
     Ok(files)
 }
 
-fn rejected(args: &[&str], diagnostic: &str) -> Result<()> {
+fn rejected(args: &[&str], diagnostic: &str) -> Result<String> {
     let home = tempfile::tempdir()?;
     let state = tempfile::tempdir()?;
     let files = existing_user_files(home.path())?;
@@ -554,7 +660,7 @@ fn rejected(args: &[&str], diagnostic: &str) -> Result<()> {
         "--listen"
     };
     assert!(
-        stderr.contains(args[0]) || stderr.contains(role_option),
+        stderr.contains(args[0]) || stderr.contains(role_option) || stderr.contains("--protocol"),
         "missing role context for {args:?}: {stderr}"
     );
     assert!(stderr.contains(diagnostic), "{args:?}: {stderr}");
@@ -565,7 +671,7 @@ fn rejected(args: &[&str], diagnostic: &str) -> Result<()> {
     );
     assert_eq!(std::fs::read_dir(state.path())?.count(), 0);
     eprintln!("rejected {args:?}, exit=2: {stderr}");
-    Ok(())
+    Ok(stderr.into_owned())
 }
 
 #[test]
@@ -750,10 +856,21 @@ fn invalid_quick_inputs_fail_without_config_or_key_writes() -> Result<()> {
         rejected(&args, "name")?;
         let mut args = valid.clone();
         args.extend(["--protocol", "sctp"]);
-        rejected(&args, "tcp or udp")?;
+        rejected(&args, "possible values")?;
+        let mut args = valid.clone();
+        args[2] = "BAD";
+        let stderr = rejected(&args, "name")?;
+        assert!(
+            !stderr.contains("Usage:"),
+            "schema error shows usage: {stderr}"
+        );
         let mut args = valid.clone();
         args.extend(["--relay-url", "http://localhost:1"]);
-        rejected(&args, "https://")?;
+        let stderr = rejected(&args, "https://")?;
+        assert!(
+            !stderr.contains("Usage:"),
+            "schema error shows usage: {stderr}"
+        );
         let mut args = valid.clone();
         args.extend(["--unknown-option", "x"]);
         rejected(&args, "--unknown-option")?;
@@ -777,8 +894,8 @@ fn invalid_quick_inputs_fail_without_config_or_key_writes() -> Result<()> {
 
 #[test]
 fn quick_config_errors_use_existing_exit_classification() -> Result<()> {
-    rejected(&["serve", "-p", "sctp"], "tcp or udp")?;
-    rejected(&["access", "-p", "sctp"], "tcp or udp")?;
+    rejected(&["serve", "-p", "sctp"], "possible values")?;
+    rejected(&["access", "-p", "sctp"], "possible values")?;
     Ok(())
 }
 
