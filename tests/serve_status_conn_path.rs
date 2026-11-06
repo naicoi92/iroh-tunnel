@@ -10,6 +10,9 @@
 //!
 //! Phases:
 //!
+//! 0. `serve-status.json` reports the in-process relay as `home_relay` once
+//!    the endpoint registers with it (issue #177): the relay is assigned
+//!    after bind, so the flush loop must pick it up on a later tick.
 //! 1. A payload round-trips through the tunnel (connection established).
 //! 2. `serve-status.json` gains a `connections[0]` entry for the access
 //!    node id (pinned key), carrying the `echo` service, non-empty
@@ -149,6 +152,22 @@ multiplex = true
     let serve_role: SharedRole = Arc::new(tokio::sync::Mutex::new(Some(serve_spawn)));
     let access_role: SharedRole = Arc::new(tokio::sync::Mutex::new(Some(access_spawn)));
 
+    // Phase 0 — the status file reports the home relay once assigned
+    // (issue #177). It is `null` right after bind, so this only passes when
+    // the flush loop re-reads the endpoint's home relay.
+    let status_path = state_tmp.path().join("serve-status.json");
+    let with_relay = poll_status(
+        &status_path,
+        STATUS_POLL_TIMEOUT,
+        &[&serve_role, &access_role],
+        |status| !status["home_relay"].is_null(),
+    )
+    .await?;
+    assert_eq!(
+        with_relay["home_relay"], relay,
+        "home_relay must be the configured in-process relay"
+    );
+
     // Phase 1 — the tunnel works (this also establishes the connection the
     // status file must then report).
     let mut client = retry_connect(
@@ -168,7 +187,6 @@ multiplex = true
     assert_eq!(got.as_slice(), PAYLOAD);
 
     // Phase 2 — serve-status.json reports the access peer.
-    let status_path = state_tmp.path().join("serve-status.json");
     let with_peer = poll_status(
         &status_path,
         STATUS_POLL_TIMEOUT,

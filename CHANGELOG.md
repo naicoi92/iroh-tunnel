@@ -38,6 +38,10 @@ The `config` command line is reworked. Config files are unchanged.
 - `-r` is a short option for `--relay-url`; short options for `-c`, `-n`, `-t`,
   `-l`, `-N`, `-p`, `-k` and `-y` are consistent across commands.
 
+### Fixed
+
+- `serve-status.json` and `serve status` now report `home_relay` once the endpoint registers with a relay, instead of `null` for the whole run (#177).
+
 ## [0.5.0] - 2026-11-06
 
 The largest release so far: quick mode, standalone role executables, UDP,
