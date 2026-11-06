@@ -9,9 +9,29 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
 
 ## [Unreleased]
 
+### BREAKING
+
+The `config` command line is reworked. Config files are unchanged.
+
+| Old | New |
+|---|---|
+| `config add --name N --protocol P --port N [--host H]` | `config set -n N -t [HOST:]PORT [-p P]` (Serve) |
+| `config add ... --node-id ID --port N` | `config set -n N -l [HOST:]PORT -N ID [-p P]` (Access) |
+| `config remove --name N` | `config rm -n N` |
+| `config keygen random` | `config keygen --print` |
+
+`config set` creates or updates a service and prints what changed.
+
 ### Added
 
 - GitHub Actions: Access (naicoi92/iroh-tunnel) and Serve (naicoi92/iroh-tunnel/serve) for CI/CD.
+- `config check` validates a config file without changing it.
+- Usage errors print `error: ...` and the help of the failing subcommand, and
+  exit `2`; bare `it`, `its`, `ita`, role, `config` and `service` print help.
+- Targets and listeners accept `[HOST:]PORT`, including hostnames and bracketed
+  IPv6; a bare port means `127.0.0.1`.
+- `-r` is a short option for `--relay-url`; short options for `-c`, `-n`, `-t`,
+  `-l`, `-N`, `-p`, `-k` and `-y` are consistent across commands.
 
 ## [0.5.0] - 2026-11-06
 

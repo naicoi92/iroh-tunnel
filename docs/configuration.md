@@ -42,22 +42,30 @@ Sample files: [`examples/serve.toml`](../examples/serve.toml) and
 
 ```sh
 iroh-tunnel serve config keygen                       # create or rotate the identity
-iroh-tunnel serve config add --name postgres --protocol tcp --port 5432
+iroh-tunnel serve config set -n postgres -t 5432
 iroh-tunnel serve config list
 iroh-tunnel serve config show                         # secrets hidden; --reveal prints them
-iroh-tunnel serve config remove --name postgres
+iroh-tunnel serve config rm -n postgres
 iroh-tunnel serve config edit                         # $EDITOR, validated on exit
+iroh-tunnel serve config check                        # validate only
 iroh-tunnel serve config path
 
-iroh-tunnel access config add --name postgres --protocol tcp \
-  --node-id <SERVE_NODE_ID> --host 127.0.0.1 --port 55432
+iroh-tunnel access config set -n postgres -l 55432 -N <SERVE_NODE_ID>
+iroh-tunnel serve config set -n postgres -t db.internal:5433   # update: prints old -> new
 ```
 
-`config add` takes `--name`, `--protocol` (`tcp` or `udp`), `--port`,
-`--host` (default `127.0.0.1`) and, for Access only, `--node-id`. `add` and
-`keygen` create the file and its directory when missing. `list`, `show`,
-`remove` and `run` on a missing file fail with exit code `2`, name the path,
-point to `config add` / `config keygen`, and create nothing.
+`config set -n NAME` creates or updates one service. Serve takes
+`-t`, `--target [HOST:]PORT`; Access takes `-l`, `--listen [HOST:]PORT` and
+`-N`, `--node-id`. Both take `-p`, `--protocol` (`tcp` default, or `udp`). A
+bare `PORT` means `127.0.0.1`; `HOST` may be an IPv4 address, a hostname or a
+bracketed IPv6 address (`[::1]:5432`). Creating a service needs its address
+(and the NodeId for Access); on update, only the options you pass change, and
+`set` prints `Updated service ...` with `field: old -> new` lines, or
+`Service ... unchanged`. `set` and `keygen` create the file and its directory
+when missing. `list`, `show`, `rm`, `check` and `run` on a missing file fail
+with exit code `2`, name the path, point to `config set` / `config keygen`,
+and create nothing. `config check` only validates and prints
+`OK: <path> is a valid <role> config.`
 
 ## Serve file
 
@@ -119,15 +127,15 @@ A node's identity is its NodeId, the public key of `secret_key`.
 - `config keygen` writes a new key and prints `New NodeId: <id>`. Replacing an
   existing key changes the NodeId, so it asks first; `--yes` skips the
   question, and without a terminal it fails and keeps the key.
-- `config keygen random` prints a `Secret key:` and its `Node ID:` and writes
-  nothing. Use it for a secret store or a `--key-file`.
+- `config keygen --print` prints a `Secret key:` and its `Node ID:` and writes
+  nothing (it cannot be combined with `-c` or `-y`). Use it for a secret store or a `--key-file`.
 - When `run` finds no key, it generates one and saves it into the file
   (owner-only), so the NodeId stays the same across restarts. If the file
   cannot be written (for example a read-only mount), `run` fails; generate the
   key in advance instead.
 - Quick mode uses a fresh identity on every start unless you pass
   `--key-file PATH`. The file holds only the base64 key, the `Secret key:`
-  value printed by `config keygen random`; keep it owner-only.
+  value printed by `config keygen --print`; keep it owner-only.
 - A Serve and an Access running at the same time must use different keys.
 
 The NodeId is public: Access needs it to dial. The secret key is not; keep it

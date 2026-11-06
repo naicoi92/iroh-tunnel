@@ -5,7 +5,7 @@ manager so it starts at boot or login. It uses
 the role's [config file](configuration.md); quick-mode flags do not apply.
 
 ```sh
-iroh-tunnel serve config add --name ssh --protocol tcp --port 22
+iroh-tunnel serve config set -n ssh -t 22
 iroh-tunnel serve service install            # install, enable and start
 iroh-tunnel serve service status
 iroh-tunnel serve service restart

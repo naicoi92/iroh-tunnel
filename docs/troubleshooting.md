@@ -4,7 +4,7 @@
 In quick mode, each start uses a fresh identity; pass `--key-file`. With a
 config file, the key is saved on the first `run`; if the file is read-only,
 `run` fails instead. Run `config keygen` once, or put a key from
-`config keygen random` into the file.
+`config keygen --print` into the file.
 
 **`run` fails with "already running" (exit code 6).**
 Each role runs as one process per user. Another `serve` (or `access`) is

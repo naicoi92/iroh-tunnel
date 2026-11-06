@@ -157,7 +157,7 @@ pub(crate) fn render_checked(role: Role, path: &Path) -> String {
     )
 }
 
-/// `config remove` confirmation line.
+/// `config rm` confirmation line.
 pub(crate) fn render_removed(outcome: &Mutation) -> String {
     format!(
         "Removed service '{}' from {}.\n",
