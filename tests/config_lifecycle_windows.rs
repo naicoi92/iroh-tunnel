@@ -247,6 +247,7 @@ fn every_config_subcommand_honors_config() {
         vec!["list"],
         vec!["show"],
         vec!["path"],
+        vec!["check"],
         vec!["rm", "-n", "web"],
     ] {
         let mut args = vec!["serve", "config", rest[0], "--config", p(&cfg)];
@@ -254,4 +255,108 @@ fn every_config_subcommand_honors_config() {
         let o = run(&args);
         assert!(o.status.success(), "{args:?}: {}", err(&o));
     }
+}
+
+#[test]
+fn set_creates_and_updates_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("c.toml");
+    let created = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3000",
+    ]);
+    assert_eq!(created.status.code(), Some(0), "{}", err(&created));
+    assert_eq!(
+        out(&created),
+        format!("Created service 'web' in {}.\n", p(&cfg))
+    );
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("protocol = \"tcp\""), "{text}");
+    assert!(text.contains("host = \"127.0.0.1\""), "{text}");
+
+    let updated = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3001",
+        "-p",
+        "udp",
+    ]);
+    assert_eq!(updated.status.code(), Some(0), "{}", err(&updated));
+    assert_eq!(
+        out(&updated),
+        format!(
+            "Updated service 'web' in {}:\n  target: 127.0.0.1:3000 -> 127.0.0.1:3001\n  protocol: tcp -> udp\n",
+            p(&cfg)
+        )
+    );
+}
+
+#[test]
+fn set_unchanged_keeps_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("c.toml");
+    let created = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3000",
+    ]);
+    assert!(created.status.success(), "{}", err(&created));
+    let before = std::fs::read(&cfg).unwrap();
+    let o = run(&[
+        "serve",
+        "config",
+        "set",
+        "-c",
+        p(&cfg),
+        "-n",
+        "web",
+        "-t",
+        "3000",
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(out(&o), format!("Service 'web' unchanged ({}).\n", p(&cfg)));
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+}
+
+#[test]
+fn check_valid_and_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("serve.toml");
+    write_valid(&cfg);
+    let ok = run(&["serve", "config", "check", "-c", p(&cfg)]);
+    assert_eq!(ok.status.code(), Some(0), "{}", err(&ok));
+    assert_eq!(
+        out(&ok),
+        format!("OK: {} is a valid serve config.\n", p(&cfg))
+    );
+
+    let bad = dir.path().join("bad.toml");
+    std::fs::write(
+        &bad,
+        "[[services]]\nname = \"X\"\nprotocol = \"tcp\"\nport = 1\n",
+    )
+    .unwrap();
+    let o = run(&["serve", "config", "check", "-c", p(&bad)]);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert!(err(&o).starts_with("error: "), "{}", err(&o));
+    assert!(!err(&o).contains("Usage:"), "{}", err(&o));
 }
