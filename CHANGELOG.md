@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Before 1.0.0, a minor release may contain breaking changes; they are marked
 **Breaking**.
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-11-06
 
 The largest release so far: quick mode, standalone role executables, UDP,
 Windows, installers, verified self-update, and a reworked configuration,
