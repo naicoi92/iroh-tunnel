@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2023",
+    "types": ["node", "bun"],
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "test", "build.ts", "build-lib.ts", "scripts"]
+}
