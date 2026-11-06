@@ -2,7 +2,7 @@ import { afterAll, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLauncher } from '../../src/adapters/launcher';
+import { createLauncher, procState } from '../../src/adapters/launcher';
 
 let dir: string;
 const ready = (async () => { dir = await mkdtemp(join(tmpdir(), 'launch-test-')); })();
@@ -53,6 +53,26 @@ test.skipIf(process.platform === 'win32')('stop returns killed for a child ignor
   await until(async () => (await readFile(log, 'utf8').catch(() => '')).includes('up'));
   expect(await l.stop(h.pid, 200)).toBe('killed');
   expect(l.isAlive(h.pid)).toBe(false);
+});
+
+// In a `container:` job PID 1 (`tail -f /dev/null`) never reaps, so a stopped
+// tunnel stays a zombie and kill(pid, 0) still succeeds.
+test('a zombie pid counts as dead on linux', async () => {
+  const zombieStat = (pid: number) => `${pid} (iroh-tunnel-acc) Z 1 1 1 0 -1`;
+  const l = createLauncher('linux', zombieStat);
+  expect(l.isAlive(process.pid)).toBe(false);
+  expect(await l.stop(process.pid, 200)).toBe('exited');
+});
+
+test('a running pid with a non-zombie state is alive on linux', () => {
+  const l = createLauncher('linux', (pid) => `${pid} (a b) S 1 1 1`);
+  expect(l.isAlive(process.pid)).toBe(true);
+});
+
+test('procState parses the state after the last paren', () => {
+  expect(procState('42 (iroh (x) y) Z 1 2')).toBe('Z');
+  expect(procState('42 (bun) R 1 2')).toBe('R');
+  expect(procState('garbage')).toBeUndefined();
 });
 
 test('stop on an already-dead pid is exited', async () => {

@@ -23108,7 +23108,7 @@ function createIO(core = exports_core) {
 
 // src/adapters/launcher.ts
 import { spawn as nodeSpawn } from "node:child_process";
-import { closeSync, openSync } from "node:fs";
+import { closeSync, openSync, readFileSync as readFileSync2 } from "node:fs";
 function inheritedEnv() {
   const out = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -23119,7 +23119,20 @@ function inheritedEnv() {
 }
 var POLL_MS2 = 50;
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-function alive(pid) {
+function procState(stat) {
+  const end = stat.lastIndexOf(")");
+  if (end < 0)
+    return;
+  return stat.slice(end + 1).trim().split(/\s+/)[0] || undefined;
+}
+function readProcStat(pid) {
+  try {
+    return readFileSync2(`/proc/${pid}/stat`, "utf8");
+  } catch {
+    return;
+  }
+}
+function signalable(pid) {
   try {
     process.kill(pid, 0);
   } catch (e) {
@@ -23127,7 +23140,14 @@ function alive(pid) {
   }
   return true;
 }
-function createLauncher(platform = process.platform) {
+function createLauncher(platform = process.platform, readStat = readProcStat) {
+  function alive(pid) {
+    if (!signalable(pid))
+      return false;
+    if (platform === "linux" && procState(readStat(pid) ?? "") === "Z")
+      return false;
+    return true;
+  }
   const exits = new Map;
   async function waitDead(pid, ms) {
     const end = Date.now() + ms;

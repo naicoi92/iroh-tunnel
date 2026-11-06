@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, openSync, readFileSync } from 'node:fs';
 import { exec } from '@actions/exec';
 
 export interface Launcher {
@@ -26,7 +26,22 @@ function inheritedEnv(): NodeJS.ProcessEnv {
 const POLL_MS = 50;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-function alive(pid: number): boolean {
+/** Process state letter from a `/proc/<pid>/stat` line (field 3, after the last `)`). */
+export function procState(stat: string): string | undefined {
+  const end = stat.lastIndexOf(')');
+  if (end < 0) return undefined;
+  return stat.slice(end + 1).trim().split(/\s+/)[0] || undefined;
+}
+
+function readProcStat(pid: number): string | undefined {
+  try {
+    return readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+function signalable(pid: number): boolean {
   try {
     process.kill(pid, 0);
   } catch (e) {
@@ -35,7 +50,19 @@ function alive(pid: number): boolean {
   return true;
 }
 
-export function createLauncher(platform: NodeJS.Platform = process.platform): Launcher {
+export function createLauncher(
+  platform: NodeJS.Platform = process.platform,
+  readStat: (pid: number) => string | undefined = readProcStat,
+): Launcher {
+  // A detached tunnel is reparented to PID 1 once the main step exits. In a
+  // `container:` job PID 1 does not reap, so a stopped tunnel stays a zombie
+  // and kill(pid, 0) still succeeds; on Linux a zombie counts as dead.
+  function alive(pid: number): boolean {
+    if (!signalable(pid)) return false;
+    if (platform === 'linux' && procState(readStat(pid) ?? '') === 'Z') return false;
+    return true;
+  }
+
   // Children spawned by this process; a reaped child leaves no zombie, so
   // kill(pid, 0) reports it dead as soon as it has exited.
   const exits = new Map<number, number | null>();
