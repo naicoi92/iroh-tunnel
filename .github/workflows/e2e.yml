@@ -2,6 +2,9 @@
 #
 #   e2e (linux|macos|windows)  tests/*; windows adds the Task Scheduler step,
 #                              linux a self-hosted iroh-relay container
+#                              every cell then runs the GitHub Actions (./serve,
+#                              ./ and ./access) with binaries built from the commit
+#   e2e-action-container       Serve action inside a `container:` job (linux)
 #   e2e-ok                     single result; always reports
 #
 # PRs run unit tests only (ci.yml). e2e runs here after merge, and the release
@@ -98,10 +101,138 @@ jobs:
           docker logs iroh-relay || true
           docker rm -f iroh-relay || true
 
+      # --- GitHub Actions, run from the checkout with binaries built here ---
+      - name: Build action binaries
+        shell: bash
+        run: |
+          cargo build --release --locked --bin iroh-tunnel-serve --bin iroh-tunnel-access
+          echo "IROH_TUNNEL_ACTION_BIN_DIR=$GITHUB_WORKSPACE/target/release" >> "$GITHUB_ENV"
+      - name: Upload action binaries
+        if: matrix.name == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: action-bins
+          path: |
+            target/release/iroh-tunnel-serve
+            target/release/iroh-tunnel-access
+          if-no-files-found: error
+          retention-days: 1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Start echo server
+        shell: bash
+        run: nohup bun action-src/scripts/echo-server.ts 18080 > "$RUNNER_TEMP/echo1.log" 2>&1 &
+      - id: serve1
+        uses: ./serve
+        with:
+          name: echo
+          target: 127.0.0.1:18080
+      - uses: ./
+        with:
+          name: echo
+          node-id: ${{ steps.serve1.outputs.node-id }}
+          listen: 127.0.0.1:19080
+      - name: Round trip (root path)
+        shell: bash
+        run: bun action-src/scripts/roundtrip.ts 127.0.0.1:19080 "hello-$RUNNER_OS"
+      # Linux and macOS: a second Serve/Access pair, the `access` alias path.
+      - name: Start second echo server
+        if: matrix.name != 'windows'
+        shell: bash
+        run: nohup bun action-src/scripts/echo-server.ts 18081 > "$RUNNER_TEMP/echo2.log" 2>&1 &
+      - id: serve2
+        if: matrix.name != 'windows'
+        uses: ./serve
+        with:
+          name: echo2
+          target: 127.0.0.1:18081
+      - name: Access (alias path)
+        if: matrix.name != 'windows'
+        uses: ./access
+        with:
+          name: echo2
+          node-id: ${{ steps.serve2.outputs.node-id }}
+          listen: 127.0.0.1:19081
+      - name: Round trip (alias path and root path)
+        if: matrix.name != 'windows'
+        shell: bash
+        run: |
+          bun action-src/scripts/roundtrip.ts 127.0.0.1:19081 "alias-$RUNNER_OS"
+          bun action-src/scripts/roundtrip.ts 127.0.0.1:19080 "root-$RUNNER_OS"
+      - name: Node ids differ
+        if: matrix.name != 'windows'
+        shell: bash
+        env:
+          A: ${{ steps.serve1.outputs.node-id }}
+          B: ${{ steps.serve2.outputs.node-id }}
+        run: '[ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ]'
+      # Windows: only one Serve and one Access step per job; the second fails.
+      - id: second
+        name: Second Access step (expected to fail)
+        if: matrix.name == 'windows'
+        continue-on-error: true
+        uses: ./access
+        env:
+          IROH_TUNNEL_ACTION_ERROR_FILE: ${{ runner.temp }}/second-error.txt
+        with:
+          name: echo
+          node-id: ${{ steps.serve1.outputs.node-id }}
+          listen: 127.0.0.1:19082
+      - name: Assert second Access step failed for the right reason
+        if: matrix.name == 'windows'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.second.outcome }}
+          ERROR_FILE: ${{ runner.temp }}/second-error.txt
+        run: |
+          [ "$OUTCOME" = failure ] || { echo "second step outcome: $OUTCOME"; exit 1; }
+          cat "$ERROR_FILE"
+          grep -q 'one Serve and one Access step per job on Windows' "$ERROR_FILE"
+
+  # The Serve action inside a container job, with a service-container hostname target.
+  e2e-action-container:
+    name: e2e (action in container)
+    needs: e2e
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    services:
+      web:
+        image: nginx:alpine
+    steps:
+      - name: Install tools
+        shell: bash
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: action-bins
+          path: bins
+      - name: Prepare binaries
+        shell: bash
+        run: |
+          chmod +x bins/*
+          echo "IROH_TUNNEL_ACTION_BIN_DIR=$GITHUB_WORKSPACE/bins" >> "$GITHUB_ENV"
+      - id: web
+        uses: ./serve
+        with:
+          name: web
+          target: web:80
+      - uses: ./
+        with:
+          name: web
+          node-id: ${{ steps.web.outputs.node-id }}
+          listen: 127.0.0.1:18090
+      - name: Fetch nginx through the tunnel
+        shell: bash
+        run: curl -fsS http://127.0.0.1:18090/ | grep -q 'Welcome to nginx'
+
   e2e-ok:
     name: e2e-ok
     if: always()
-    needs: [e2e]
+    needs: [e2e, e2e-action-container]
     runs-on: ubuntu-latest
     steps:
       # `e2e` can only be success, failure or cancelled here;
