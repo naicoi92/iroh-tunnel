@@ -3,6 +3,7 @@
 //! `mutate` and `fixtures` are private infrastructure.
 
 mod add_service;
+mod check_config;
 mod display_addr;
 mod dto;
 mod edit;
@@ -26,6 +27,7 @@ mod to_settings;
 mod types;
 
 pub use add_service::add_service;
+pub use check_config::check_config;
 pub(crate) use dto::RoleDoc;
 pub use dto::{AccessConfig, AccessService, NodeConfig, ServeConfig, ServeService, UdpSettings};
 pub use edit::prepare_edit;
