@@ -63,15 +63,15 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 
 ## 3. CLI: usage errors with help (src/app.rs)
 
-- [ ] 3.1 Add `UsageError { command_path, message }` in `src/usage.rs` and a renderer that prints `error: <msg>`, a blank line, then the help of `command_path` to stderr, exit 2. Unit tests cover the rendered text. (CLI: Usage errors print the failing command's help)
-- [ ] 3.2 Switch the three entry points to `try_parse`:
+- [x] 3.1 Add `UsageError { command_path, message }` in `src/usage.rs` and a renderer that prints `error: <msg>`, a blank line, then the help of `command_path` to stderr, exit 2. Unit tests cover the rendered text. (CLI: Usage errors print the failing command's help)
+- [x] 3.2 Switch the three entry points to `try_parse`:
   - `DisplayHelp`/`DisplayVersion` exit 0;
   - help-on-missing exits 2;
   - every other clap error prints clap's message plus the help of the deepest subcommand matched in argv, exit 2, with stdout empty.
 
   (CLI: Usage errors print the failing command's help scenarios Unknown option on a leaf command, Unknown subcommand, Invalid value, Help goes to stderr; CLI: Bare commands print their help)
 - [x] 3.3 Remove the post-parse quick-mode required checks and `quick_protocol`, since clap now enforces them. Quick mode builds the in-memory service from `ServiceAddr` (bare port maps to 127.0.0.1; hostnames are passed through). Name, node-id and https-relay rules stay config errors with no help. (CLI: Quick mode input validation; CLI: Usage errors print the failing command's help scenario Schema rule failure has no help)
-- [ ] 3.4 In `execute`, downcast `UsageError` before the `CliError` mapping, and map host `SetError::MissingForCreate` to a `UsageError` at the role's `config set` path. Every other error keeps today's exit-code mapping. (CLI: Exit status mapping; CMC: Creating a service requires its address and peer; WB: Host owns persistence and platform policy scenario Creation requirements decided by host)
+- [x] 3.4 In `execute`, downcast `UsageError` before the `CliError` mapping, and map host `SetError::MissingForCreate` to a `UsageError` at the role's `config set` path. Every other error keeps today's exit-code mapping. (CLI: Exit status mapping; CMC: Creating a service requires its address and peer; WB: Host owns persistence and platform policy scenario Creation requirements decided by host)
 
 ## 4. CLI: config handlers and rendering (src/config_cmd.rs, src/render.rs)
 
