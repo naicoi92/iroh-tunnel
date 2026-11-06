@@ -81,9 +81,9 @@ Scenarios (CCP): "Stable release", "Pre-release", "Release job failed", "Older p
 Owns: `docs/github-actions.md`, `README.md` (new section only), `docs/README.md` (index row), `CONTRIBUTING.md` (Releasing and development notes), `CHANGELOG.md` (`[Unreleased]`).
 Scenarios (GAI): "Copy-paste adoption", "Docs page examples", "Embedded client contract"; (CCP) "Marketplace step".
 
-- [ ] 8.1 `docs/github-actions.md`: examples (Access to a private service, Serve with a job service, Serve in `container:`, two services as two steps, own relay with token, Serve + Access in one job), input/output tables, fixed behaviour (readiness incl. the one probe connection, 60 s, cleanup, logs), version pinning (`@v0`, `@vX.Y.Z`, `version`), supported platforms, Windows limit, embedded-client contract (ALPN `iroh-tunnel/<name>`, one bidirectional stream per TCP connection, raw bytes, same relays) (design D11)
-- [ ] 8.2 README: short "GitHub Actions" section with one Access and one Serve example and a link; `docs/README.md` index row
-- [ ] 8.3 CONTRIBUTING: action development (`action-src/`, `bun run build`, committed bundles), Releasing checklist step to tick "Publish this Action to the GitHub Marketplace" (and accept the agreement on the first release), note on the automatic `v0` move
-- [ ] 8.4 CHANGELOG `[Unreleased]`: the Access and Serve GitHub Actions
-- [ ] 8.5 Verify: every example in the docs is valid YAML and uses only declared inputs (script check against `access/action.yml`/`serve/action.yml`); `openspec validate github-actions-serve-access --strict`
+- [x] 8.1 `docs/github-actions.md`: examples (Access to a private service, Serve with a job service, Serve in `container:`, two services as two steps, own relay with token, Serve + Access in one job), input/output tables, fixed behaviour (readiness incl. the one probe connection, 60 s, cleanup, logs), version pinning (`@v0`, `@vX.Y.Z`, `version`), supported platforms, Windows limit, embedded-client contract (ALPN `iroh-tunnel/<name>`, one bidirectional stream per TCP connection, raw bytes, same relays) (design D11)
+- [x] 8.2 README: short "GitHub Actions" section with one Access and one Serve example and a link; `docs/README.md` index row
+- [x] 8.3 CONTRIBUTING: action development (`action-src/`, `bun run build`, committed bundles), Releasing checklist step to tick "Publish this Action to the GitHub Marketplace" (and accept the agreement on the first release), note on the automatic `v0` move
+- [x] 8.4 CHANGELOG `[Unreleased]`: the Access and Serve GitHub Actions
+- [x] 8.5 Verify: every example in the docs is valid YAML and uses only declared inputs (script check against `access/action.yml`/`serve/action.yml`); `openspec validate github-actions-serve-access --strict`
 - [ ] 8.6 Verify on the main-branch run after merge (needs owner permission): `action` job green on the PR; `e2e (linux|macos|windows)` and the container job green with round trips and post-step cleanup logged
