@@ -22592,7 +22592,7 @@ class RetryHelper {
 }
 
 // node_modules/@actions/tool-cache/lib/tool-cache.js
-var __dirname = "/Users/naicoi/Projects/iroh/iroh-tunnel.github-actions-serve-access/action-src/node_modules/@actions/tool-cache/lib";
+var __dirname = "action-src/node_modules/@actions/tool-cache/lib";
 var __awaiter13 = function(thisArg, _arguments, P, generator) {
   function adopt(value) {
     return value instanceof P ? value : new P(function(resolve) {

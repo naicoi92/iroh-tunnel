@@ -21959,7 +21959,7 @@ var semver = __toESM(require_semver2(), 1);
 
 // node_modules/@actions/tool-cache/lib/tool-cache.js
 var semver2 = __toESM(require_semver2(), 1);
-var __dirname = "/Users/naicoi/Projects/iroh/iroh-tunnel.github-actions-serve-access/action-src/node_modules/@actions/tool-cache/lib";
+var __dirname = "action-src/node_modules/@actions/tool-cache/lib";
 var IS_WINDOWS3 = process.platform === "win32";
 var IS_MAC = process.platform === "darwin";
 

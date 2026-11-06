@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { generateRootActionYml, workspaceVersion } from './build-lib';
+import { generateRootActionYml, normalizeBundle, workspaceVersion } from './build-lib';
 
 /** First release that ships the actions. */
 const MIN_VERSION = '0.6.0';
@@ -32,7 +32,7 @@ export async function build(outRoot: string = repoRoot): Promise<void> {
     }
     const dest = join(outRoot, out);
     await mkdir(dirname(dest), { recursive: true });
-    await writeFile(dest, await result.outputs[0]!.text());
+    await writeFile(dest, normalizeBundle(await result.outputs[0]!.text(), import.meta.dir));
   }
   const accessYml = await readFile(join(repoRoot, 'access/action.yml'), 'utf8');
   await writeFile(join(outRoot, 'action.yml'), generateRootActionYml(accessYml));

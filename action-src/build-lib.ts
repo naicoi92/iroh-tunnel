@@ -16,3 +16,12 @@ export function generateRootActionYml(accessYml: string): string {
   if (out === accessYml) throw new Error('access/action.yml has no main/post lines to rewrite');
   return GENERATED_HEADER + out;
 }
+
+/**
+ * Make a bundle independent of the checkout path. Bun injects
+ * `var __dirname = "<abs>/action-src/node_modules/..."` for CJS deps that use
+ * `__dirname`; rewrite the absolute `action-src` prefix to a fixed relative one.
+ */
+export function normalizeBundle(text: string, actionSrcDir: string): string {
+  return text.split(actionSrcDir).join('action-src');
+}
