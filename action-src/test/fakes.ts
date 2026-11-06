@@ -136,7 +136,8 @@ export function startDeps(w: World, over: Partial<StartDeps> = {}): StartDeps {
     },
     createWorkspace: async () => {
       w.calls.push('createWorkspace');
-      return WS;
+      // records what start renders, like the real workspace writing the config file
+      return { ...WS, writeConfig: async (t: string) => void w.files.set(WS.configPath, t) };
     },
     launcher: fakeLauncher(w),
     readStatus: async () => {

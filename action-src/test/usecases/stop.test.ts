@@ -54,4 +54,33 @@ describe('stop', () => {
     expect(w.stopCalls).toEqual([]);
     expect(w.removed).toEqual(['/tmp/ws']);
   });
+
+  describe('cleanup on dependency errors', () => {
+    const cases: [string, (w: ReturnType<typeof saved>) => Parameters<typeof stopDeps>[1]][] = [
+      ['readStatus', () => ({ readStatus: async () => { throw new Error('status boom'); } })],
+      ['launcher.stop', (w) => {
+        const d = stopDeps(w);
+        return { launcher: { ...d.launcher, stop: async () => { throw new Error('stop boom'); } } };
+      }],
+      ['readLog', () => ({ readLog: async () => { throw new Error('log boom'); } })],
+    ];
+    for (const [name, mk] of cases) {
+      test(`${name} throws: still kills, removes workspace, fails the step`, async () => {
+        const w = saved();
+        w.jobFailed = true;
+        const over = mk(w);
+        await stop(stopDeps(w, over));
+        expect(w.removed).toEqual(['/tmp/ws']);
+        expect(w.failed).toHaveLength(1);
+        expect(w.failed[0]).toContain(`${name === 'launcher.stop' ? 'stop' : name === 'readStatus' ? 'status' : 'log'} boom`);
+        if (name !== 'launcher.stop') expect(w.stopCalls).toEqual([[4242, 5000]]);
+      });
+    }
+
+    test('removeWorkspace throws: step fails', async () => {
+      const w = saved();
+      await stop(stopDeps(w, { removeWorkspace: async () => { throw new Error('rm boom'); } }));
+      expect(w.failed[0]).toContain('rm boom');
+    });
+  });
 });

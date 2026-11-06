@@ -13,7 +13,7 @@ export function isReady(req: TunnelRequest, status: StatusSnapshot | undefined, 
 
   const sig = scanLog(log, req.listen);
   if (sig.bindError !== undefined) {
-    return { failed: `cannot listen on ${req.listen.host}:${req.listen.port}: ${sig.bindError}` };
+    return { failed: `input \`listen\` (${req.listen.host}:${req.listen.port}): cannot bind: ${sig.bindError}.` };
   }
   if (!sig.bound) return { ready: false };
   if (req.protocol === 'udp') return { ready: true };

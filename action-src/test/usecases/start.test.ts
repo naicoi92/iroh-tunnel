@@ -96,7 +96,7 @@ describe('failures', () => {
     expect(w.failed[0]).toContain('line 59');
     expect(w.failed[0]).toContain('line 20');
     expect(w.failed[0]).not.toContain('line 19\n');
-    expect(w.polls).toBe(0);
+    expect(w.polls).toBe(1); // one status read for the failure message, no readiness polling
     expect(w.outputs).toEqual({});
     expect(w.state['pid']).toBe('4242');
     expect(w.state['main-ok']).toBeUndefined();
@@ -109,7 +109,21 @@ describe('failures', () => {
     const m = w.failed[0]!;
     expect(m).toContain('already running for this runner user');
     expect(m).toContain('system service');
+    expect(m).toContain('another step of this job');
     expect(m).not.toContain('one Serve and one Access step per job on Windows');
+  });
+
+  test('exit failure includes the last status, or says there is none', async () => {
+    const w = newWorld(serveIn);
+    w.status = { node_id: NODE, services: [] };
+    w.onSpawn = (x) => (x.exit = 4);
+    await runMain('serve', startDeps(w));
+    expect(w.failed[0]).toContain('Last status:');
+    expect(w.failed[0]).toContain(NODE);
+    const w2 = newWorld(serveIn);
+    w2.onSpawn = (x) => (x.exit = 4);
+    await runMain('serve', startDeps(w2));
+    expect(w2.failed[0]).toContain('no status file yet');
   });
 
   test('exit code 6 on windows adds the limit', async () => {
@@ -127,6 +141,9 @@ describe('failures', () => {
     expect(w.failed).toHaveLength(1);
     expect(w.failed[0]).toContain('127.0.0.1:15000');
     expect(w.failed[0]).toContain('Address already in use');
+    expect(w.failed[0]).toContain('input `listen` (127.0.0.1:15000): cannot bind');
+    expect(w.failed[0]).toContain('Last status:');
+    expect(w.failed[0]).toContain('no status file yet');
     expect(w.polls).toBe(1);
     expect(w.outputs).toEqual({});
     expect(w.state['pid']).toBe('4242');
@@ -146,6 +163,24 @@ describe('failures', () => {
     expect(w.outputs).toEqual({});
     expect(w.state['main-ok']).toBeUndefined();
     expect(w.state['pid']).toBe('4242');
+  });
+
+  test('timeout is a real 60 s deadline, not only a poll count', async () => {
+    const w = newWorld(serveIn);
+    let now = 0;
+    await runMain(
+      'serve',
+      startDeps(w, {
+        clock: {
+          now: () => now,
+          sleep: async (ms) => {
+            now += ms * 4;
+          },
+        },
+      }),
+    );
+    expect(w.polls).toBe(30);
+    expect(w.failed[0]).toContain('not ready within 60 s');
   });
 
   test('child dies mid-poll', async () => {

@@ -31,6 +31,7 @@ export type StartDeps = {
 
 const POLL_MS = 500;
 const MAX_POLLS = 120;
+const DEADLINE_MS = 60_000;
 const PROBE_TIMEOUT_MS = 2000;
 
 class StartFailure extends Error {}
@@ -62,16 +63,21 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
   io.saveState('pid', String(child.pid));
   io.saveState('role', req.role);
 
+  const secrets = req.relayToken === undefined ? [] : [req.relayToken];
+  const deadline = deps.clock.now() + DEADLINE_MS;
   let probed = false;
   let lastStatus: Awaited<ReturnType<StartDeps['readStatus']>>;
-  for (let i = 0; i < MAX_POLLS; i++) {
+  for (let i = 0; i < MAX_POLLS && deps.clock.now() < deadline; i++) {
     const code = child.exitCode();
-    if (code !== null) throw new StartFailure(exitMessage(req.role, code, await deps.readLog(ws.logPath), deps.platform));
+    if (code !== null) {
+      lastStatus = await deps.readStatus(ws.stateDir, req.role).catch(() => undefined);
+      throw new StartFailure(exitMessage(req.role, code, lastStatus, await deps.readLog(ws.logPath), deps.platform, secrets));
+    }
 
     lastStatus = await deps.readStatus(ws.stateDir, req.role);
     const log = await deps.readLog(ws.logPath);
     const r = isReady(req, lastStatus, log);
-    if ('failed' in r) throw new StartFailure(bindMessage(r.failed, log));
+    if ('failed' in r) throw new StartFailure(bindMessage(r.failed, lastStatus, log, secrets));
     // The output is this node's own id, which only the status file knows.
     if (r.ready && lastStatus?.node_id) {
       if (req.role === 'access' && req.protocol === 'udp') {
@@ -93,7 +99,7 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     }
     await deps.clock.sleep(POLL_MS);
   }
-  throw new StartFailure(timeoutMessage(req.role, lastStatus, await deps.readLog(ws.logPath)));
+  throw new StartFailure(timeoutMessage(req.role, lastStatus, await deps.readLog(ws.logPath), secrets));
 }
 
 export async function start(req: TunnelRequest, deps: StartDeps): Promise<void> {
