@@ -28,12 +28,12 @@ Scenarios (GAI): "Missing required Access input", "Missing required Serve input"
 Owns: `action-src/src/adapters/**`, `action-src/test/adapters/**`.
 Scenarios (GAI): "Default version", "Release not found", "Version too old", "Latest", "Checksum mismatch", "Cached binary", "Unsupported runner", "Alpine container job", "Ubuntu runner", "Key file permissions", "Own relay with a token" (masking).
 
-- [ ] 3.1 Test-first: `ReleaseTarget` mapping from `process.platform`/`arch` and libc detection (musl vs glibc) to archive and checksum file names; reject macOS x64 and Linux riscv64 with the supported list (design D6)
-- [ ] 3.2 Test-first: `ReleaseSource`: resolve `latest` to the newest stable release, default to the embedded version, reject versions below the embedded minimum, download archive + checksum file from `https://github.com/naicoi92/iroh-tunnel/releases/download/v<ver>/`, verify SHA-256 before extract, tool-cache by (role, version); honour the CI-only `IROH_TUNNEL_ACTION_BIN_DIR` (fake HTTP and cache in tests)
-- [ ] 3.3 Test-first: `ActionsIO` wrapper over `@actions/core` (inputs, outputs, saveState/getState, `setSecret` before any use of `relay-token`, log groups, failure)
-- [ ] 3.4 Test-first: `StepWorkspace`: create `RUNNER_TEMP/iroh-tunnel-<random>/` with `state/`, `home/`, config file mode 0600 on Unix, log file; delete it (design D3, D5)
-- [ ] 3.5 Test-first: `ProcessLauncher` (spawn detached with env `IROH_TUNNEL_STATE_DIR`, Unix `HOME`, stdout/stderr to the log; SIGTERM then SIGKILL after 5 s on Unix, terminate on Windows; liveness check), `StatusFile` reader, `TcpProbe` (connect/close, loopback for `0.0.0.0`/`[::]`) (design D7, D8)
-- [ ] 3.6 Verify: `bun test test/adapters` green; typecheck clean
+- [x] 3.1 Test-first: `ReleaseTarget` mapping from `process.platform`/`arch` and libc detection (musl vs glibc) to archive and checksum file names; reject macOS x64 and Linux riscv64 with the supported list (design D6)
+- [x] 3.2 Test-first: `ReleaseSource`: resolve `latest` to the newest stable release, default to the embedded version, reject versions below the embedded minimum, download archive + checksum file from `https://github.com/naicoi92/iroh-tunnel/releases/download/v<ver>/`, verify SHA-256 before extract, tool-cache by (role, version); honour the CI-only `IROH_TUNNEL_ACTION_BIN_DIR` (fake HTTP and cache in tests)
+- [x] 3.3 Test-first: `ActionsIO` wrapper over `@actions/core` (inputs, outputs, saveState/getState, `setSecret` before any use of `relay-token`, log groups, failure)
+- [x] 3.4 Test-first: `StepWorkspace`: create `RUNNER_TEMP/iroh-tunnel-<random>/` with `state/`, `home/`, config file mode 0600 on Unix, log file; delete it (design D3, D5)
+- [x] 3.5 Test-first: `ProcessLauncher` (spawn detached with env `IROH_TUNNEL_STATE_DIR`, Unix `HOME`, stdout/stderr to the log; SIGTERM then SIGKILL after 5 s on Unix, terminate on Windows; liveness check), `StatusFile` reader, `TcpProbe` (connect/close, loopback for `0.0.0.0`/`[::]`) (design D7, D8)
+- [x] 3.6 Verify: `bun test test/adapters` green; typecheck clean
 
 ## 4. Use cases: start and stop (`action-src/src/usecases/`)
 
