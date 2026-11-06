@@ -6,9 +6,9 @@
 > Failed checks must be fixed in the corresponding artifact, then re-run verify.
 
 **Change**: `github-actions-serve-access`
-**Verified at**: `2026-11-06 09:20` (UTC)
-**Iteration**: `1`
-**Verifier**: parent session (pi), with independent evidence from `superspec.verifier`; every result below was re-run or checked in this verify invocation
+**Verified at**: `2026-11-06 09:50` (UTC)
+**Iteration**: `2`
+**Verifier**: parent session (pi). Iteration 2 re-ran every command below fresh at `58592e6`; requirement/scenario/contract mappings carried from iteration 1 (independent `superspec.verifier` evidence) are unchanged because iteration 2 only touched build tooling (`action-src/build.ts`, `build-lib.ts`, its test) and regenerated bundles
 
 ---
 
@@ -85,14 +85,16 @@ $ openspec validate github-actions-serve-access --strict   -> Change 'github-act
 - [x] Every scenario maps to a test (unit/script/static check), with runner-only scenarios marked
 - [x] The project test command was run fresh in this step
 
-**Test command** (all fresh in this invocation, worktree at `0539d30`):
+**Test command** (all fresh in this invocation, worktree at `58592e6`):
 
 | Command | cwd | Exit | Result |
 |---|---|---|---|
 | `bun install --frozen-lockfile` | action-src | 0 | no changes |
 | `bun run typecheck` | action-src | 0 | clean |
-| `bun test` | action-src | 0 | 143 pass, 0 fail, 21 files |
+| `bun test` | action-src | 0 | 148 pass, 0 fail |
 | `bun run check-dist` | action-src | 0 | no diff |
+| `git archive HEAD \| tar -x -C <tmp>`; `bun install --frozen-lockfile && bun run check-dist` | `<tmp>/action-src` | 0 | no diff — bundles are reproducible outside the worktree (iteration 2 fix) |
+| `grep -c /Users/` over `access/dist/*.js serve/dist/*.js` | worktree | — | 0 |
 | `bun run check-docs` | action-src | 0 | 2 files ok |
 | `bash .github/scripts/move-major-tag.test.sh` | worktree | 0 | 14 passed, 0 failed |
 | `shellcheck .github/scripts/*.sh` | worktree | 0 | clean |
@@ -150,6 +152,7 @@ Contract deviations from apply.md, each compared:
 **Drift warnings** (non-blocking):
 
 - plan.md Contracts row "`ci.yml` filter `action` + job `action`" lists four commands; the job also runs `bun run check-docs` (`ci.yml:155`), added by Task 8 as planned in Task 8 Step 5. Documentation drift in the Contracts row only.
+- Iteration 2 (`34c150d`, `7482443`): `build.ts` now normalizes the bundler-injected absolute `__dirname` to `action-src/…` and fails on any absolute path left (`action-src/build-lib.ts` `normalizeBundle`). Internal build tooling, no contract change; D2 (committed bundles, generated root) still holds.
 
 ---
 
@@ -157,7 +160,7 @@ Contract deviations from apply.md, each compared:
 
 - [x] Working tree is clean (`git status --porcelain` empty; `git ls-files .superpowers` returns nothing)
 
-**Commit range**: `7c51c80..0539d30` (26 commits; merge-base with feature branch `spec/github-actions-serve-access` is `7c51c80`), plus this receipt commit.
+**Commit range**: `7c51c80..58592e6` (30 commits: iteration 1 `7c51c80..c9b29ab`, iteration 2 `34c150d`, `7482443`, receipt `58592e6`), plus this receipt commit. The feature branch `spec/github-actions-serve-access` was fast-forwarded to `c9b29ab` during finalize (not pushed); iteration 2 continues from it, so it fast-forwards again.
 
 ---
 
