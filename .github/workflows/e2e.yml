@@ -11,15 +11,20 @@
 # preflight (release.yml) requires `e2e-ok` on the tagged commit: tag only after
 # this run is green on main. There is no path filter, so every push to main
 # reports `e2e-ok`. Runs for different commits are not cancelled.
+#
+# Before merge, run it on a branch with `gh workflow run e2e.yml --ref <branch>`
+# (the branch must contain this trigger). That run reports `e2e-ok (manual)`,
+# which release preflight ignores.
 
 name: e2e
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
-  group: e2e-${{ github.sha }}
+  group: e2e-${{ github.event_name }}-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -238,7 +243,7 @@ jobs:
         run: curl -fsS http://127.0.0.1:18090/ | grep -q 'Welcome to nginx'
 
   e2e-ok:
-    name: e2e-ok
+    name: ${{ github.event_name == 'workflow_dispatch' && 'e2e-ok (manual)' || 'e2e-ok' }}
     if: always()
     needs: [e2e, e2e-action-container]
     runs-on: ubuntu-latest

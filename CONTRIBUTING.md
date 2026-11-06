@@ -52,6 +52,8 @@ changes and cite applicable rule IDs in Standards reviews.
 PRs run `lint`, `unit (linux|macos|windows)` and a `scripts` job (shellcheck,
 PSScriptAnalyzer, actionlint) when scripts or workflows change. The e2e tests
 run on every push to `main` (`e2e.yml`), and releases require its `e2e-ok`.
+Before merge, run them on your branch with `gh workflow run e2e.yml --ref <branch>`
+(rebase on `main` first so the branch has the trigger); the check is `e2e-ok (manual)`.
 Run these commands locally before pushing:
 
 ```sh
@@ -163,7 +165,8 @@ are not part of the public interface. `bun run check-docs` verifies that the
 
 Push a `vX.Y.Z` (or `vX.Y.Z-rc.N`) tag on a merged commit on `main` whose PR
 passed `ci-ok`, and only after `e2e-ok` is green on that commit
-(`e2e.yml` on `main`); otherwise preflight fails — re-run the release run once
+(`e2e.yml` on `main`; `e2e-ok (manual)` from a dispatched run does not count);
+otherwise preflight fails — re-run the release run once
 it is green. The tag run publishes the GitHub release, the ghcr.io images
 and (stable tags only) the Homebrew cask.
 
