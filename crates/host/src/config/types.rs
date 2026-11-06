@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use super::Protocol;
 use crate::role::Role;
 
 /// Whether the role's config already holds a `[node].secret_key`.
@@ -206,5 +207,126 @@ impl std::fmt::Debug for EditAttempt {
 impl Drop for EditAttempt {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.scratch);
+    }
+}
+
+/// Request to create or update one `[[services]]` entry by name.
+///
+/// `None` means "not passed". `host` is used only when `port` is `Some`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetService {
+    /// Config file; `None` selects the role default.
+    pub config: Option<PathBuf>,
+    /// Service name.
+    pub name: String,
+    /// Target (serve) or listen (access) host.
+    pub host: Option<String>,
+    /// Target (serve) or listen (access) port.
+    pub port: Option<u16>,
+    /// Transport protocol.
+    pub protocol: Option<Protocol>,
+    /// Peer node id (access role).
+    pub node_id: Option<String>,
+}
+
+/// Result of `set_service`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetOutcome {
+    /// A new entry was appended.
+    Created {
+        /// Service name.
+        service: String,
+        /// Config file that was written.
+        path: PathBuf,
+    },
+    /// An existing entry changed.
+    Updated {
+        /// Service name.
+        service: String,
+        /// Config file that was written.
+        path: PathBuf,
+        /// Changed fields in the order address, protocol, node_id.
+        changes: Vec<FieldChange>,
+    },
+    /// The entry already had every requested value; the file is untouched.
+    Unchanged {
+        /// Service name.
+        service: String,
+        /// Config file that was inspected.
+        path: PathBuf,
+    },
+}
+
+/// One changed field of an updated service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldChange {
+    /// The field that changed.
+    pub field: ServiceField,
+    /// Previous value; addresses are rendered by `display_addr`.
+    pub old: String,
+    /// New value; addresses are rendered by `display_addr`.
+    pub new: String,
+}
+
+/// A field of a `[[services]]` entry that `set` can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceField {
+    /// The target (serve) or listen (access) address.
+    Address,
+    /// The transport protocol.
+    Protocol,
+    /// The peer node id.
+    NodeId,
+}
+
+impl ServiceField {
+    /// The label shown in the change report for `role`.
+    pub fn label(self, role: Role) -> &'static str {
+        match (self, role) {
+            (ServiceField::Address, Role::Serve) => "target",
+            (ServiceField::Address, Role::Access) => "listen",
+            (ServiceField::Protocol, _) => "protocol",
+            (ServiceField::NodeId, _) => "node_id",
+        }
+    }
+}
+
+/// Typed failures of `set_service`, returned inside `anyhow::Error`.
+#[derive(thiserror::Error, Debug)]
+pub enum SetError {
+    /// A create request lacks required flags.
+    #[error("creating service '{name}' requires {}", .flags.join(" and "))]
+    MissingForCreate {
+        /// Service name.
+        name: String,
+        /// Missing flags, e.g. `--target`, then `--node-id`.
+        flags: Vec<&'static str>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_for_create_names_flags() {
+        let e = SetError::MissingForCreate {
+            name: "web".into(),
+            flags: vec!["--listen", "--node-id"],
+        };
+        assert_eq!(
+            e.to_string(),
+            "creating service 'web' requires --listen and --node-id"
+        );
+    }
+
+    #[test]
+    fn service_field_labels() {
+        assert_eq!(ServiceField::Address.label(Role::Serve), "target");
+        assert_eq!(ServiceField::Address.label(Role::Access), "listen");
+        assert_eq!(ServiceField::Protocol.label(Role::Serve), "protocol");
+        assert_eq!(ServiceField::Protocol.label(Role::Access), "protocol");
+        assert_eq!(ServiceField::NodeId.label(Role::Serve), "node_id");
+        assert_eq!(ServiceField::NodeId.label(Role::Access), "node_id");
     }
 }

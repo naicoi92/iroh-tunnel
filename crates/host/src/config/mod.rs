@@ -3,6 +3,7 @@
 //! `mutate` and `fixtures` are private infrastructure.
 
 mod add_service;
+mod display_addr;
 mod dto;
 mod edit;
 mod encode_secret_key;
@@ -42,5 +43,7 @@ pub use show_config::show_config;
 pub use to_settings::{access_settings, serve_settings};
 pub use types::{
     AddService, Disclosure, EditAttempt, EditOutcome, EditRejection, GeneratedIdentity,
-    IdentityState, KeygenOutcome, Mutation, RotationConsent, ServiceList, ServiceRow, ShownConfig,
+    IdentityState, KeygenOutcome, Mutation, RotationConsent, ServiceList, ServiceRow, SetError,
+    SetOutcome, SetService, ShownConfig,
 };
+pub use types::{FieldChange, ServiceField};
