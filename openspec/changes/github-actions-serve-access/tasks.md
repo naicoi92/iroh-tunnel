@@ -18,10 +18,10 @@ Scenarios: CCP "Action change only" (install from lockfile, typecheck).
 Owns: `action-src/src/domain/**`, `action-src/test/domain/**`.
 Scenarios (GAI): "Missing required Access input", "Missing required Serve input", "Invalid service name", "Valid input", "Port out of range", "Port boundary accepted", "IPv6 address", "Hostname not allowed for listen", "Malformed NodeId", "Unknown protocol", "Relay URL not https", "Relay token with a trailing newline", "Multi-line relay token", "Malformed version", "Input of the other role".
 
-- [ ] 2.1 Test-first: `AccessRequest` and `ServeRequest` parsing from a raw input map (`name`, `node-id`/`listen` or `target`, `protocol`, `relay-url`, `relay-token`, `version`), returning a typed request or an error that names the input (design D1, D4)
-- [ ] 2.2 Test-first: value rules: service name, protocol, `host:port` (IPv4, bracketed IPv6, hostname for `target` only, port 1-65535), NodeId (64 hex / 52 base32), https relay URLs one per line, trimmed single-line relay token, version (`X.Y.Z`, `vX.Y.Z`, optional pre-release, `latest`)
-- [ ] 2.3 Test-first: config TOML rendering for one service with optional `relay_urls`/`relay_token` and no `secret_key` (design D3); the rendered file parses with the CLI's rules (assert against a fixture checked by `iroh-tunnel-serve run`'s validation in group 6)
-- [ ] 2.4 Verify: `bun test test/domain` green; no adapter imports in `src/domain`
+- [x] 2.1 Test-first: `AccessRequest` and `ServeRequest` parsing from a raw input map (`name`, `node-id`/`listen` or `target`, `protocol`, `relay-url`, `relay-token`, `version`), returning a typed request or an error that names the input (design D1, D4)
+- [x] 2.2 Test-first: value rules: service name, protocol, `host:port` (IPv4, bracketed IPv6, hostname for `target` only, port 1-65535), NodeId (64 hex / 52 base32), https relay URLs one per line, trimmed single-line relay token, version (`X.Y.Z`, `vX.Y.Z`, optional pre-release, `latest`)
+- [x] 2.3 Test-first: config TOML rendering for one service with optional `relay_urls`/`relay_token` and no `secret_key` (design D3); the rendered file parses with the CLI's rules (assert against a fixture checked by `iroh-tunnel-serve run`'s validation in group 6)
+- [x] 2.4 Verify: `bun test test/domain` green; no adapter imports in `src/domain`
 
 ## 3. Adapters (`action-src/src/adapters/`)
 
