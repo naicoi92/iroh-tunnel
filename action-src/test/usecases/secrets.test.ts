@@ -65,6 +65,6 @@ test('no secret in any output: stop with job failed or not', async () => {
     c.jobFailed = failed;
     await stop(stopDeps(c));
     if (failed) expect(c.out.join('\n')).toContain('tail');
-    expect(leaks(c).filter((m) => m.includes(SECRET_KEY))).toEqual([]);
+    expect(leaks(c)).toEqual([]);
   }
 });

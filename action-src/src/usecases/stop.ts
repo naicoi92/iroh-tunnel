@@ -55,9 +55,13 @@ export async function stop(deps: StopDeps): Promise<void> {
   }
 
   if (io.jobFailed()) {
+    // The post step is a separate process: re-register the token (action inputs are re-provided to it).
+    const token = io.input('relay-token').trim();
+    if (token !== '') io.setSecret(token);
+    const secrets = token === '' ? [] : [token];
     await attempt('reading the tunnel log failed', () =>
       io.group('iroh-tunnel log', async () => {
-        const tail = redact(logTail(await deps.readLog(logPath)), []);
+        const tail = redact(logTail(await deps.readLog(logPath)), secrets);
         io.info(tail === '' ? 'Tunnel log is empty.' : tail);
       }),
     );

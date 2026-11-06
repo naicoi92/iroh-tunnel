@@ -17,3 +17,12 @@ test('redacts registered secret values, all occurrences', () => {
 test('ignores empty secrets and leaves other text alone', () => {
   expect(redact('plain', [''])).toBe('plain');
 });
+
+test('redacts quoted, single-quoted, unquoted and colon forms', () => {
+  for (const v of ['"v1"', "'v1'", 'v1']) {
+    for (const sep of ['=', ' = ', ': ', ':']) {
+      expect(redact(`relay_token${sep}${v}`, [])).toBe('relay_token = "***"');
+      expect(redact(`secret_key${sep}${v}`, [])).toBe('secret_key = "***"');
+    }
+  }
+});
