@@ -106,7 +106,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
   - a runtime config error without `Usage:`.
 
   (CLI ADDED requirements; CLI: Config actions dispatch scenario Removed syntax)
-- [ ] 5.4 Update `quick_run.rs` and `role_binaries.rs`:
+- [x] 5.4 Update `quick_run.rs` and `role_binaries.rs`:
   - bad protocol lists the possible values;
   - missing flag shows help;
   - bare-port target forwards;
