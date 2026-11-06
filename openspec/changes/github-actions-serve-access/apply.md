@@ -5,8 +5,8 @@
 > Overwritten on each apply iteration; iteration counter grows.
 
 **Change**: `github-actions-serve-access`
-**Iteration**: `1`
-**Applied at**: `2026-11-06 09:08` (UTC)
+**Iteration**: `2`
+**Applied at**: `2026-11-06 09:45` (UTC)
 **Executor**: `subagent-driven-development` (per task: `superspec.implementer`, then one combined spec+quality review by `superspec.task-reviewer`; final whole-branch review by `superspec.task-reviewer`, one fix wave, scoped re-review Approved)
 
 ---
@@ -22,8 +22,17 @@
 
 ## Commits
 
-- **Range**: `7c51c80..915cafe` (plus this receipt commit)
-- **Count**: `25` (implementation, fix rounds, task ticks and contract-deviation notes)
+- **Range**: `7c51c80..7482443` (plus this receipt commit)
+- **Count**: `29` (iteration 1: `7c51c80..0539d30`; verify receipt `c9b29ab`; iteration 2: `34c150d`, `7482443`)
+
+### Iteration 2
+
+- **Trigger**: finalize step 5 (re-verify on the feature branch after the fast-forward, before any push) found `bun run check-dist` failing. Code review gate had approved `7c51c80..c9b29ab`.
+- **Root cause**: bun's ESM bundling of `@actions/tool-cache` injects `var __dirname = "<absolute build path>/action-src/node_modules/@actions/tool-cache/lib"` (used only by the Windows `.7z` path, which the action never reaches). The committed bundles held the worktree's absolute path, so they were not reproducible in any other checkout (CI included) and leaked a local path.
+- **Fix**: `build-lib.ts` `normalizeBundle()` rewrites the absolute `action-src` path (POSIX, raw and JSON-escaped Windows forms) to the relative `action-src` and fails the build if an absolute `__dirname` remains; tests guard the committed bundles. Bundles rebuilt.
+- **Evidence**: `check-dist` exit 0 in the worktree and in a `git archive HEAD` copy in a temp dir after `bun install --frozen-lockfile`; `bun test` 148 pass; no `/Users/` in any bundle; node loads `access/dist/main.js`.
+- **Review**: per-fix `superspec.task-reviewer` Approved (3 Minors, all fixed in `7482443`).
+- **Gate outcome**: code review approved for `7c51c80..c9b29ab`; the iteration-2 change is build tooling and regenerated bundles only (no behaviour or requirement change), so finalize resumes at step 3 after `/opsx-verify`.
 
 ---
 
@@ -32,7 +41,7 @@
 - **Completed**: `37 of 38` checkboxes in tasks.md flipped to `- [x]`
 - **Remaining**: `8.6` — verify on the main-branch run after merge (needs owner permission to push/merge). Runner-only items to watch there: Windows background echo server and exit-6 assertion, container job (bundled node in `ubuntu:24.04`, artifact layout), post step receiving `INPUT_relay-token`, Access readiness with a single probe (Ruling R7).
 
-Verification evidence at `915cafe` (worktree, fresh):
+Verification evidence at `915cafe` (worktree, fresh; iteration 1 — iteration 2 evidence above):
 - `action-src`: `bun run typecheck` clean; `bun test` 143 pass / 0 fail; `bun run check-dist` no diff; `bun run check-docs` 2 files ok
 - `.github/scripts/move-major-tag.test.sh` 14 passed; `shellcheck .github/scripts/*.sh` clean; `actionlint` clean
 - `openspec validate github-actions-serve-access --strict` valid
@@ -63,4 +72,4 @@ Rulings made during apply (cost if wrong):
 
 ## Next step
 
-Run `/opsx-verify`. After verify, task 8.6 needs owner authorization to push/merge so the PR `action` job and the main-branch `e2e` / `e2e-action-container` runs can be observed.
+Run `/opsx-verify` (iteration 2), then resume finalize at step 3: fast-forward `spec/github-actions-serve-access` to the worktree HEAD, re-run tests and `check-dist`, clean up, write `finalize.md`, push and open the PR (owner authorized push + PR, no merge). Task 8.6 follows on the PR and main-branch runs.
