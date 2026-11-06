@@ -46,13 +46,13 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
   - `-c` on every config subcommand.
 
   (CLI: Config actions dispatch; CMC: Config file target resolution; CMC: Random keygen touches no file; TC: Random key generation prints an identity without touching configuration)
-- [ ] 2.4 Write the help content:
+- [x] 2.4 Write the help content:
   - a description on every arg and command;
   - `after_help` Examples for serve and access `config set`, `config rm`, `config keygen` and both quick-mode roots (all-in-one and standalone);
   - `arg_required_else_help` on `it`, roles, `its`/`ita`, `config` and `service`.
 
   (CLI: Help documents every option; CLI: Bare commands print their help; CLI: Operator guidance on target protection unchanged)
-- [ ] 2.5 Extend the `cli.rs` unit tests:
+- [x] 2.5 Extend the `cli.rs` unit tests:
   - walk every subcommand of `it`/`its`/`ita` and assert the short-option table `c n t l N p r k y`;
   - assert that `reveal print system user` have no short;
   - assert there are no empty arg descriptions;
