@@ -51,6 +51,14 @@ Push note: the `origin` SSH remote authenticates as another GitHub account (`ttd
 
 ---
 
+## PR CI
+
+- First PR run (`cd7d2d3`): `action` job passed on the runner (typecheck, 148 tests, `check-dist`, `check-docs`), but `scripts` failed: the pinned actionlint 1.7.7 rejects `runs.using: node24` (support arrived in 1.7.8). Locally actionlint 1.7.12 had been used, which hid it.
+- Fix `f95cea7` (`ci: pin actionlint 1.7.12 for the node24 action runtime`), verified locally with actionlint 1.7.12 (exit 0; 1.7.7 reproduced the 3 errors).
+- Second PR run (`f95cea7`): `ci-ok` pass — `changes`, `lint`, `unit (linux|macos|windows)`, `scripts`, `action` all pass.
+
+---
+
 ## Next step
 
 Wait for PR review; the PR runs `ci-ok` (including the new `action` job). After approval, run `/opsx-archive` on this feature branch (commits land here), push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch` or GitHub UI). After the merge, observe `e2e (linux|macos|windows)` and `e2e-action-container` on `main` and tick task 8.6 (record run URLs). Before tagging a release, bump `Cargo.toml` to 0.6.0 and rebuild the bundles (CONTRIBUTING Releasing checklist).
