@@ -7,7 +7,7 @@ No public IP, no port forwarding, no server to rent.**
 
 [![ci](https://github.com/naicoi92/iroh-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/naicoi92/iroh-tunnel/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/naicoi92/iroh-tunnel)](https://github.com/naicoi92/iroh-tunnel/releases)
-[![rust](https://img.shields.io/badge/rust-1.91%2B-dea584?logo=rust)](Cargo.toml)
+[![rust](https://img.shields.io/badge/rust-1.91%2B-dea584?logo=rust)](https://github.com/naicoi92/iroh-tunnel/blob/main/Cargo.toml)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE-MIT)
 
 </div>
@@ -27,7 +27,7 @@ psql -h 127.0.0.1 -p 15432
 ```
 
 > **Status:** pre-1.0. TCP is the supported protocol; UDP forwarding is
-> [experimental](docs/udp.md).
+> [experimental](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/udp.md).
 
 ## Features
 
@@ -39,7 +39,7 @@ psql -h 127.0.0.1 -p 15432
   sign-up, no tokens, no vendor.
 - **One connection, many channels.** Each service keeps one Iroh connection
   and gives every local client its own QUIC stream.
-- **Small static binaries** for Linux (glibc and musl; amd64, arm64,
+- **Small self-contained binaries** for Linux (glibc, or static musl; amd64, arm64,
   riscv64), macOS (Apple silicon) and Windows (x64, ARM64).
 - **Service management** for systemd, launchd, BusyBox/SysV init and
   Windows Task Scheduler.
@@ -72,7 +72,7 @@ The installers put three executables on your `PATH`: `iroh-tunnel` (both
 roles), `iroh-tunnel-serve` and `iroh-tunnel-access`. On Linux and macOS
 they also add the aliases `it`, `its` and `ita`. `.deb`/`.apk` packages,
 per-role images, archives and building from source are covered in
-[Install](docs/install.md).
+[Install](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/install.md).
 
 ## Quick start
 
@@ -92,7 +92,7 @@ iroh-tunnel access -n postgres -l 127.0.0.1:15432 -N <SERVE_NODE_ID>
 
 Clients now connect to `127.0.0.1:15432`. The standalone executables take
 the same flags without the role word: `its -n postgres -t 127.0.0.1:5432`.
-Add `-p udp` for [UDP](docs/udp.md). Quick mode uses a fresh NodeId on every
+Add `-p udp` for [UDP](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/udp.md). Quick mode uses a fresh NodeId on every
 start. To keep it, save the `Secret key:` value printed by
 `iroh-tunnel serve config keygen random` to a private file and pass
 `-k FILE`.
@@ -100,7 +100,7 @@ start. To keep it, save the `Secret key:` value printed by
 **NodeId is public identity, not target authorization.** Anyone who knows a
 NodeId and service name can connect. Target services must enforce their own access protection;
 the tunnel does not add an authorization scheme. See the
-[security model](docs/how-it-works.md#security-model).
+[security model](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/how-it-works.md#security-model).
 
 ### 2. Keep it running with a config file
 
@@ -126,8 +126,8 @@ To start a role at boot, register it as a service:
 iroh-tunnel serve service install
 ```
 
-More in [Configuration](docs/configuration.md) and
-[Running as a service](docs/services.md).
+More in [Configuration](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/configuration.md) and
+[Running as a service](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/services.md).
 
 ### 3. Check the connection
 
@@ -144,7 +144,7 @@ postgres  127.0.0.1:15432  1aa27080…  relay https://use1-1.relay.n0.iroh.link.
 
 `[active]` marks the paths in use: here a direct path, with the relay kept as
 fallback. Logs show the same in `connected to serve peer ... via` lines; see
-[Monitoring](docs/monitoring.md).
+[Monitoring](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/monitoring.md).
 
 ## Use cases
 
@@ -154,7 +154,7 @@ fallback. Logs show the same in `connected to serve peer ... via` lines; see
   `127.0.0.1:2222`, then `ssh -p 2222 user@127.0.0.1`.
 - **Expose an in-cluster Kubernetes service** without Ingress or a
   `kubectl port-forward` that dies; see
-  [Docker and Kubernetes](docs/deployment.md).
+  [Docker and Kubernetes](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/deployment.md).
 - **Embedded boards.** Static riscv64 builds and BusyBox init support let a
   buildroot device publish its web UI or SSH from wherever it boots.
 
@@ -170,23 +170,23 @@ another WireGuard mesh), or port mapping through a server you already run
 
 | | |
 |---|---|
-| [Install](docs/install.md) | Every install method, `update`, verifying releases |
-| [Configuration](docs/configuration.md) | Config files, keys, relays, validation |
-| [Running as a service](docs/services.md) | systemd, launchd, BusyBox init, Windows |
-| [Docker and Kubernetes](docs/deployment.md) | Images, compose demo, Kubernetes |
-| [Monitoring and logs](docs/monitoring.md) | `status`, status files, log events, exit codes |
-| [UDP (experimental)](docs/udp.md) | Behavior, limits and tuning |
-| [Self-hosted relay](docs/self-hosted-relay.md) | Running your own iroh-relay |
-| [CLI reference](docs/cli.md) | Every command and flag |
-| [How it works](docs/how-it-works.md) | Architecture, lifecycle, security, compatibility |
-| [Troubleshooting](docs/troubleshooting.md) | Common problems |
+| [Install](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/install.md) | Every install method, `update`, verifying releases |
+| [Configuration](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/configuration.md) | Config files, keys, relays, validation |
+| [Running as a service](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/services.md) | systemd, launchd, BusyBox init, Windows |
+| [Docker and Kubernetes](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/deployment.md) | Images, compose demo, Kubernetes |
+| [Monitoring and logs](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/monitoring.md) | `status`, status files, log events, exit codes |
+| [UDP (experimental)](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/udp.md) | Behavior, limits and tuning |
+| [Self-hosted relay](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/self-hosted-relay.md) | Running your own iroh-relay |
+| [CLI reference](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/cli.md) | Every command and flag |
+| [How it works](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/how-it-works.md) | Architecture, lifecycle, security, compatibility |
+| [Troubleshooting](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/troubleshooting.md) | Common problems |
 
 ## Contributing
 
 Bug reports and pull requests are welcome; see
-[CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately as
-described in [SECURITY.md](SECURITY.md). Changes are listed in the
-[changelog](CHANGELOG.md).
+[CONTRIBUTING.md](https://github.com/naicoi92/iroh-tunnel/blob/main/CONTRIBUTING.md). Report security issues privately as
+described in [SECURITY.md](https://github.com/naicoi92/iroh-tunnel/blob/main/SECURITY.md). Changes are listed in the
+[changelog](https://github.com/naicoi92/iroh-tunnel/blob/main/CHANGELOG.md).
 
 ## Acknowledgments
 

@@ -203,3 +203,7 @@ cosign verify-blob checksums.txt \
   --certificate-identity "https://github.com/naicoi92/iroh-tunnel/.github/workflows/release.yml@refs/tags/v$VERSION"
 sha256sum --ignore-missing -c checksums.txt
 ```
+
+For macOS archives, use `checksums-darwin.txt` and
+`checksums-darwin.txt.sigstore.json` the same way (`shasum -a 256 -c` on
+macOS).

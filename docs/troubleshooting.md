@@ -46,9 +46,9 @@ It was installed by Homebrew, a Linux package or a container image. Update it
 through that tool, or pass `--yes` to replace a Homebrew or package file
 anyway. On Windows, stop the running executable first.
 
-**`service install --system` exits with code 3.**
-System services need root. The error prints the `sudo` command to run. On
-Windows, use `--user`.
+**`service install --system` exits with code 3 (or 5 on Windows).**
+System services need root; the error prints the `sudo` command to run.
+Windows has no system services (exit code `5`); use `--user`.
 
 **`config edit` says my change was rejected.**
 The edited file did not validate, or the file changed while you were editing.

@@ -15,9 +15,13 @@ service and shutdown lifecycle.
 
 **Upgrade notes**
 
-- **Breaking:** on macOS the config moves to `~/.config/iroh-tunnel` and the
-  status files to `~/.local/state/iroh-tunnel`. The legacy config is copied on
-  first use; monitoring that reads `~/Library/Application Support` must move.
+- **Breaking:** on Linux and macOS, `XDG_CONFIG_HOME` and `XDG_STATE_HOME`
+  are ignored; config always lives in `~/.config/iroh-tunnel` and status files
+  in `~/.local/state/iroh-tunnel`. Use `--config` and `IROH_TUNNEL_STATE_DIR`
+  for other locations.
+- **Breaking:** on macOS the config and status files move out of
+  `~/Library/Application Support/iroh-tunnel`. The legacy config is copied on
+  first use; monitoring that reads the old status path must move.
 - **Breaking:** `config list`, `config show` and `run` without a config file
   now fail with exit code `2` instead of succeeding.
 - **Breaking:** Linux packages no longer ship a systemd unit, `/etc/iroh-tunnel`

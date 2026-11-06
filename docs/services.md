@@ -1,7 +1,7 @@
 # Running as a service
 
 `iroh-tunnel <role> service ...` registers a role with the host's service
-manager so it starts at boot or login and restarts after a failure. It uses
+manager so it starts at boot or login. It uses
 the role's [config file](configuration.md); quick-mode flags do not apply.
 
 ```sh
@@ -39,6 +39,15 @@ Only the all-in-one `iroh-tunnel` manages services. The standalone
 On Linux the backend is chosen at runtime: systemd when `/run/systemd/system`
 exists or PID 1 is systemd, otherwise the init-script backend.
 
+Restart after a failure depends on the backend:
+
+| Backend | Restart |
+|---|---|
+| systemd | After 5 seconds, except after exit code `6` (the role is already running) |
+| launchd | After any unsuccessful exit, at launchd's own pace |
+| BusyBox init script | None; the script only starts the role at boot |
+| Windows task | Retried every minute |
+
 ## User or system scope
 
 - `install` with `--user` or `--system` uses that scope. Without a flag, root
@@ -60,8 +69,6 @@ are logged in unless lingering is enabled (`loginctl enable-linger $USER`).
   service does not depend on its working directory or environment.
 - `install` checks that the config exists and is valid before it registers
   anything; a bad config exits with code `2`.
-- The service restarts on failure after 5 seconds, except after exit code `6`
-  (the role is already running), which would only fail again.
 - `service start` is refused with code `6` while the role already runs in the
   foreground.
 - The registration runs the `iroh-tunnel` found on `PATH`, or the absolute
