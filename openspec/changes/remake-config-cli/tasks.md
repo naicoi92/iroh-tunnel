@@ -120,8 +120,8 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 
 ## 6. Verification gate
 
-- [ ] 6.1 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`; all must be green on macOS. Also run `cargo check --tests --target x86_64-pc-windows-msvc` if the toolchain is present; otherwise note in apply.md that the Windows tests run in CI.
-- [ ] 6.2 E2E smoke run of the real binary with an isolated HOME. Record each command and its output in apply.md:
+- [x] 6.1 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`; all must be green on macOS. Also run `cargo check --tests --target x86_64-pc-windows-msvc` if the toolchain is present; otherwise note in apply.md that the Windows tests run in CI.
+- [x] 6.2 E2E smoke run of the real binary with an isolated HOME. Record each command and its output in apply.md:
   - `it serve`;
   - `it serve config set -n web`;
   - `it serve config set -n web -t 3000`;
