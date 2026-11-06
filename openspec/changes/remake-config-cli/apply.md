@@ -5,8 +5,8 @@
 > Overwritten on each apply iteration; iteration counter grows.
 
 **Change**: `remake-config-cli`
-**Iteration**: `1`
-**Applied at**: `2026-11-06 19:09`
+**Iteration**: `2` (post-PR fix)
+**Applied at**: `2026-11-06 22:05` (iteration 1: `2026-11-06 19:09`)
 **Executor**: `subagent-driven-development` (implementer `superspec.implementer`, per-task and whole-branch review `superspec.task-reviewer`)
 
 ---
@@ -24,6 +24,26 @@
 
 - **Range**: `af6c312..a872fbe`. `af6c312` is the step-0 artifact scaffold commit. The implementation starts at `bae2fea`.
 - **Count**: `25`, which includes task-checkbox commits.
+
+Before iteration 2, the branch was rebased onto `origin/main` at `d7afe53` (after #181 and #182), with the user's approval. The rebased history is `origin/main..93d87f3`, 30 commits.
+
+**Post-PR iteration 2**
+- **Range**: `93d87f3..444c0bf`, one commit: `fix(cli): use a stable binary name in help regardless of argv[0]`.
+- **Trigger**: e2e dispatch run https://github.com/naicoi92/iroh-tunnel/actions/runs/42234561860 failed on Windows.
+  - The failing test was `tests/cli_usage.rs:181` `bare_invocations_print_help`.
+  - A bare `it serve` printed `Usage: iroh-tunnel.exe serve`, but the test expected `Usage: iroh-tunnel serve`.
+- **Root cause**:
+  - clap derives `bin_name` from argv[0], which is `iroh-tunnel.exe` on Windows.
+  - Bare-command help was rendered from that parsed command.
+  - Usage-error help was rebuilt through `build_command`, which defaults `bin_name` to the command name.
+  - The binary name in help was therefore inconsistent, and showed `.exe` on Windows.
+- **Fix**: `cli::build_command` sets the root `bin_name` explicitly to the command's name before `build()`.
+- **TDD**: RED/GREEN with the new unit test `cli::bare_help_uses_stable_bin_name_with_exe_argv0`. It uses argv[0] values `iroh-tunnel.exe`, `iroh-tunnel-serve.exe` and `C:\bin\iroh-tunnel-access.exe`.
+- **Verification**:
+  - `cargo fmt --all -- --check`: ok.
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: ok.
+  - `cargo test --workspace --all-features`: 587 passed, 0 failed, 4 ignored.
+  - Manual repro through binaries symlinked as `*.exe`: help shows `Usage: iroh-tunnel serve …`, `Usage: iroh-tunnel-serve …` and `Usage: iroh-tunnel-access config …`, with no `.exe`.
 
 ---
 
@@ -112,4 +132,6 @@ All are internal; no public contract changed.
 
 ## Next step
 
-Run `/opsx-verify`. Before merge, make sure Windows CI (`tests/config_lifecycle_windows.rs`) is green.
+1. Push iteration 2 to PR #179.
+2. Run `gh workflow run e2e.yml --ref remake-config-cli` and require `e2e (windows)` to be green, including `tests/config_lifecycle_windows.rs`, which did not run in the failed run because `cargo test` stopped at the first failing binary.
+3. Run `/opsx-verify` again for iteration 2.
