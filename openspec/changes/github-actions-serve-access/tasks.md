@@ -73,8 +73,8 @@ Scenarios (CCP): "Action change only", "Version bump", "Mixed change", "A check 
 Owns: `.github/workflows/release.yml`.
 Scenarios (CCP): "Stable release", "Pre-release", "Release job failed", "Older patch released later", "Tag move fails".
 
-- [ ] 7.1 Add job `action-tag` after `github-release` (needs it, stable only): compute the highest stable `vX.*.*` tag; when it equals the run's tag, force-push `vX` to that commit with `contents: write`; otherwise log and skip; on push failure, fail with the manual `git tag -f`/`git push -f` command in the log (design D9)
-- [ ] 7.2 Verify: `actionlint` clean; shellcheck the job script; dry-run the version-comparison script locally against sample tag lists (stable, rc, older patch)
+- [x] 7.1 Add job `action-tag` after `github-release` (needs it, stable only): compute the highest stable `vX.*.*` tag; when it equals the run's tag, force-push `vX` to that commit with `contents: write`; otherwise log and skip; on push failure, fail with the manual `git tag -f`/`git push -f` command in the log (design D9)
+- [x] 7.2 Verify: `actionlint` clean; shellcheck the job script; dry-run the version-comparison script locally against sample tag lists (stable, rc, older patch)
 
 ## 8. Documentation
 
