@@ -15,4 +15,10 @@ Traceability: CICD = ci-cd-pipeline delta spec.
 
 ## 3. Post-merge verification
 
-- [ ] 3.1 (post-merge; stays open through apply/verify with reason "post-merge") After merge: check that the push run on the merge commit reports a check named `e2e-ok`; dispatch on `main` and check `e2e-ok` is unchanged; then dispatch on a branch rebased onto that commit (`gh workflow run e2e.yml --ref remake-config-cli`) and check via `gh api repos/naicoi92/iroh-tunnel/commits/<sha>/check-runs` that it reports `e2e-ok (manual)` and creates no `e2e-ok`. Record the run URLs. (CICD: Dispatch on an unmerged branch; End-to-end stage on main — Merge runs e2e; Release preflight — Only a manual e2e run exists by exact-name filter in release.yml)
+- [x] 3.1 (post-merge; stays open through apply/verify with reason "post-merge") After merge: check that the push run on the merge commit reports a check named `e2e-ok`; dispatch on `main` and check `e2e-ok` is unchanged; then dispatch on a branch rebased onto that commit (`gh workflow run e2e.yml --ref remake-config-cli`) and check via `gh api repos/naicoi92/iroh-tunnel/commits/<sha>/check-runs` that it reports `e2e-ok (manual)` and creates no `e2e-ok`. Record the run URLs. (CICD: Dispatch on an unmerged branch; End-to-end stage on main — Merge runs e2e; Release preflight — Only a manual e2e run exists by exact-name filter in release.yml)
+
+  Evidence (2026-11-06, merge commit `4280612` of #181):
+  - Push run https://github.com/naicoi92/iroh-tunnel/actions/runs/42231440356 — success; check run `e2e-ok` (id 127947797615) success.
+  - Dispatch on `main` https://github.com/naicoi92/iroh-tunnel/actions/runs/42231488366 — success; check run `e2e-ok (manual)` (id 127948343370) success; ran concurrently with the push run.
+  - `gh api repos/naicoi92/iroh-tunnel/commits/4280612.../check-runs?check_name=e2e-ok` (the release preflight query) returns only the push run's `e2e-ok`; the manual check is not matched.
+  - Dispatch on the rebased `remake-config-cli` (PR #179): https://github.com/naicoi92/iroh-tunnel/actions/runs/42234561860.
