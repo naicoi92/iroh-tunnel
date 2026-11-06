@@ -123,6 +123,7 @@ jobs:
         with:
           persist-credentials: false
       - run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+      - run: bash .github/scripts/move-major-tag.test.sh
       - name: actionlint
         run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 && ./actionlint -color
       - name: PSScriptAnalyzer
