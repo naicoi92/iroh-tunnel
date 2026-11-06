@@ -17,7 +17,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
   - no difference gives `Edit::Keep(Unchanged)`.
 
   TDD per scenario. (CMC: Set creates a service entry; Creating a service requires its address and peer; Set updates only the given attributes; Set reports what changed; FIM scenarios Add returns the affected entry, Update returns the changes, Unchanged writes nothing, Invalid mutation changes nothing)
-- [ ] 1.3 Implement `check_config` in `config/check_config.rs`. It does `require_existing`, then read and `validate_role_doc`, with no lock and no write. Tests cover a valid file, an invalid file, a missing file, and a held lock with a legacy `multiplex` key left untouched. (CMC: Check validates a config without writing; FIM: Check returns the validated path)
+- [x] 1.3 Implement `check_config` in `config/check_config.rs`. It does `require_existing`, then read and `validate_role_doc`, with no lock and no write. Tests cover a valid file, an invalid file, a missing file, and a held lock with a legacy `multiplex` key left untouched. (CMC: Check validates a config without writing; FIM: Check returns the validated path)
 - [ ] 1.4 Update the `config/mod.rs` exports:
   - drop `add_service`/`AddService`;
   - export `set_service`, `check_config` and the new types;
