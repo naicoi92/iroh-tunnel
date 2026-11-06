@@ -22,6 +22,8 @@ Finalize ran through the escape hatch, using `finishing-a-development-branch` Op
 
 Push note: `origin` uses SSH, and the local SSH key authenticates as GitHub user `ttdua`, who has no push access. The branch was therefore pushed over HTTPS using the `gh` credential of the remote owner `naicoi92`. The remote was not changed.
 
+**History update.** The merge commit `5c658dd` described below was later replaced. With the user's approval, the branch was rebased onto `origin/main` twice: first onto `360386b` (#180), then onto `d7afe53` (#181 and #182). Both rebases were force-pushed with `--force-with-lease`, and the history is now linear. The `CHANGELOG.md` conflict was resolved the same way each time.
+
 `origin/main` had moved to `294397b` (#178, GitHub Actions). It was merged into the branch as `5c658dd`. The only conflict was the `## [Unreleased]` section of `CHANGELOG.md`, resolved by keeping this change's BREAKING section and adding #178's Added bullet. The GitHub Action calls only `iroh-tunnel run -c`, so the CLI changes do not affect it.
 
 ---
@@ -44,6 +46,7 @@ Push note: `origin` uses SSH, and the local SSH key authenticates as GitHub user
 - **Code review**: `approved`
 - **Reviewer tier**: human. The user approved through the Plannotator Inbox gate, reviewing the full patch, stat and commit list against `main`.
 - **Commit range reviewed**: `main(9b8f301)..1dfe352`
+- **Iteration 2 (post-PR fix)**: the user reviewed fix commit `444c0bf` (stable `bin_name` in help) through the Inbox and gave `approved`.
 
 ---
 
@@ -53,9 +56,16 @@ Push note: `origin` uses SSH, and the local SSH key authenticates as GitHub user
   - on `1dfe352`: 586 passed, 0 failed, 4 ignored;
   - on the merged result `5c658dd`: 586 passed, 0 failed, 4 ignored.
 - Windows-only tests are verified by CI on the PR. Making that check green is the open warning from `verify.md`.
+- **Iteration 2:** `cargo test --workspace --all-features` on `5ba750d` passed: 587 passed, 0 failed.
+- **End-to-end on all three operating systems:** e2e dispatch run https://github.com/naicoi92/iroh-tunnel/actions/runs/42239371375 is green.
+  - Windows: 144 passed, 0 failed, including `config_lifecycle_windows` and `config_paths_windows`.
+  - macOS: green on the re-run. The first attempt failed because GitHub had no macOS runner available.
+- PR CI (`lint`, `unit` on all three operating systems, `ci-ok`) is green.
 
 ---
 
 ## Next step
 
-Wait for the PR code review and for green CI, especially Windows. After approval, run `/opsx-archive` on this branch. The archive commits land here. Push them to update the PR, then merge the PR with `gh pr merge --squash --delete-branch` or the GitHub UI. That single merge lands both the implementation and the archive into main.
+Code review and CI are done, so the next step is to run `/opsx-archive` on this branch (in progress).
+
+Original note: wait for the PR code review and for green CI, especially Windows. After approval, run `/opsx-archive` on this branch. The archive commits land here. Push them to update the PR, then merge the PR with `gh pr merge --squash --delete-branch` or the GitHub UI. That single merge lands both the implementation and the archive into main.
