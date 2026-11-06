@@ -13,7 +13,7 @@
 //! iroh was never reached — none of the specific [`CliError`](iroh_tunnel_host::error::CliError)
 //! categories (config/permission/iroh/service) fits. It therefore maps to
 //! the general error (exit 1) with an actionable message naming the exact
-//! path (see README §Exit codes).
+//! path (see docs/monitoring.md, "Exit codes").
 
 use std::io::Write;
 use std::path::Path;
