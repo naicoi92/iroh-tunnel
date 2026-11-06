@@ -18,7 +18,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 
   TDD per scenario. (CMC: Set creates a service entry; Creating a service requires its address and peer; Set updates only the given attributes; Set reports what changed; FIM scenarios Add returns the affected entry, Update returns the changes, Unchanged writes nothing, Invalid mutation changes nothing)
 - [x] 1.3 Implement `check_config` in `config/check_config.rs`. It does `require_existing`, then read and `validate_role_doc`, with no lock and no write. Tests cover a valid file, an invalid file, a missing file, and a held lock with a legacy `multiplex` key left untouched. (CMC: Check validates a config without writing; FIM: Check returns the validated path)
-- [ ] 1.4 Update the `config/mod.rs` exports:
+- [x] 1.4 Update the `config/mod.rs` exports:
   - drop `add_service`/`AddService`;
   - export `set_service`, `check_config` and the new types;
   - port the host unit tests and fixtures that used `add_web` to `set_service`;
@@ -40,7 +40,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
   - `-p` gets `[default: tcp]` in quick mode only.
 
   (CLI: One argument vocabulary across quick mode and config; CLI: Quick mode forwards a single service from flags)
-- [ ] 2.3 Reshape `ConfigAction` and `RoleCmd` to be generic over the role's set args:
+- [x] 2.3 Reshape `ConfigAction` and `RoleCmd` to be generic over the role's set args:
   - `Set`, `Rm { -n }`, `List`, `Show { --reveal }`, `Edit`, `Path`, `Check`, `Keygen { -c, -y, --print conflicts_with_all }`;
   - drop `Add`, `Remove`, `KeygenMode`;
   - `-c` on every config subcommand.
@@ -75,17 +75,17 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 
 ## 4. CLI: config handlers and rendering (src/config_cmd.rs, src/render.rs)
 
-- [ ] 4.1 Add the `config set` handler and renderers:
+- [x] 4.1 Add the `config set` handler and renderers:
   - `Created service '<n>' in <p>.`;
   - `Updated service '<n>' in <p>:` with lines `  <field>: <old> -> <new>` (labels `target`/`listen`/`protocol`/`node_id`);
   - `Service '<n>' unchanged (<p>).`
 
   Also add the `config rm` handler (renamed from remove). (CMC: Set reports what changed; CMC: Remove a service entry)
-- [ ] 4.2 Add the `config check` handler (`OK: <path> is a valid <role> config.`) and the `keygen --print` dispatch. Update the missing-config guidance text from `config add` to `config set`. (CMC: Check validates a config without writing; CMC: Read commands on a missing config share one guidance error; TC: Failed macOS migration never creates a substitute identity)
+- [x] 4.2 Add the `config check` handler (`OK: <path> is a valid <role> config.`) and the `keygen --print` dispatch. Update the missing-config guidance text from `config add` to `config set`. (CMC: Check validates a config without writing; CMC: Read commands on a missing config share one guidance error; TC: Failed macOS migration never creates a substitute identity)
 
 ## 5. Integration tests (tests/)
 
-- [ ] 5.1 Migrate `config_lifecycle.rs`, `config_lifecycle_windows.rs`, `config_paths.rs`, `config_paths_windows.rs`, `config_multiplex_compat.rs` and `configured_multiplex.rs` to `set -n`/`rm -n`/`keygen --print`. Keep every existing scenario: parallel writers, killed writer, lock timeout, read-only target, permissions, symlink, invalid config, secret-free diagnostics. (CMC: Concurrent writers are serialized; Saves are atomic and owner-only; Mutations are validated and all-or-nothing; Config edits preserve formatting and drop retired fields; Remove on a missing config creates nothing)
+- [x] 5.1 Migrate `config_lifecycle.rs`, `config_lifecycle_windows.rs`, `config_paths.rs`, `config_paths_windows.rs`, `config_multiplex_compat.rs` and `configured_multiplex.rs` to `set -n`/`rm -n`/`keygen --print`. Keep every existing scenario: parallel writers, killed writer, lock timeout, read-only target, permissions, symlink, invalid config, secret-free diagnostics. (CMC: Concurrent writers are serialized; Saves are atomic and owner-only; Mutations are validated and all-or-nothing; Config edits preserve formatting and drop retired fields; Remove on a missing config creates nothing)
 - [ ] 5.2 Add the `config set` and `check` e2e cases in `config_lifecycle.rs`:
   - create with defaults, access create, hostname target;
   - create without `-t`/`-l`/`-N`, which gives help and no file;
@@ -116,7 +116,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
   - help-listing assertions include `-r/--relay-url`.
 
   (CLI: Quick mode forwards a single service from flags; Quick mode input validation; Addresses accept PORT or HOST:PORT; Top-level options and help)
-- [ ] 5.5 Rename and re-bless `cli_golden`: the `config_add_*` golden becomes `config_set_created_*`, `config_remove_*` becomes `config_rm_*`, and `keygen_random_*` becomes `keygen_print_*`. Add goldens for an updated change report and for one usage error with help. Review the golden diff. (CMC: Set reports what changed; CLI: Usage errors print the failing command's help)
+- [x] 5.5 Rename and re-bless `cli_golden`: the `config_add_*` golden becomes `config_set_created_*`, `config_remove_*` becomes `config_rm_*`, and `keygen_random_*` becomes `keygen_print_*`. Add goldens for an updated change report and for one usage error with help. Review the golden diff. (CMC: Set reports what changed; CLI: Usage errors print the failing command's help)
 
 ## 6. Verification gate
 
