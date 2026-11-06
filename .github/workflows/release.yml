@@ -3,7 +3,8 @@
 #
 #   preflight ─ build (8 targets ∥) ─ package ─ sign + verify ─┬─ github-release
 #                                                              ├─ images
-#                                                              └─ homebrew
+#                                                              ├─ homebrew
+#                                                              └─ action-tag
 #
 # preflight refuses anything but a vX.Y.Z[-pre] tag on a commit reachable from
 # main whose merged PR head passed `ci-ok` and whose own commit passed the
@@ -567,3 +568,31 @@ jobs:
             git commit -m "iroh-tunnel ${VERSION}"
             git push origin HEAD:main
           fi
+
+  # Moves the major action tag (`v0` for `naicoi92/iroh-tunnel@v0`, `/access@v0`,
+  # `/serve@v0`) to this release, only when it is the highest stable version of
+  # its major. The ref update goes through the REST API with GITHUB_TOKEN, and
+  # events caused by GITHUB_TOKEN do not start workflows, so release.yml is not
+  # re-triggered. This requires that no tag protection rule / ruleset covers `v*`.
+  action-tag:
+    name: move major action tag
+    needs: [preflight, github-release]
+    if: ${{ needs.preflight.outputs.prerelease != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      # Must equal MIN_VERSION in action-src/build.ts.
+      MIN_ACTION_VERSION: 0.6.0
+    steps:
+      # Only the helper script, never the code under test; no git push happens.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Move the major tag
+        run: bash .github/scripts/move-major-tag.sh "$TAG"

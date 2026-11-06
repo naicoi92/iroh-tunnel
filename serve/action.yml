@@ -1,0 +1,40 @@
+name: iroh-tunnel-serve
+description: Expose a local TCP or UDP service from the runner through an iroh-tunnel Serve node.
+branding:
+  icon: link
+  color: blue
+inputs:
+  name:
+    description: Name of the service to expose; Access nodes dial it by this name.
+    required: true
+  target:
+    description: Local service to forward to, as host:port with an IP address or a hostname.
+    required: true
+  protocol:
+    description: Service protocol, tcp or udp.
+    required: false
+    default: tcp
+  relay-url:
+    description: Relay server URLs, one https:// URL per line; empty uses the n0 public relays.
+    required: false
+    default: ""
+  relay-token:
+    description: Relay authentication token; pass it from a secret.
+    required: false
+    default: ""
+  version:
+    description: iroh-tunnel release to run (X.Y.Z, vX.Y.Z, with an optional -pre suffix, or latest); empty uses the version this action was built for.
+    required: false
+    default: ""
+  job-status:
+    description: Internal; do not set.
+    required: false
+    default: ${{ job.status }}
+outputs:
+  node-id:
+    description: NodeId of this Serve node, which Access clients dial.
+runs:
+  using: node24
+  main: dist/main.js
+  post: dist/post.js
+  post-if: always()

@@ -5,6 +5,8 @@
 #            │                (--lib --bins + doctests)       if code changed
 #            ├─ scripts       (shellcheck + actionlint + PSScriptAnalyzer)
 #            │                                                if scripts/workflows changed
+#            ├─ action        (bun typecheck + test + check-dist)
+#            │                                                if action paths changed
 #            └─ ci-ok         (single required check; always reports)
 #
 # e2e tests are NOT run on PRs: they run on every push to main (e2e.yml) and
@@ -38,6 +40,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       scripts: ${{ steps.filter.outputs.scripts }}
+      action: ${{ steps.filter.outputs.action }}
     steps:
       # No checkout: on pull_request events the filter reads the changed files
       # through the API.
@@ -59,6 +62,14 @@ jobs:
               - '**/*.sh'
               - 'install.ps1'
               - '.github/**'
+            # Cargo.toml feeds BUILD_VERSION, so a version bump re-runs check-dist.
+            action:
+              - 'action.yml'
+              - 'access/**'
+              - 'serve/**'
+              - 'action-src/**'
+              - '.github/workflows/ci.yml'
+              - 'Cargo.toml'
 
   lint:
     name: lint (fmt + clippy)
@@ -112,18 +123,42 @@ jobs:
         with:
           persist-credentials: false
       - run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+      - run: bash .github/scripts/move-major-tag.test.sh
       - name: actionlint
-        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 && ./actionlint -color
+        # 1.7.8+ is required for the node24 runtime used by the repository's own actions.
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 && ./actionlint -color
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
           Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error -EnableExit
 
+  # GitHub Actions: typecheck, unit tests, and committed bundles == fresh build.
+  action:
+    name: action (bun typecheck + test + check-dist)
+    needs: changes
+    if: needs.changes.outputs.action == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: action-src
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run check-dist
+      - run: bun run check-docs
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, lint, unit, scripts]
+    needs: [changes, lint, unit, scripts, action]
     runs-on: ubuntu-latest
     steps:
       # `skipped` is fine (path filter); `failure` / `cancelled` is not.

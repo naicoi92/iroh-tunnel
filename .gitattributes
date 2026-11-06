@@ -2,3 +2,7 @@
 tests/fixtures/sigstore/* -text
 # CLI goldens pin exact bytes, LF included; a CRLF checkout breaks them.
 tests/fixtures/golden/* -text
+# Generated GitHub Action bundles.
+access/dist/** linguist-generated=true
+serve/dist/** linguist-generated=true
+/action.yml linguist-generated=true

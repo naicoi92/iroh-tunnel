@@ -1,0 +1,22 @@
+{
+  "name": "iroh-tunnel-action",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun run build.ts",
+    "check-dist": "bun run scripts/check-dist.ts",
+    "check-docs": "bun run scripts/check-docs.ts"
+  },
+  "dependencies": {
+    "@actions/core": "^3",
+    "@actions/exec": "^3",
+    "@actions/tool-cache": "^4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
