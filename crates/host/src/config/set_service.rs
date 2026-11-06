@@ -437,8 +437,10 @@ mod tests {
     }
 
     #[test]
-    fn access_update_node_id_is_reported() {
-        let text = format!("[[services]]\nname = \"db\"\nnode_id = \"{NODE}\"\nport = 5432\n");
+    fn access_update_with_invalid_node_id_is_rejected() {
+        let text = format!(
+            "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nnode_id = \"{NODE}\"\nport = 5432\n"
+        );
         let (_d, path) = file(Some(&text));
         let r = SetService {
             node_id: Some("x".repeat(3)),
@@ -447,5 +449,58 @@ mod tests {
         // Short ids fail schema validation; the file must stay unchanged.
         assert_config_err(&set_service(Role::Access, &r).unwrap_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn access_update_node_id_is_reported_and_written() {
+        let new = "1".repeat(64);
+        let text = format!(
+            "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nnode_id = \"{NODE}\"\nport = 5432\n"
+        );
+        let (_d, path) = file(Some(&text));
+        let r = SetService {
+            node_id: Some(new.clone()),
+            ..req(&path, "db")
+        };
+        let out = set_service(Role::Access, &r).unwrap();
+        assert_eq!(
+            out,
+            SetOutcome::Updated {
+                service: "db".into(),
+                path: path.clone(),
+                changes: vec![FieldChange {
+                    field: ServiceField::NodeId,
+                    old: NODE.into(),
+                    new: new.clone(),
+                }],
+            }
+        );
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(got.contains(&format!("node_id = \"{new}\"")), "{got}");
+        assert!(!got.contains(NODE), "{got}");
+    }
+
+    #[test]
+    fn update_protocol_only_is_reported() {
+        let (_d, path) = file(Some(
+            "[[services]]\nname = \"web\"\nprotocol = \"tcp\"\nport = 3000\n",
+        ));
+        let r = SetService {
+            protocol: Some(Protocol::Udp),
+            ..req(&path, "web")
+        };
+        let SetOutcome::Updated { changes, .. } = set_service(Role::Serve, &r).unwrap() else {
+            panic!("expected Updated");
+        };
+        assert_eq!(
+            changes,
+            vec![FieldChange {
+                field: ServiceField::Protocol,
+                old: "tcp".into(),
+                new: "udp".into(),
+            }]
+        );
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(got.contains("protocol = \"udp\""), "{got}");
     }
 }
