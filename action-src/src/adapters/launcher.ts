@@ -8,7 +8,7 @@ export interface Launcher {
     args: string[],
     env: Record<string, string>,
     logPath: string,
-  ): { pid: number; exitCode(): number | null };
+  ): Promise<{ pid: number; exitCode(): number | null }>;
   isAlive(pid: number): boolean;
   stop(pid: number, graceMs: number): Promise<'exited' | 'killed' | 'still-alive'>;
 }
@@ -48,7 +48,7 @@ export function createLauncher(platform: NodeJS.Platform = process.platform): La
   }
 
   return {
-    spawn(exe, args, env, logPath) {
+    async spawn(exe, args, env, logPath) {
       const fd = openSync(logPath, 'a');
       try {
         const child = nodeSpawn(exe, args, {
@@ -57,8 +57,12 @@ export function createLauncher(platform: NodeJS.Platform = process.platform): La
           windowsHide: true,
           env: { ...process.env, ...env },
         });
-        const pid = child.pid;
-        if (pid === undefined) throw new Error(`failed to start ${exe}`);
+        // Attach before anything else: ENOENT/EACCES surface as an async 'error'.
+        const started = await new Promise<number>((resolve, reject) => {
+          child.once('error', (e) => reject(new Error(`failed to start ${exe}: ${e.message}`)));
+          child.once('spawn', () => resolve(child.pid as number));
+        });
+        const pid = started;
         exits.set(pid, null);
         child.on('exit', (code, sig) => exits.set(pid, code ?? (sig ? 128 : null)));
         child.on('error', () => exits.set(pid, 127));

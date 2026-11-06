@@ -29,7 +29,7 @@ beforeAll(async () => {
         const [, ver, file] = m;
         if (file === 'checksums.txt') {
           const digest = badDigest ? '0'.repeat(64) : sha(BODY);
-          return new Response(`${'f'.repeat(64)}  other-file.tar.gz\n${digest}  ${archiveName('iroh-tunnel-serve', ver!, target)}\n`);
+          return new Response(`${'f'.repeat(64)}  other-file.tar.gz\n${digest}  ${archiveName('iroh-tunnel-serve', ver!, target)}\n${digest}  ${archiveName('iroh-tunnel-serve', ver!, resolveTarget('linux', 'x64', true))}\n`);
         }
         return new Response(BODY);
       }
@@ -141,5 +141,18 @@ describe('IROH_TUNNEL_ACTION_BIN_DIR', () => {
     const dir = await mkdtemp(join(work, 'empty-'));
     await mkdir(dir, { recursive: true });
     await expect(mk({ binDir: dir }).install('access', { kind: 'default' })).rejects.toThrow(/iroh-tunnel-access/);
+  });
+});
+
+describe('cache keys', () => {
+  test('musl and glibc builds of the same version and role use distinct keys', async () => {
+    const store = new Map<string, string>();
+    const gnu = resolveTarget('linux', 'x64', false);
+    const musl = resolveTarget('linux', 'x64', true);
+    const mkFor = (t: typeof gnu) => mk({ target: t }, fakeCache(calls, store));
+    await mkFor(gnu).install('serve', { kind: 'default' });
+    await mkFor(musl).install('serve', { kind: 'default' });
+    expect(calls.cacheDir).toBe(2);
+    expect(store.size).toBe(2);
   });
 });
