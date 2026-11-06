@@ -40,11 +40,11 @@ Scenarios (GAI): "Default version", "Release not found", "Version too old", "Lat
 Owns: `action-src/src/usecases/**`, `action-src/test/usecases/**`.
 Scenarios (GAI): "Access ready", "Serve ready", "UDP Access step", "Readiness timeout", "Tunnel exits during start", "No outputs on failure", "System service on a self-hosted Linux runner", "Second Serve step on Windows", "Normal stop", "Main step failed before starting", "Successful job", "Failed job", "No key leaks", "Key removed at job end", "Later steps use the tunnel".
 
-- [ ] 4.1 Test-first: `start(request)` orchestration with fakes: validate → install → write workspace/config → launch → await readiness (Serve: `node_id` present, issue #177; Access TCP: probe then non-empty `transports`; Access UDP: listener only, log note) polled every 500 ms up to 60 s → set output `node-id` → save state (design D7)
-- [ ] 4.2 Test-first: start failures: early exit (exit code, CLI error class, log tail), timeout (last status, log tail), exit code 6 mapped to "role already running for this runner user" with system-service/other-step hints and the Windows one-step-per-role limit (design D5, D7)
-- [ ] 4.3 Test-first: `stop()` orchestration: no state → no-op success; else print final status in a group, stop the process, print the log only when the job failed, delete the workspace, fail if still alive (design D8)
-- [ ] 4.4 Test-first: no generated secret key in any output, log line or summary (scan fake IO output for the key read from the fixture config)
-- [ ] 4.5 Verify: `bun test` green for the whole package
+- [x] 4.1 Test-first: `start(request)` orchestration with fakes: validate → install → write workspace/config → launch → await readiness (Serve: `node_id` present, issue #177; Access TCP: probe then non-empty `transports`; Access UDP: listener only, log note) polled every 500 ms up to 60 s → set output `node-id` → save state (design D7)
+- [x] 4.2 Test-first: start failures: early exit (exit code, CLI error class, log tail), timeout (last status, log tail), exit code 6 mapped to "role already running for this runner user" with system-service/other-step hints and the Windows one-step-per-role limit (design D5, D7)
+- [x] 4.3 Test-first: `stop()` orchestration: no state → no-op success; else print final status in a group, stop the process, print the log only when the job failed, delete the workspace, fail if still alive (design D8)
+- [x] 4.4 Test-first: no generated secret key in any output, log line or summary (scan fake IO output for the key read from the fixture config)
+- [x] 4.5 Verify: `bun test` green for the whole package
 
 ## 5. Entry points, metadata and bundles
 
