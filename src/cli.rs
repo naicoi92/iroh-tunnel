@@ -22,7 +22,7 @@ const APP_VERSION: &str = env!("APP_VERSION");
 
 /// CLI entry point.
 #[derive(Parser, Debug)]
-#[command(name = "iroh-tunnel", version = APP_VERSION, about = "P2P port-forwarding tunnel via Iroh", after_help = "Aliases: it = iroh-tunnel, its = iroh-tunnel-serve (Serve only), ita = iroh-tunnel-access (Access only)")]
+#[command(name = "iroh-tunnel", version = APP_VERSION, about = "P2P port-forwarding tunnel via Iroh", arg_required_else_help = true, after_help = "Aliases: it = iroh-tunnel, its = iroh-tunnel-serve (Serve only), ita = iroh-tunnel-access (Access only)")]
 pub struct Cli {
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -44,7 +44,11 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Role {
     /// Serve role: publish local services into Iroh (standalone binary: iroh-tunnel-serve, alias its).
-    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    #[command(
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true,
+        arg_required_else_help = true
+    )]
     Serve {
         #[command(flatten)]
         quick: ServeQuickArgs,
@@ -52,7 +56,11 @@ pub enum Role {
         cmd: Option<RoleCmd<ServeServiceArgs>>,
     },
     /// Access role: consume remote services to local (standalone binary: iroh-tunnel-access, alias ita).
-    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    #[command(
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true,
+        arg_required_else_help = true
+    )]
     Access {
         #[command(flatten)]
         quick: AccessQuickArgs,
@@ -80,7 +88,7 @@ pub struct UpdateArgs {
 
 /// Standalone Serve binary (`iroh-tunnel-serve`, alias `its`).
 #[derive(Parser, Debug)]
-#[command(name = "iroh-tunnel-serve", version = APP_VERSION, about = "Serve role: publish a local service through an Iroh tunnel (alias: its)", args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+#[command(name = "iroh-tunnel-serve", version = APP_VERSION, about = "Serve role: publish a local service through an Iroh tunnel (alias: its)", args_conflicts_with_subcommands = true, subcommand_negates_reqs = true, arg_required_else_help = true)]
 pub struct ServeCli {
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -114,7 +122,7 @@ impl ServeCli {
 
 /// Standalone Access binary (`iroh-tunnel-access`, alias `ita`).
 #[derive(Parser, Debug)]
-#[command(name = "iroh-tunnel-access", version = APP_VERSION, about = "Access role: expose a remote Iroh service on a local address (alias: ita)", args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+#[command(name = "iroh-tunnel-access", version = APP_VERSION, about = "Access role: expose a remote Iroh service on a local address (alias: ita)", args_conflicts_with_subcommands = true, subcommand_negates_reqs = true, arg_required_else_help = true)]
 pub struct AccessCli {
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -216,6 +224,39 @@ fn config_set(role: clap::Command) -> clap::Command {
     })
 }
 
+/// Attach `Examples:` to a role root and its `config` verbs. `prefix` is the
+/// invocation up to the role, e.g. `it serve` or `its`; the text differs per
+/// binary, so it is set here rather than in the shared derive.
+fn examples(role: clap::Command, prefix: &str, access: bool) -> clap::Command {
+    let (quick, set) = if access {
+        (
+            format!("{prefix} -n web -l 8080 -N <NODE_ID>"),
+            vec![format!("{prefix} config set -n web -l 8080 -N <NODE_ID>")],
+        )
+    } else {
+        (
+            format!("{prefix} -n web -t 3000"),
+            vec![
+                format!("{prefix} config set -n web -t 3000"),
+                format!("{prefix} config set -n web -t 3001 -p udp"),
+            ],
+        )
+    };
+    let block = |lines: &[String]| format!("Examples:\n  {}", lines.join("\n  "));
+    let rm = block(&[format!("{prefix} config rm -n web")]);
+    let keygen = block(&[
+        format!("{prefix} config keygen"),
+        format!("{prefix} config keygen --print"),
+    ]);
+    role.after_help(block(&[quick]))
+        .mut_subcommand("config", |config| {
+            config
+                .mut_subcommand("set", |c| c.after_help(block(&set)))
+                .mut_subcommand("rm", |c| c.after_help(rm))
+                .mut_subcommand("keygen", |c| c.after_help(keygen))
+        })
+}
+
 const SERVE_QUICK: &[&str] = &["name", "target"];
 const ACCESS_QUICK: &[&str] = &["name", "listen", "node_id"];
 
@@ -224,10 +265,30 @@ const ACCESS_QUICK: &[&str] = &["name", "listen", "node_id"];
 pub fn build_command(binary: Binary) -> clap::Command {
     let mut cmd = match binary {
         Binary::AllInOne => Cli::command()
-            .mut_subcommand("serve", |c| config_set(quick_required(c, SERVE_QUICK)))
-            .mut_subcommand("access", |c| config_set(quick_required(c, ACCESS_QUICK))),
-        Binary::Serve => config_set(quick_required(ServeCli::command(), SERVE_QUICK)),
-        Binary::Access => config_set(quick_required(AccessCli::command(), ACCESS_QUICK)),
+            .mut_subcommand("serve", |c| {
+                examples(
+                    config_set(quick_required(c, SERVE_QUICK)),
+                    "it serve",
+                    false,
+                )
+            })
+            .mut_subcommand("access", |c| {
+                examples(
+                    config_set(quick_required(c, ACCESS_QUICK)),
+                    "it access",
+                    true,
+                )
+            }),
+        Binary::Serve => examples(
+            config_set(quick_required(ServeCli::command(), SERVE_QUICK)),
+            "its",
+            false,
+        ),
+        Binary::Access => examples(
+            config_set(quick_required(AccessCli::command(), ACCESS_QUICK)),
+            "ita",
+            true,
+        ),
     };
     cmd.build();
     cmd
@@ -301,6 +362,7 @@ pub enum RoleCmd<S: ServiceArgs> {
         config: Option<PathBuf>,
     },
     /// Config management (set/rm/list/show/edit/path/check/keygen).
+    #[command(arg_required_else_help = true)]
     Config {
         #[command(subcommand)]
         action: ConfigAction<S>,
@@ -312,6 +374,7 @@ pub enum RoleCmd<S: ServiceArgs> {
         json: bool,
     },
     /// Service management: install, start, stop, restart, status, uninstall.
+    #[command(arg_required_else_help = true)]
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -327,7 +390,7 @@ pub enum ConfigAction<S: ServiceArgs> {
     Set {
         #[command(flatten)]
         service: S,
-        /// Config file path (default: OS-specific).
+        /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
@@ -336,20 +399,20 @@ pub enum ConfigAction<S: ServiceArgs> {
         /// Name of the service to remove.
         #[arg(short = 'n', long)]
         name: String,
-        /// Config file path (default: OS-specific).
+        /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
     /// List services in config.
     List {
-        /// Config file path (default: OS-specific).
+        /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
     /// Print config file content; `secret_key` and `relay_token` are hidden
     /// unless `--reveal` is given.
     Show {
-        /// Config file path (default: OS-specific).
+        /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
         /// Print `secret_key` and `relay_token` instead of hiding them.
@@ -358,19 +421,19 @@ pub enum ConfigAction<S: ServiceArgs> {
     },
     /// Open config in $EDITOR; the result is validated before it is saved.
     Edit {
-        /// Config file path (default: OS-specific).
+        /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
     /// Print config file path.
     Path {
-        /// Config file path (default: OS-specific).
+        /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
     /// Validate the config file without changing it.
     Check {
-        /// Config file path (default: OS-specific).
+        /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
@@ -411,7 +474,7 @@ pub struct ScopeArgs {
 pub enum ServiceAction {
     /// Install, enable and start the service.
     Install {
-        /// Config file to pin into the service (absolute path is stored).
+        /// Config file to pin into the service (absolute path is stored; default: OS-specific).
         #[arg(short, long)]
         config: Option<PathBuf>,
         #[command(flatten)]
@@ -480,35 +543,7 @@ pub fn init_tracing(verbose: u8, quiet: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
     use std::collections::HashMap;
-
-    /// No command declares the same short option twice (clap's debug assert
-    /// also covers this) and equivalent options use one letter across roles.
-    #[test]
-    fn short_options_are_consistent_and_conflict_free() {
-        let mut meaning: HashMap<char, String> = HashMap::new();
-        for mut command in [
-            ServeCli::command(),
-            AccessCli::command(),
-            Cli::command().find_subcommand("serve").unwrap().clone(),
-            Cli::command().find_subcommand("access").unwrap().clone(),
-        ] {
-            command.build();
-            let mut seen = HashMap::new();
-            for arg in command.get_arguments() {
-                let (Some(short), Some(long)) = (arg.get_short(), arg.get_long()) else {
-                    continue;
-                };
-                assert!(seen.insert(short, long).is_none(), "duplicate -{short}");
-                let previous = meaning.entry(short).or_insert_with(|| long.to_owned());
-                assert_eq!(previous, long, "-{short} means different options");
-            }
-        }
-        for (short, long) in [('n', "name"), ('p', "protocol"), ('k', "key-file")] {
-            assert_eq!(meaning[&short], long);
-        }
-    }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
@@ -588,5 +623,255 @@ mod tests {
     fn role_command_does_not_need_quick_flags() {
         assert!(parse_cli(Binary::AllInOne, argv(&["it", "serve", "config", "path"])).is_ok());
         assert!(parse_cli(Binary::Serve, argv(&["its", "config", "path"])).is_ok());
+    }
+
+    fn all_binaries() -> [Binary; 3] {
+        [Binary::AllInOne, Binary::Serve, Binary::Access]
+    }
+
+    /// Visit `cmd` and every subcommand below it with its path.
+    fn walk(
+        cmd: &clap::Command,
+        path: &mut Vec<String>,
+        f: &mut dyn FnMut(&[String], &clap::Command),
+    ) {
+        f(path, cmd);
+        for sub in cmd.get_subcommands() {
+            path.push(sub.get_name().to_owned());
+            walk(sub, path, f);
+            path.pop();
+        }
+    }
+
+    fn for_each_command(f: &mut dyn FnMut(Binary, &[String], &clap::Command)) {
+        for b in all_binaries() {
+            let root = build_command(b);
+            walk(&root, &mut Vec::new(), &mut |p, c| f(b, p, c));
+        }
+    }
+
+    fn find<'a>(root: &'a clap::Command, path: &[&str]) -> &'a clap::Command {
+        path.iter().fold(root, |c, n| {
+            c.find_subcommand(n).unwrap_or_else(|| panic!("no {n}"))
+        })
+    }
+
+    /// Each short letter maps to one long name (table in the spec), and no
+    /// command declares the same short twice.
+    #[test]
+    fn short_options_are_consistent_and_conflict_free() {
+        let table: HashMap<char, &str> = HashMap::from([
+            ('c', "config"),
+            ('n', "name"),
+            ('t', "target"),
+            ('l', "listen"),
+            ('N', "node-id"),
+            ('p', "protocol"),
+            ('r', "relay-url"),
+            ('k', "key-file"),
+            ('y', "yes"),
+        ]);
+        for_each_command(&mut |b, path, cmd| {
+            let mut seen = HashMap::new();
+            for arg in cmd.get_arguments() {
+                let Some(short) = arg.get_short() else {
+                    continue;
+                };
+                let long = arg.get_long().unwrap_or("");
+                assert!(
+                    seen.insert(short, long).is_none(),
+                    "duplicate -{short} in {b:?} {path:?}"
+                );
+                // Global/update/verbosity letters outside the table are fixed.
+                if let Some(expected) = table.get(&short) {
+                    assert_eq!(*expected, long, "-{short} in {b:?} {path:?}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn long_only_options() {
+        for_each_command(&mut |b, path, cmd| {
+            for arg in cmd.get_arguments() {
+                if matches!(arg.get_long(), Some("reveal" | "print" | "system" | "user")) {
+                    assert_eq!(arg.get_short(), None, "{b:?} {path:?} {:?}", arg.get_long());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn no_blank_descriptions() {
+        for_each_command(&mut |b, path, cmd| {
+            for arg in cmd.get_arguments() {
+                if matches!(arg.get_id().as_str(), "help" | "version") {
+                    continue;
+                }
+                let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+                assert!(!help.trim().is_empty(), "{b:?} {path:?} {}", arg.get_id());
+            }
+        });
+    }
+
+    #[test]
+    fn shared_flags_match_between_quick_and_set() {
+        let strip = |s: String| s.replace(" (default on create: tcp)", "");
+        for (b, role, ids) in [
+            (Binary::Serve, None, &["name", "target", "protocol"][..]),
+            (
+                Binary::Access,
+                None,
+                &["name", "listen", "node_id", "protocol"][..],
+            ),
+            (
+                Binary::AllInOne,
+                Some("serve"),
+                &["name", "target", "protocol"][..],
+            ),
+            (
+                Binary::AllInOne,
+                Some("access"),
+                &["name", "listen", "node_id", "protocol"][..],
+            ),
+        ] {
+            let root = build_command(b);
+            let quick = match role {
+                Some(r) => find(&root, &[r]),
+                None => &root,
+            };
+            let set = find(quick, &["config", "set"]);
+            for id in ids {
+                let q = quick.get_arguments().find(|a| a.get_id() == *id).unwrap();
+                let s = set.get_arguments().find(|a| a.get_id() == *id).unwrap();
+                assert_eq!(q.get_long(), s.get_long(), "{id}");
+                assert_eq!(q.get_short(), s.get_short(), "{id}");
+                assert_eq!(q.get_value_names(), s.get_value_names(), "{id}");
+                let qh = strip(q.get_help().unwrap().to_string());
+                let sh = strip(s.get_help().unwrap().to_string());
+                assert_eq!(qh, sh, "{id}");
+                if *id != "protocol" {
+                    assert_eq!(
+                        q.get_default_values(),
+                        s.get_default_values(),
+                        "{id} default"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn config_set_has_no_relay_flag() {
+        for_each_command(&mut |_, path, cmd| {
+            if path.ends_with(&["config".to_owned(), "set".to_owned()]) {
+                assert!(cmd
+                    .get_arguments()
+                    .all(|a| a.get_long() != Some("relay-url")));
+            }
+        });
+    }
+
+    #[test]
+    fn config_set_requires_name() {
+        let err = parse_cli(
+            Binary::AllInOne,
+            argv(&["it", "serve", "config", "set", "-t", "3000"]),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    fn has_examples(cmd: &clap::Command) -> bool {
+        cmd.get_after_help()
+            .is_some_and(|h| h.to_string().contains("Examples:"))
+    }
+
+    #[test]
+    fn examples_on_listed_commands() {
+        for b in all_binaries() {
+            let root = build_command(b);
+            let roles: Vec<(&str, &clap::Command)> = match b {
+                Binary::AllInOne => vec![
+                    ("serve", find(&root, &["serve"])),
+                    ("access", find(&root, &["access"])),
+                ],
+                Binary::Serve => vec![("serve", &root)],
+                Binary::Access => vec![("access", &root)],
+            };
+            for (name, role) in roles {
+                assert!(has_examples(role), "{b:?} {name} root");
+                assert!(
+                    has_examples(find(role, &["config", "set"])),
+                    "{b:?} {name} set"
+                );
+                if name == "serve" {
+                    assert!(has_examples(find(role, &["config", "rm"])), "{b:?} rm");
+                    assert!(
+                        has_examples(find(role, &["config", "keygen"])),
+                        "{b:?} keygen"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn examples_use_the_binary_name() {
+        let text = |c: &clap::Command| c.get_after_help().unwrap().to_string();
+        let it = build_command(Binary::AllInOne);
+        assert!(text(find(&it, &["serve", "config", "set"]))
+            .contains("it serve config set -n web -t 3000"));
+        assert!(text(find(&it, &["access"])).contains("it access -n web -l 8080 -N <NODE_ID>"));
+        let its = build_command(Binary::Serve);
+        assert!(text(find(&its, &["config", "keygen"])).contains("its config keygen --print"));
+        let ita = build_command(Binary::Access);
+        assert!(text(find(&ita, &["config", "set"]))
+            .contains("ita config set -n web -l 8080 -N <NODE_ID>"));
+        assert!(text(find(&ita, &["config", "set"])).contains("<NODE_ID>"));
+    }
+
+    #[test]
+    fn keygen_print_conflicts() {
+        let err = parse_cli(
+            Binary::AllInOne,
+            argv(&["it", "serve", "config", "keygen", "--print", "-y"]),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn bare_invocations_request_help() {
+        for (b, args) in [
+            (Binary::AllInOne, vec!["it"]),
+            (Binary::AllInOne, vec!["it", "serve"]),
+            (Binary::AllInOne, vec!["it", "access"]),
+            (Binary::Serve, vec!["its"]),
+            (Binary::Access, vec!["ita"]),
+            (Binary::Access, vec!["ita", "config"]),
+            (Binary::AllInOne, vec!["it", "serve", "service"]),
+            (Binary::AllInOne, vec!["it", "serve", "config"]),
+        ] {
+            let err = parse_cli(b, argv(&args)).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn access_help_keeps_target_protection_guidance() {
+        let root = build_command(Binary::Access);
+        let help = find(&root, &["config", "set"])
+            .clone()
+            .render_help()
+            .to_string();
+        assert!(
+            help.contains("public identity, not authorization"),
+            "{help}"
+        );
     }
 }
