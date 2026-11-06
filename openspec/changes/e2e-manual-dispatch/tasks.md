@@ -7,11 +7,11 @@ Traceability: CICD = ci-cd-pipeline delta spec.
 
 ## 1. Workflow (.github/workflows/e2e.yml)
 
-- [ ] 1.1 Add `workflow_dispatch:` (no inputs) to `on:`, change the concurrency group to `e2e-${{ github.event_name }}-${{ github.sha }}` (keep `cancel-in-progress: false`), and make the aggregate job's display name `${{ github.event_name == 'workflow_dispatch' && 'e2e-ok (manual)' || 'e2e-ok' }}` (job id stays `e2e-ok`). Permissions stay `contents: read`; no `secrets.*`. Verify with `actionlint .github/workflows/*.yml` and by grepping that only `e2e.yml` declares `workflow_dispatch`. (CICD: Manual end-to-end runs on any ref — Dispatch on an unmerged branch, Dispatch on main, Manual run fails like a push run, Manual and push run on the same commit, No extra privileges; Three single-purpose pipeline stages — Only e2e is dispatchable, Workflow inventory; End-to-end stage on main)
+- [x] 1.1 Add `workflow_dispatch:` (no inputs) to `on:`, change the concurrency group to `e2e-${{ github.event_name }}-${{ github.sha }}` (keep `cancel-in-progress: false`), and make the aggregate job's display name `${{ github.event_name == 'workflow_dispatch' && 'e2e-ok (manual)' || 'e2e-ok' }}` (job id stays `e2e-ok`). Permissions stay `contents: read`; no `secrets.*`. Verify with `actionlint .github/workflows/*.yml` and by grepping that only `e2e.yml` declares `workflow_dispatch`. (CICD: Manual end-to-end runs on any ref — Dispatch on an unmerged branch, Dispatch on main, Manual run fails like a push run, Manual and push run on the same commit, No extra privileges; Three single-purpose pipeline stages — Only e2e is dispatchable, Workflow inventory; End-to-end stage on main)
 
 ## 2. Documentation
 
-- [ ] 2.1 Update the `e2e.yml` header comment and `CONTRIBUTING.md` (code quality gates and releasing): the dispatch command `gh workflow run e2e.yml --ref <branch>`, the branch must contain the trigger (rebase on `main`), and only `e2e-ok` from a push run on `main` counts for releases; `e2e-ok (manual)` does not. (CICD: Manual end-to-end runs are documented — Contributor guide; Release preflight requires a passed test gate — Only a manual e2e run exists)
+- [x] 2.1 Update the `e2e.yml` header comment and `CONTRIBUTING.md` (code quality gates and releasing): the dispatch command `gh workflow run e2e.yml --ref <branch>`, the branch must contain the trigger (rebase on `main`), and only `e2e-ok` from a push run on `main` counts for releases; `e2e-ok (manual)` does not. (CICD: Manual end-to-end runs are documented — Contributor guide; Release preflight requires a passed test gate — Only a manual e2e run exists)
 
 ## 3. Post-merge verification
 
