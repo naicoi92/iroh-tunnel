@@ -86,7 +86,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 ## 5. Integration tests (tests/)
 
 - [x] 5.1 Migrate `config_lifecycle.rs`, `config_lifecycle_windows.rs`, `config_paths.rs`, `config_paths_windows.rs`, `config_multiplex_compat.rs` and `configured_multiplex.rs` to `set -n`/`rm -n`/`keygen --print`. Keep every existing scenario: parallel writers, killed writer, lock timeout, read-only target, permissions, symlink, invalid config, secret-free diagnostics. (CMC: Concurrent writers are serialized; Saves are atomic and owner-only; Mutations are validated and all-or-nothing; Config edits preserve formatting and drop retired fields; Remove on a missing config creates nothing)
-- [ ] 5.2 Add the `config set` and `check` e2e cases in `config_lifecycle.rs`:
+- [x] 5.2 Add the `config set` and `check` e2e cases in `config_lifecycle.rs`:
   - create with defaults, access create, hostname target;
   - create without `-t`/`-l`/`-N`, which gives help and no file;
   - bare-port update keeps the host, and HOST:PORT update;
