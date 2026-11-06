@@ -7,11 +7,11 @@ Scenario names refer to `specs/github-actions-integration/spec.md` (GAI) and `sp
 Owns: `action-src/package.json`, `action-src/bun.lock`, `action-src/tsconfig.json`, `action-src/build.ts`, `.gitattributes` (generated-file entries only).
 Scenarios: CCP "Action change only" (install from lockfile, typecheck).
 
-- [ ] 1.1 Create `action-src/` as a bun-managed TypeScript package: `bun init`-style `package.json` (private, `type: module`), `tsconfig.json` (strict, Node 24 target), dependencies `@actions/core`, `@actions/exec`, `@actions/tool-cache` added with `bun add` (design D2); commit `bun.lock`
-- [ ] 1.2 Add scripts `typecheck` (`tsc --noEmit`), `test` (`bun test`), `build` (runs `build.ts`) and `check-dist` (build into a temp dir and diff with the committed outputs)
-- [ ] 1.3 Write `build.ts`: bundle `access/main`, `access/post`, `serve/main`, `serve/post` with `bun build --target=node` into `access/dist/` and `serve/dist/`; embed the build-time release version (from root `Cargo.toml` `version`) and the minimum supported version as constants; generate the root `action.yml` from `access/action.yml` by rewriting only `runs.main`/`runs.post` (design D2, D6)
-- [ ] 1.4 Mark `access/dist/**`, `serve/dist/**` and root `action.yml` as generated in `.gitattributes` (`linguist-generated`)
-- [ ] 1.5 Verify: `bun install --frozen-lockfile && bun run typecheck && bun test` succeed on the empty skeleton
+- [x] 1.1 Create `action-src/` as a bun-managed TypeScript package: `bun init`-style `package.json` (private, `type: module`), `tsconfig.json` (strict, Node 24 target), dependencies `@actions/core`, `@actions/exec`, `@actions/tool-cache` added with `bun add` (design D2); commit `bun.lock`
+- [x] 1.2 Add scripts `typecheck` (`tsc --noEmit`), `test` (`bun test`), `build` (runs `build.ts`) and `check-dist` (build into a temp dir and diff with the committed outputs)
+- [x] 1.3 Write `build.ts`: bundle `access/main`, `access/post`, `serve/main`, `serve/post` with `bun build --target=node` into `access/dist/` and `serve/dist/`; embed the build-time release version (from root `Cargo.toml` `version`) and the minimum supported version as constants; generate the root `action.yml` from `access/action.yml` by rewriting only `runs.main`/`runs.post` (design D2, D6)
+- [x] 1.4 Mark `access/dist/**`, `serve/dist/**` and root `action.yml` as generated in `.gitattributes` (`linguist-generated`)
+- [x] 1.5 Verify: `bun install --frozen-lockfile && bun run typecheck && bun test` succeed on the empty skeleton
 
 ## 2. Domain: requests and validation (`action-src/src/domain/`)
 
