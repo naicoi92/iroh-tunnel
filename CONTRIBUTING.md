@@ -48,10 +48,10 @@ when it is relevant to a change.
 Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
-CI runs these three commands on pull requests that change code, in the `lint`,
-`test-linux` and `test-windows` jobs, plus a `scripts` job (shellcheck,
-PSScriptAnalyzer, actionlint) when scripts or workflows change. Run the three
-commands locally before pushing:
+PRs run `lint`, `unit (linux|macos|windows)` and a `scripts` job (shellcheck,
+PSScriptAnalyzer, actionlint) when scripts or workflows change. The e2e tests
+run on every push to `main` (`e2e.yml`), and releases require its `e2e-ok`.
+Run these commands locally before pushing:
 
 ```sh
 cargo fmt --all -- --check
@@ -61,6 +61,34 @@ cargo test --all-features
 
 `clippy -D warnings` means zero warnings — fix or suppress with a comment
 explaining why.
+
+### Running tests
+
+New tests go in `src/` (`#[cfg(test)]`) for unit tests or in `tests/` for
+end-to-end tests. CI runs the same selectors (unit on PRs, e2e on `main`):
+
+```sh
+# unit tests (plus doctests)
+cargo test --workspace --all-features --locked --lib --bins
+cargo test --workspace --all-features --locked --doc
+
+# end-to-end tests
+cargo test --workspace --all-features --locked --test '*'
+```
+
+The relay suite in `tests/serve_access_tunnel.rs` runs in CI against a
+self-hosted `n0computer/iroh-relay:v1.4.1` on Linux:
+
+```sh
+IROH_TUNNEL_TEST_RELAY_URL=https://127.0.0.1:3443 \
+  cargo test --workspace --all-features --locked --test serve_access_tunnel -- --ignored --test-threads=1
+```
+
+See [docs/self-hosted-relay.md](docs/self-hosted-relay.md) for starting the
+relay locally.
+
+Coverage check: the unit and e2e passed counts must add up to the passed count
+of the full `cargo test --workspace --all-features --locked`.
 
 ## Project layout
 
@@ -104,15 +132,17 @@ explaining why.
    where the scope is usually the module or area (`config`, `service`, `ci`,
    `release`, `role-run`, …).
 3. `ci-ok` must pass. A PR runs only what its changes need: lint and
-   Linux/Windows tests for code, shellcheck, PSScriptAnalyzer and actionlint
-   for scripts and workflows. Release artifacts are built only on tags.
+   unit tests on Linux/macOS/Windows for code, shellcheck, PSScriptAnalyzer
+   and actionlint for scripts and workflows. Release artifacts are built only on tags.
 4. User-visible changes get a line under `[Unreleased]` in
    [CHANGELOG.md](CHANGELOG.md).
 
 ## Releasing
 
 Push a `vX.Y.Z` (or `vX.Y.Z-rc.N`) tag on a merged commit on `main` whose PR
-passed `ci-ok`. The tag run publishes the GitHub release, the ghcr.io images
+passed `ci-ok`, and only after `e2e-ok` is green on that commit
+(`e2e.yml` on `main`); otherwise preflight fails — re-run the release run once
+it is green. The tag run publishes the GitHub release, the ghcr.io images
 and (stable tags only) the Homebrew cask.
 
 - If the run fails in `github-release`, delete the leftover draft

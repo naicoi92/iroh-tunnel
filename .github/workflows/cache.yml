@@ -1,9 +1,11 @@
 # Seeds the Rust build caches that PR jobs restore from.
 #
 # GitHub scopes caches by ref: a PR can read main's cache but not another PR's.
-# This workflow only compiles (never runs tests) on main, using the same cache
-# keys and flags as ci.yml, so PRs start from a warm target/. It runs only when
-# dependencies or the toolchain/cache setup change.
+# This workflow only compiles (never runs tests) on main, warming the lint and
+# unit caches on Linux, macOS and Windows with the same cache keys and test
+# selectors as ci.yml, so PRs start from a warm target/. The e2e caches are
+# saved by e2e.yml itself. It runs only when dependencies or the toolchain/cache
+# setup change.
 
 name: cache
 
@@ -38,18 +40,19 @@ jobs:
           cache-key: lint
       - run: cargo clippy --workspace --all-targets --all-features --locked
 
-  test:
-    name: cache (test, ${{ matrix.os }})
+  unit:
+    name: cache (unit, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: test
-      - run: cargo test --workspace --all-features --locked --no-run
+          cache-key: unit
+      # Doctests are compiled at test time, so they need no warm-up.
+      - run: cargo test --workspace --all-features --locked --lib --bins --no-run

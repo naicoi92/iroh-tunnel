@@ -20,6 +20,7 @@
   - `remove`, `list`, `show`, `edit` and `path` accept `--config`.
   - Windows: owner-only ACL equivalent for the config file is not enforced
     (unverified).
+- PRs run unit tests on Linux, macOS and Windows; end-to-end tests (including the relay suite against a self-hosted iroh-relay) run on every push to `main` and gate releases.
 - Releases publish automatically on a version tag (GitHub release, container images, Homebrew cask); there is no manual draft or promote step any more.
 
 ### Added

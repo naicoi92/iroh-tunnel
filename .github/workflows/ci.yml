@@ -1,14 +1,15 @@
 # Pull-request CI — the test gate. Fast feedback only; no artifact builds.
 #
 #   changes ─┬─ lint          (fmt + clippy)                  if code changed
-#            ├─ test-linux    (cargo test)                    if code changed
-#            ├─ test-windows  (cargo test + Task Scheduler)   if code changed
+#            ├─ unit (linux|macos|windows)
+#            │                (--lib --bins + doctests)       if code changed
 #            ├─ scripts       (shellcheck + actionlint + PSScriptAnalyzer)
 #            │                                                if scripts/workflows changed
 #            └─ ci-ok         (single required check; always reports)
 #
-# Release build, packages and images are NOT run on PRs. They run only on `v*`
-# tags (release.yml); cache.yml warms caches on main. There is no pre-merge
+# e2e tests are NOT run on PRs: they run on every push to main (e2e.yml) and
+# gate releases. Release build, packages and images run only on `v*` tags
+# (release.yml); cache.yml warms caches on main. There is no pre-merge
 # rehearsal.
 #
 # The workflow itself has no path filter so `ci-ok` always reports: a docs-only
@@ -75,38 +76,30 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-  test-linux:
-    name: test (linux)
+  unit:
+    name: unit (${{ matrix.name }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-15
+          - name: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: test
-      - run: cargo test --workspace --all-features --locked
-
-  test-windows:
-    name: test (windows)
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache-key: test
-      - run: cargo test --workspace --all-features --locked
-      - name: Service lifecycle (Task Scheduler)
-        shell: pwsh
-        env:
-          IROH_TUNNEL_E2E_SERVICE: "1"
-        run: cargo test --all-features --locked --test service_user_windows -- --nocapture --test-threads=1
+          cache-key: unit
+      - run: cargo test --workspace --all-features --locked --lib --bins
+      - run: cargo test --workspace --all-features --locked --doc
 
   # Static checks for shell scripts and workflows; seconds, no build needed.
   scripts:
@@ -130,7 +123,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, lint, test-linux, test-windows, scripts]
+    needs: [changes, lint, unit, scripts]
     runs-on: ubuntu-latest
     steps:
       # `skipped` is fine (path filter); `failure` / `cancelled` is not.
