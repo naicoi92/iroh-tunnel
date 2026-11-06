@@ -67,8 +67,12 @@ Source: design.md Decisions 1, 6
 Source: design.md Decisions 1, 3, 4
 
 #### Scenario: CLI mutations go through host operations
-- **WHEN** `iroh-tunnel config add`, `config remove`, `keygen` or `serve service install` mutates a file or registration
+- **WHEN** `iroh-tunnel config set`, `config rm`, `keygen` or `serve service install` mutates a file or registration
 - **THEN** a host operation applies the lock, validation, privilege and trust policy, and the CLI only translates arguments, collects decisions and renders the outcome
+
+#### Scenario: Creation requirements decided by host
+- **WHEN** `config set` needs to know whether an entry exists to decide which flags are required
+- **THEN** the host decides under the writer lock and returns a domain error, and the CLI alone turns it into a usage error with help
 
 ### Requirement: Host performs no terminal interaction
 `iroh-tunnel-host` MUST NOT depend on clap, read from stdin, render tables or prompts, or call `std::process::exit`.
