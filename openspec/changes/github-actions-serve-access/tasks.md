@@ -51,11 +51,11 @@ Scenarios (GAI): "Access ready", "Serve ready", "UDP Access step", "Readiness ti
 Owns: `action-src/src/entry/**`, `access/action.yml`, `serve/action.yml`, `access/dist/**`, `serve/dist/**`, root `action.yml` (generated).
 Scenarios (GAI): "Access through the root path", "Access through the alias path", "Serve path", "Root metadata", "Serve metadata", "Root metadata mirrors the access directory", "Minimal Access step", "Several Access services", "Serve in front of a runner-mapped job service", "Serve in a container job with a hostname target", "UDP service", "Two relays", "Default relays".
 
-- [ ] 5.1 Entry modules `access/main`, `access/post`, `serve/main`, `serve/post` wiring real adapters into the use cases
-- [ ] 5.2 `access/action.yml`: `name: iroh-tunnel`, description, `branding`, inputs `name`, `node-id`, `listen` (required), `protocol`, `relay-url`, `relay-token`, `version` (optional, with descriptions and defaults), internal `job-status` (default `${{ job.status }}`, not documented), output `node-id`, `runs: node24`, `main: dist/main.js`, `post: dist/post.js`, `post-if: always()`
-- [ ] 5.3 `serve/action.yml`: inputs `name`, `target` (required) plus the same optional four and internal `job-status`; output `node-id`; same `runs` shape
-- [ ] 5.4 Run `bun run build`; commit `access/dist`, `serve/dist` and the generated root `action.yml`; unit test that the root and `access/action.yml` differ only in `runs.main`/`runs.post`
-- [ ] 5.5 Verify: `bun run check-dist` reports no diff; `actionlint` accepts workflows using `./`, `./access`, `./serve`
+- [x] 5.1 Entry modules `access/main`, `access/post`, `serve/main`, `serve/post` wiring real adapters into the use cases
+- [x] 5.2 `access/action.yml`: `name: iroh-tunnel`, description, `branding`, inputs `name`, `node-id`, `listen` (required), `protocol`, `relay-url`, `relay-token`, `version` (optional, with descriptions and defaults), internal `job-status` (default `${{ job.status }}`, not documented), output `node-id`, `runs: node24`, `main: dist/main.js`, `post: dist/post.js`, `post-if: always()`
+- [x] 5.3 `serve/action.yml`: inputs `name`, `target` (required) plus the same optional four and internal `job-status`; output `node-id`; same `runs` shape
+- [x] 5.4 Run `bun run build`; commit `access/dist`, `serve/dist` and the generated root `action.yml`; unit test that the root and `access/action.yml` differ only in `runs.main`/`runs.post`
+- [x] 5.5 Verify: `bun run check-dist` reports no diff; `actionlint` accepts workflows using `./`, `./access`, `./serve`
 
 ## 6. CI coverage (`.github/workflows/ci.yml`, `.github/workflows/e2e.yml`)
 
