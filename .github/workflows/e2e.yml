@@ -122,7 +122,9 @@ jobs:
           bun-version: 1.4.4
       - name: Start echo server
         shell: bash
-        run: nohup bun action-src/scripts/echo-server.ts 18080 > "$RUNNER_TEMP/echo1.log" 2>&1 &
+        run: |
+          nohup bun action-src/scripts/echo-server.ts 18080 > "$RUNNER_TEMP/echo1.log" 2>&1 &
+          bun action-src/scripts/wait-port.ts 127.0.0.1:18080
       - id: serve1
         uses: ./serve
         with:
@@ -140,7 +142,9 @@ jobs:
       - name: Start second echo server
         if: matrix.name != 'windows'
         shell: bash
-        run: nohup bun action-src/scripts/echo-server.ts 18081 > "$RUNNER_TEMP/echo2.log" 2>&1 &
+        run: |
+          nohup bun action-src/scripts/echo-server.ts 18081 > "$RUNNER_TEMP/echo2.log" 2>&1 &
+          bun action-src/scripts/wait-port.ts 127.0.0.1:18081
       - id: serve2
         if: matrix.name != 'windows'
         uses: ./serve
@@ -189,6 +193,10 @@ jobs:
           [ "$OUTCOME" = failure ] || { echo "second step outcome: $OUTCOME"; exit 1; }
           cat "$ERROR_FILE"
           grep -q 'one Serve and one Access step per job on Windows' "$ERROR_FILE"
+      - name: Echo server logs
+        if: failure()
+        shell: bash
+        run: tail -n +1 "$RUNNER_TEMP"/echo*.log || true
 
   # The Serve action inside a container job, with a service-container hostname target.
   e2e-action-container:
