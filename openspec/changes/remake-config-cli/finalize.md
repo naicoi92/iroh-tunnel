@@ -18,7 +18,9 @@ Finalize ran through the escape hatch, using `finishing-a-development-branch` Op
 - **Branch**: `remake-config-cli`
 - **Base branch**: `main`
 - **Final state**: `pr-open`
-- **PR URL**: `<filled after PR creation>`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/179`
+
+Push note: `origin` uses SSH, and the local SSH key authenticates as GitHub user `ttdua`, who has no push access. The branch was therefore pushed over HTTPS using the `gh` credential of the remote owner `naicoi92`. The remote was not changed.
 
 `origin/main` had moved to `294397b` (#178, GitHub Actions). It was merged into the branch as `5c658dd`. The only conflict was the `## [Unreleased]` section of `CHANGELOG.md`, resolved by keeping this change's BREAKING section and adding #178's Added bullet. The GitHub Action calls only `iroh-tunnel run -c`, so the CLI changes do not affect it.
 
@@ -33,7 +35,7 @@ Finalize ran through the escape hatch, using `finishing-a-development-branch` Op
 
 ## PR comment
 
-- **PR comment status**: `<filled after comment>`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/179#issuecomment-6685192404)
 
 ---
 
