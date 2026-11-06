@@ -10,7 +10,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 ## 1. Host: set and check operations (crates/host)
 
 - [x] 1.1 Add `SetService`, `SetOutcome { Created, Updated { changes }, Unchanged }`, `FieldChange` and the typed `SetError::MissingForCreate { name, flags }` to `config/types.rs`, with unit tests for their `Display`/`Error`. The display text names the CLI flags; no secrets. (FIM: Configuration operations return outcomes; FIM: Configuration mutations keep store guarantees)
-- [ ] 1.2 Implement `set_service` in `config/set_service.rs` on `mutate_deciding`, and replace `add_service.rs`:
+- [x] 1.2 Implement `set_service` in `config/set_service.rs` on `mutate_deciding`, and replace `add_service.rs`:
   - create applies the defaults (tcp, 127.0.0.1) and returns `MissingForCreate` for a missing address or access node_id;
   - update edits only the given keys in place;
   - a bare port keeps the existing host;
