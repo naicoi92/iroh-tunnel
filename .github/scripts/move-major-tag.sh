@@ -11,10 +11,19 @@ highest_stable() { # <major>
   grep -E "^v${1}\.[0-9]+\.[0-9]+\$" | grep -v -- '-' | sort -V | tail -1
 }
 
-# Create or force-move refs/tags/v<major> to <sha> through the REST API.
+# Force-move refs/tags/v<major> to <sha>; create it only when it does not exist.
+# Any other PATCH error (403, 5xx, rate limit) is returned, not retried as POST.
 move_ref() { # <major> <sha>
-  gh api -X PATCH "repos/$GH_REPO/git/refs/tags/v${1}" -f sha="$2" -F force=true >/dev/null \
-    || gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/v${1}" -f sha="$2" >/dev/null
+  local err
+  if err="$(gh api -X PATCH "repos/$GH_REPO/git/refs/tags/v${1}" -f sha="$2" -F force=true 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  if [[ "$err" == *"HTTP 404"* || "$err" == *"Not Found"* ]]; then
+    gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/v${1}" -f sha="$2" >/dev/null
+  else
+    echo "$err" >&2
+    return 1
+  fi
 }
 
 list_tags() { # <major>
@@ -60,7 +69,11 @@ main() {
   elif ! tags="$(list_tags "$major")"; then
     manual "$major" "$tag"
   fi
-  best="$(printf '%s\n' "$tags" | highest_stable "$major")"
+  best="$(printf '%s\n' "$tags" | highest_stable "$major" || true)"
+  if [[ -z "$best" ]]; then
+    echo "no stable v$major tags found" >&2
+    exit 1
+  fi
   decide "$tag" "$major" "$best" || return 0
   $dry && return 0
 
