@@ -6,7 +6,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "build": "bun run build.ts",
-    "check-dist": "bun run scripts/check-dist.ts"
+    "check-dist": "bun run scripts/check-dist.ts",
+    "check-docs": "bun run scripts/check-docs.ts"
   },
   "dependencies": {
     "@actions/core": "^3",

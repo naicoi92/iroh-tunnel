@@ -68,6 +68,8 @@ jobs:
               - 'access/**'
               - 'serve/**'
               - 'action-src/**'
+              - 'docs/github-actions.md'
+              - 'README.md'
               - '.github/workflows/ci.yml'
               - 'Cargo.toml'
 
@@ -152,6 +154,7 @@ jobs:
       - run: bun run typecheck
       - run: bun test
       - run: bun run check-dist
+      - run: bun run check-docs
 
   ci-ok:
     name: ci-ok

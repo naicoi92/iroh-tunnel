@@ -6,6 +6,7 @@ Thanks for contributing! Bug reports, fixes, and features are welcome.
 - [Development setup](#development-setup)
 - [Code quality gates](#code-quality-gates)
 - [Project layout](#project-layout)
+- [GitHub Actions](#github-actions)
 - [Pull requests](#pull-requests)
 - [Compatibility rules](#compatibility-rules)
 - [Licensing](#licensing)
@@ -124,6 +125,27 @@ of the full `cargo test --workspace --all-features --locked`.
 | `packaging/`               | nFPM config, Homebrew cask                             |
 | `examples/`                | sample `serve.toml` / `access.toml`                    |
 
+## GitHub Actions
+
+The actions are TypeScript in `action-src/`, bundled with bun into committed
+`access/dist`, `serve/dist` and the root `action.yml` (generated from
+`access/action.yml`; do not edit it).
+
+```sh
+cd action-src
+bun install
+bun test
+bun run build      # commit access/dist, serve/dist and action.yml
+```
+
+CI `check-dist` fails when the committed bundles differ from a fresh build.
+`MIN_VERSION` in `action-src/build.ts` (currently `0.6.0`) is the oldest
+release the actions will download; raise it only when the actions start to
+need a newer CLI behavior. Maintainer-only: the internal `job-status` input and
+the CI env vars `IROH_TUNNEL_ACTION_BIN_DIR` and `IROH_TUNNEL_ACTION_ERROR_FILE`
+are not part of the public interface. `bun run check-docs` verifies that the
+`with:` keys in the docs exist in the action metadata.
+
 ## Pull requests
 
 1. Branch from `main`.
@@ -145,6 +167,12 @@ passed `ci-ok`, and only after `e2e-ok` is green on that commit
 it is green. The tag run publishes the GitHub release, the ghcr.io images
 and (stable tags only) the Homebrew cask.
 
+- In the release-bump PR, after bumping `Cargo.toml`, run `bun run build` in
+  `action-src/` (bun 1.4.4) and commit the bundles; CI `check-dist` fails
+  otherwise.
+- The `v0` tag moves automatically after a stable release.
+- When publishing each release, tick "Publish this Action to the GitHub
+  Marketplace" (accept the Marketplace agreement on the first).
 - If the run fails in `github-release`, delete the leftover draft
   (`gh release delete <tag>`, keeping the tag) and re-run all jobs.
 - A bad release is superseded by a new tag, not edited.

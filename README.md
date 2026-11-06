@@ -158,6 +158,27 @@ fallback. Logs show the same in `connected to serve peer ... via` lines; see
 - **Embedded boards.** Static riscv64 builds and BusyBox init support let a
   buildroot device publish its web UI or SSH from wherever it boots.
 
+## GitHub Actions
+
+Reach a private service from a workflow, or expose one from a runner:
+
+```yaml
+- uses: naicoi92/iroh-tunnel@v0
+  with:
+    name: postgres
+    node-id: ${{ vars.POSTGRES_NODE_ID }}
+    listen: 127.0.0.1:15432
+```
+
+```yaml
+- uses: naicoi92/iroh-tunnel/serve@v0
+  with:
+    name: web
+    target: 127.0.0.1:8080
+```
+
+See [GitHub Actions](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/github-actions.md).
+
 ## When to use something else
 
 iroh-tunnel forwards fixed ports between two machines. Look elsewhere if you
@@ -175,6 +196,7 @@ another WireGuard mesh), or port mapping through a server you already run
 | [Running as a service](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/services.md) | systemd, launchd, BusyBox init, Windows |
 | [Docker and Kubernetes](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/deployment.md) | Images, compose demo, Kubernetes |
 | [Monitoring and logs](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/monitoring.md) | `status`, status files, log events, exit codes |
+| [GitHub Actions](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/github-actions.md) | Access and Serve steps for CI/CD |
 | [UDP (experimental)](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/udp.md) | Behavior, limits and tuning |
 | [Self-hosted relay](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/self-hosted-relay.md) | Running your own iroh-relay |
 | [CLI reference](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/cli.md) | Every command and flag |
