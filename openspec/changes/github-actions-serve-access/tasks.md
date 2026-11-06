@@ -62,11 +62,11 @@ Scenarios (GAI): "Access through the root path", "Access through the alias path"
 Owns: `.github/workflows/ci.yml`, `.github/workflows/e2e.yml`.
 Scenarios (CCP): "Action change only", "Version bump", "Mixed change", "A check fails", "Docs-only change", "Code change", "Suite contents", "Action tests", "Actions on every OS", "Container job on Linux", "Action regression", "No release download in CI", "Alias path on Linux and macOS", "Windows limit asserted"; unchanged and kept passing: "Installer script change only", "Workflow change only", "Superseded push", "Script lint"; (GAI) "Concurrent jobs", "Two Serve steps on Linux", "Concurrent jobs on one self-hosted runner user", "Access and Serve together on Windows".
 
-- [ ] 6.1 `ci.yml`: add filter `action` (`action.yml`, `access/**`, `serve/**`, `action-src/**`, `.github/workflows/ci.yml`, `Cargo.toml` because the bundles embed its version) and job `action` (setup bun pinned, `bun install --frozen-lockfile`, `typecheck`, `test`, `check-dist`); add `action` to `ci-ok.needs`; update the header diagram (design D10)
-- [ ] 6.2 `e2e.yml`, each OS cell: build `iroh-tunnel-serve`/`iroh-tunnel-access` (`cargo build --release --locked --bin ...`), set `IROH_TUNNEL_ACTION_BIN_DIR`, start a local TCP echo target, `uses: ./serve`, `uses: ./` with its `node-id`, round-trip bytes through the listener and assert equality
-- [ ] 6.3 `e2e.yml`: Linux and macOS add a second Serve step and a `uses: ./access` step with a round trip; Windows runs the second Access step with `continue-on-error` and the CI-only `IROH_TUNNEL_ACTION_ERROR_FILE`, and a following step asserts that file holds the one-step-per-role message
-- [ ] 6.4 `e2e.yml`: Linux job `e2e-action-container` running in `container:` with a job service, Serve target by hostname, round trip from an Access step in the same job; include it in `e2e-ok.needs`
-- [ ] 6.5 Verify: `actionlint` clean; `bun test` green; the Rust suite is untouched (`git diff --stat -- tests/ crates/ src/` empty)
+- [x] 6.1 `ci.yml`: add filter `action` (`action.yml`, `access/**`, `serve/**`, `action-src/**`, `.github/workflows/ci.yml`, `Cargo.toml` because the bundles embed its version) and job `action` (setup bun pinned, `bun install --frozen-lockfile`, `typecheck`, `test`, `check-dist`); add `action` to `ci-ok.needs`; update the header diagram (design D10)
+- [x] 6.2 `e2e.yml`, each OS cell: build `iroh-tunnel-serve`/`iroh-tunnel-access` (`cargo build --release --locked --bin ...`), set `IROH_TUNNEL_ACTION_BIN_DIR`, start a local TCP echo target, `uses: ./serve`, `uses: ./` with its `node-id`, round-trip bytes through the listener and assert equality
+- [x] 6.3 `e2e.yml`: Linux and macOS add a second Serve step and a `uses: ./access` step with a round trip; Windows runs the second Access step with `continue-on-error` and the CI-only `IROH_TUNNEL_ACTION_ERROR_FILE`, and a following step asserts that file holds the one-step-per-role message
+- [x] 6.4 `e2e.yml`: Linux job `e2e-action-container` running in `container:` with a job service, Serve target by hostname, round trip from an Access step in the same job; include it in `e2e-ok.needs`
+- [x] 6.5 Verify: `actionlint` clean; `bun test` green; the Rust suite is untouched (`git diff --stat -- tests/ crates/ src/` empty)
 
 ## 7. Release stage (`.github/workflows/release.yml`)
 
