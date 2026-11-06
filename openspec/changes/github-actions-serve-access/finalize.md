@@ -11,6 +11,8 @@
 
 Deviation from the canonical `pr-updated` flow: no spec pre-review PR existed, so the push created the remote branch and finalize step 11 opened the PR (owner authorized "push + open PR, no merge" in the Inbox).
 
+Push note: the `origin` SSH remote authenticates as another GitHub account (`ttdua`), which has no push access. Per the owner's instruction (`gh auth switch` to `naicoi92`), the branch was pushed once over HTTPS with `gh auth git-credential` as the credential helper (`git push https://github.com/naicoi92/iroh-tunnel.git …`); the configured remote and SSH config were left unchanged, and `origin/spec/github-actions-serve-access` was fetched and set as upstream.
+
 ---
 
 ## Branch state
@@ -18,7 +20,7 @@ Deviation from the canonical `pr-updated` flow: no spec pre-review PR existed, s
 - **Branch**: `spec/github-actions-serve-access`
 - **Base branch**: `main`
 - **Final state**: `pr-open`
-- **PR URL**: `<filled after gh pr create>`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/178`
 
 ---
 
@@ -31,7 +33,7 @@ Deviation from the canonical `pr-updated` flow: no spec pre-review PR existed, s
 
 ## PR comment
 
-- **PR comment status**: `<filled after the comment subroutine>`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/178#issuecomment-6682011580)
 
 ---
 
