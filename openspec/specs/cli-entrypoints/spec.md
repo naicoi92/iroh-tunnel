@@ -222,7 +222,7 @@ Confidence: inferred
 
 ### Requirement: Logging verbosity precedence
 The system SHALL choose the log filter with `RUST_LOG` first (overrides everything), then `--quiet` (errors only), then `-v` count: none or `-v` = info, `-vv` = debug, `-vvv` or more = trace; the default is info.
-Evidence: src/cli.rs:362-384; README.md:701,720-721 (README disagrees about -v)
+Evidence: src/cli.rs:362-384; docs/monitoring.md (Log levels)
 Confidence: inferred
 
 #### Scenario: Quiet
