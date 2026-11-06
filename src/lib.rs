@@ -13,3 +13,4 @@ pub mod config_cmd;
 pub(crate) mod lifecycle;
 pub(crate) mod render;
 pub mod status_cmd;
+pub mod usage;

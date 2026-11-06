@@ -13,6 +13,7 @@ use crate::cli_args::{ProtocolArg, ServiceAddr};
 use crate::config_cmd;
 use crate::lifecycle;
 use crate::status_cmd;
+use crate::usage::{self, UsageError};
 use anyhow::Context as _;
 use iroh_tunnel_host::config as config_ops;
 use iroh_tunnel_host::config::SetError;
@@ -52,9 +53,39 @@ fn install_migration_notice() {
     });
 }
 
-/// Parse the process arguments; clap renders usage errors and exits.
+/// Parse the process arguments; usage errors print the failing command's help
+/// on stderr and exit 2, `--help`/`--version` exit 0.
 fn parse_or_exit(binary: Binary) -> Cli {
-    cli::parse_cli(binary, std::env::args_os()).unwrap_or_else(|e| e.exit())
+    use clap::error::ErrorKind;
+    let argv = std::env::args_os().collect::<Vec<_>>();
+    match cli::parse_cli(binary, argv.clone()) {
+        Ok(parsed) => parsed,
+        Err(e) => match e.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => e.exit(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                eprint!("{}", e.render());
+                std::process::exit(2);
+            }
+            _ => {
+                let path = usage::deepest_command_path(&cli::build_command(binary), &argv);
+                std::process::exit(usage::print_usage_error(
+                    binary,
+                    &path,
+                    &usage::clap_error_summary(&e),
+                ));
+            }
+        },
+    }
+}
+
+/// Command path of `config set` for the role of a host `SetError`.
+fn config_set_path(binary: Binary, role: &str) -> Vec<String> {
+    let tail = ["config", "set"].map(str::to_owned);
+    if binary.is_standalone() {
+        tail.to_vec()
+    } else {
+        std::iter::once(role.to_owned()).chain(tail).collect()
+    }
 }
 
 /// Host of a quick-mode address; a bare port means loopback.
@@ -78,6 +109,11 @@ fn execute(parsed: Cli, binary: Binary) -> ! {
 
     // Role to clean up if shutdown is abandoned; only `run` commands own
     // a status file, but removal is pid-checked so other commands are safe.
+    let role_name = match &parsed.role {
+        Role::Serve { .. } => Some("serve"),
+        Role::Access { .. } => Some("access"),
+        Role::Update(_) => None,
+    };
     let status_role = match &parsed.role {
         Role::Serve { .. } => Some(StatusRole::Serve),
         Role::Access { .. } => Some(StatusRole::Access),
@@ -109,18 +145,28 @@ fn execute(parsed: Cli, binary: Binary) -> ! {
     match outcome {
         Ok(()) => std::process::exit(0),
         Err(e) => {
+            if let Some(usage) = e.downcast_ref::<UsageError>() {
+                std::process::exit(usage::print_usage_error(
+                    binary,
+                    &usage.command_path,
+                    &usage.message,
+                ));
+            }
+            if let (Some(set_err), Some(role)) = (e.downcast_ref::<SetError>(), role_name) {
+                std::process::exit(usage::print_usage_error(
+                    binary,
+                    &config_set_path(binary, role),
+                    &set_err.to_string(),
+                ));
+            }
             eprintln!("error: {e:#}");
-            let code = if e.downcast_ref::<SetError>().is_some() {
-                2
-            } else {
-                match e.downcast_ref::<CliError>() {
-                    Some(CliError::Config(_)) => 2,
-                    Some(CliError::Permission(_)) => 3,
-                    Some(CliError::Iroh(_)) => 4,
-                    Some(CliError::Service(_)) => 5,
-                    Some(CliError::Conflict(_)) => 6,
-                    None => 1,
-                }
+            let code = match e.downcast_ref::<CliError>() {
+                Some(CliError::Config(_)) => 2,
+                Some(CliError::Permission(_)) => 3,
+                Some(CliError::Iroh(_)) => 4,
+                Some(CliError::Service(_)) => 5,
+                Some(CliError::Conflict(_)) => 6,
+                None => 1,
             };
             std::process::exit(code);
         }

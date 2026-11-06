@@ -566,6 +566,11 @@ fn missing_for_create_exits_2() {
         "{}",
         err(&output)
     );
+    assert!(
+        err(&output).contains("Usage: iroh-tunnel serve config set"),
+        "{}",
+        err(&output)
+    );
     assert!(!cfg.exists());
 }
 
