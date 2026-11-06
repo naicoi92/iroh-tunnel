@@ -18,7 +18,7 @@ Finalize used the escape hatch: `finishing-a-development-branch` Option 2, push 
 - **Branch**: `e2e-manual-dispatch`
 - **Base branch**: `main`. The branch is up to date with `origin/main` at `360386b`, so no merge was needed.
 - **Final state**: `pr-open`
-- **PR URL**: `<filled after PR creation>`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/181`. The branch was pushed over HTTPS with the `gh` credential of `naicoi92`; the local SSH key authenticates as `ttdua`. The remote was left unchanged.
 
 ---
 
@@ -31,7 +31,7 @@ Finalize used the escape hatch: `finishing-a-development-branch` Option 2, push 
 
 ## PR comment
 
-- **PR comment status**: `<filled after comment>`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/181#issuecomment-6686713723)
 
 ---
 
