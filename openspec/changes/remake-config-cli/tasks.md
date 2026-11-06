@@ -96,7 +96,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
   - `check` valid, invalid, missing, and under a held lock.
 
   (CMC ADDED requirements, all scenarios)
-- [ ] 5.3 Add a usage-error and help e2e file `tests/cli_usage.rs`:
+- [x] 5.3 Add a usage-error and help e2e file `tests/cli_usage.rs`:
   - unknown option on a leaf, unknown subcommand, invalid enum value;
   - bare `it`/`its`/`ita`/role/`config`/`service`;
   - wrong-role flag on `config set`, and `-r` on `config set`;
