@@ -23,5 +23,13 @@ export function generateRootActionYml(accessYml: string): string {
  * `__dirname`; rewrite the absolute `action-src` prefix to a fixed relative one.
  */
 export function normalizeBundle(text: string, actionSrcDir: string): string {
-  return text.split(actionSrcDir).join('action-src');
+  // Cover the POSIX form, the raw Windows form and the JSON-escaped Windows form.
+  const forms = new Set([actionSrcDir, actionSrcDir.replace(/\\/g, '\\\\')]);
+  let out = text;
+  for (const f of forms) out = out.split(f).join('action-src');
+  const leftover = /var __dirname = "(\/|[A-Za-z]:)/.exec(out);
+  if (leftover) {
+    throw new Error('bundle still contains an absolute __dirname path after normalization');
+  }
+  return out;
 }

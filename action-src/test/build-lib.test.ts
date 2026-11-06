@@ -27,8 +27,22 @@ test('normalizeBundle replaces the absolute action-src path with a relative one'
   );
 });
 
-test('normalizeBundle is a no-op when no absolute path is present', () => {
+test('normalizeBundle leaves a bundle without __dirname unchanged', () => {
   expect(normalizeBundle('var a = 1;\n', '/x/action-src')).toBe('var a = 1;\n');
+});
+
+test('normalizeBundle handles Windows paths (JSON-escaped and raw)', () => {
+  const dir = 'C:\\Users\\ci\\repo\\action-src';
+  const escaped = 'C:\\\\Users\\\\ci\\\\repo\\\\action-src';
+  const a = `var __dirname = "${escaped}\\\\node_modules";\n`;
+  const b = `var __dirname = "${dir}\\node_modules";\n`;
+  expect(normalizeBundle(a, dir)).toBe('var __dirname = "action-src\\\\node_modules";\n');
+  expect(normalizeBundle(b, dir)).toBe('var __dirname = "action-src\\node_modules";\n');
+});
+
+test('normalizeBundle throws when an absolute __dirname remains', () => {
+  expect(() => normalizeBundle('var __dirname = "/other/place/lib";\n', '/x/action-src')).toThrow();
+  expect(() => normalizeBundle('var __dirname = "D:\\\\other\\\\lib";\n', '/x/action-src')).toThrow();
 });
 
 test('committed bundles contain no absolute build path', async () => {
@@ -36,6 +50,6 @@ test('committed bundles contain no absolute build path', async () => {
   for (const f of ['access/dist/main.js', 'access/dist/post.js', 'serve/dist/main.js', 'serve/dist/post.js']) {
     const text = await Bun.file(join(root, f)).text();
     expect(text.includes(root)).toBe(false);
-    expect(text).not.toMatch(/var __dirname = "\//);
+    expect(text).not.toMatch(/var __dirname = "(\/|[A-Za-z]:)/);
   }
 });
