@@ -41,7 +41,9 @@ steps:
     with:
       name: web
       target: 127.0.0.1:8080
-  - run: echo "Dial ${{ steps.tunnel.outputs.node-id }}"
+  - run: echo "Dial $NODE_ID"
+    env:
+      NODE_ID: ${{ steps.tunnel.outputs.node-id }}
 ```
 
 A hostname `target` such as a service label resolves only in a `container:`

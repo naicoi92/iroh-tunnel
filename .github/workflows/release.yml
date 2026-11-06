@@ -585,6 +585,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
+      # Must equal MIN_VERSION in action-src/build.ts.
+      MIN_ACTION_VERSION: 0.6.0
     steps:
       # Only the helper script, never the code under test; no git push happens.
       - uses: actions/checkout@v7

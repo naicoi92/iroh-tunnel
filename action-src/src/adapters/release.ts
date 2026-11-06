@@ -65,6 +65,7 @@ export function createInstaller(o: InstallerOptions): Installer {
     async install(role, spec) {
       const name = `iroh-tunnel-${role}`;
       const exe = exeName(role, o.target);
+      // CI-only hook, settable only by the workflow author; it skips download, version and checksum checks on purpose.
       if (o.binDir) {
         const p = join(o.binDir, exe);
         try {

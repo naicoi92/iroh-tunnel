@@ -32,6 +32,14 @@ check "older patch is skipped" \
   "skip: v0.5.9 is not the highest stable v0 release (v0.6.0)" \
   "$(bash "$script" --dry-run v0.5.9 "$work/older.txt")"
 
+printf 'v0.5.0\nv0.5.9\n' > "$work/min.txt"
+check "tag below MIN_ACTION_VERSION is skipped" \
+  "skip: v0.5.9 is below the first release that ships the actions (v0.6.0)" \
+  "$(MIN_ACTION_VERSION=0.6.0 bash "$script" --dry-run v0.5.9 "$work/min.txt")"
+check "tag at MIN_ACTION_VERSION still moves" \
+  "move v0 -> v0.6.0" \
+  "$(MIN_ACTION_VERSION=0.6.0 bash "$script" --dry-run v0.6.0 "$work/stable.txt")"
+
 printf 'v0.5.0\nv0.6.0\nv0.6.1-rc.1\n' > "$work/pre.txt"
 check "pre-release is skipped" \
   "skip: pre-release" \

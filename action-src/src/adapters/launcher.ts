@@ -13,6 +13,16 @@ export interface Launcher {
   stop(pid: number, graceMs: number): Promise<'exited' | 'killed' | 'still-alive'>;
 }
 
+// The runner exposes every action input (INPUT_*) and saved state (STATE_*) in
+// the environment; the tunnel binary must not inherit them (e.g. relay-token).
+function inheritedEnv(): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!/^(INPUT_|STATE_)/i.test(k)) out[k] = v;
+  }
+  return out;
+}
+
 const POLL_MS = 50;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -55,7 +65,7 @@ export function createLauncher(platform: NodeJS.Platform = process.platform): La
           detached: true,
           stdio: ['ignore', fd, fd],
           windowsHide: true,
-          env: { ...process.env, ...env },
+          env: { ...inheritedEnv(), ...env },
         });
         // Attach before anything else: ENOENT/EACCES surface as an async 'error'.
         const started = await new Promise<number>((resolve, reject) => {

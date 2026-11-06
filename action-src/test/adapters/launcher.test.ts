@@ -77,3 +77,21 @@ test('spawning a nonexistent executable rejects with the cause and emits no unha
     process.off('uncaughtException', onErr);
   }
 });
+
+test('INPUT_* and STATE_* from the parent do not reach the child', async () => {
+  const s = await script('inputs.js', `console.log('keys=' + Object.keys(process.env).filter((k) => /^(INPUT_|STATE_)/i.test(k)).join(',') + ';keep=' + process.env.KEEP_ME);`);
+  const log = join(dir, 'inputs.log');
+  process.env['INPUT_RELAY-TOKEN'] = 'secret';
+  process.env['STATE_pid'] = '1';
+  process.env.KEEP_ME = 'yes';
+  try {
+    const h = await createLauncher().spawn(exe, [s], {}, log);
+    await until(() => h.exitCode() === 0);
+  } finally {
+    delete process.env['INPUT_RELAY-TOKEN'];
+    delete process.env['STATE_pid'];
+    delete process.env.KEEP_ME;
+  }
+  const text = await readFile(log, 'utf8');
+  expect(text).toContain('keys=;keep=yes');
+});

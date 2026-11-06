@@ -58,6 +58,16 @@ main() {
   fi
   local major="${BASH_REMATCH[1]}"
 
+  # Never move the major tag to a release that predates the action bundles.
+  if [[ -n "${MIN_ACTION_VERSION:-}" && "$tag" != *-* ]]; then
+    local lowest
+    lowest="$(printf '%s\n%s\n' "${tag#v}" "$MIN_ACTION_VERSION" | sort -V | head -1)"
+    if [[ "$lowest" != "$MIN_ACTION_VERSION" ]]; then
+      echo "skip: $tag is below the first release that ships the actions (v$MIN_ACTION_VERSION)"
+      return 0
+    fi
+  fi
+
   if [[ "$tag" == *-* ]]; then
     echo "skip: pre-release"
     return 0

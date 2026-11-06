@@ -23109,6 +23109,14 @@ function createIO(core = exports_core) {
 // src/adapters/launcher.ts
 import { spawn as nodeSpawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
+function inheritedEnv() {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!/^(INPUT_|STATE_)/i.test(k))
+      out[k] = v;
+  }
+  return out;
+}
 var POLL_MS2 = 50;
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function alive(pid) {
@@ -23143,7 +23151,7 @@ function createLauncher(platform = process.platform) {
           detached: true,
           stdio: ["ignore", fd, fd],
           windowsHide: true,
-          env: { ...process.env, ...env }
+          env: { ...inheritedEnv(), ...env }
         });
         const started = await new Promise((resolve, reject) => {
           child.once("error", (e) => reject(new Error(`failed to start ${exe}: ${e.message}`)));

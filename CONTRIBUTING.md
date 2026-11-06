@@ -171,6 +171,8 @@ and (stable tags only) the Homebrew cask.
   `action-src/` (bun 1.4.4) and commit the bundles; CI `check-dist` fails
   otherwise.
 - The `v0` tag moves automatically after a stable release.
+- Do not tag a stable release below `MIN_VERSION` (`action-src/build.ts`) from a
+  branch that contains the action; the release job skips moving the tag then.
 - When publishing each release, tick "Publish this Action to the GitHub
   Marketplace" (accept the Marketplace agreement on the first).
 - If the run fails in `github-release`, delete the leftover draft
