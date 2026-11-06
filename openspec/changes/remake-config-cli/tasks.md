@@ -29,12 +29,12 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 
 ## 2. CLI: argument model (src/cli.rs)
 
-- [ ] 2.1 Add the CLI value types:
+- [x] 2.1 Add the CLI value types:
   - `ServiceAddr` value parser (`PORT | HOST:PORT`, last-colon split, bracketed IPv6, hostname charset, rejects empty, 0 and unbracketed IPv6);
   - `ProtocolArg` and `ColorArg` `ValueEnum`s.
 
   Unit tests cover each grammar case. (CLI: Addresses accept PORT or HOST:PORT; CLI: Top-level options and help scenario Invalid color)
-- [ ] 2.2 Define `ServeServiceArgs` (`-n -t -p`) and `AccessServiceArgs` (`-n -l -N -p`) once, with descriptions:
+- [x] 2.2 Define `ServeServiceArgs` (`-n -t -p`) and `AccessServiceArgs` (`-n -l -N -p`) once, with descriptions:
   - flatten them into quick mode with `-r` and `-k`, marking name and address (and node id) required via `mut_arg` with `subcommand_negates_reqs`;
   - flatten them into a role-generic `config set` with `-c`;
   - `-p` gets `[default: tcp]` in quick mode only.
@@ -70,7 +70,7 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
   - every other clap error prints clap's message plus the help of the deepest subcommand matched in argv, exit 2, with stdout empty.
 
   (CLI: Usage errors print the failing command's help scenarios Unknown option on a leaf command, Unknown subcommand, Invalid value, Help goes to stderr; CLI: Bare commands print their help)
-- [ ] 3.3 Remove the post-parse quick-mode required checks and `quick_protocol`, since clap now enforces them. Quick mode builds the in-memory service from `ServiceAddr` (bare port maps to 127.0.0.1; hostnames are passed through). Name, node-id and https-relay rules stay config errors with no help. (CLI: Quick mode input validation; CLI: Usage errors print the failing command's help scenario Schema rule failure has no help)
+- [x] 3.3 Remove the post-parse quick-mode required checks and `quick_protocol`, since clap now enforces them. Quick mode builds the in-memory service from `ServiceAddr` (bare port maps to 127.0.0.1; hostnames are passed through). Name, node-id and https-relay rules stay config errors with no help. (CLI: Quick mode input validation; CLI: Usage errors print the failing command's help scenario Schema rule failure has no help)
 - [ ] 3.4 In `execute`, downcast `UsageError` before the `CliError` mapping, and map host `SetError::MissingForCreate` to a `UsageError` at the role's `config set` path. Every other error keeps today's exit-code mapping. (CLI: Exit status mapping; CMC: Creating a service requires its address and peer; WB: Host owns persistence and platform policy scenario Creation requirements decided by host)
 
 ## 4. CLI: config handlers and rendering (src/config_cmd.rs, src/render.rs)
