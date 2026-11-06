@@ -123,25 +123,17 @@ fn invalid_mutations_fail_and_leave_file_bytes_unchanged() {
         vec![
             "serve",
             "config",
-            "add",
+            "set",
             "--config",
             p(&cfg),
-            "--name",
+            "-n",
             "ok",
-            "--protocol",
+            "-p",
             "tcp",
-            "--port",
+            "-t",
             "2",
         ],
-        vec![
-            "serve",
-            "config",
-            "remove",
-            "--config",
-            p(&cfg),
-            "--name",
-            "X",
-        ],
+        vec!["serve", "config", "rm", "--config", p(&cfg), "-n", "X"],
         vec!["serve", "config", "keygen", "--config", p(&cfg), "--yes"],
         vec!["serve", "config", "edit", "--config", p(&cfg)],
     ];
@@ -216,7 +208,7 @@ fn edit_conflicting_with_a_concurrent_change_is_rejected() {
     write_valid(&cfg);
     // The editor, while "open", lets another writer add a service.
     let body = format!(
-        "{BIN} serve config add --config {cfg} --name other --protocol tcp --port 7 >/dev/null || exit 9\nsed 's/8080/9090/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"",
+        "{BIN} serve config set --config {cfg} -n other -p tcp -t 7 >/dev/null || exit 9\nsed 's/8080/9090/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"",
         cfg = p(&cfg)
     );
     let editor = editor_script(&world, &body);
@@ -235,7 +227,7 @@ fn edit_conflicting_with_a_concurrent_change_is_rejected() {
 // --- AC-CFG-06 / AC-CFG-10 -------------------------------------------------
 
 #[test]
-fn concurrent_adds_serialize_without_losing_updates() {
+fn concurrent_sets_serialize_without_losing_updates() {
     let world = World::new();
     let cfg = world.file("serve.toml");
     write_valid(&cfg);
@@ -249,14 +241,14 @@ fn concurrent_adds_serialize_without_losing_updates() {
                 .command(&[
                     "serve",
                     "config",
-                    "add",
+                    "set",
                     "--config",
                     p(&cfg),
-                    "--name",
+                    "-n",
                     name,
-                    "--protocol",
+                    "-p",
                     "tcp",
-                    "--port",
+                    "-t",
                     &port,
                 ])
                 .stdout(Stdio::null())
@@ -299,14 +291,14 @@ fn killed_or_concurrent_saves_never_expose_a_truncated_file() {
             .command(&[
                 "serve",
                 "config",
-                "add",
+                "set",
                 "--config",
                 p(&cfg),
-                "--name",
+                "-n",
                 &name,
-                "--protocol",
+                "-p",
                 "tcp",
-                "--port",
+                "-t",
                 "5000",
             ])
             .spawn()
@@ -324,14 +316,14 @@ fn killed_or_concurrent_saves_never_expose_a_truncated_file() {
     let output = world.run(&[
         "serve",
         "config",
-        "add",
+        "set",
         "--config",
         p(&cfg),
-        "--name",
+        "-n",
         "final",
-        "--protocol",
+        "-p",
         "tcp",
-        "--port",
+        "-t",
         "1",
     ]);
     assert!(output.status.success(), "{}", err(&output));
@@ -355,14 +347,14 @@ fn lock_held_by_another_writer_times_out_with_a_clear_error() {
         .command(&[
             "serve",
             "config",
-            "add",
+            "set",
             "--config",
             p(&cfg),
-            "--name",
+            "-n",
             "x",
-            "--protocol",
+            "-p",
             "tcp",
-            "--port",
+            "-t",
             "1",
         ])
         .env("IROH_TUNNEL_TEST_CONFIG_LOCK_TIMEOUT_MS", "300")
@@ -459,7 +451,7 @@ fn show_redacts_secrets_unless_revealed() {
 fn read_commands_without_config_share_one_guidance_error_and_create_nothing() {
     let world = World::new();
     let mut messages = Vec::new();
-    for command in ["run", "list", "show"] {
+    for command in ["run", "list", "show", "check"] {
         let args: Vec<&str> = if command == "run" {
             vec!["serve", "run"]
         } else {
@@ -474,7 +466,7 @@ fn read_commands_without_config_share_one_guidance_error_and_create_nothing() {
     let path = world.default_serve();
     assert!(message.contains(p(&path)), "{message}");
     assert!(
-        message.contains("config add") && message.contains("config keygen"),
+        message.contains("config set") && message.contains("config keygen"),
         "{message}"
     );
     assert!(!path.exists());
@@ -558,17 +550,23 @@ fn parse_errors_never_echo_secret_lines() {
 fn remove_on_a_missing_config_creates_nothing() {
     let world = World::new();
     let cfg = world.file("sub/serve.toml");
-    let output = world.run(&[
-        "serve",
-        "config",
-        "remove",
-        "--config",
-        p(&cfg),
-        "--name",
-        "x",
-    ]);
+    let output = world.run(&["serve", "config", "rm", "--config", p(&cfg), "-n", "x"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!world.file("sub").exists());
+}
+
+#[test]
+fn missing_for_create_exits_2() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    let output = world.run(&["serve", "config", "set", "--config", p(&cfg), "-n", "web"]);
+    assert_eq!(output.status.code(), Some(2), "{}", err(&output));
+    assert!(
+        err(&output).contains("creating service 'web' requires --target"),
+        "{}",
+        err(&output)
+    );
+    assert!(!cfg.exists());
 }
 
 // --- AC-CFG-11 -------------------------------------------------------------
@@ -581,14 +579,11 @@ fn every_config_subcommand_honors_config_and_ignores_the_default() {
 
     let steps: Vec<(Vec<&str>, bool)> = vec![
         (vec!["keygen"], true),
-        (
-            vec!["add", "--name", "web", "--protocol", "tcp", "--port", "80"],
-            true,
-        ),
+        (vec!["set", "-n", "web", "-p", "tcp", "-t", "80"], true),
         (vec!["list"], true),
         (vec!["show"], true),
         (vec!["path"], true),
-        (vec!["remove", "--name", "web"], true),
+        (vec!["rm", "-n", "web"], true),
     ];
     for (rest, _) in &steps {
         let mut args = vec!["serve", "config"];
@@ -614,16 +609,16 @@ fn every_config_subcommand_honors_config_and_ignores_the_default() {
     let added = world.run(&[
         "access",
         "config",
-        "add",
+        "set",
         "--config",
         p(&acfg),
-        "--name",
+        "-n",
         "db",
-        "--protocol",
+        "-p",
         "tcp",
-        "--port",
+        "-l",
         "5432",
-        "--node-id",
+        "-N",
         &peer,
     ]);
     assert!(added.status.success(), "{}", err(&added));

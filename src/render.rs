@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use iroh_tunnel_host::config::{GeneratedIdentity, KeygenOutcome, Mutation, ServiceList};
+use iroh_tunnel_host::config::{
+    GeneratedIdentity, KeygenOutcome, Mutation, ServiceList, SetOutcome,
+};
 use iroh_tunnel_host::ReadyReport;
 use iroh_tunnel_host::Role;
 
@@ -118,12 +120,40 @@ pub(crate) fn render_ready(report: &ReadyReport) -> String {
     out
 }
 
-/// `config add` confirmation line.
-pub(crate) fn render_added(outcome: &Mutation) -> String {
+/// `config set` report: created, the changed fields, or unchanged.
+pub(crate) fn render_set(role: Role, outcome: &SetOutcome) -> String {
+    match outcome {
+        SetOutcome::Created { service, path } => {
+            format!("Created service '{service}' in {}.\n", path.display())
+        }
+        SetOutcome::Updated {
+            service,
+            path,
+            changes,
+        } => {
+            let mut out = format!("Updated service '{service}' in {}:\n", path.display());
+            for c in changes {
+                out.push_str(&format!(
+                    "  {}: {} -> {}\n",
+                    c.field.label(role),
+                    c.old,
+                    c.new
+                ));
+            }
+            out
+        }
+        SetOutcome::Unchanged { service, path } => {
+            format!("Service '{service}' unchanged ({}).\n", path.display())
+        }
+    }
+}
+
+/// `config check` confirmation line.
+pub(crate) fn render_checked(role: Role, path: &Path) -> String {
     format!(
-        "Added service '{}' to {}.\n",
-        outcome.service,
-        outcome.path.display()
+        "OK: {} is a valid {} config.\n",
+        path.display(),
+        role.name()
     )
 }
 
@@ -141,7 +171,7 @@ pub(crate) fn render_path(path: &Path) -> String {
     format!("{}\n", path.display())
 }
 
-/// `config keygen random` output.
+/// `config keygen --print` output.
 pub(crate) fn render_identity(identity: &GeneratedIdentity) -> String {
     format!(
         "Secret key: {}\nNode ID: {}\n",
@@ -238,6 +268,76 @@ mod tests {
     use super::*;
     use iroh_tunnel_host::config::Protocol;
     use iroh_tunnel_host::{AccessReady, ReadyServices, ServeReady};
+
+    use iroh_tunnel_host::config::{FieldChange, ServiceField};
+
+    fn change(field: ServiceField, old: &str, new: &str) -> FieldChange {
+        FieldChange {
+            field,
+            old: old.into(),
+            new: new.into(),
+        }
+    }
+
+    #[test]
+    fn render_created() {
+        let outcome = SetOutcome::Created {
+            service: "web".into(),
+            path: "/x/s.toml".into(),
+        };
+        assert_eq!(
+            render_set(Role::Serve, &outcome),
+            "Created service 'web' in /x/s.toml.\n"
+        );
+    }
+
+    #[test]
+    fn render_updated_lists_changes() {
+        let outcome = SetOutcome::Updated {
+            service: "web".into(),
+            path: "/x/s.toml".into(),
+            changes: vec![
+                change(ServiceField::Address, "127.0.0.1:3000", "127.0.0.1:3001"),
+                change(ServiceField::Protocol, "tcp", "udp"),
+            ],
+        };
+        assert_eq!(
+            render_set(Role::Serve, &outcome),
+            "Updated service 'web' in /x/s.toml:\n  target: 127.0.0.1:3000 -> 127.0.0.1:3001\n  protocol: tcp -> udp\n"
+        );
+    }
+
+    #[test]
+    fn render_unchanged() {
+        let outcome = SetOutcome::Unchanged {
+            service: "web".into(),
+            path: "/x/s.toml".into(),
+        };
+        assert_eq!(
+            render_set(Role::Serve, &outcome),
+            "Service 'web' unchanged (/x/s.toml).\n"
+        );
+    }
+
+    #[test]
+    fn render_checked_names_the_role() {
+        assert_eq!(
+            render_checked(Role::Serve, Path::new("/x/s.toml")),
+            "OK: /x/s.toml is a valid serve config.\n"
+        );
+    }
+
+    #[test]
+    fn access_label_is_listen() {
+        let outcome = SetOutcome::Updated {
+            service: "web".into(),
+            path: "/x/a.toml".into(),
+            changes: vec![change(ServiceField::Address, "127.0.0.1:1", "127.0.0.1:2")],
+        };
+        assert!(
+            render_set(Role::Access, &outcome).contains("  listen: 127.0.0.1:1 -> 127.0.0.1:2\n")
+        );
+    }
 
     #[test]
     fn render_service_note_matches_legacy_text() {

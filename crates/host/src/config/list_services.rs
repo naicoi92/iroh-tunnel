@@ -37,15 +37,15 @@ pub fn list_services(role: Role, config: Option<&Path>) -> Result<ServiceList> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::add_service::add_service;
-    use super::super::fixtures::add_web;
+    use super::super::fixtures::set_web;
+    use super::super::set_service::set_service;
     use super::*;
 
     #[test]
     fn list_services_returns_rows_without_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("serve.toml");
-        add_service(Role::Serve, &add_web(&path)).unwrap();
+        set_service(Role::Serve, &set_web(&path)).unwrap();
         let list = list_services(Role::Serve, Some(&path)).unwrap();
         assert_eq!(list.path, path);
         assert_eq!(

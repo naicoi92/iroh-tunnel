@@ -1,4 +1,4 @@
-//! `config keygen random`: an identity that touches no file.
+//! `config keygen --print`: an identity that touches no file.
 
 use super::types::GeneratedIdentity;
 

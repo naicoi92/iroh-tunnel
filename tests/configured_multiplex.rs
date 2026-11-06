@@ -287,14 +287,14 @@ async fn configured_variant(legacy: &str) -> Result<()> {
                 .args([
                     "access",
                     "config",
-                    "add",
-                    "--name",
+                    "set",
+                    "-n",
                     "saved",
-                    "--protocol",
+                    "-p",
                     "tcp",
-                    "--port",
+                    "-l",
                     "5433",
-                    "--node-id",
+                    "-N",
                     &serve_key.public().to_string(),
                 ])
                 .output()?;
@@ -304,9 +304,9 @@ async fn configured_variant(legacy: &str) -> Result<()> {
                 String::from_utf8_lossy(&output.stderr)
             );
             let output = command(&access_home)
-                .args(["access", "config", "remove", "--name", "saved"])
+                .args(["access", "config", "rm", "-n", "saved"])
                 .output()?;
-            anyhow::ensure!(output.status.success(), "config remove failed");
+            anyhow::ensure!(output.status.success(), "config rm failed");
             let saved = std::fs::read_to_string(&access_path)?;
             assert!(!saved.contains("multiplex"));
             let cfg = AccessConfig::load(&access_path)?;

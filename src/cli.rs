@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::cli_args::{AccessServiceArgs, ColorArg, ServeServiceArgs};
+use crate::cli_args::{AccessServiceArgs, ColorArg, ProtocolArg, ServeServiceArgs, ServiceAddr};
+use anyhow::Context as _;
+use iroh_tunnel_host::config::SetService;
+use iroh_tunnel_host::Role as StatusRole;
 
 /// App version resolved at build time from the git tag (see `build.rs`).
 ///
@@ -46,7 +49,7 @@ pub enum Role {
         #[command(flatten)]
         quick: ServeQuickArgs,
         #[command(subcommand)]
-        cmd: Option<RoleCmd>,
+        cmd: Option<RoleCmd<ServeServiceArgs>>,
     },
     /// Access role: consume remote services to local (standalone binary: iroh-tunnel-access, alias ita).
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -54,7 +57,7 @@ pub enum Role {
         #[command(flatten)]
         quick: AccessQuickArgs,
         #[command(subcommand)]
-        cmd: Option<RoleCmd>,
+        cmd: Option<RoleCmd<AccessServiceArgs>>,
     },
     /// Update this executable (iroh-tunnel) to the latest stable or a chosen release.
     Update(UpdateArgs),
@@ -91,7 +94,7 @@ pub struct ServeCli {
     #[command(flatten)]
     pub quick: ServeQuickArgs,
     #[command(subcommand)]
-    pub cmd: Option<RoleCmd>,
+    pub cmd: Option<RoleCmd<ServeServiceArgs>>,
 }
 
 impl ServeCli {
@@ -125,7 +128,7 @@ pub struct AccessCli {
     #[command(flatten)]
     pub quick: AccessQuickArgs,
     #[command(subcommand)]
-    pub cmd: Option<RoleCmd>,
+    pub cmd: Option<RoleCmd<AccessServiceArgs>>,
 }
 
 impl AccessCli {
@@ -199,6 +202,20 @@ fn quick_required(cmd: clap::Command, required: &[&str]) -> clap::Command {
     cmd.mut_arg("protocol", |a| a.default_value("tcp"))
 }
 
+/// `config set`: the name is required, and the protocol help states the
+/// create-time default (the flag itself has no default so an update keeps it).
+fn config_set(role: clap::Command) -> clap::Command {
+    role.mut_subcommand("config", |config| {
+        config.mut_subcommand("set", |set| {
+            set.mut_arg("name", |a| a.required(true))
+                .mut_arg("protocol", |a| {
+                    let help = a.get_help().map(ToString::to_string).unwrap_or_default();
+                    a.help(format!("{help} (default on create: tcp)"))
+                })
+        })
+    })
+}
+
 const SERVE_QUICK: &[&str] = &["name", "target"];
 const ACCESS_QUICK: &[&str] = &["name", "listen", "node_id"];
 
@@ -207,10 +224,10 @@ const ACCESS_QUICK: &[&str] = &["name", "listen", "node_id"];
 pub fn build_command(binary: Binary) -> clap::Command {
     let mut cmd = match binary {
         Binary::AllInOne => Cli::command()
-            .mut_subcommand("serve", |c| quick_required(c, SERVE_QUICK))
-            .mut_subcommand("access", |c| quick_required(c, ACCESS_QUICK)),
-        Binary::Serve => quick_required(ServeCli::command(), SERVE_QUICK),
-        Binary::Access => quick_required(AccessCli::command(), ACCESS_QUICK),
+            .mut_subcommand("serve", |c| config_set(quick_required(c, SERVE_QUICK)))
+            .mut_subcommand("access", |c| config_set(quick_required(c, ACCESS_QUICK))),
+        Binary::Serve => config_set(quick_required(ServeCli::command(), SERVE_QUICK)),
+        Binary::Access => config_set(quick_required(AccessCli::command(), ACCESS_QUICK)),
     };
     cmd.build();
     cmd
@@ -230,19 +247,63 @@ pub fn parse_cli(
     })
 }
 
+/// Service flag group of one role, shared by quick mode and `config set`.
+pub trait ServiceArgs: Args + FromArgMatches {
+    /// The role these flags belong to.
+    const ROLE: StatusRole;
+
+    /// Build the `config set` request. A missing name never gets here because
+    /// [`build_command`] makes `-n` required; it is an internal error if it does.
+    fn into_set(self, config: Option<PathBuf>) -> anyhow::Result<SetService>;
+}
+
+fn set_request(
+    config: Option<PathBuf>,
+    name: Option<String>,
+    addr: Option<ServiceAddr>,
+    protocol: Option<ProtocolArg>,
+    node_id: Option<String>,
+) -> anyhow::Result<SetService> {
+    let name = name.context("internal: config set requires --name")?;
+    Ok(SetService {
+        config,
+        name,
+        host: addr.as_ref().and_then(|a| a.host.clone()),
+        port: addr.map(|a| a.port.get()),
+        protocol: protocol.map(Into::into),
+        node_id,
+    })
+}
+
+impl ServiceArgs for ServeServiceArgs {
+    const ROLE: StatusRole = StatusRole::Serve;
+
+    fn into_set(self, config: Option<PathBuf>) -> anyhow::Result<SetService> {
+        set_request(config, self.name, self.target, self.protocol, None)
+    }
+}
+
+impl ServiceArgs for AccessServiceArgs {
+    const ROLE: StatusRole = StatusRole::Access;
+
+    fn into_set(self, config: Option<PathBuf>) -> anyhow::Result<SetService> {
+        set_request(config, self.name, self.listen, self.protocol, self.node_id)
+    }
+}
+
 /// Commands available per role.
 #[derive(Subcommand, Debug)]
-pub enum RoleCmd {
+pub enum RoleCmd<S: ServiceArgs> {
     /// Run in foreground.
     Run {
         /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
-    /// Config management (keygen [random]/add/remove/list/show/edit/path).
+    /// Config management (set/rm/list/show/edit/path/check/keygen).
     Config {
         #[command(subcommand)]
-        action: ConfigAction,
+        action: ConfigAction<S>,
     },
     /// Print the role's status file as a table (`--json` for the raw file).
     Status {
@@ -261,29 +322,23 @@ pub enum RoleCmd {
 
 /// Config sub-actions.
 #[derive(Subcommand, Debug)]
-pub enum ConfigAction {
-    /// Generate/rotate secret_key and write it to the config file; use
-    /// `keygen random` to print a key without saving.
-    #[command(args_conflicts_with_subcommands = true)]
-    Keygen {
-        /// Config file to write; not allowed with `random`.
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-        /// Replace an existing key without asking; not allowed with `random`.
-        #[arg(short, long)]
-        yes: bool,
-        #[command(subcommand)]
-        mode: Option<KeygenMode>,
-    },
-    /// Add a service to config.
-    Add(AddServiceArgs),
-    /// Remove a service from config by name.
-    Remove {
+pub enum ConfigAction<S: ServiceArgs> {
+    /// Create a service or change fields of an existing one.
+    Set {
+        #[command(flatten)]
+        service: S,
         /// Config file path (default: OS-specific).
         #[arg(short, long)]
         config: Option<PathBuf>,
-        #[arg(long)]
+    },
+    /// Remove a service from config by name.
+    Rm {
+        /// Name of the service to remove.
+        #[arg(short = 'n', long)]
         name: String,
+        /// Config file path (default: OS-specific).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
     },
     /// List services in config.
     List {
@@ -313,13 +368,25 @@ pub enum ConfigAction {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
-}
-
-/// Alternative `config keygen` modes.
-#[derive(Subcommand, Debug)]
-pub enum KeygenMode {
-    /// Print a fresh random secret key and its node ID; nothing is written.
-    Random,
+    /// Validate the config file without changing it.
+    Check {
+        /// Config file path (default: OS-specific).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Generate/rotate secret_key and write it to the config file; use
+    /// `--print` to print a key without saving.
+    Keygen {
+        /// Config file to write; not allowed with `--print`.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// Replace an existing key without asking; not allowed with `--print`.
+        #[arg(short, long)]
+        yes: bool,
+        /// Print a fresh random secret key and its node ID; nothing is written.
+        #[arg(long, conflicts_with_all = ["config", "yes"])]
+        print: bool,
+    },
 }
 
 /// Scope selection shared by every service verb.
@@ -375,24 +442,6 @@ pub enum ServiceAction {
         #[command(flatten)]
         scope: ScopeArgs,
     },
-}
-
-/// Args for `config add`.
-#[derive(Args, Debug)]
-pub struct AddServiceArgs {
-    #[arg(short, long)]
-    pub config: Option<PathBuf>,
-    #[arg(long)]
-    pub name: String,
-    #[arg(long)]
-    pub protocol: String,
-    #[arg(long, default_value = "127.0.0.1")]
-    pub host: String,
-    #[arg(long)]
-    pub port: u16,
-    /// Required only for access role.
-    #[arg(long)]
-    pub node_id: Option<String>,
 }
 
 /// Initialize the tracing subscriber.
@@ -488,6 +537,51 @@ mod tests {
             quick.service.protocol,
             Some(crate::cli_args::ProtocolArg::Tcp)
         );
+    }
+
+    #[test]
+    fn set_without_name_is_usage_error() {
+        for (binary, args) in [
+            (
+                Binary::AllInOne,
+                vec!["it", "serve", "config", "set", "-t", "3000"],
+            ),
+            (Binary::Serve, vec!["its", "config", "set", "-t", "3000"]),
+            (Binary::Access, vec!["ita", "config", "set", "-l", "3000"]),
+        ] {
+            let err = parse_cli(binary, argv(&args)).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        }
+    }
+
+    #[test]
+    fn set_has_no_protocol_default_and_documents_create_default() {
+        let cli = parse_cli(Binary::Serve, argv(&["its", "config", "set", "-n", "web"])).unwrap();
+        let Role::Serve {
+            cmd:
+                Some(RoleCmd::Config {
+                    action: ConfigAction::Set { service, .. },
+                }),
+            ..
+        } = cli.role
+        else {
+            panic!("config set")
+        };
+        assert_eq!(service.protocol, None);
+        let cmd = build_command(Binary::Serve);
+        let set = cmd
+            .find_subcommand("config")
+            .unwrap()
+            .find_subcommand("set")
+            .unwrap();
+        let help = set
+            .get_arguments()
+            .find(|a| a.get_id() == "protocol")
+            .unwrap()
+            .get_help()
+            .unwrap()
+            .to_string();
+        assert!(help.ends_with(" (default on create: tcp)"), "{help}");
     }
 
     #[test]

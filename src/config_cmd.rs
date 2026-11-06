@@ -1,36 +1,24 @@
-//! CLI handlers for the `config` subcommand: keygen / add / remove / list /
-//! show / edit / path.
+//! CLI handlers for the `config` subcommand: keygen / set / rm / list /
+//! show / edit / path / check.
 //!
 //! Each handler calls the terminal-free host operation in
 //! [`iroh_tunnel_host::config`] and does the prompting and printing; the
 //! `$EDITOR` invocation of `edit` lives here too.
 
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::cli::AddServiceArgs;
+use crate::cli::ServiceArgs;
 use crate::render;
 use iroh_tunnel_host::config::{
-    add_service, identity_state, keygen, list_services, prepare_edit, random_identity,
-    remove_service, show_config, AddService, Disclosure, EditOutcome, IdentityState, KeygenOutcome,
-    RotationConsent,
+    check_config, identity_state, keygen, list_services, prepare_edit, random_identity,
+    remove_service, set_service, show_config, Disclosure, EditOutcome, IdentityState,
+    KeygenOutcome, RotationConsent,
 };
 use iroh_tunnel_host::error::CliError;
 pub use iroh_tunnel_host::Role;
-
-/// Request for `config add` built from the parsed CLI arguments.
-fn add_request(args: &AddServiceArgs) -> AddService {
-    AddService {
-        config: args.config.clone(),
-        name: args.name.clone(),
-        protocol: args.protocol.clone(),
-        host: args.host.clone(),
-        port: args.port,
-        node_id: args.node_id.clone(),
-    }
-}
 
 /// CLI wrapper: prompt (or refuse without a terminal) before rotating, then
 /// print the result.
@@ -94,22 +82,29 @@ fn confirm_rotation(path: &Path) -> Result<()> {
     }
 }
 
-/// `config keygen random`: print the identity. The secret goes to stdout only,
+/// `config keygen --print`: print the identity. The secret goes to stdout only,
 /// so it can be captured (`$(…)`, pipes).
 pub fn keygen_random() -> Result<()> {
     print!("{}", render::render_identity(&random_identity()));
     Ok(())
 }
 
-/// `config add`: add the service and print the confirmation.
-pub fn add(role: Role, args: &AddServiceArgs) -> Result<()> {
-    let outcome = add_service(role, &add_request(args))?;
-    print!("{}", render::render_added(&outcome));
+/// `config set`: create or update the service and print the change report.
+pub fn set<S: ServiceArgs>(args: S, config: Option<PathBuf>) -> Result<()> {
+    let outcome = set_service(S::ROLE, &args.into_set(config)?)?;
+    print!("{}", render::render_set(S::ROLE, &outcome));
     Ok(())
 }
 
-/// `config remove`: remove the service and print the confirmation.
-pub fn remove(role: Role, config: Option<&Path>, name: &str) -> Result<()> {
+/// `config check`: validate the config and print the confirmation.
+pub fn check(role: Role, config: Option<&Path>) -> Result<()> {
+    let path = check_config(role, config)?;
+    print!("{}", render::render_checked(role, &path));
+    Ok(())
+}
+
+/// `config rm`: remove the service and print the confirmation.
+pub fn rm(role: Role, config: Option<&Path>, name: &str) -> Result<()> {
     let outcome = remove_service(role, config, name)?;
     print!("{}", render::render_removed(&outcome));
     Ok(())

@@ -288,15 +288,7 @@ mod macos_migration {
         for args in [
             &["serve", "config", "keygen"][..],
             &[
-                "serve",
-                "config",
-                "add",
-                "--name",
-                "web",
-                "--protocol",
-                "tcp",
-                "--port",
-                "8080",
+                "serve", "config", "set", "-n", "web", "-p", "tcp", "-t", "8080",
             ][..],
             &["serve", "run"][..],
         ] {
@@ -388,7 +380,7 @@ fn dir_listing(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Parse the `Secret key:` and `Node ID:` lines printed by `keygen random`.
+/// Parse the `Secret key:` and `Node ID:` lines printed by `keygen --print`.
 fn random_identity(out: &Output) -> (String, String) {
     let text = stdout(out);
     let field = |label: &str| {
@@ -411,7 +403,7 @@ fn assert_key_matches_node_id(secret: &str, node_id: &str) {
 }
 
 #[test]
-fn keygen_random_prints_matching_key_and_node_id_without_touching_config() {
+fn keygen_print_prints_matching_key_and_node_id_without_touching_config() {
     for role in ["serve", "access"] {
         let (_tmp, home) = home();
         let cfg = new_config(&home, role);
@@ -420,7 +412,7 @@ fn keygen_random_prints_matching_key_and_node_id_without_touching_config() {
         std::fs::write(&cfg, original).unwrap();
         let before = dir_listing(&home);
 
-        let out = tunnel(&home, &[role, "config", "keygen", "random"]);
+        let out = tunnel(&home, &[role, "config", "keygen", "--print"]);
         assert!(out.status.success(), "{}", stderr(&out));
         let (secret, node_id) = random_identity(&out);
 
@@ -432,21 +424,21 @@ fn keygen_random_prints_matching_key_and_node_id_without_touching_config() {
 }
 
 #[test]
-fn keygen_random_creates_no_config_and_differs_each_run() {
+fn keygen_print_creates_no_config_and_differs_each_run() {
     let (_tmp, home) = home();
-    let first = random_identity(&tunnel(&home, &["access", "config", "keygen", "random"]));
-    let second = random_identity(&tunnel(&home, &["access", "config", "keygen", "random"]));
+    let first = random_identity(&tunnel(&home, &["access", "config", "keygen", "--print"]));
+    let second = random_identity(&tunnel(&home, &["access", "config", "keygen", "--print"]));
     assert_ne!(first.0, second.0);
     assert_ne!(first.1, second.1);
     assert_key_matches_node_id(&first.0, &first.1);
     assert!(
         dir_listing(&home).is_empty(),
-        "random keygen must not create any configuration"
+        "keygen --print must not create any configuration"
     );
 }
 
 #[test]
-fn keygen_random_rejects_config_path_instead_of_ignoring_it() {
+fn keygen_print_rejects_config_path_instead_of_ignoring_it() {
     let (_tmp, home) = home();
     let target = home.join("x.toml");
     let out = tunnel(
@@ -457,7 +449,7 @@ fn keygen_random_rejects_config_path_instead_of_ignoring_it() {
             "keygen",
             "--config",
             target.to_str().unwrap(),
-            "random",
+            "--print",
         ],
     );
     assert!(!out.status.success(), "{}", stdout(&out));

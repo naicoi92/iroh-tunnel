@@ -65,25 +65,17 @@ fn invalid_mutation_fails_and_leaves_file_bytes_unchanged() {
         vec![
             "serve",
             "config",
-            "add",
+            "set",
             "--config",
             p(&cfg),
-            "--name",
+            "-n",
             "ok",
-            "--protocol",
+            "-p",
             "tcp",
-            "--port",
+            "-t",
             "3",
         ],
-        vec![
-            "serve",
-            "config",
-            "remove",
-            "--config",
-            p(&cfg),
-            "--name",
-            "X",
-        ],
+        vec!["serve", "config", "rm", "--config", p(&cfg), "-n", "X"],
         vec!["serve", "config", "keygen", "--config", p(&cfg), "--yes"],
     ] {
         let o = run(&args);
@@ -93,7 +85,7 @@ fn invalid_mutation_fails_and_leaves_file_bytes_unchanged() {
 }
 
 #[test]
-fn concurrent_adds_serialize_without_losing_updates() {
+fn concurrent_sets_serialize_without_losing_updates() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("serve.toml");
     write_valid(&cfg);
@@ -106,14 +98,14 @@ fn concurrent_adds_serialize_without_losing_updates() {
             tunnel(&[
                 "serve",
                 "config",
-                "add",
+                "set",
                 "--config",
                 p(&cfg),
-                "--name",
+                "-n",
                 name,
-                "--protocol",
+                "-p",
                 "tcp",
-                "--port",
+                "-t",
                 &port,
             ])
             .stdout(Stdio::null())
@@ -149,14 +141,14 @@ fn lock_held_by_another_writer_times_out_with_a_clear_error() {
     let o = tunnel(&[
         "serve",
         "config",
-        "add",
+        "set",
         "--config",
         p(&cfg),
-        "--name",
+        "-n",
         "x",
-        "--protocol",
+        "-p",
         "tcp",
-        "--port",
+        "-t",
         "1",
     ])
     .env("IROH_TUNNEL_TEST_CONFIG_LOCK_TIMEOUT_MS", "300")
@@ -227,6 +219,7 @@ fn read_commands_without_config_share_one_error_and_create_nothing() {
         vec!["serve", "run"],
         vec!["serve", "config", "list"],
         vec!["serve", "config", "show"],
+        vec!["serve", "config", "check"],
     ] {
         let o = tunnel(&args)
             .env("IROH_TUNNEL_TEST_CONFIG_DIR", &base)
@@ -236,7 +229,7 @@ fn read_commands_without_config_share_one_error_and_create_nothing() {
         messages.push(err(&o));
     }
     assert!(messages.windows(2).all(|w| w[0] == w[1]), "{messages:?}");
-    assert!(messages[0].contains("config add"), "{}", messages[0]);
+    assert!(messages[0].contains("config set"), "{}", messages[0]);
     assert_eq!(
         std::fs::read_dir(&base).unwrap().count(),
         0,
@@ -250,11 +243,11 @@ fn every_config_subcommand_honors_config() {
     let cfg = dir.path().join("custom.toml");
     for rest in [
         vec!["keygen"],
-        vec!["add", "--name", "web", "--protocol", "tcp", "--port", "80"],
+        vec!["set", "-n", "web", "-p", "tcp", "-t", "80"],
         vec!["list"],
         vec!["show"],
         vec!["path"],
-        vec!["remove", "--name", "web"],
+        vec!["rm", "-n", "web"],
     ] {
         let mut args = vec!["serve", "config", rest[0], "--config", p(&cfg)];
         args.extend(&rest[1..]);

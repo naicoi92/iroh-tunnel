@@ -45,7 +45,7 @@ pub enum KeygenOutcome {
     },
 }
 
-/// A freshly generated identity from `config keygen random`.
+/// A freshly generated identity from `config keygen --print`.
 ///
 /// The secret is reachable only through [`GeneratedIdentity::secret`]; `Debug`
 /// never prints it (RS-10).
@@ -71,28 +71,10 @@ impl std::fmt::Debug for GeneratedIdentity {
     }
 }
 
-/// Request to append one `[[services]]` entry. Fields are raw strings so the
-/// schema validation (and its messages) run at the same stage as before.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddService {
-    /// Config file; `None` selects the role default.
-    pub config: Option<PathBuf>,
-    /// Service name.
-    pub name: String,
-    /// Protocol text, validated when the entry is written.
-    pub protocol: String,
-    /// Target (serve) or listen (access) host.
-    pub host: String,
-    /// Target (serve) or listen (access) port.
-    pub port: u16,
-    /// Required only for the access role.
-    pub node_id: Option<String>,
-}
-
-/// Outcome of a service add/remove: the service name and the file changed.
+/// Outcome of a service removal: the service name and the file changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mutation {
-    /// Name of the added or removed service.
+    /// Name of the removed service.
     pub service: String,
     /// Config file that was changed.
     pub path: PathBuf,

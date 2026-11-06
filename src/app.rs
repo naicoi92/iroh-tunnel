@@ -8,13 +8,14 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli;
-use crate::cli::{Binary, Cli, ConfigAction, KeygenMode, Role, RoleCmd};
+use crate::cli::{Binary, Cli, ConfigAction, Role, RoleCmd, ServiceArgs};
 use crate::cli_args::{ProtocolArg, ServiceAddr};
 use crate::config_cmd;
 use crate::lifecycle;
 use crate::status_cmd;
 use anyhow::Context as _;
 use iroh_tunnel_host::config as config_ops;
+use iroh_tunnel_host::config::SetError;
 use iroh_tunnel_host::error::CliError;
 use iroh_tunnel_host::runtime;
 use iroh_tunnel_host::update;
@@ -109,13 +110,17 @@ fn execute(parsed: Cli, binary: Binary) -> ! {
         Ok(()) => std::process::exit(0),
         Err(e) => {
             eprintln!("error: {e:#}");
-            let code = match e.downcast_ref::<CliError>() {
-                Some(CliError::Config(_)) => 2,
-                Some(CliError::Permission(_)) => 3,
-                Some(CliError::Iroh(_)) => 4,
-                Some(CliError::Service(_)) => 5,
-                Some(CliError::Conflict(_)) => 6,
-                None => 1,
+            let code = if e.downcast_ref::<SetError>().is_some() {
+                2
+            } else {
+                match e.downcast_ref::<CliError>() {
+                    Some(CliError::Config(_)) => 2,
+                    Some(CliError::Permission(_)) => 3,
+                    Some(CliError::Iroh(_)) => 4,
+                    Some(CliError::Service(_)) => 5,
+                    Some(CliError::Conflict(_)) => 6,
+                    None => 1,
+                }
             };
             std::process::exit(code);
         }
@@ -135,7 +140,10 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext) -> anyhow::Result<()> {
     };
     match cli.role {
         Role::Update(_) => unreachable!("handled above"),
-        Role::Serve { cmd: Some(cmd), .. } | Role::Access { cmd: Some(cmd), .. } => {
+        Role::Serve { cmd: Some(cmd), .. } => {
+            dispatch_role_cmd(status_role, cmd, binary, ctx).await
+        }
+        Role::Access { cmd: Some(cmd), .. } => {
             dispatch_role_cmd(status_role, cmd, binary, ctx).await
         }
         Role::Serve { quick, cmd: None } => {
@@ -272,9 +280,9 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
     Ok(())
 }
 
-async fn dispatch_role_cmd(
+async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
     status_role: StatusRole,
-    cmd: RoleCmd,
+    cmd: RoleCmd<S>,
     binary: Binary,
     ctx: RunContext,
 ) -> anyhow::Result<()> {
@@ -344,23 +352,22 @@ fn role_named(name: &str) -> anyhow::Result<StatusRole> {
     }
 }
 
-fn dispatch_config(role: StatusRole, action: ConfigAction) -> anyhow::Result<()> {
+fn dispatch_config<S: ServiceArgs>(
+    role: StatusRole,
+    action: ConfigAction<S>,
+) -> anyhow::Result<()> {
     match action {
-        ConfigAction::Keygen {
-            mode: Some(KeygenMode::Random),
-            ..
-        } => config_cmd::keygen_random(),
-        ConfigAction::Keygen {
-            config,
-            yes,
-            mode: None,
-        } => config_cmd::keygen_cli(role, config.as_deref(), yes),
-        ConfigAction::Add(args) => config_cmd::add(role, &args),
-        ConfigAction::Remove { config, name } => config_cmd::remove(role, config.as_deref(), &name),
+        ConfigAction::Keygen { print: true, .. } => config_cmd::keygen_random(),
+        ConfigAction::Keygen { config, yes, .. } => {
+            config_cmd::keygen_cli(role, config.as_deref(), yes)
+        }
+        ConfigAction::Set { service, config } => config_cmd::set(service, config),
+        ConfigAction::Rm { config, name } => config_cmd::rm(role, config.as_deref(), &name),
         ConfigAction::List { config } => config_cmd::list(role, config.as_deref()),
         ConfigAction::Show { config, reveal } => config_cmd::show(role, config.as_deref(), reveal),
         ConfigAction::Edit { config } => config_cmd::edit_cli(role, config.as_deref()),
         ConfigAction::Path { config } => config_cmd::path(role, config.as_deref()),
+        ConfigAction::Check { config } => config_cmd::check(role, config.as_deref()),
     }
 }
 
