@@ -8,12 +8,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli;
-use crate::cli::{AccessCli, Cli, ConfigAction, KeygenMode, Role, RoleCmd, ServeCli};
+use crate::cli::{Binary, Cli, ConfigAction, KeygenMode, Role, RoleCmd};
+use crate::cli_args::{ProtocolArg, ServiceAddr};
 use crate::config_cmd;
 use crate::lifecycle;
 use crate::status_cmd;
 use anyhow::Context as _;
-use clap::Parser;
 use iroh_tunnel_host::config as config_ops;
 use iroh_tunnel_host::error::CliError;
 use iroh_tunnel_host::runtime;
@@ -24,19 +24,19 @@ use iroh_tunnel_host::RunContext;
 /// Entry point of the all-in-one `iroh-tunnel` (`it`) binary.
 pub fn main_all_in_one() -> ! {
     install_migration_notice();
-    execute(Cli::parse(), Packaging::AllInOne)
+    execute(parse_or_exit(Binary::AllInOne), Binary::AllInOne)
 }
 
 /// Entry point of the standalone `iroh-tunnel-serve` (`its`) binary.
 pub fn main_serve() -> ! {
     install_migration_notice();
-    execute(ServeCli::parse().into_cli(), Packaging::Standalone)
+    execute(parse_or_exit(Binary::Serve), Binary::Serve)
 }
 
 /// Entry point of the standalone `iroh-tunnel-access` (`ita`) binary.
 pub fn main_access() -> ! {
     install_migration_notice();
-    execute(AccessCli::parse().into_cli(), Packaging::Standalone)
+    execute(parse_or_exit(Binary::Access), Binary::Access)
 }
 
 /// Show the operator the macOS legacy-configuration copy on stderr; the host
@@ -51,15 +51,17 @@ fn install_migration_notice() {
     });
 }
 
-/// Which executable is running. Service units run `<exe> <role> run`, which
-/// only the all-in-one binary accepts.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Packaging {
-    AllInOne,
-    Standalone,
+/// Parse the process arguments; clap renders usage errors and exits.
+fn parse_or_exit(binary: Binary) -> Cli {
+    cli::parse_cli(binary, std::env::args_os()).unwrap_or_else(|e| e.exit())
 }
 
-fn execute(parsed: Cli, packaging: Packaging) -> ! {
+/// Host of a quick-mode address; a bare port means loopback.
+fn quick_host(addr: &ServiceAddr) -> String {
+    addr.host.clone().unwrap_or_else(|| "127.0.0.1".to_owned())
+}
+
+fn execute(parsed: Cli, binary: Binary) -> ! {
     cli::init_tracing(parsed.verbose, parsed.quiet);
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -87,7 +89,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     let ctx = RunContext::new();
     let outcome = rt.block_on(async {
         tokio::select! {
-            result = run(parsed, packaging, ctx.clone()) => Ok(result),
+            result = run(parsed, binary, ctx.clone()) => Ok(result),
             forced = lifecycle::forced_exit(&ctx) => Err(forced),
         }
     });
@@ -120,7 +122,7 @@ fn execute(parsed: Cli, packaging: Packaging) -> ! {
     }
 }
 
-async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<()> {
+async fn run(cli: Cli, binary: Binary, ctx: RunContext) -> anyhow::Result<()> {
     // The typed role tag comes from ONE match on the CLI enum; the dispatch
     // string is derived from it — an invalid role is unrepresentable, and
     // the two can never disagree.
@@ -134,13 +136,15 @@ async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<
     match cli.role {
         Role::Update(_) => unreachable!("handled above"),
         Role::Serve { cmd: Some(cmd), .. } | Role::Access { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd, packaging, ctx).await
+            dispatch_role_cmd(status_role, cmd, binary, ctx).await
         }
         Role::Serve { quick, cmd: None } => {
-            let protocol = quick_protocol("serve", &quick.protocol)?;
-            let target = quick.target.ok_or_else(|| {
-                CliError::Config("serve quick mode: --target IP:PORT is required".into())
-            })?;
+            let svc = quick.service;
+            let (name, target) = svc
+                .name
+                .zip(svc.target)
+                .context("internal: quick mode requires --name and --target")?;
+            let protocol = svc.protocol.unwrap_or(ProtocolArg::Tcp).into();
             let secret_key = read_key_file(quick.key_file.as_deref())?;
             let cfg = iroh_tunnel_host::config::ServeConfig {
                 node: iroh_tunnel_host::config::NodeConfig {
@@ -149,12 +153,10 @@ async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<
                     ..Default::default()
                 },
                 services: vec![iroh_tunnel_host::config::ServeService {
-                    name: quick.name.ok_or_else(|| {
-                        CliError::Config("serve quick mode: --name is required".into())
-                    })?,
+                    name,
                     protocol,
-                    host: target.ip().to_string(),
-                    port: target.port(),
+                    host: quick_host(&target),
+                    port: target.port.get(),
                     udp: Default::default(),
                 }],
             };
@@ -167,13 +169,14 @@ async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<
             .await
         }
         Role::Access { quick, cmd: None } => {
-            let protocol = quick_protocol("access", &quick.protocol)?;
-            let listen = quick.listen.ok_or_else(|| {
-                CliError::Config("access quick mode: --listen IP:PORT is required".into())
-            })?;
-            let node_id = quick.node_id.ok_or_else(|| {
-                CliError::Config("access quick mode: --node-id is required".into())
-            })?;
+            let svc = quick.service;
+            let (name, listen, node_id) = svc
+                .name
+                .zip(svc.listen)
+                .zip(svc.node_id)
+                .map(|((n, l), i)| (n, l, i))
+                .context("internal: quick mode requires --name, --listen and --node-id")?;
+            let protocol = svc.protocol.unwrap_or(ProtocolArg::Tcp).into();
             node_id.parse::<iroh::EndpointId>().map_err(|e| {
                 CliError::Config(format!("access quick mode: invalid --node-id: {e}"))
             })?;
@@ -185,13 +188,11 @@ async fn run(cli: Cli, packaging: Packaging, ctx: RunContext) -> anyhow::Result<
                     ..Default::default()
                 },
                 services: vec![iroh_tunnel_host::config::AccessService {
-                    name: quick.name.ok_or_else(|| {
-                        CliError::Config("access quick mode: --name is required".into())
-                    })?,
+                    name,
                     node_id,
                     protocol,
-                    host: listen.ip().to_string(),
-                    port: listen.port(),
+                    host: quick_host(&listen),
+                    port: listen.port.get(),
                     relay_urls: vec![],
                     udp: Default::default(),
                 }],
@@ -271,21 +272,10 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
     Ok(())
 }
 
-/// Parse a quick-mode `--protocol` value.
-fn quick_protocol(role: &str, value: &str) -> Result<iroh_tunnel_host::config::Protocol, CliError> {
-    match value {
-        "tcp" => Ok(iroh_tunnel_host::config::Protocol::Tcp),
-        "udp" => Ok(iroh_tunnel_host::config::Protocol::Udp),
-        other => Err(CliError::Config(format!(
-            "{role} quick mode supports tcp or udp protocol, got '{other}'; use --protocol tcp or --protocol udp"
-        ))),
-    }
-}
-
 async fn dispatch_role_cmd(
     status_role: StatusRole,
     cmd: RoleCmd,
-    packaging: Packaging,
+    binary: Binary,
     ctx: RunContext,
 ) -> anyhow::Result<()> {
     let role = status_role.name();
@@ -316,23 +306,21 @@ async fn dispatch_role_cmd(
                 .await
                 .context("status command task failed")?
         }
-        RoleCmd::Update(args) => match packaging {
-            Packaging::Standalone => {
+        RoleCmd::Update(args) => match binary.is_standalone() {
+            true => {
                 let exe = format!("iroh-tunnel-{role}");
                 run_update_cli(&args, &exe).await
             }
-            Packaging::AllInOne => Err(CliError::Config(
+            false => Err(CliError::Config(
                 "update acts on the invoked executable; run `iroh-tunnel update`".into(),
             )
             .into()),
         },
-        RoleCmd::Service { .. } if packaging == Packaging::Standalone => {
-            Err(CliError::Service(format!(
-                "service management is not yet supported by the standalone {role} binary; \
+        RoleCmd::Service { .. } if binary.is_standalone() => Err(CliError::Service(format!(
+            "service management is not yet supported by the standalone {role} binary; \
              use `iroh-tunnel {role} service ...`"
-            ))
-            .into())
-        }
+        ))
+        .into()),
         RoleCmd::Service { action } => {
             tokio::task::spawn_blocking(move || crate::cli_service::dispatch(status_role, action))
                 .await

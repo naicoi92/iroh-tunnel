@@ -554,7 +554,7 @@ fn rejected(args: &[&str], diagnostic: &str) -> Result<()> {
         "--listen"
     };
     assert!(
-        stderr.contains(args[0]) || stderr.contains(role_option),
+        stderr.contains(args[0]) || stderr.contains(role_option) || stderr.contains("--protocol"),
         "missing role context for {args:?}: {stderr}"
     );
     assert!(stderr.contains(diagnostic), "{args:?}: {stderr}");
@@ -750,7 +750,7 @@ fn invalid_quick_inputs_fail_without_config_or_key_writes() -> Result<()> {
         rejected(&args, "name")?;
         let mut args = valid.clone();
         args.extend(["--protocol", "sctp"]);
-        rejected(&args, "tcp or udp")?;
+        rejected(&args, "possible values")?;
         let mut args = valid.clone();
         args.extend(["--relay-url", "http://localhost:1"]);
         rejected(&args, "https://")?;
@@ -777,8 +777,8 @@ fn invalid_quick_inputs_fail_without_config_or_key_writes() -> Result<()> {
 
 #[test]
 fn quick_config_errors_use_existing_exit_classification() -> Result<()> {
-    rejected(&["serve", "-p", "sctp"], "tcp or udp")?;
-    rejected(&["access", "-p", "sctp"], "tcp or udp")?;
+    rejected(&["serve", "-p", "sctp"], "possible values")?;
+    rejected(&["access", "-p", "sctp"], "possible values")?;
     Ok(())
 }
 

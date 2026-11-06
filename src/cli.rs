@@ -3,10 +3,13 @@
 //! Based on Page 06 v5 §8 (clap struct). Only defines the parse surface;
 //! dispatch lives in `main.rs`, tracing init in [`init_tracing`].
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+use crate::cli_args::{AccessServiceArgs, ColorArg, ServeServiceArgs};
 
 /// App version resolved at build time from the git tag (see `build.rs`).
 ///
@@ -26,9 +29,9 @@ pub struct Cli {
     #[arg(short, long)]
     pub quiet: bool,
 
-    /// Color output: auto | always | never.
-    #[arg(long, default_value = "auto")]
-    pub color: String,
+    /// Color output.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub color: ColorArg,
 
     #[command(subcommand)]
     pub role: Role,
@@ -38,7 +41,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Role {
     /// Serve role: publish local services into Iroh (standalone binary: iroh-tunnel-serve, alias its).
-    #[command(args_conflicts_with_subcommands = true)]
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Serve {
         #[command(flatten)]
         quick: ServeQuickArgs,
@@ -46,7 +49,7 @@ pub enum Role {
         cmd: Option<RoleCmd>,
     },
     /// Access role: consume remote services to local (standalone binary: iroh-tunnel-access, alias ita).
-    #[command(args_conflicts_with_subcommands = true)]
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Access {
         #[command(flatten)]
         quick: AccessQuickArgs,
@@ -74,7 +77,7 @@ pub struct UpdateArgs {
 
 /// Standalone Serve binary (`iroh-tunnel-serve`, alias `its`).
 #[derive(Parser, Debug)]
-#[command(name = "iroh-tunnel-serve", version = APP_VERSION, about = "Serve role: publish a local service through an Iroh tunnel (alias: its)", args_conflicts_with_subcommands = true)]
+#[command(name = "iroh-tunnel-serve", version = APP_VERSION, about = "Serve role: publish a local service through an Iroh tunnel (alias: its)", args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct ServeCli {
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -82,9 +85,9 @@ pub struct ServeCli {
     /// Quiet mode (only errors).
     #[arg(short, long)]
     pub quiet: bool,
-    /// Color output: auto | always | never.
-    #[arg(long, default_value = "auto")]
-    pub color: String,
+    /// Color output.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub color: ColorArg,
     #[command(flatten)]
     pub quick: ServeQuickArgs,
     #[command(subcommand)]
@@ -108,7 +111,7 @@ impl ServeCli {
 
 /// Standalone Access binary (`iroh-tunnel-access`, alias `ita`).
 #[derive(Parser, Debug)]
-#[command(name = "iroh-tunnel-access", version = APP_VERSION, about = "Access role: expose a remote Iroh service on a local address (alias: ita)", args_conflicts_with_subcommands = true)]
+#[command(name = "iroh-tunnel-access", version = APP_VERSION, about = "Access role: expose a remote Iroh service on a local address (alias: ita)", args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct AccessCli {
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace). Default is info.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -116,9 +119,9 @@ pub struct AccessCli {
     /// Quiet mode (only errors).
     #[arg(short, long)]
     pub quiet: bool,
-    /// Color output: auto | always | never.
-    #[arg(long, default_value = "auto")]
-    pub color: String,
+    /// Color output.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub color: ColorArg,
     #[command(flatten)]
     pub quick: AccessQuickArgs,
     #[command(subcommand)]
@@ -143,17 +146,10 @@ impl AccessCli {
 /// Quick Serve options; omit when using a role command.
 #[derive(Args, Debug)]
 pub struct ServeQuickArgs {
-    /// Service name.
-    #[arg(short, long)]
-    pub name: Option<String>,
-    /// Fixed target socket address (TCP or UDP, per --protocol).
-    #[arg(short, long)]
-    pub target: Option<std::net::SocketAddr>,
-    /// Protocol: tcp (default) or udp.
-    #[arg(short, long, default_value = "tcp")]
-    pub protocol: String,
+    #[command(flatten)]
+    pub service: ServeServiceArgs,
     /// Relay URL used by both peers.
-    #[arg(long)]
+    #[arg(short = 'r', long)]
     pub relay_url: Option<String>,
     /// File holding a persistent secret key (base64, as written by `config keygen`);
     /// keeps the public identity stable across restarts. Default: ephemeral identity.
@@ -164,25 +160,74 @@ pub struct ServeQuickArgs {
 /// Quick Access options; omit when using a role command.
 #[derive(Args, Debug)]
 pub struct AccessQuickArgs {
-    /// Service name.
-    #[arg(short, long)]
-    pub name: Option<String>,
-    /// Local listen socket address (TCP or UDP, per --protocol).
-    #[arg(short, long)]
-    pub listen: Option<std::net::SocketAddr>,
-    /// Serve NodeId (public identity, not authorization; protect the target service).
-    #[arg(short = 'N', long)]
-    pub node_id: Option<String>,
-    /// Protocol: tcp (default) or udp.
-    #[arg(short, long, default_value = "tcp")]
-    pub protocol: String,
+    #[command(flatten)]
+    pub service: AccessServiceArgs,
     /// Relay URL used by both peers.
-    #[arg(long)]
+    #[arg(short = 'r', long)]
     pub relay_url: Option<String>,
     /// File holding a persistent secret key (base64, as written by `config keygen`);
     /// keeps the public identity stable across restarts. Default: ephemeral identity.
     #[arg(short = 'k', long)]
     pub key_file: Option<PathBuf>,
+}
+
+/// Which executable is running. Service units run `<exe> <role> run`, which
+/// only the all-in-one binary accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Binary {
+    /// `iroh-tunnel` (`it`).
+    AllInOne,
+    /// `iroh-tunnel-serve` (`its`).
+    Serve,
+    /// `iroh-tunnel-access` (`ita`).
+    Access,
+}
+
+impl Binary {
+    /// True for the single-role executables.
+    pub fn is_standalone(self) -> bool {
+        !matches!(self, Binary::AllInOne)
+    }
+}
+
+/// Make quick-mode flags required and default the protocol to tcp.
+fn quick_required(cmd: clap::Command, required: &[&str]) -> clap::Command {
+    let mut cmd = cmd;
+    for id in required {
+        cmd = cmd.mut_arg(*id, |a| a.required(true));
+    }
+    cmd.mut_arg("protocol", |a| a.default_value("tcp"))
+}
+
+const SERVE_QUICK: &[&str] = &["name", "target"];
+const ACCESS_QUICK: &[&str] = &["name", "listen", "node_id"];
+
+/// Build the clap command tree of `binary` with the runtime adjustments the
+/// derive cannot express (required quick flags, protocol default).
+pub fn build_command(binary: Binary) -> clap::Command {
+    let mut cmd = match binary {
+        Binary::AllInOne => Cli::command()
+            .mut_subcommand("serve", |c| quick_required(c, SERVE_QUICK))
+            .mut_subcommand("access", |c| quick_required(c, ACCESS_QUICK)),
+        Binary::Serve => quick_required(ServeCli::command(), SERVE_QUICK),
+        Binary::Access => quick_required(AccessCli::command(), ACCESS_QUICK),
+    };
+    cmd.build();
+    cmd
+}
+
+/// Parse `argv` against the tree of `binary`; standalone results are
+/// converted to the all-in-one [`Cli`] shape.
+pub fn parse_cli(
+    binary: Binary,
+    argv: impl IntoIterator<Item = OsString>,
+) -> Result<Cli, clap::Error> {
+    let mut matches = build_command(binary).try_get_matches_from_mut(argv)?;
+    Ok(match binary {
+        Binary::AllInOne => Cli::from_arg_matches_mut(&mut matches)?,
+        Binary::Serve => ServeCli::from_arg_matches_mut(&mut matches)?.into_cli(),
+        Binary::Access => AccessCli::from_arg_matches_mut(&mut matches)?.into_cli(),
+    })
 }
 
 /// Commands available per role.
@@ -414,5 +459,40 @@ mod tests {
         for (short, long) in [('n', "name"), ('p', "protocol"), ('k', "key-file")] {
             assert_eq!(meaning[&short], long);
         }
+    }
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn empty_name_is_usage_error() {
+        assert!(parse_cli(Binary::Serve, argv(&["its", "-n", "", "-t", "1"])).is_err());
+    }
+
+    #[test]
+    fn quick_requires_name_and_target() {
+        let err = parse_cli(Binary::Serve, argv(&["its", "-n", "web"])).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let err = parse_cli(Binary::AllInOne, argv(&["it", "access", "-n", "web"])).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn quick_protocol_defaults_to_tcp() {
+        let cli = parse_cli(Binary::Serve, argv(&["its", "-n", "web", "-t", "3000"])).unwrap();
+        let Role::Serve { quick, .. } = cli.role else {
+            panic!("serve role")
+        };
+        assert_eq!(
+            quick.service.protocol,
+            Some(crate::cli_args::ProtocolArg::Tcp)
+        );
+    }
+
+    #[test]
+    fn role_command_does_not_need_quick_flags() {
+        assert!(parse_cli(Binary::AllInOne, argv(&["it", "serve", "config", "path"])).is_ok());
+        assert!(parse_cli(Binary::Serve, argv(&["its", "config", "path"])).is_ok());
     }
 }
