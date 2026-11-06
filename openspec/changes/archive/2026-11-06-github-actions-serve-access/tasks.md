@@ -87,3 +87,4 @@ Scenarios (GAI): "Copy-paste adoption", "Docs page examples", "Embedded client c
 - [x] 8.4 CHANGELOG `[Unreleased]`: the Access and Serve GitHub Actions
 - [x] 8.5 Verify: every example in the docs is valid YAML and uses only declared inputs (script check against `access/action.yml`/`serve/action.yml`); `openspec validate github-actions-serve-access --strict`
 - [ ] 8.6 Verify on the main-branch run after merge (needs owner permission): `action` job green on the PR; `e2e (linux|macos|windows)` and the container job green with round trips and post-step cleanup logged
+  - Archived open by owner decision (2026-11-06): the PR part is done (PR #178 `ci-ok` green at `f95cea7`, including `action`); the main-branch e2e runs are tracked after merge on PR #178, not in this archived change.
