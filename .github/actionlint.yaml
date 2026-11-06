@@ -1,5 +1,6 @@
-# actionlint 1.7.7 (pinned in ci.yml) predates the GitHub-hosted Windows ARM64
-# runner label, so it reports it as unknown. The label exists for public
+# Added for actionlint 1.7.7, which predated the GitHub-hosted Windows ARM64
+# runner label and reported it as unknown; 1.7.12 (pinned in ci.yml) knows it,
+# so this entry is now redundant but harmless. The label exists for public
 # repositories; release.yml uses it for the windows-arm64 target (issue #124).
 self-hosted-runner:
   labels:
