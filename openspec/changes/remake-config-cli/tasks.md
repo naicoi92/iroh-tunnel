@@ -133,5 +133,5 @@ FIM = frontend-independent-management, TC = tunnel-configuration, WB = workspace
 
 ## 7. Docs and release notes
 
-- [ ] 7.1 Update `README.md`, `docs/cli.md`, `docs/configuration.md`, `docs/services.md`, `docs/deployment.md` and `docs/troubleshooting.md` to the new syntax, the short options and the error/help behaviour. Grep gate: `rg -n "config add|config remove|keygen random" README.md docs examples src tests crates` returns nothing.
-- [ ] 7.2 Add a CHANGELOG `Unreleased` entry with a **BREAKING** section listing the old and new commands (`config add` becomes `config set -n`, `config remove --name` becomes `config rm -n`, `keygen random` becomes `keygen --print`), plus the added `check`, usage-error help, hostname addresses and `-r`.
+- [x] 7.1 Update `README.md`, `docs/cli.md`, `docs/configuration.md`, `docs/services.md`, `docs/deployment.md` and `docs/troubleshooting.md` to the new syntax, the short options and the error/help behaviour. Grep gate: `rg -n "config add|config remove|keygen random" README.md docs examples src tests crates` returns nothing.
+- [x] 7.2 Add a CHANGELOG `Unreleased` entry with a **BREAKING** section listing the old and new commands (`config add` becomes `config set -n`, `config remove --name` becomes `config rm -n`, `keygen random` becomes `keygen --print`), plus the added `check`, usage-error help, hostname addresses and `-r`.
