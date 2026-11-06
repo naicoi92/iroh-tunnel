@@ -62,6 +62,29 @@ pub(super) fn find_service<'a>(doc: &'a DocumentMut, name: &str) -> Option<&'a t
         .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
 }
 
+/// Index of the `[[services]]` entry named `name`.
+///
+/// `services` absent is `Ok(None)`; present but not an array of tables is a
+/// config error naming `path`.
+pub(super) fn find_service_index(
+    doc: &DocumentMut,
+    name: &str,
+    path: &Path,
+) -> Result<Option<usize>> {
+    let Some(item) = doc.get("services") else {
+        return Ok(None);
+    };
+    let services = item.as_array_of_tables().ok_or_else(|| {
+        CliError::Config(format!(
+            "invalid config at {}: [services] must be an array of tables",
+            path.display()
+        ))
+    })?;
+    Ok(services
+        .iter()
+        .position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name)))
+}
+
 /// Re-parse `content` through the role's schema to enforce all validation rules
 /// (name regex/length, port range, node_id length, duplicate names, https
 /// relay_urls). A failure is a `CliError::Config` → exit 2.

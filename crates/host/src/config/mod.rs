@@ -19,6 +19,7 @@ mod require_existing;
 mod resolve_config_path;
 mod resolve_secret_key;
 mod resolve_write_target;
+mod set_service;
 mod show_config;
 mod store;
 mod to_settings;
@@ -39,6 +40,7 @@ pub use require_existing::require_existing;
 pub use resolve_config_path::resolve_config_path;
 pub use resolve_secret_key::resolve_secret_key;
 pub use resolve_write_target::resolve_write_target;
+pub use set_service::set_service;
 pub use show_config::show_config;
 pub use to_settings::{access_settings, serve_settings};
 pub use types::{
