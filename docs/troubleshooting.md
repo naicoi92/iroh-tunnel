@@ -46,9 +46,23 @@ It was installed by Homebrew, a Linux package or a container image. Update it
 through that tool, or pass `--yes` to replace a Homebrew or package file
 anyway. On Windows, stop the running executable first.
 
-**`service install --system` exits with code 3 (or 5 on Windows).**
-System services need root; the error prints the `sudo` command to run.
-Windows has no system services (exit code `5`); use `--user`.
+**`service install --system` exits with code 3.**
+System services need root; the error prints the `sudo` command to run. On
+Windows, open a terminal with "Run as administrator" and run the printed
+command there.
+
+**A Windows system service refuses to start: `permission error`.**
+The config, state directory, binary or `%ProgramData%\iroh-tunnel` can be
+changed by an account the service does not trust, or the path goes through a
+junction or link. The message names the path, account and rights; the service
+log is `%ProgramData%\iroh-tunnel\logs\serve.log` (or `access.log`). Remove
+that access or move the file, then run `service start --system`. See
+[Windows system scope](services.md#system-scope).
+
+**`the service binary ... is not protected`.**
+The `iroh-tunnel.exe` on `PATH` is in a directory you can write, such as your
+profile. Install it with `install.ps1` from an elevated terminal (or into
+`%ProgramFiles%`), then install the service again.
 
 **`config edit` says my change was rejected.**
 The edited file did not validate, or the file changed while you were editing.

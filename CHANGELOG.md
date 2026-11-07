@@ -22,8 +22,24 @@ The `config` command line is reworked. Config files are unchanged.
 
 `config set` creates or updates a service and prints what changed.
 
+Windows service scope changes:
+
+- **Breaking:** on Windows, `service install` from an elevated terminal
+  without `--user` or `--system` now installs a system service instead of a
+  user task.
+- **Breaking:** on Windows, `--system` without elevation now exits with code
+  `3` (permission) with "Run as administrator" guidance, instead of `5`.
+
 ### Added
 
+- **Windows system services:** `service install --system` registers a
+  LocalSystem Windows Service that starts at boot, trusts one pinned user's
+  config and state, checks file ownership and access (no junctions or links)
+  at install and every start, logs to `%ProgramData%\iroh-tunnel\logs`, and
+  drains on stop. Thanks to @23rd for the original Windows Service work in
+  #67.
+- `install.ps1` run elevated protects the install directory it creates, so
+  the binary passes the system service check.
 - GitHub Actions: Access (naicoi92/iroh-tunnel) and Serve (naicoi92/iroh-tunnel/serve) for CI/CD.
 - `config check` validates a config file without changing it.
 - Usage errors print `error: ...` and the help of the failing subcommand, and
