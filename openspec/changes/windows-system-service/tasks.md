@@ -39,9 +39,9 @@ Traceability:
 
 ## 2. Scope rules and elevation on Windows
 
-- [ ] 2.1 Implement `is_elevated()` on Windows with `GetTokenInformation(TokenElevation)`, keeping the existing test shape. (SSM: Install scope selection; Default scope for verbs)
+- [x] 2.1 Implement `is_elevated()` on Windows with `GetTokenInformation(TokenElevation)`, keeping the existing test shape. (SSM: Install scope selection; Default scope for verbs)
 - [ ] 2.2 Remove the forced-user line in `install.rs`, and remove the Windows branch of `policy::ensure_supported`. Unit-test `decide_install_scope`/`default_scope` on Windows for: elevated without a flag means system; a non-elevated terminal prompts; non-elevated without a terminal means user. (SSM: Elevated Windows terminal installs without a scope prompt; Elevated Windows terminal without a flag; Interactive user is offered both scopes)
-- [ ] 2.3 Make the `ensure_privilege` rerun guidance platform-specific: `sudo <argv>` on Unix, "Run as administrator" plus `<argv>` on Windows. Exit code 3 and the absolute config path stay. Unit tests for both texts. (SSM: Non-elevated system install on Windows; Non-elevated system verbs on Windows; FIM: Non-elevated Windows system scope; Windows system scope without elevation)
+- [x] 2.3 Make the `ensure_privilege` rerun guidance platform-specific: `sudo <argv>` on Unix, "Run as administrator" plus `<argv>` on Windows. Exit code 3 and the absolute config path stay. Unit tests for both texts. (SSM: Non-elevated system install on Windows; Non-elevated system verbs on Windows; FIM: Non-elevated Windows system scope; Windows system scope without elevation)
 
 ## 3. Windows trust model (design D2, D3)
 
