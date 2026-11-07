@@ -75,7 +75,8 @@ pub(crate) struct ServiceSpec {
     pub launch_arguments: Vec<OsString>,
     /// Service environment, in fixed order.
     pub env: Vec<(String, String)>,
-    /// The pin record, so a later install can detect retargeting.
+    /// The pin record in comment-line form (`# iroh-tunnel-pin …`), the only
+    /// shape `Pin::find` accepts, so a later install can detect retargeting.
     pub description: String,
     pub failure: Option<FailurePlan>,
 }
@@ -124,7 +125,7 @@ impl ServiceSpec {
                 config.as_os_str().to_owned(),
             ],
             env,
-            description: pin.record(),
+            description: format!("# {}", pin.record()),
             failure: FailurePlan::from_policy(policy),
         })
     }
@@ -637,6 +638,15 @@ mod tests {
     }
 
     #[test]
+    fn rendered_description_round_trips_through_pin_find() {
+        let s = spec();
+        assert_eq!(
+            Pin::find(&s.description),
+            Some(pin(Path::new(r"C:\cfg\serve.toml")))
+        );
+    }
+
+    #[test]
     fn service_registered_reflects_scm_state() {
         assert!(!service_registered(&mut FakeScm::with(None), "serve").unwrap());
         assert!(service_registered(&mut FakeScm::with(Some(ScmState::Stopped)), "serve").unwrap());
@@ -703,7 +713,10 @@ mod tests {
                 ("IROH_TUNNEL_SCM".to_string(), "1".to_string()),
             ]
         );
-        assert_eq!(s.description, pin(Path::new(r"C:\cfg\serve.toml")).record());
+        assert_eq!(
+            s.description,
+            format!("# {}", pin(Path::new(r"C:\cfg\serve.toml")).record())
+        );
         assert!(s.failure.is_some());
     }
 
