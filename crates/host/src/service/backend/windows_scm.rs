@@ -107,6 +107,12 @@ impl ServiceSpec {
             )
             .into());
         };
+        let mut env = vec![
+            (ENV_STATE_DIR.into(), state.to_string_lossy().into_owned()),
+            (ENV_TRUSTED_SID.into(), sid.clone()),
+            (ENV_SCM.into(), "1".into()),
+        ];
+        env.extend(test_env());
         Ok(Self {
             name: service_name(role),
             display_name: format!("iroh-tunnel {role}"),
@@ -117,15 +123,29 @@ impl ServiceSpec {
                 "--config".into(),
                 config.as_os_str().to_owned(),
             ],
-            env: vec![
-                (ENV_STATE_DIR.into(), state.to_string_lossy().into_owned()),
-                (ENV_TRUSTED_SID.into(), sid.clone()),
-                (ENV_SCM.into(), "1".into()),
-            ],
+            env,
             description: pin.record(),
             failure: FailurePlan::from_policy(policy),
         })
     }
+}
+
+/// Test-utils seam: the installing process's `IROH_TUNNEL_TEST_*` variables and
+/// `IROH_TUNNEL_MACHINE_LOCK_DIR`, forwarded into the service environment (a
+/// service gets its environment only from the registry), sorted by name.
+#[cfg(feature = "test-utils")]
+fn test_env() -> Vec<(String, String)> {
+    let mut vars: Vec<_> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("IROH_TUNNEL_TEST_") || k == "IROH_TUNNEL_MACHINE_LOCK_DIR")
+        .collect();
+    vars.sort();
+    vars
+}
+
+/// Production build: nothing is forwarded.
+#[cfg(not(feature = "test-utils"))]
+fn test_env() -> Vec<(String, String)> {
+    Vec::new()
 }
 
 /// Coarse state of a service as the orchestration sees it.
