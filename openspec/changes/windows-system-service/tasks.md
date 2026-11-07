@@ -46,7 +46,7 @@ Traceability:
 ## 3. Windows trust model (design D2, D3)
 
 - [ ] 3.1 Add `windows-sys` as a direct `cfg(windows)` dependency of `crates/host`, reusing the locked version and only the features named in D10. Add `windows-service` likewise to `crates/host` and to the root crate. Confirm `cargo tree` resolves on MSRV 1.91.
-- [ ] 3.2 Add the pure `trust_windows::model` (all platforms): `Sid`, `Ace`, `Descriptor`, `TrustedSet` (config/state set with the pinned SID; binary set without it), and `evaluate`. Write a TDD test per rule:
+- [x] 3.2 Add the pure `trust_windows::model` (all platforms): `Sid`, `Ace`, `Descriptor`, `TrustedSet` (config/state set with the pinned SID; binary set without it), and `evaluate`. Write a TDD test per rule:
   - reparse point refused;
   - NULL or unreadable DACL refused;
   - untrusted owner refused;
