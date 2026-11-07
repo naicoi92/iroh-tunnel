@@ -134,8 +134,8 @@ Traceability:
 
 ## 9. Installer directory protection (design D9)
 
-- [ ] 9.1 If the D1 measurement shows a creator-writable ACE: after `install.ps1` creates `$BinDir` (default or `-BinDir`), set the owner to Administrators and a protected DACL derived from the parent without entries for the current user SID. Never touch a pre-existing directory. Keep PSScriptAnalyzer clean. If D1 shows nothing is needed, record that in `design.md` and mark this task done without changing code. (IRP: Windows installer protects the install directory it creates)
-- [ ] 9.2 Add a Windows CI check: run `install.ps1` against a local release fixture into a fresh directory, then assert the binary trust check passes; a pre-existing directory keeps its SDDL. (IRP: Fresh default install; Existing directory untouched)
+- [x] 9.1 If the D1 measurement shows a creator-writable ACE: after `install.ps1` creates `$BinDir` (default or `-BinDir`), set the owner to Administrators and a protected DACL derived from the parent without entries for the current user SID. Never touch a pre-existing directory. Keep PSScriptAnalyzer clean. If D1 shows nothing is needed, record that in `design.md` and mark this task done without changing code. (IRP: Windows installer protects the install directory it creates)
+- [x] 9.2 Add a Windows CI check: run `install.ps1` against a local release fixture into a fresh directory, then assert the binary trust check passes; a pre-existing directory keeps its SDDL. (IRP: Fresh default install; Existing directory untouched)
 
 ## 10. End-to-end on Windows
 
