@@ -21,12 +21,15 @@ fn restricted_child_is_not_elevated() {
         .expect("launch whoami under a restricted token");
     eprintln!("restricted launch API: {}", LAUNCH_API.lock().unwrap());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{text}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.code() != Some(0) {
+        eprintln!(
+            "whoami failed: status={:?}\nLAUNCH_API={}\nstdout:\n{text}\nstderr:\n{stderr}",
+            out.status,
+            LAUNCH_API.lock().unwrap()
+        );
+    }
+    assert_eq!(out.status.code(), Some(0), "{text}{stderr}");
     assert!(
         text.contains("S-1-16-8192"),
         "not Medium integrity:\n{text}"

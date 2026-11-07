@@ -18,10 +18,12 @@ use windows_sys::Win32::Foundation::{
     GetLastError, ERROR_PRIVILEGE_NOT_HELD, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::{
-    CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation,
-    TokenIntegrityLevel, WinBuiltinAdministratorsSid, WinMediumLabelSid, DISABLE_MAX_PRIVILEGE,
-    SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    AddAccessAllowedAce, CreateRestrictedToken, CreateWellKnownSid, GetLengthSid,
+    GetTokenInformation, InitializeAcl, SetTokenInformation, TokenDefaultDacl, TokenIntegrityLevel,
+    TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid, WinMediumLabelSid,
+    ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, DISABLE_MAX_PRIVILEGE, SECURITY_ATTRIBUTES,
+    SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
@@ -35,6 +37,9 @@ const SE_GROUP_INTEGRITY: u32 = 0x20;
 
 /// Which API launched the child (reported by the self-test).
 pub static LAUNCH_API: std::sync::Mutex<&'static str> = std::sync::Mutex::new("none");
+
+/// `GENERIC_ALL` (winnt.h).
+const GENERIC_ALL: u32 = 0x1000_0000;
 
 /// A SID in a stack buffer.
 struct Sid([u8; SECURITY_MAX_SID_SIZE as usize]);
@@ -90,6 +95,83 @@ fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle)> {
         last_error()
     );
     Ok((read, write))
+}
+
+/// Default DACL like a real UAC-filtered token: allow the user and SYSTEM.
+/// `CreateRestrictedToken` keeps the elevated DACL (Administrators + SYSTEM),
+/// and Administrators is deny-only in the restricted token, so without this
+/// the child cannot open its own token (`whoami /groups` fails).
+fn set_default_dacl(original: &OwnedHandle, restricted: &OwnedHandle) -> Result<()> {
+    let mut needed = 0u32;
+    // SAFETY: a null buffer of length 0 only queries the required size.
+    unsafe {
+        GetTokenInformation(
+            original.as_raw_handle() as _,
+            TokenUser,
+            null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    ensure!(
+        needed > 0,
+        "GetTokenInformation(size) failed: {}",
+        last_error()
+    );
+    // u64 elements keep the TOKEN_USER buffer 8-byte aligned.
+    let mut user_buf = vec![0u64; (needed as usize).div_ceil(8)];
+    // SAFETY: `user_buf` has at least `needed` bytes.
+    let ok = unsafe {
+        GetTokenInformation(
+            original.as_raw_handle() as _,
+            TokenUser,
+            user_buf.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    ensure!(
+        ok != 0,
+        "GetTokenInformation(TokenUser) failed: {}",
+        last_error()
+    );
+    // SAFETY: the API filled `user_buf` with a TOKEN_USER; the SID it points
+    // at lives inside `user_buf`, which outlives every use below.
+    let user_sid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut system = Sid::well_known(WinLocalSystemSid)?;
+
+    // SAFETY: both SIDs are valid.
+    let (user_len, system_len) = unsafe { (GetLengthSid(user_sid), GetLengthSid(system.as_ptr())) };
+    // ACE header + mask, minus the one-DWORD SidStart placeholder, plus the SID.
+    let ace_overhead = size_of::<ACCESS_ALLOWED_ACE>() as u32 - size_of::<u32>() as u32;
+    let acl_len =
+        (size_of::<ACL>() as u32 + 2 * ace_overhead + user_len + system_len).next_multiple_of(4);
+    let mut acl_buf = vec![0u32; (acl_len / 4) as usize];
+    let acl: *mut ACL = acl_buf.as_mut_ptr().cast();
+    // SAFETY: `acl_buf` is `acl_len` bytes, DWORD aligned; both SIDs are valid.
+    let ok = unsafe {
+        InitializeAcl(acl, acl_len, ACL_REVISION) != 0
+            && AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, user_sid) != 0
+            && AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, system.as_ptr()) != 0
+    };
+    ensure!(ok, "building default DACL failed: {}", last_error());
+
+    let dacl = TOKEN_DEFAULT_DACL { DefaultDacl: acl };
+    // SAFETY: `dacl` points at a live, initialized ACL; the size is the struct's.
+    let ok = unsafe {
+        SetTokenInformation(
+            restricted.as_raw_handle() as _,
+            TokenDefaultDacl,
+            (&dacl as *const TOKEN_DEFAULT_DACL).cast(),
+            size_of::<TOKEN_DEFAULT_DACL>() as u32,
+        )
+    };
+    ensure!(
+        ok != 0,
+        "SetTokenInformation(DefaultDacl) failed: {}",
+        last_error()
+    );
+    Ok(())
 }
 
 /// The current token, restricted and lowered to Medium integrity.
@@ -153,6 +235,7 @@ fn restricted_token() -> Result<OwnedHandle> {
         "SetTokenInformation(integrity) failed: {}",
         last_error()
     );
+    set_default_dacl(&token, &restricted)?;
     Ok(restricted)
 }
 
