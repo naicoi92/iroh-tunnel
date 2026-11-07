@@ -48,7 +48,7 @@ pub use install::install;
 pub use is_elevated::is_elevated;
 pub use native::{InstalledAt, NativeOutput, OutputMode, ServiceCall, ServiceNote};
 pub use parse_scope_answer::parse_scope_answer;
-pub use pin::{Pin, RetargetConsent};
+pub use pin::{Pin, PinOwner, RetargetConsent};
 pub(crate) use platform::load_config;
 pub use restart::restart;
 pub use start::start;

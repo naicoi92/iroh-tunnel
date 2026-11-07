@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use super::account::{self, Account};
-use super::pin::{Pin, RetargetConsent};
+use super::pin::{Pin, PinOwner, RetargetConsent};
 use super::trust;
 use crate::error::CliError;
 
@@ -31,7 +31,7 @@ impl Target {
     pub fn pin(&self) -> Pin {
         Pin {
             config: self.config.clone(),
-            uid: self.account.uid,
+            owner: PinOwner::Uid(self.account.uid),
         }
     }
 }
@@ -189,14 +189,18 @@ pub fn retarget_decision(
         return RetargetDecision::Proceed;
     };
     let previous = Pin::find(body);
-    if previous
-        .as_ref()
-        .is_some_and(|p| p.uid == target.account.uid)
-    {
+    let proposed = target.pin();
+    // Same owner proceeds whatever the config path. A SID pin never equals a
+    // uid, so on Unix it counts as an unknown owner.
+    if previous.as_ref().is_some_and(|p| p.owner == proposed.owner) {
         return RetargetDecision::Proceed;
     }
-    let proposed = target.pin();
-    if consent.is_some_and(|c| c.previous == previous && c.proposed == proposed) {
+    let same_previous = |c: &RetargetConsent| match (&c.previous, &previous) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.same_target(b),
+        _ => false,
+    };
+    if consent.is_some_and(|c| same_previous(c) && c.proposed.same_target(&proposed)) {
         return RetargetDecision::Proceed;
     }
     RetargetDecision::Needs { previous, proposed }

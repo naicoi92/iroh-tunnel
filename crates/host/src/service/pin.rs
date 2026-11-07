@@ -20,15 +20,53 @@ const KEY: &str = "iroh-tunnel-pin";
 pub struct Pin {
     /// Absolute, canonical path of the config file the service reads.
     pub config: PathBuf,
-    /// UID of the user the service was installed for: the only principal,
-    /// besides root, whose writes the service accepts.
-    pub uid: u32,
+    /// The principal the service was installed for: the only one, besides
+    /// the system account, whose writes the service accepts.
+    pub owner: PinOwner,
+}
+
+/// Who a registration is pinned to: a Unix uid or a Windows SID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinOwner {
+    /// Unix user id.
+    Uid(u32),
+    /// Windows security identifier in `S-1-…` form.
+    Sid(String),
+}
+
+impl std::fmt::Display for PinOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Uid(uid) => write!(f, "uid {uid}"),
+            Self::Sid(sid) => f.write_str(sid),
+        }
+    }
 }
 
 impl Pin {
     /// The record text (no comment delimiters).
     pub fn record(&self) -> String {
-        format!("{KEY} config={} uid={}", escape(&self.config), self.uid)
+        let owner = match &self.owner {
+            PinOwner::Uid(uid) => format!("uid={uid}"),
+            PinOwner::Sid(sid) => format!("sid={sid}"),
+        };
+        format!("{KEY} config={} {owner}", escape(&self.config))
+    }
+
+    /// The uid of a Unix registration; `None` for a SID pin.
+    #[cfg(unix)]
+    pub(super) fn unix_uid(&self) -> Option<u32> {
+        match self.owner {
+            PinOwner::Uid(uid) => Some(uid),
+            PinOwner::Sid(_) => None,
+        }
+    }
+
+    /// Whether `other` pins the same registration target: exact on Unix,
+    /// ASCII-case- and separator-insensitive on Windows paths.
+    #[cfg_attr(not(unix), allow(dead_code))] // consumed by the Windows backend later
+    pub(crate) fn same_target(&self, other: &Pin) -> bool {
+        same_target_with(cfg!(windows), self, other)
     }
 
     /// Find and decode the record inside a registration body. `None` when the
@@ -46,19 +84,64 @@ impl Pin {
         let rest = &line[line.find(KEY)? + KEY.len()..];
         let mut config = None;
         let mut uid = None;
+        let mut sid = None;
         for field in rest.split_whitespace() {
             let field = field.trim_end_matches("-->");
             if let Some(value) = field.strip_prefix("config=") {
                 config = unescape(value);
             } else if let Some(value) = field.strip_prefix("uid=") {
-                uid = value.parse().ok();
+                uid = Some(value.parse().ok()?);
+            } else if let Some(value) = field.strip_prefix("sid=") {
+                sid = Some(value.to_owned());
             }
         }
+        let owner = match (uid, sid) {
+            (Some(uid), None) => PinOwner::Uid(uid),
+            (None, Some(sid)) if !sid.is_empty() => PinOwner::Sid(sid),
+            _ => return None,
+        };
         Some(Self {
             config: config?,
-            uid: uid?,
+            owner,
         })
     }
+}
+
+/// Reject a SID pin handed to a Unix backend, before anything is written.
+#[cfg(unix)]
+pub(super) fn require_unix_pin(pin: Option<&Pin>) -> anyhow::Result<()> {
+    if pin.is_some_and(|p| p.unix_uid().is_none()) {
+        return Err(crate::error::CliError::Service(
+            "internal: Unix registration with a SID pin".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// [`Pin::same_target`] with the platform made explicit, so the Windows rule
+/// is testable everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn same_target_with(windows: bool, a: &Pin, b: &Pin) -> bool {
+    if a.owner != b.owner {
+        return false;
+    }
+    if !windows {
+        return a.config == b.config;
+    }
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .chars()
+            .map(|c| {
+                if c == '/' {
+                    '\\'
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect::<String>()
+    };
+    norm(&a.config) == norm(&b.config)
 }
 
 /// Consent to retarget, valid only against the registration it was given for.
@@ -131,8 +214,61 @@ mod tests {
     fn pin(path: &str) -> Pin {
         Pin {
             config: PathBuf::from(path),
-            uid: 1000,
+            owner: PinOwner::Uid(1000),
         }
+    }
+
+    fn sid_pin(path: &str) -> Pin {
+        Pin {
+            config: PathBuf::from(path),
+            owner: PinOwner::Sid("S-1-5-21-1-2-3-1001".into()),
+        }
+    }
+
+    #[test]
+    fn sid_record_round_trips() {
+        let p = sid_pin("C:\\Users\\a\\serve.toml");
+        assert!(p.record().ends_with(" sid=S-1-5-21-1-2-3-1001"));
+        assert_eq!(Pin::find(&format!("# {}\n", p.record())), Some(p));
+    }
+
+    #[test]
+    fn legacy_uid_record_still_parses() {
+        assert_eq!(
+            Pin::find("# iroh-tunnel-pin config=/home/a/c.toml uid=1000"),
+            Some(pin("/home/a/c.toml"))
+        );
+        assert_eq!(
+            pin("/home/a/c.toml").record(),
+            "iroh-tunnel-pin config=/home/a/c.toml uid=1000"
+        );
+    }
+
+    #[test]
+    fn record_with_both_uid_and_sid_is_malformed() {
+        assert_eq!(
+            Pin::find("# iroh-tunnel-pin config=/a uid=1 sid=S-1-5-18"),
+            None
+        );
+    }
+
+    #[test]
+    fn pin_compares_paths_case_insensitively_on_windows() {
+        let a = sid_pin("C:\\Users\\A\\Serve.toml");
+        let b = sid_pin("c:/users/a/serve.toml");
+        assert!(same_target_with(true, &a, &b));
+        assert!(!same_target_with(false, &a, &b));
+        let other = Pin {
+            owner: PinOwner::Sid("S-1-5-18".into()),
+            ..b.clone()
+        };
+        assert!(!same_target_with(true, &a, &other));
+    }
+
+    #[test]
+    fn pin_round_trips_unicode_path() {
+        let p = sid_pin("C:\\Users\\Nguyễn Văn\\AppData\\Local\\iroh-tunnel\\config\\serve.toml");
+        assert_eq!(Pin::find(&format!("# {}\n", p.record())), Some(p));
     }
 
     #[test]

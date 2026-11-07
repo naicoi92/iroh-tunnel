@@ -62,13 +62,12 @@ fn format_script(
     let pidfile = format!("/var/run/iroh-tunnel-{role}.pid");
     let logfile = format!("/var/log/iroh-tunnel-{role}.log");
     // A root service reads a user's files: say whose (SM-04).
+    // A SID pin is rejected by `install_with` before this runs.
     let pin_lines = pin.map_or_else(String::new, |p| {
-        format!(
-            "# {}\nexport {}={}\n",
-            p.record(),
-            super::super::trust::ENV_TRUSTED_UID,
-            p.uid
-        )
+        let uid = p
+            .unix_uid()
+            .map(|u| format!("export {}={u}\n", super::super::trust::ENV_TRUSTED_UID));
+        format!("# {}\n{}", p.record(), uid.unwrap_or_default())
     });
     format!(
         r#"#!/bin/sh
@@ -211,6 +210,7 @@ pub(crate) fn install(
     state: &Path,
     pin: Option<&Pin>,
 ) -> Result<()> {
+    super::super::pin::require_unix_pin(pin)?;
     require_root()?;
     if let Some(note) = busybox_scope_note(role, scope) {
         notes(&note);

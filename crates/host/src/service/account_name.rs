@@ -1,16 +1,23 @@
 //! Display name of the account owning a service registration.
 
-/// The user name for `uid`, or `"?"` when no such account exists (or on
-/// platforms without a user database). Used by frontends to describe a
-/// registration's owner in prompts.
+use super::pin::PinOwner;
+
+/// The account name for `owner`, or `"?"` when it cannot be resolved (no such
+/// uid, no user database, or a SID this platform cannot look up). Used by
+/// frontends to describe a registration's owner in prompts.
 #[cfg(unix)]
-pub fn account_name(uid: u32) -> String {
-    super::account::by_uid(uid).map_or_else(|| "?".to_owned(), |a| a.name)
+pub fn account_name(owner: &PinOwner) -> String {
+    match owner {
+        PinOwner::Uid(uid) => {
+            super::account::by_uid(*uid).map_or_else(|| "?".to_owned(), |a| a.name)
+        }
+        PinOwner::Sid(_) => "?".to_owned(),
+    }
 }
 
-/// See the Unix variant; there is no user database to consult here.
+/// See the Unix variant. SID lookup arrives with the Win32 adapter.
 #[cfg(not(unix))]
-pub fn account_name(_uid: u32) -> String {
+pub fn account_name(_owner: &PinOwner) -> String {
     "?".to_owned()
 }
 
@@ -18,16 +25,15 @@ pub fn account_name(_uid: u32) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(not(unix))]
     #[test]
-    fn without_a_user_database_the_name_is_a_question_mark() {
-        assert_eq!(account_name(0), "?");
+    fn an_unresolvable_sid_is_a_question_mark() {
+        assert_eq!(account_name(&PinOwner::Sid("S-1-5-21-9-9-9-1".into())), "?");
     }
 
     #[cfg(unix)]
     #[test]
     fn root_is_named_and_a_name_is_never_empty() {
-        assert_eq!(account_name(0), "root");
-        assert!(!account_name(u32::MAX - 1).is_empty());
+        assert_eq!(account_name(&PinOwner::Uid(0)), "root");
+        assert!(!account_name(&PinOwner::Uid(u32::MAX - 1)).is_empty());
     }
 }
