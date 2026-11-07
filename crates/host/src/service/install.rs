@@ -383,8 +383,8 @@ mod tests {
             let mut req = request(Some(ServiceScope::User));
             req.config = Some(config);
             req.state_dir_override = Some(home.join("state"));
-            // Linux: daemon-reload ok, `enable` fails. macOS: `bootout` ok,
-            // `bootstrap` fails.
+            // Linux: daemon-reload ok, `enable` fails. macOS: `enable` and
+            // `bootout` ok, `bootstrap` fails.
             let responses = if cfg!(target_os = "linux") {
                 vec![
                     crate::service::native::fake::output(0, "", ""),
@@ -392,6 +392,7 @@ mod tests {
                 ]
             } else {
                 vec![
+                    crate::service::native::fake::output(0, "", ""),
                     crate::service::native::fake::output(0, "", ""),
                     crate::service::native::fake::output(5, "", "boom"),
                 ]
