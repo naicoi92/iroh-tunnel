@@ -132,6 +132,17 @@ pub(crate) fn exceeds_read_limit(total: usize, chunk: usize) -> bool {
     total.saturating_add(chunk) > MAX_VERIFIED_READ
 }
 
+/// Byte length of a `FILE_RENAME_INFO` buffer holding `name_units` UTF-16
+/// units: the fixed part up to the `FileName` offset, the name and a NUL,
+/// never below the struct's own size (which already holds one unit).
+pub(crate) fn rename_buffer_len(
+    struct_size: usize,
+    name_offset: usize,
+    name_units: usize,
+) -> usize {
+    (name_offset + (name_units + 1) * 2).max(struct_size)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Reparse {
@@ -433,6 +444,15 @@ mod tests {
         assert_eq!(text, "C:\\u\\s.toml has an access list that cannot be read");
         assert!(!text.contains("everyone"), "{text}");
         assert!(matches!(CliError::from(r), CliError::Permission(m) if m == text));
+    }
+
+    #[test]
+    fn rename_buffer_covers_name_and_nul() {
+        // x64 layout: 20-byte header padded to 24 bytes, struct size 24 + 2.
+        assert_eq!(rename_buffer_len(32, 20, 0), 32);
+        assert_eq!(rename_buffer_len(32, 20, 5), 32);
+        assert_eq!(rename_buffer_len(32, 20, 10), 42);
+        assert_eq!(rename_buffer_len(32, 20, 100), 222);
     }
 
     #[test]

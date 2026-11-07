@@ -87,6 +87,10 @@ fn permission(msg: String) -> anyhow::Error {
 }
 
 /// NUL-terminated UTF-16.
+fn wide_nul(units: &[u16]) -> Vec<u16> {
+    units.iter().copied().chain(Some(0)).collect()
+}
+
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
@@ -483,34 +487,48 @@ fn child_path(dir: &Descriptor, name: &str) -> Vec<u16> {
 
 /// A `FILE_RENAME_INFO` with its trailing name, aligned for the HANDLE it
 /// contains. Valid by construction for `SetFileInformationByHandle`.
+///
+/// `RootDirectory` is deliberately NULL and `FileName` is the full
+/// `\\?\`-prefixed destination path: measured on Windows, both
+/// `FileRenameInfoEx` and `FileRenameInfo` fail with ERROR_INVALID_PARAMETER
+/// (87) when `RootDirectory` is a directory handle, because the Win32 layer
+/// only accepts a NULL root. The handle-relative guarantee for the
+/// destination name is replaced by [`publish_with`] holding the verified
+/// directory chain (no ancestor or the directory itself can be renamed or
+/// replaced while held) and re-checking the destination after the rename.
 struct RenameInfo {
     buf: Vec<u64>,
     len: u32,
 }
 
 impl RenameInfo {
-    /// `flags` is `FILE_RENAME_FLAG_*` for `FileRenameInfoEx`; `None` builds
-    /// the legacy `FileRenameInfo` with `ReplaceIfExists = TRUE`.
-    fn new(dir: &OwnedHandle, name: &[u16], flags: Option<u32>) -> Self {
+    /// `path` is the NUL-less UTF-16 destination. `flags` is
+    /// `FILE_RENAME_FLAG_*` for `FileRenameInfoEx`; `None` builds the legacy
+    /// `FileRenameInfo` with `ReplaceIfExists = TRUE`.
+    fn new(path: &[u16], flags: Option<u32>) -> Self {
         let name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-        let name_bytes = std::mem::size_of_val(name);
-        let len = (name_offset + name_bytes + 2).max(std::mem::size_of::<FILE_RENAME_INFO>());
+        let name_bytes = std::mem::size_of_val(path);
+        let len = model::rename_buffer_len(
+            std::mem::size_of::<FILE_RENAME_INFO>(),
+            name_offset,
+            path.len(),
+        );
         let mut buf = vec![0u64; len.div_ceil(8)];
         let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         // SAFETY: `buf` is zeroed, 8-byte aligned and at least `len` bytes,
-        // which covers the fixed FILE_RENAME_INFO fields and `name` plus a
+        // which covers the fixed FILE_RENAME_INFO fields and `path` plus a
         // NUL at FileName; each write stays inside it.
         unsafe {
             match flags {
                 Some(f) => (*info).Anonymous.Flags = f,
                 None => (*info).Anonymous.ReplaceIfExists = true,
             }
-            (*info).RootDirectory = dir.as_raw_handle();
+            (*info).RootDirectory = std::ptr::null_mut();
             (*info).FileNameLength = name_bytes as u32;
             std::ptr::copy_nonoverlapping(
-                name.as_ptr(),
+                path.as_ptr(),
                 buf.as_mut_ptr().cast::<u8>().add(name_offset).cast::<u16>(),
-                name.len(),
+                path.len(),
             );
         }
         Self {
@@ -548,28 +566,34 @@ fn set_rename_info(
 type Rename<'a> =
     &'a mut dyn FnMut(&OwnedHandle, FILE_INFO_BY_HANDLE_CLASS, &RenameInfo) -> Result<(), u32>;
 
-/// Rename `temp` to `name` under `dir`, replacing whatever entry (including
-/// a planted link) is there: POSIX semantics first, the legacy class when
-/// the file system does not support them.
-fn rename_into(
-    temp: &OwnedHandle,
-    dir: &OwnedHandle,
-    name: &str,
-    rename: Rename,
-) -> io::Result<()> {
-    let name: Vec<u16> = name.encode_utf16().collect();
+/// Rename `temp` to the verbatim path `to` (no trailing NUL), replacing
+/// whatever entry (including a planted link) is there: POSIX semantics
+/// first, the legacy class when the file system does not support them.
+fn rename_into(temp: &OwnedHandle, to: &[u16], rename: Rename) -> io::Result<()> {
     let flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
-    let result = match rename(
-        temp,
-        FileRenameInfoEx,
-        &RenameInfo::new(dir, &name, Some(flags)),
-    ) {
+    let result = match rename(temp, FileRenameInfoEx, &RenameInfo::new(to, Some(flags))) {
         Err(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED) => {
-            rename(temp, FileRenameInfo, &RenameInfo::new(dir, &name, None))
+            rename(temp, FileRenameInfo, &RenameInfo::new(to, None))
         }
         other => other,
     };
     result.map_err(|code| io::Error::from_raw_os_error(code as i32))
+}
+
+/// After a rename: `path` must be a regular file, not a link or directory.
+fn ensure_regular_file(path: &[u16]) -> io::Result<()> {
+    let handle = open_raw(
+        path,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    )?;
+    let attrs = attributes(&handle)?;
+    if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return Err(io::Error::other("the published name is not a regular file"));
+    }
+    Ok(())
 }
 
 fn delete_on_close(file: &OwnedHandle) -> io::Result<()> {
@@ -623,14 +647,13 @@ fn write_all(file: &OwnedHandle, mut bytes: &[u8]) -> io::Result<()> {
 
 /// Atomically publish `bytes` as `dir\name` through a freshly verified
 /// directory chain. The temp file is created `CREATE_NEW` without following
-/// a reparse point and renamed over `name` relative to the held directory
-/// handle, so a link planted at either name is never written through. The
-/// temp file is deleted on any error.
+/// a reparse point and renamed over `name` while the verified chain is held, so a link
+/// planted at either name is never written through. The temp file is deleted on any error.
 ///
 /// # Errors
 ///
 /// [`CliError::Permission`] when the directory is no longer safe.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the status writer later
+#[cfg_attr(not(test), allow(dead_code))] // no consumer until the status writer (Task 8)
 pub(crate) fn publish(
     dir: &Path,
     trusted: &TrustedSet,
@@ -651,7 +674,7 @@ fn publish_with(
 ) -> Result<()> {
     let (name, temp) = (plain_name(name)?, plain_name(temp)?);
     let chain = verified(dir, LastAccess::WriteDir, trusted)?;
-    let (dir_handle, d) = chain.target()?;
+    let (_, d) = chain.target()?;
     if !d.is_dir {
         return Err(not_a("directory", d));
     }
@@ -666,7 +689,11 @@ fn publish_with(
     let result = write_all(&file, bytes)
         .with_context(|| format!("failed to write {temp} in {}", dir.display()))
         .and_then(|()| {
-            rename_into(&file, dir_handle, name, rename)
+            let to = child_path(d, name);
+            // `chain` is still held here, so `d` cannot be swapped.
+            let to = &to[..to.len() - 1];
+            rename_into(&file, to, rename)
+                .and_then(|()| ensure_regular_file(&wide_nul(to)))
                 .with_context(|| format!("failed to finalize {name} in {}", dir.display()))
         });
     if result.is_err() {
@@ -682,7 +709,7 @@ fn publish_with(
 /// # Errors
 ///
 /// [`CliError::Permission`] when the directory is no longer safe.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the status writer later
+#[cfg_attr(not(test), allow(dead_code))] // no consumer until the status writer (Task 8)
 pub(crate) fn remove_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<()> {
     let name = plain_name(name)?;
     let chain = verified(dir, LastAccess::WriteDir, trusted)?;
@@ -956,13 +983,23 @@ mod tests {
     fn held_ancestor_cannot_be_renamed() {
         let (tmp, _f) = fixture();
         let a = tmp.path().join("a");
-        let file = a.join("b").join("file");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let b = a.join("b");
+        let file = b.join("file");
+        std::fs::create_dir_all(&b).unwrap();
         std::fs::write(&file, "x").unwrap();
-        let a2 = tmp.path().join("a2");
-        let chain = open_chain(&file, LastAccess::Inspect).unwrap();
+        let (a2, b2, file2) = (tmp.path().join("a2"), a.join("b2"), b.join("file2"));
+        let leaf_chain = open_chain(&file, LastAccess::Inspect).unwrap();
         assert!(std::fs::rename(&a, &a2).is_err());
-        drop(chain);
+        assert!(std::fs::rename(&b, &b2).is_err());
+        assert!(std::fs::rename(&file, &file2).is_err());
+        drop(leaf_chain);
+        // A chain whose last element is the middle directory.
+        let mid_chain = open_chain(&b, LastAccess::Inspect).unwrap();
+        assert!(std::fs::rename(&b, &b2).is_err());
+        drop(mid_chain);
+        std::fs::rename(&file, &file2).unwrap();
+        std::fs::rename(&file2, &file).unwrap();
+        std::fs::rename(&b, &b2).unwrap();
         std::fs::rename(&a, &a2).unwrap();
     }
 
