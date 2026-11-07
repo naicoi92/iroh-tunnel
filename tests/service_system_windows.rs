@@ -5,6 +5,12 @@
 //! `skipped:` line otherwise, because they register services and create
 //! directories under `%ProgramFiles%` / `%ProgramData%`.
 //!
+//! ## Fixture root
+//!
+//! Config and state live under `%LOCALAPPDATA%` (the user's own profile
+//! volume), not `TEMP`: the product's trust check walks from the volume root,
+//! and the runner's TEMP is on `D:\`, which NETWORK SERVICE owns.
+//!
 //! ## Binary trust (R1)
 //!
 //! `service install --system` refuses a binary in a user-writable directory,
@@ -107,6 +113,12 @@ fn env_dir(var: &str, fallback: &str) -> PathBuf {
     PathBuf::from(std::env::var(var).unwrap_or_else(|_| fallback.into()))
 }
 
+/// The runner's own profile volume (`%LOCALAPPDATA%`), where the trust walk
+/// from the volume root succeeds.
+fn local_app_data() -> PathBuf {
+    PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set on Windows"))
+}
+
 /// One test's world: the trusted binary copy, machine and state directories, a
 /// config, and a guard that removes the service and every directory.
 struct Fixture {
@@ -130,7 +142,9 @@ impl Fixture {
         let exe = exe_dir.join("iroh-tunnel.exe");
         std::fs::copy(BIN, &exe)?;
         let fx = Self {
-            root: tempfile::tempdir()?,
+            root: tempfile::Builder::new()
+                .prefix("iroh-tunnel-e2e-")
+                .tempdir_in(local_app_data())?,
             suffix: format!("-e2e-{tag}"),
             exe_dir,
             exe,
@@ -223,6 +237,20 @@ impl Fixture {
         let mut args = flags.to_vec();
         args.extend(["--config", config]);
         args
+    }
+
+    /// Install, failing with stdout, stderr and the service log on error.
+    fn install_ok(&self, flags: &[&str]) -> Result<()> {
+        let out = self.install(flags)?;
+        ensure!(
+            out.status.success(),
+            "install: {}{}\nservice log {}: {}",
+            stdout(&out),
+            stderr(&out),
+            self.log_file().display(),
+            std::fs::read_to_string(self.log_file()).unwrap_or_else(|e| format!("<{e}>"))
+        );
+        Ok(())
     }
 
     fn install(&self, flags: &[&str]) -> Result<Output> {
@@ -385,13 +413,7 @@ async fn system_service_lifecycle() -> Result<()> {
     let fx = Fixture::new("lifecycle")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
 
-    let out = fx.install(&["--system"])?;
-    ensure!(
-        out.status.success(),
-        "install: {}{}",
-        stdout(&out),
-        stderr(&out)
-    );
+    fx.install_ok(&["--system"])?;
     let pid = wait_for_node(&fx, &node_id)?;
     let status = fx.service_ok("status", &["--system"])?;
     assert!(status.contains("is running"), "{status}");
@@ -457,13 +479,7 @@ async fn stop_pending_reported_while_draining() -> Result<()> {
         }
     });
     let node_id = fx.write_config(relay.as_ref(), echo_port)?;
-    let out = fx.install(&["--system"])?;
-    ensure!(
-        out.status.success(),
-        "install: {}{}",
-        stdout(&out),
-        stderr(&out)
-    );
+    fx.install_ok(&["--system"])?;
     wait_for_node(&fx, &node_id)?;
 
     // An access in this process, tunnelling to the service.
@@ -563,13 +579,7 @@ async fn elevated_without_flag_targets_system() -> Result<()> {
     let fx = Fixture::new("noflag")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
 
-    let out = fx.install(&[])?;
-    ensure!(
-        out.status.success(),
-        "install: {}{}",
-        stdout(&out),
-        stderr(&out)
-    );
+    fx.install_ok(&[])?;
     assert!(fx.service_exists(), "the service must exist");
     assert!(!fx.task_exists(), "no scheduled task may exist");
     let pid = wait_for_node(&fx, &node_id)?;
@@ -599,13 +609,7 @@ async fn missing_service_verbs() -> Result<()> {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
     // Stopping an already stopped service is fine.
-    let out = fx.install(&["--system"])?;
-    ensure!(
-        out.status.success(),
-        "install: {}{}",
-        stdout(&out),
-        stderr(&out)
-    );
+    fx.install_ok(&["--system"])?;
     fx.service_ok("stop", &["--system"])?;
     let again = fx.service("stop", &["--system"])?;
     assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
@@ -643,13 +647,7 @@ async fn crash_is_restarted() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("crash")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    let out = fx.install(&["--system"])?;
-    ensure!(
-        out.status.success(),
-        "install: {}{}",
-        stdout(&out),
-        stderr(&out)
-    );
+    fx.install_ok(&["--system"])?;
     let first = wait_for_node(&fx, &node_id)?;
 
     fx.set_service_env(&[("IROH_TUNNEL_TEST_EXIT_AFTER_MS", "1500")])?;
