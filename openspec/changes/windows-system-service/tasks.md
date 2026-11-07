@@ -27,7 +27,7 @@ Traceability:
 
 ## 1. Spike: measure the Windows assumptions (design D1)
 
-- [ ] 1.1 Add the ignored test `tests/windows_trust_probe.rs` (cfg windows, `IROH_TUNNEL_E2E_SERVICE=1`). It prints SDDL, owner and reparse attributes for:
+- [x] 1.1 Add the ignored test `tests/windows_trust_probe.rs` (cfg windows, `IROH_TUNNEL_E2E_SERVICE=1`). It prints SDDL, owner and reparse attributes for:
   - every component of the user's `%LOCALAPPDATA%\iroh-tunnel` chain;
   - `C:\` and `C:\Program Files`;
   - a directory created the way `install.ps1` creates `$BinDir`;
@@ -35,7 +35,7 @@ Traceability:
   - the elevated and filtered token user SIDs.
 
   It also checks whether `SetFileInformationByHandle(FileRenameInfoEx, POSIX_SEMANTICS)` succeeds. Run it via `gh workflow run e2e.yml --ref feat/windows-system-service` on x64 (and ARM64 if available).
-- [ ] 1.2 Append a "Measurements" section to `design.md` with the raw results and a verdict for brainstorm assumptions 1-4 and the rename open question. If an assumption is contradicted, stop and send an Inbox question to the owner before groups 3, 6 and 9 continue.
+- [x] 1.2 Append a "Measurements" section to `design.md` with the raw results and a verdict for brainstorm assumptions 1-4 and the rename open question. If an assumption is contradicted, stop and send an Inbox question to the owner before groups 3, 6 and 9 continue.
 
 ## 2. Scope rules and elevation on Windows
 
