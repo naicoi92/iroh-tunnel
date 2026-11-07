@@ -23,8 +23,10 @@ pub(crate) use win32::{
 
 /// Serialised, scoped process-environment edits shared by every test that
 /// sets the service variables (the environment is global).
-#[cfg(all(test, windows))]
+#[allow(clippy::mixed_attributes_style)]
+#[cfg(test)]
 pub(crate) mod test_env {
+    #![cfg(windows)]
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard};
 
