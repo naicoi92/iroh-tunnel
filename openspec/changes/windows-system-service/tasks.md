@@ -69,7 +69,7 @@ Traceability:
 
 ## 4. Pin, installing user and accounts (design D4)
 
-- [ ] 4.1 Change `Pin.uid` to `Pin.owner: PinOwner { Uid, Sid }`. The record text emits `uid=` or `sid=`; `find` parses both, and existing Unix records still parse. Update `account_name` to take `&PinOwner` (`LookupAccountSidW` on Windows) and port `src/cli_service.rs`. Unit tests cover round trip, legacy record and malformed record. (SSM: Registration pins the owner — Pin in the script; Pin in the Windows service)
+- [x] 4.1 Change `Pin.uid` to `Pin.owner: PinOwner { Uid, Sid }`. The record text emits `uid=` or `sid=`; `find` parses both, and existing Unix records still parse. Update `account_name` to take `&PinOwner` (`LookupAccountSidW` on Windows) and port `src/cli_service.rs`. Unit tests cover round trip, legacy record and malformed record. (SSM: Registration pins the owner — Pin in the script; Pin in the Windows service)
 - [ ] 4.2 Windows installing user: take the token user SID, resolve `%LOCALAPPDATA%` with `SHGetKnownFolderPath(FOLDERID_LocalAppData, token)`, and cross-check the `--config` directory owner:
   - a different user SID gives exit 2 naming both accounts;
   - Administrators, SYSTEM or TrustedInstaller defers to the token user.
