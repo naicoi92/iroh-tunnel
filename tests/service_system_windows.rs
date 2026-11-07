@@ -253,13 +253,15 @@ impl Fixture {
 
     /// Deterministic `PATH`: the protected copy first, then system directories.
     fn pinned_path(&self) -> std::ffi::OsString {
+        self.path_starting_with(self.exe.parent().expect("copied exe has a parent"))
+    }
+
+    /// Deterministic `PATH` whose first entry is `first`.
+    fn path_starting_with(&self, first: &Path) -> std::ffi::OsString {
         let root =
             PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()));
         let dirs = [
-            self.exe
-                .parent()
-                .expect("copied exe has a parent")
-                .to_path_buf(),
+            first.to_path_buf(),
             root.join("System32"),
             root.clone(),
             root.join(r"System32\WindowsPowerShell\v1.0"),
@@ -779,5 +781,417 @@ async fn rollback_when_start_fails() -> Result<()> {
         fx.log_file().display()
     );
     fx.wait_absent()?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Trust refusals (Task 13, commit C)
+// ---------------------------------------------------------------------------
+
+/// Everyone (`S-1-1-0`) with modify rights, as `icacls` takes it.
+const EVERYONE_MODIFY: &str = "*S-1-1-0:M";
+const EVERYONE: &str = "*S-1-1-0";
+
+fn icacls(args: &[&str]) -> Result<()> {
+    let out = Command::new("icacls").args(args).output()?;
+    ensure!(
+        out.status.success(),
+        "icacls {args:?}: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    Ok(())
+}
+
+/// Owner SID and sorted access rules (SID, rights, type, inherited) of
+/// `path`. SIDs, not SDDL substrings: the runner is the built-in
+/// Administrator, which SDDL abbreviates.
+fn acl_state(path: &Path) -> Result<String> {
+    let p = path.display();
+    let script = format!(
+        "$a = Get-Acl -LiteralPath '{p}'; \
+         'owner=' + $a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; \
+         $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | \
+         ForEach-Object {{ '{{0}}|{{1}}|{{2}}|{{3}}' -f $_.IdentityReference.Value, \
+         $_.FileSystemRights, $_.AccessControlType, $_.IsInherited }} | Sort-Object"
+    );
+    let out = pwsh(&script)?;
+    ensure!(out.status.success(), "Get-Acl {p}: {}", stderr(&out));
+    Ok(stdout(&out).replace("\r\n", "\n"))
+}
+
+/// Remove the Everyone grant from `path` when dropped.
+struct GrantGuard(PathBuf);
+
+impl GrantGuard {
+    fn everyone_modify(path: &Path) -> Result<Self> {
+        let guard = Self(path.to_path_buf());
+        icacls(&[path.to_str().unwrap(), "/grant", EVERYONE_MODIFY])?;
+        Ok(guard)
+    }
+}
+
+impl Drop for GrantGuard {
+    fn drop(&mut self) {
+        let _ = icacls(&[self.0.to_str().unwrap(), "/remove", EVERYONE]);
+    }
+}
+
+/// Lowercased, `\`-separated, without a verbatim prefix.
+fn normalised(text: &str) -> String {
+    text.replace(r"\\?\", "").replace('/', r"\").to_lowercase()
+}
+
+fn log_text(fx: &Fixture) -> String {
+    std::fs::read_to_string(fx.log_file()).unwrap_or_default()
+}
+
+fn wait_for_log(fx: &Fixture, needle: &str) -> Result<()> {
+    wait_for(&format!("{needle:?} in the service log"), || {
+        normalised(&log_text(fx)).contains(&normalised(needle))
+    })
+}
+
+fn sc_running(fx: &Fixture) -> bool {
+    stdout(&fx.sc("query")).contains("RUNNING")
+}
+
+/// The service must not be Running at any sample during `window`.
+fn assert_never_running(fx: &Fixture, window: Duration) {
+    let end = Instant::now() + window;
+    while Instant::now() < end {
+        assert!(
+            !sc_running(fx),
+            "the service reached Running:\n{}",
+            stdout(&fx.sc("query"))
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Retry `start --system` until the service is Running: after a refusal the
+/// SCM recovery action may start it on its own between two attempts.
+fn start_until_running(fx: &Fixture) -> Result<()> {
+    wait_for("the service to run after start", || {
+        if !sc_running(fx) {
+            let _ = fx.service("start", &["--system"]);
+        }
+        sc_running(fx)
+    })
+}
+
+fn install_with_env(fx: &Fixture, envs: &[(&str, &str)]) -> Result<Output> {
+    let config = fx.config();
+    let mut command = fx.command(&[
+        "serve",
+        "service",
+        "install",
+        "--system",
+        "--config",
+        config.to_str().unwrap(),
+    ]);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    Ok(command.output()?)
+}
+
+fn assert_exit(out: &Output, code: i32) {
+    assert_eq!(
+        out.status.code(),
+        Some(code),
+        "{}{}",
+        stdout(out),
+        stderr(out)
+    );
+}
+
+#[tokio::test]
+async fn unsafe_config_refused_then_fixed() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("unsafecfg")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+    let before = acl_state(&fx.config())?;
+
+    let grant = GrantGuard::everyone_modify(&fx.config())?;
+    // `restart` waits for Running, so the CLI itself fails.
+    let out = fx.service("restart", &["--system"])?;
+    assert!(
+        !out.status.success(),
+        "restart must fail: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert_never_running(&fx, Duration::from_secs(3));
+    wait_for_log(&fx, "permission error")?;
+    wait_for_log(&fx, fx.config().to_str().unwrap())?;
+    assert_ne!(acl_state(&fx.config())?, before, "the grant is in place");
+
+    drop(grant);
+    start_until_running(&fx)?;
+    wait_for_node(&fx, &node_id)?;
+    assert_eq!(
+        acl_state(&fx.config())?,
+        before,
+        "the product must not repair or alter the config ACL"
+    );
+    Ok(())
+}
+
+/// Removes a junction (not its target) when dropped.
+struct JunctionGuard(PathBuf);
+
+impl Drop for JunctionGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("cmd")
+            .args(["/c", "rmdir"])
+            .arg(&self.0)
+            .output();
+    }
+}
+
+#[tokio::test]
+async fn junction_in_config_path_refused() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("junction")?;
+    fx.write_config(relay.as_ref(), 9)?;
+    let real = fx.base().join("real");
+    std::fs::create_dir(&real)?;
+    std::fs::copy(fx.config(), real.join("serve.toml"))?;
+    let link = fx.base().join("link");
+    let _guard = JunctionGuard(link.clone());
+    let made = Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&real)
+        .output()?;
+    ensure!(made.status.success(), "mklink: {}", stdout(&made));
+
+    let out = fx.install_config(&link.join("serve.toml"))?;
+    assert_exit(&out, 3);
+    assert!(stderr(&out).contains("reparse point"), "{}", stderr(&out));
+    assert!(!fx.service_exists(), "no service may be registered");
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_config_never_runs() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("invalidcfg")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+    let before = acl_state(&fx.config())?;
+
+    // Overwriting in place keeps the owner and the DACL.
+    std::fs::write(fx.config(), "[node\nthis is = = not toml\n")?;
+    let out = fx.service("restart", &["--system"])?;
+    assert!(!out.status.success(), "restart must fail");
+    assert_never_running(&fx, Duration::from_secs(3));
+    wait_for_log(&fx, "failed to parse")?;
+    assert_eq!(acl_state(&fx.config())?, before, "owner and DACL unchanged");
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_key_never_written() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("emptykey")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    // Install is allowed to refuse an empty key, so empty it afterwards.
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+    let text = std::fs::read_to_string(fx.config())?;
+    let emptied = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("secret_key") {
+                "secret_key = \"\""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(emptied, text, "the key line must have been replaced");
+    std::fs::write(fx.config(), &emptied)?;
+    let bytes = std::fs::read(fx.config())?;
+
+    let out = fx.service("restart", &["--system"])?;
+    assert!(!out.status.success(), "restart must fail");
+    assert_never_running(&fx, Duration::from_secs(3));
+    wait_for_log(&fx, "config keygen")?;
+    assert_eq!(
+        std::fs::read(fx.config())?,
+        bytes,
+        "the service must never write a generated key"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinless_service_refused() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("pinless")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+
+    svc::remove_service_env(&fx.name(), "IROH_TUNNEL_TRUSTED_SID")?;
+    let out = fx.service("restart", &["--system"])?;
+    assert!(!out.status.success(), "restart must fail");
+    assert_never_running(&fx, Duration::from_secs(3));
+    wait_for_log(&fx, "service install --system")?;
+    Ok(())
+}
+
+const VERIFY_MACHINE_DIR: (&str, &str) = ("IROH_TUNNEL_TEST_VERIFY_MACHINE_DIR", "1");
+
+/// Give the machine directory a known-trusted DACL (SYSTEM and
+/// Administrators only), so a later Everyone grant is the only difference.
+fn protect_machine_dir(fx: &Fixture) -> Result<()> {
+    icacls(&[
+        fx.machine.to_str().unwrap(),
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+    ])
+}
+
+#[tokio::test]
+async fn untrusted_machine_dir_refused() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+
+    // (a) A directory made by someone else, writable by Everyone, at install.
+    {
+        let fx = Fixture::new("machdir-a")?;
+        fx.write_config(relay.as_ref(), 9)?;
+        protect_machine_dir(&fx)?;
+        let _grant = GrantGuard::everyone_modify(&fx.machine)?;
+        let rules = acl_state(&fx.machine)?;
+        let out = install_with_env(&fx, &[VERIFY_MACHINE_DIR])?;
+        assert_exit(&out, 3);
+        assert!(
+            normalised(&stderr(&out)).contains(&normalised(fx.machine.to_str().unwrap())),
+            "the refusal must name {}: {}",
+            fx.machine.display(),
+            stderr(&out)
+        );
+        assert!(!fx.service_exists(), "no service may be registered");
+        assert_eq!(acl_state(&fx.machine)?, rules, "never repaired");
+    }
+
+    // (b) A trusted directory that becomes untrusted after install.
+    let fx = Fixture::new("machdir-b")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    protect_machine_dir(&fx)?;
+    let out = install_with_env(&fx, &[VERIFY_MACHINE_DIR])?;
+    ensure!(
+        out.status.success(),
+        "install: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    // The service checks the directory too; the CLI below does not.
+    fx.set_service_env(&[VERIFY_MACHINE_DIR])?;
+    wait_for_node(&fx, &node_id)?;
+    fx.service_ok("stop", &["--system"])?;
+    wait_for("the status file to go", || !fx.status_file().exists())?;
+    let log_len = std::fs::metadata(fx.log_file())?.len();
+
+    let _grant = GrantGuard::everyone_modify(&fx.machine)?;
+    let rules = acl_state(&fx.machine)?;
+    let out = fx.service("start", &["--system"])?;
+    assert!(!out.status.success(), "start must fail");
+    assert_never_running(&fx, Duration::from_secs(3));
+    // Its log lives in the untrusted directory, so the service writes none.
+    assert_eq!(
+        std::fs::metadata(fx.log_file())?.len(),
+        log_len,
+        "no log may be written into an untrusted directory"
+    );
+    assert!(fx.machine.join("logs").exists());
+    assert_eq!(acl_state(&fx.machine)?, rules, "never repaired");
+    Ok(())
+}
+
+#[tokio::test]
+async fn binary_check_at_install_and_start() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+
+    // (a) The `iroh-tunnel` first on PATH sits in a directory the user can
+    // write: that is also "binary writable by the pinned user".
+    {
+        let fx = Fixture::new("binary-a")?;
+        fx.write_config(relay.as_ref(), 9)?;
+        let user_bin = fx.base().join("userbin");
+        std::fs::create_dir(&user_bin)?;
+        let copy = user_bin.join("iroh-tunnel.exe");
+        std::fs::copy(BIN, &copy)?;
+        let config = fx.config();
+        let out = fx
+            .command_of(
+                &copy,
+                &[
+                    "serve",
+                    "service",
+                    "install",
+                    "--system",
+                    "--config",
+                    config.to_str().unwrap(),
+                ],
+            )
+            .env("PATH", fx.path_starting_with(&user_bin))
+            .output()?;
+        assert_exit(&out, 3);
+        assert!(
+            normalised(&stderr(&out)).contains(&normalised(copy.to_str().unwrap())),
+            "the refusal must name {}: {}",
+            copy.display(),
+            stderr(&out)
+        );
+        assert!(!fx.service_exists(), "no service may be registered");
+    }
+
+    // (b) A protected binary that becomes writable after install.
+    let fx = Fixture::new("binary-b")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+    fx.service_ok("stop", &["--system"])?;
+    let _grant = GrantGuard::everyone_modify(&fx.exe)?;
+    let out = fx.service("start", &["--system"])?;
+    assert_exit(&out, 3);
+    assert!(
+        normalised(&stderr(&out)).contains(&normalised(fx.exe.to_str().unwrap())),
+        "the refusal must name {}: {}",
+        fx.exe.display(),
+        stderr(&out)
+    );
+    assert!(svc::service_stopped_or_absent(&fx.name()));
     Ok(())
 }

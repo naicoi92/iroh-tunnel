@@ -105,6 +105,19 @@ pub fn set_service_env(name: &str, extra: &[(&str, &str)]) -> Result<()> {
         entries.retain(|e| !e.starts_with(&format!("{key}=")));
         entries.push(format!("{key}={value}"));
     }
+    write_service_env(name, &entries)
+}
+
+/// Remove `key` from the service's `Environment`; applies from the next start.
+pub fn remove_service_env(name: &str, key: &str) -> Result<()> {
+    let mut entries = service_env(name)?;
+    let before = entries.len();
+    entries.retain(|e| !e.starts_with(&format!("{key}=")));
+    ensure!(entries.len() < before, "{key} is not in the environment");
+    write_service_env(name, &entries)
+}
+
+fn write_service_env(name: &str, entries: &[String]) -> Result<()> {
     let out = Command::new("reg")
         .args([
             "add",
