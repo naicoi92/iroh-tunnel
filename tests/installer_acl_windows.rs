@@ -54,21 +54,101 @@ fn pwsh(script: &str) -> Result<Output> {
         .context("spawn pwsh")
 }
 
+const TRUSTED_INSTALLER: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+const WRITE_BITS: [i64; 8] = [
+    0x2, 0x4, 0x40, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000,
+];
+
 fn sddl(dir: &Path) -> Result<String> {
     let out = pwsh(&format!("(Get-Acl -LiteralPath '{}').Sddl", dir.display()))?;
     ensure!(out.status.success(), "Get-Acl failed: {out:?}");
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-fn test_dir() -> PathBuf {
-    let base = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
-    PathBuf::from(base).join(format!("iroh-tunnel-test-{}", std::process::id()))
+/// Per-test directory under `base` (default `%ProgramFiles%`).
+fn test_dir_in(base: Option<&Path>, name: &str) -> PathBuf {
+    let base = base.map(Path::to_path_buf).unwrap_or_else(|| {
+        PathBuf::from(std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into()))
+    });
+    base.join(format!("iroh-tunnel-test-{}-{name}", std::process::id()))
+}
+
+fn test_dir(name: &str) -> PathBuf {
+    test_dir_in(None, name)
 }
 
 fn current_user_sid() -> Result<String> {
     let out = pwsh("[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value")?;
     ensure!(out.status.success(), "{out:?}");
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// `(sid, rights, type)` for every explicit and inherited rule.
+fn rules(dir: &Path) -> Result<Vec<(String, i64, String)>> {
+    let out = pwsh(&format!(
+        "(Get-Acl -LiteralPath '{}').GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | ForEach-Object {{ \"$($_.IdentityReference.Value)|$([int]$_.FileSystemRights)|$($_.AccessControlType)\" }}",
+        dir.display()
+    ))?;
+    ensure!(out.status.success(), "Get-Acl failed: {out:?}");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut p = l.trim().split('|');
+            let (sid, rights, kind) = (p.next(), p.next(), p.next());
+            match (sid, rights, kind) {
+                (Some(s), Some(r), Some(k)) => Ok((s.to_owned(), r.parse()?, k.to_owned())),
+                _ => anyhow::bail!("bad rule line: {l}"),
+            }
+        })
+        .collect()
+}
+
+fn owner_sid(dir: &Path) -> Result<String> {
+    let out = pwsh(&format!(
+        "(Get-Acl -LiteralPath '{}').GetOwner([Security.Principal.SecurityIdentifier]).Value",
+        dir.display()
+    ))?;
+    ensure!(out.status.success(), "Get-Acl failed: {out:?}");
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// The whitelist DACL: only the four known SIDs, Users read-only, owner BA,
+/// and never the installing user.
+fn assert_protected(dir: &Path) -> Result<()> {
+    let allowed = [
+        "S-1-5-18",
+        "S-1-5-32-544",
+        TRUSTED_INSTALLER,
+        "S-1-5-32-545",
+    ];
+    let me = current_user_sid()?;
+    let rules = rules(dir)?;
+    ensure!(!rules.is_empty(), "no rules read for {}", dir.display());
+    for (sid, rights, kind) in &rules {
+        assert_ne!(*sid, me, "an ACE names the installing user");
+        if kind == "Allow" {
+            assert!(
+                allowed.contains(&sid.as_str()),
+                "unexpected Allow SID {sid}"
+            );
+        }
+        if sid == "S-1-5-32-545" {
+            for bit in WRITE_BITS {
+                assert_eq!(
+                    rights & bit,
+                    0,
+                    "Users rule {rights:#x} has write bit {bit:#x}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        owner_sid(dir)?,
+        "S-1-5-32-544",
+        "owner must be Administrators"
+    );
+    Ok(())
 }
 
 /// Serve a release and run `install.ps1 -Yes -BinDir dir` against it.
@@ -101,27 +181,53 @@ fn installer_creates_a_directory_that_passes_the_binary_check() -> Result<()> {
     if !enabled() {
         return Ok(());
     }
-    let dir = test_dir();
+    let dir = test_dir("creates");
     let _guard = DirGuard(dir.clone());
 
     let out = run_installer(&dir)?;
     ensure!(out.status.success(), "install.ps1 failed: {out:?}");
 
     iroh_tunnel_host::service::__test_verify_binary(&dir.join("iroh-tunnel.exe"))?;
-    let sddl = sddl(&dir)?;
-    assert!(
-        sddl.starts_with("O:BA"),
-        "owner must be Administrators: {sddl}"
-    );
-    let me = current_user_sid()?;
-    assert!(
-        !sddl.contains(&me),
-        "an ACE names the installing user: {sddl}"
-    );
-    assert!(
-        !sddl.contains(";;;CO)"),
-        "an ACE names CREATOR OWNER: {sddl}"
-    );
+    assert_protected(&dir)
+}
+
+/// I-1 regression: a parent that grants Users modify must not leak into the
+/// new directory.
+#[test]
+fn installer_ignores_a_parent_that_grants_users_modify() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let pd = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
+    let parent = test_dir_in(Some(Path::new(&pd)), "parent");
+    let _parent_guard = DirGuard(parent.clone());
+    std::fs::create_dir(&parent)?;
+    let out = pwsh(&format!(
+        "icacls '{}' /grant '*S-1-5-32-545:(OI)(CI)M'",
+        parent.display()
+    ))?;
+    ensure!(out.status.success(), "icacls failed: {out:?}");
+    let dir = parent.join("bin");
+
+    let out = run_installer(&dir)?;
+    ensure!(out.status.success(), "install.ps1 failed: {out:?}");
+
+    assert_protected(&dir)
+}
+
+#[test]
+fn installer_refuses_a_missing_parent_and_creates_nothing() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let parent = test_dir("missing-parent");
+    let _guard = DirGuard(parent.clone());
+    let dir = parent.join("bin");
+
+    let out = run_installer(&dir)?;
+    assert!(!out.status.success(), "must fail: {out:?}");
+    assert!(!parent.exists(), "parent was created");
+    assert!(!dir.exists(), "directory was created");
     Ok(())
 }
 
@@ -130,7 +236,7 @@ fn installer_leaves_an_existing_directory_untouched() -> Result<()> {
     if !enabled() {
         return Ok(());
     }
-    let dir = test_dir();
+    let dir = test_dir("existing");
     let _guard = DirGuard(dir.clone());
     std::fs::create_dir(&dir)?;
     let before = sddl(&dir)?;

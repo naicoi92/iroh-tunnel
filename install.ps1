@@ -168,31 +168,62 @@ function Test-OnPath([string]$Path, [string]$Dir) {
 # --- install directory ------------------------------------------------------
 
 # Creates a directory only SYSTEM, Administrators and TrustedInstaller can
-# change: the parent's rules minus the creating user and CREATOR OWNER (which
-# would hand the creator full control), owned by Administrators.
+# change, owned by Administrators. The DACL is built from scratch as a
+# whitelist and never reads the parent's ACL: a copy of the parent's rules (a
+# blacklist of what to skip) leaks whatever the parent grants, for example the
+# Users delete-child right under ProgramData. Users get read and execute only,
+# so ordinary accounts can still run the installed programs.
+#
+# The directory is created together with its security descriptor, so there is
+# no window with inherited rules: PowerShell 7 (.NET) uses
+# FileSystemAclExtensions.Create, Windows PowerShell 5.1 (.NET Framework) uses
+# the Directory.CreateDirectory(path, security) overload. The parent must
+# already exist, so no unprotected intermediate directory is ever created.
 function New-ProtectedBinDir {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Private helper; the installer honours -DryRun before calling it.')]
     param([string]$Dir)
 
-    New-Item -ItemType Directory -Path $Dir | Out-Null
+    $parent = Split-Path -LiteralPath $Dir -Parent
+    if (-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        Fail "the parent of -BinDir must exist: $Dir"
+    }
+    $created = $false
     try {
-        $parentAcl = Get-Acl -LiteralPath (Split-Path -LiteralPath $Dir -Parent)
+        $admins = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
         $sec = New-Object System.Security.AccessControl.DirectorySecurity
         $sec.SetAccessRuleProtection($true, $false)
-        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        foreach ($rule in $parentAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-            $sid = $rule.IdentityReference.Value
-            if ($sid -eq $me -or $sid -eq 'S-1-3-0') { continue }
+        $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        $none = [System.Security.AccessControl.PropagationFlags]::None
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') {
             $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                        $rule.IdentityReference, $rule.FileSystemRights, $rule.InheritanceFlags,
-                        $rule.PropagationFlags, $rule.AccessControlType)))
+                        ([System.Security.Principal.SecurityIdentifier]$sid), $full, $inherit, $none, $allow)))
         }
-        $sec.SetOwner([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544')
-        Set-Acl -LiteralPath $Dir -AclObject $sec
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    ([System.Security.Principal.SecurityIdentifier]'S-1-5-32-545'),
+                    [System.Security.AccessControl.FileSystemRights]'ReadAndExecute, Synchronize', $inherit, $none, $allow)))
+        $sec.SetOwner($admins)
+
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($Dir), $sec) | Out-Null
+        }
+        else {
+            [System.IO.Directory]::CreateDirectory($Dir, $sec) | Out-Null
+        }
+        $created = $true
+
+        $owner = (Get-Acl -LiteralPath $Dir).GetOwner([System.Security.Principal.SecurityIdentifier])
+        if ($owner -ne $admins) {
+            # Creation may keep the caller as owner; set it explicitly, then check.
+            Set-Acl -LiteralPath $Dir -AclObject $sec
+            $owner = (Get-Acl -LiteralPath $Dir).GetOwner([System.Security.Principal.SecurityIdentifier])
+            if ($owner -ne $admins) { throw "owner is $owner, expected Administrators" }
+        }
     }
     catch {
         $reason = $_.Exception.Message
-        Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
+        if ($created) { Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue }
         Fail "cannot protect $Dir ($reason). Rerun from an elevated PowerShell (Run as administrator)."
     }
 }
@@ -236,7 +267,7 @@ function Install-IrohTunnel {
         # A parent we cannot write to fails here; the helper removes what it made.
         try { New-ProtectedBinDir $BinDir }
         catch [InstallError] { throw }
-        catch { Fail "cannot write to $BinDir. Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
+        catch { Fail "cannot write to $BinDir ($($_.Exception.Message)). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
     }
     try {
         $probe = Join-Path $BinDir ".write-test.$PID"
@@ -244,8 +275,9 @@ function Install-IrohTunnel {
         Remove-Item -LiteralPath $probe -Force
     }
     catch {
+        $reason = $_.Exception.Message
         if (-not $binDirExisted) { Remove-Item -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue }
-        Fail "cannot write to $BinDir. Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR."
+        Fail "cannot write to $BinDir ($reason). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR."
     }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "iroh-tunnel-install-$([Guid]::NewGuid().ToString('N'))"
