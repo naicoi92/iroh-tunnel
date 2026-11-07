@@ -67,6 +67,7 @@ jobs:
         run: |
           cargo test --all-features --locked --test windows_trust_probe -- --nocapture
           cargo test -p iroh-tunnel-host --all-features --locked --lib -- --nocapture --test-threads=1
+          cargo test --all-features --locked --test installer_acl_windows -- --nocapture --test-threads=1
       # The image tag must match the `iroh` version in Cargo.lock.
       - name: Start self-hosted relay
         if: ${{ !cancelled() && matrix.name == 'linux' }}
