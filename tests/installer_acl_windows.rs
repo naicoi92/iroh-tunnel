@@ -153,6 +153,10 @@ fn assert_protected(dir: &Path) -> Result<()> {
 
 /// Serve a release and run `install.ps1 -Yes -BinDir dir` against it.
 fn run_installer(dir: &Path) -> Result<Output> {
+    run_installer_with(dir, &[])
+}
+
+fn run_installer_with(dir: &Path, env: &[(&str, &str)]) -> Result<Output> {
     let releases = tempfile::tempdir()?;
     let exes: Vec<(&str, String, &[u8])> = EXES
         .iter()
@@ -172,6 +176,7 @@ fn run_installer(dir: &Path) -> Result<Output> {
         .env("IROH_TUNNEL_BASE_URL", &server.url)
         .env("IROH_TUNNEL_TARGET", target())
         .env("IROH_TUNNEL_PATH_FILE", scratch.path().join("path.txt"))
+        .envs(env.iter().copied())
         .output()
         .context("spawn install.ps1")
 }
@@ -245,5 +250,33 @@ fn installer_leaves_an_existing_directory_untouched() -> Result<()> {
     ensure!(out.status.success(), "install.ps1 failed: {out:?}");
 
     assert_eq!(sddl(&dir)?, before);
+    Ok(())
+}
+
+/// A non-elevated session keeps the plain behaviour: default access, missing
+/// parents created. The runner is elevated, so the installer is told to treat
+/// the session as not elevated (a test hook that can only skip protection).
+#[test]
+fn non_elevated_install_creates_a_plain_directory() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let parent = test_dir("plain");
+    let _guard = DirGuard(parent.clone());
+    let dir = parent.join("bin");
+
+    let out = run_installer_with(&dir, &[("IROH_TUNNEL_TEST_ASSUME_NOT_ELEVATED", "1")])?;
+    ensure!(out.status.success(), "install.ps1 failed: {out:?}");
+
+    assert!(dir.join("iroh-tunnel.exe").is_file(), "binary missing");
+    // An elevated token owns new objects as Administrators by default, so the
+    // owner alone cannot tell; the protected DACL (inheritance cut) can.
+    let out = pwsh(&format!(
+        "(Get-Acl -LiteralPath '{}').AreAccessRulesProtected",
+        dir.display()
+    ))?;
+    ensure!(out.status.success(), "Get-Acl failed: {out:?}");
+    let protected = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    ensure!(protected == "False", "directory was protected: {protected}");
     Ok(())
 }

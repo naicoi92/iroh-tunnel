@@ -34,6 +34,9 @@ Environment:
   IROH_TUNNEL_PROMPT_INPUT  read answers from this file instead of the console
   IROH_TUNNEL_PATH_FILE     keep the machine PATH in this file instead of the
                             registry (used by tests)
+  IROH_TUNNEL_TEST_ASSUME_NOT_ELEVATED  =1 treats the session as not elevated
+                            (used by tests; it can only skip the install
+                            directory protection, never add or weaken it)
 
 .PARAMETER Version
 Install release X (for example 1.2.3) instead of the latest stable release.
@@ -179,11 +182,17 @@ function Test-OnPath([string]$Path, [string]$Dir) {
 # FileSystemAclExtensions.Create, Windows PowerShell 5.1 (.NET Framework) uses
 # the Directory.CreateDirectory(path, security) overload. The parent must
 # already exist, so no unprotected intermediate directory is ever created.
+function Test-Elevated {
+    # Test hook: may only turn protection off, matching a real non-elevated run.
+    if ($env:IROH_TUNNEL_TEST_ASSUME_NOT_ELEVATED -eq '1') { return $false }
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function New-ProtectedBinDir {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Private helper; the installer honours -DryRun before calling it.')]
     param([string]$Dir)
 
-    $parent = Split-Path -LiteralPath $Dir -Parent
+    $parent = [System.IO.Path]::GetDirectoryName($Dir)
     if (-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
         Fail "the parent of -BinDir must exist: $Dir"
     }
@@ -264,10 +273,20 @@ function Install-IrohTunnel {
     $binDirExisted = Test-Path -LiteralPath $BinDir
     $completed = $false
     if (-not $binDirExisted) {
-        # A parent we cannot write to fails here; the helper removes what it made.
-        try { New-ProtectedBinDir $BinDir }
-        catch [InstallError] { throw }
-        catch { Fail "cannot write to $BinDir ($($_.Exception.Message)). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
+        # Only an elevated session protects the new directory: it is the one
+        # that can create it under Program Files and own it as Administrators.
+        # A non-elevated session keeps the plain behaviour (default access,
+        # missing parents created) so a per-user -BinDir keeps working.
+        if (Test-Elevated) {
+            # A parent we cannot write to fails here; the helper removes what it made.
+            try { New-ProtectedBinDir $BinDir }
+            catch [InstallError] { throw }
+            catch { Fail "cannot write to $BinDir ($($_.Exception.Message)). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
+        }
+        else {
+            try { New-Item -ItemType Directory -Force -Path $BinDir | Out-Null }
+            catch { Fail "cannot write to $BinDir ($($_.Exception.Message)). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
+        }
     }
     try {
         $probe = Join-Path $BinDir ".write-test.$PID"
