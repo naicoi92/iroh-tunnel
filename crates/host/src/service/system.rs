@@ -167,43 +167,15 @@ pub fn resolve_target_account(
     }))
 }
 
-/// Whether an install may replace the existing registration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RetargetDecision {
-    Proceed,
-    Needs {
-        previous: Option<Pin>,
-        proposed: Pin,
-    },
-}
+pub(crate) use super::pin::RetargetDecision;
 
-/// Pure retarget policy: nothing installed or the same user proceeds; another
-/// owner (or an unpinned registration) proceeds only with consent that matches
-/// the current registration and the proposed pin.
+/// Pure retarget policy for a Unix [`Target`]; see [`super::pin::retarget_decision_for`].
 pub fn retarget_decision(
     existing: Option<&str>,
     target: &Target,
     consent: Option<&RetargetConsent>,
 ) -> RetargetDecision {
-    let Some(body) = existing else {
-        return RetargetDecision::Proceed;
-    };
-    let previous = Pin::find(body);
-    let proposed = target.pin();
-    // Same owner proceeds whatever the config path. A SID pin never equals a
-    // uid, so on Unix it counts as an unknown owner.
-    if previous.as_ref().is_some_and(|p| p.owner == proposed.owner) {
-        return RetargetDecision::Proceed;
-    }
-    let same_previous = |c: &RetargetConsent| match (&c.previous, &previous) {
-        (None, None) => true,
-        (Some(a), Some(b)) => a.same_target(b),
-        _ => false,
-    };
-    if consent.is_some_and(|c| same_previous(c) && c.proposed.same_target(&proposed)) {
-        return RetargetDecision::Proceed;
-    }
-    RetargetDecision::Needs { previous, proposed }
+    super::pin::retarget_decision_for(existing, target.pin(), consent)
 }
 
 #[cfg(test)]

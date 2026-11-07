@@ -64,7 +64,6 @@ impl Pin {
 
     /// Whether `other` pins the same registration target: exact on Unix,
     /// ASCII-case- and separator-insensitive on Windows paths.
-    #[cfg_attr(not(unix), allow(dead_code))] // consumed by the Windows backend later
     pub(crate) fn same_target(&self, other: &Pin) -> bool {
         same_target_with(cfg!(windows), self, other)
     }
@@ -156,6 +155,44 @@ pub struct RetargetConsent {
     pub previous: Option<Pin>,
     /// The pin the new registration would carry.
     pub proposed: Pin,
+}
+
+/// Whether an install may replace the existing registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetargetDecision {
+    Proceed,
+    Needs {
+        previous: Option<Pin>,
+        proposed: Pin,
+    },
+}
+
+/// Pure retarget policy: nothing installed or the same owner proceeds; another
+/// owner (or an unpinned registration) proceeds only with consent that matches
+/// the current registration and the proposed pin.
+pub(crate) fn retarget_decision_for(
+    existing: Option<&str>,
+    proposed: Pin,
+    consent: Option<&RetargetConsent>,
+) -> RetargetDecision {
+    let Some(body) = existing else {
+        return RetargetDecision::Proceed;
+    };
+    let previous = Pin::find(body);
+    // Same owner proceeds whatever the config path. A SID pin never equals a
+    // uid, so across platforms it counts as an unknown owner.
+    if previous.as_ref().is_some_and(|p| p.owner == proposed.owner) {
+        return RetargetDecision::Proceed;
+    }
+    let same_previous = |c: &RetargetConsent| match (&c.previous, &previous) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.same_target(b),
+        _ => false,
+    };
+    if consent.is_some_and(|c| same_previous(c) && c.proposed.same_target(&proposed)) {
+        return RetargetDecision::Proceed;
+    }
+    RetargetDecision::Needs { previous, proposed }
 }
 
 /// Escape to `[A-Za-z0-9/._]`; everything else, including `-` (illegal as `--`

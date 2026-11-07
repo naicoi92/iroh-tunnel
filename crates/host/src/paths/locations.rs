@@ -26,7 +26,7 @@ pub(super) fn home_dir() -> Result<PathBuf> {
 
 /// The LocalAppData root of the current user (without the app directory).
 #[cfg(windows)]
-pub(super) fn local_app_data() -> Result<PathBuf> {
+pub(crate) fn local_app_data() -> Result<PathBuf> {
     match dirs::data_local_dir() {
         Some(dir) if dir.is_absolute() => Ok(dir),
         _ => Err(config_err(

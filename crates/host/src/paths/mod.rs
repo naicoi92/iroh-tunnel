@@ -17,4 +17,6 @@ pub use default_state_dir::default_state_dir;
 #[cfg(unix)]
 pub(crate) use in_home::{config_path_in, state_dir_in};
 pub(crate) use in_home::{windows_config_path_in, windows_state_path_in};
+#[cfg(windows)]
+pub(crate) use locations::local_app_data;
 pub use set_migration_notice::{set_migration_notice, MigrationNotice};

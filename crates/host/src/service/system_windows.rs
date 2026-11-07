@@ -3,9 +3,8 @@
 //! Pure: the token user, the owner lookup, the LocalAppData lookup and the
 //! account-name lookup are injected, so every rule runs on any platform.
 
-// Consumed by the Windows install wiring (Task 9, commit C); until then it is
-// unused on every target, Windows included.
-#![allow(dead_code)]
+// Pure and compiled everywhere for its tests, but only Windows consumes it.
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 
@@ -64,6 +63,12 @@ pub(crate) fn resolve_target(
     local_appdata: &dyn Fn(&Sid) -> Result<PathBuf>,
     account_of: &dyn Fn(&Sid) -> Option<String>,
 ) -> Result<WinTarget> {
+    // Looked up once, and only when a default path needs it.
+    let appdata = if req.config.is_none() || req.state.is_none() {
+        Some(local_appdata(token)?)
+    } else {
+        None
+    };
     let name = |sid: &Sid| account_of(sid).unwrap_or_else(|| sid.0.clone());
 
     let config = match req.config {
@@ -91,11 +96,14 @@ pub(crate) fn resolve_target(
             }
             config.to_path_buf()
         }
-        None => crate::paths::windows_config_path_in(&local_appdata(token)?, req.role),
+        None => crate::paths::windows_config_path_in(
+            appdata.as_deref().expect("looked up above"),
+            req.role,
+        ),
     };
     let state = match req.state {
         Some(state) => state.to_path_buf(),
-        None => crate::paths::windows_state_path_in(&local_appdata(token)?),
+        None => crate::paths::windows_state_path_in(appdata.as_deref().expect("looked up above")),
     };
     Ok(WinTarget {
         sid: token.clone(),

@@ -6,8 +6,6 @@
 //! `Environment` (REG_MULTI_SZ of `K=V` strings, written here; the SCM hands
 //! it to the service process as its environment block).
 
-#![allow(dead_code)] // TODO(Task 9 commit C): remove once wired
-
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
@@ -313,6 +311,7 @@ impl ScmPort for Scm {
 }
 
 /// Full `binPath` command line of `name`; `None` when absent or marked for delete.
+#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 fn command_line(name: &str) -> Result<Option<String>> {
     let manager = connect(ServiceManagerAccess::CONNECT)?;
     let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {

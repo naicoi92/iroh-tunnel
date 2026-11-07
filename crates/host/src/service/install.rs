@@ -9,6 +9,8 @@ use super::decide_install_scope::decide_install_scope;
 use super::execute::execute;
 #[allow(unused_imports)] // unused on targets without a service backend
 use super::native::system_runner;
+#[cfg(windows)]
+use super::native::InstalledAt;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
 use super::pin::Pin;
 use super::policy::{ensure_privilege, ensure_supported};
@@ -106,9 +108,7 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
         .into());
     }
     let role = req.role;
-    // Windows has only the user scope, so there is nothing to ask.
-    let requested = req.scope.or(cfg!(windows).then_some(ServiceScope::User));
-    let scope = match decide_install_scope(requested, env) {
+    let scope = match decide_install_scope(req.scope, env) {
         ScopeDecision::Chosen(scope) => scope,
         ScopeDecision::NeedsChoice => return Ok(Planned::Needs(InstallNeed::ScopeChoice)),
     };
@@ -190,9 +190,88 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
     }))
 }
 
-#[cfg(not(unix))]
+/// Install a Windows service for the installing (token) user's files (SM-04).
+/// Unprivileged callers are refused with rerun guidance; every file the
+/// service will trust is checked before anything is registered.
+#[cfg(windows)]
+fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
+    use super::backend::windows_scm::{service_name, ScmPort};
+    use super::backend::windows_scm_impl::Scm;
+    use super::pin::{retarget_decision_for, RetargetDecision};
+    use super::system_windows::{resolve_target, WinRequest};
+    use super::trust_windows::model::TrustedSet;
+    use super::trust_windows::{
+        account_of, owner_of, read_verified, token_user, verify_binary, verify_dir,
+        verify_machine_dir,
+    };
+
+    let role = req.role;
+    // Absolute before anything reads its parent: a bare filename has none.
+    let config_abs = req
+        .config
+        .as_deref()
+        .map(absolutize_config_path)
+        .transpose()?;
+    if !env.elevated {
+        let config = match &config_abs {
+            Some(config) => config.clone(),
+            None => absolutize_config_path(&crate::config::resolve_config_path(role, None)?)?,
+        };
+        let rerun = install_rerun(role, ServiceScope::System, &config);
+        ensure_privilege(ServiceScope::System, false, &rerun)?;
+    }
+
+    let token = token_user()?;
+    // The token user is the elevated process's own user: the shell resolves
+    // its LocalAppData with the current token.
+    let target = resolve_target(
+        &WinRequest {
+            role: role.name(),
+            config: config_abs.as_deref(),
+            state: req.state_dir_override.as_deref(),
+        },
+        &token,
+        &|dir| owner_of(dir).ok(),
+        &|_| crate::paths::local_app_data(),
+        &account_of,
+    )?;
+
+    if let Some(machine) = crate::ownership::machine_dir() {
+        if machine.verify && machine.path.exists() {
+            verify_machine_dir(&machine.path).map_err(|e| {
+                CliError::Permission(format!(
+                    "the machine directory {} is not safe to trust: {e:#}. Nothing was changed.",
+                    machine.path.display()
+                ))
+            })?;
+        }
+    }
+
+    // Fail closed before registering anything LocalSystem would later refuse.
+    let trusted = TrustedSet::for_user_files(&target.sid);
+    verify_dir(&target.state, &trusted)?;
+    let text = read_verified(&target.config, &trusted)?;
+    check_installable_text(role, &text, &target.config)?;
+    verify_binary(&req.tunnel_executable)?;
+
+    // Read the registration last, right before the write, so a consent given
+    // for an earlier look at it is checked against the current one.
+    let existing = Scm.description(&service_name(role.name()))?;
+    if let RetargetDecision::Needs { previous, proposed } =
+        retarget_decision_for(existing.as_deref(), target.pin(), req.retarget.as_ref())
+    {
+        return Ok(Planned::Needs(InstallNeed::Retarget { previous, proposed }));
+    }
+    Ok(Planned::Ready(InstallPlan {
+        scope: ServiceScope::System,
+        pin: Some(target.pin()),
+        config: target.config,
+        state: target.state,
+    }))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn plan_system_install(_req: &InstallRequest, _env: Environment) -> Result<Planned> {
-    ensure_supported(ServiceScope::System)?;
     Err(CliError::Service("system services are not supported on this platform".into()).into())
 }
 
@@ -235,7 +314,7 @@ fn check_installable_config(role: Role, config: &Path) -> Result<()> {
 }
 
 /// [`check_installable_config`] for text already read from a verified handle.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn check_installable_text(role: Role, text: &str, config: &Path) -> Result<()> {
     use crate::config::RoleDoc;
     let loaded = match role {
@@ -283,12 +362,43 @@ fn backend_install(
     }
     #[cfg(windows)]
     {
-        super::backend::windows::install(native, notes, role, scope, binary, config, state)
+        match scope {
+            ServiceScope::User => {
+                super::backend::windows::install(native, notes, role, scope, binary, config, state)
+            }
+            ServiceScope::System => {
+                install_windows_service(notes, role, binary, config, state, pin)
+            }
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         super::platform::unsupported()
     }
+}
+
+/// Register, start and announce the SCM service of `role` (system scope).
+#[cfg(windows)]
+fn install_windows_service(
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    binary: &Path,
+    config: &Path,
+    state: &Path,
+    pin: Option<&Pin>,
+) -> Result<()> {
+    use super::backend::windows_scm::{install_with, ServiceSpec, SystemClock};
+    use super::backend::windows_scm_impl::Scm;
+    use super::types::RestartPolicy;
+
+    let pin = pin.context("internal: a Windows service needs a pin")?;
+    let spec = ServiceSpec::render(role, binary, config, state, pin, &RestartPolicy::DEFAULT)?;
+    install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
+    notes(&ServiceNote::Installed {
+        name: spec.name,
+        at: InstalledAt::WindowsService,
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -442,18 +552,85 @@ mod tests {
         });
     }
 
-    #[cfg(windows)]
+    /// `plan_install` needs the real token and file system on Windows, so the
+    /// scope decision is tested at its seam: an elevated request without a
+    /// flag chooses system, and the platform accepts it.
     #[test]
-    fn windows_system_scope_is_service_error() {
+    fn windows_elevated_install_without_flag_plans_system() {
         let env = Environment {
             elevated: true,
             can_answer: false,
         };
-        let (result, _) = run_install(&request(Some(ServiceScope::System)), env, vec![]);
-        let err = anyhow::Error::from(result.expect_err("must be refused"));
-        let Some(CliError::Service(msg)) = err.downcast_ref::<CliError>() else {
-            panic!("expected Service, got {err:?}");
+        assert_eq!(
+            decide_install_scope(None, env),
+            ScopeDecision::Chosen(ServiceScope::System)
+        );
+        assert!(ensure_supported(ServiceScope::System).is_ok());
+    }
+
+    #[test]
+    fn install_request_on_windows_no_longer_forces_user_scope() {
+        // Neither a TTY nor elevation: user. Elevated: system, never forced to user.
+        for (elevated, can_answer, expected) in [
+            (true, true, ScopeDecision::Chosen(ServiceScope::System)),
+            (false, true, ScopeDecision::NeedsChoice),
+        ] {
+            let env = Environment {
+                elevated,
+                can_answer,
+            };
+            assert_eq!(decide_install_scope(request(None).scope, env), expected);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_scope_is_supported() {
+        assert!(ensure_supported(ServiceScope::System).is_ok());
+    }
+}
+
+/// Windows plan against the real token; gated like the other service tests.
+#[allow(clippy::mixed_attributes_style)]
+#[cfg(test)]
+mod windows_plan_tests {
+    #![cfg(windows)]
+    use super::super::fixtures::request;
+    use super::super::pin::PinOwner;
+    use super::super::trust_windows::token_user;
+    use super::*;
+
+    #[test]
+    fn system_install_plan_pins_the_token_sid() {
+        if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none_or(|v| v != "1") {
+            return;
+        }
+        let root = crate::paths::local_app_data()
+            .unwrap()
+            .join("iroh-tunnel-plan-test");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config = config_dir.join("serve.toml");
+        std::fs::write(
+            &config,
+            "[node]\nrelay_urls = []\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
+        )
+        .unwrap();
+        let mut req = request(Some(ServiceScope::System));
+        req.config = Some(config);
+        req.state_dir_override = Some(root.join("state"));
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        req.tunnel_executable = std::env::current_exe().unwrap();
+        let env = Environment {
+            elevated: true,
+            can_answer: false,
         };
-        assert!(msg.contains("--user"), "{msg}");
+        let planned = plan_install(&req, env);
+        let _ = std::fs::remove_dir_all(&root);
+        let Ok(Planned::Ready(plan)) = planned else {
+            panic!("expected a ready plan");
+        };
+        let pin = plan.pin.expect("a system plan pins its owner");
+        assert_eq!(pin.owner, PinOwner::Sid(token_user().unwrap().0));
     }
 }

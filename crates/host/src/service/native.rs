@@ -48,6 +48,8 @@ pub enum InstalledAt {
     Path(PathBuf),
     /// A per-user Task Scheduler task (Windows).
     WindowsTask,
+    /// A Windows service in the Service Control Manager (system scope).
+    WindowsService,
 }
 
 /// A user-facing message from a service operation.

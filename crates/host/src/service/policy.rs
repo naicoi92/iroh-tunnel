@@ -7,22 +7,14 @@ use crate::error::CliError;
 
 /// Refuse a scope this platform has no backend for.
 ///
-/// Windows has only the user-background task: a Windows Service is deferred
-/// (SM-04), so `--system` is reported as unsupported rather than as a missing
-/// privilege that elevation could not fix.
+/// Every supported platform (Linux, macOS, Windows) has both scopes, so this
+/// accepts them all; the per-scope privilege and trust checks come later.
 ///
 /// # Errors
 ///
-/// [`CliError::Service`] for system scope on Windows; nothing is changed.
-pub(crate) fn ensure_supported(scope: ServiceScope) -> Result<()> {
-    if cfg!(windows) && scope == ServiceScope::System {
-        return Err(CliError::Service(
-            "system services are not supported on Windows; use --user, which runs the role \
-             in your logged-in session as a scheduled task"
-                .into(),
-        )
-        .into());
-    }
+/// Never fails today; kept as the single seam for a platform without a backend.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn ensure_supported(_scope: ServiceScope) -> Result<()> {
     Ok(())
 }
 
