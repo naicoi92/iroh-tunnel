@@ -176,8 +176,9 @@ re-check the binary; keep its directory protected.
 #### Machine directory
 
 `%ProgramData%\iroh-tunnel` holds the machine-wide role locks and the service
-log `logs\<role>.log` (10 MiB, one rotated file). The first elevated start
-creates it readable by Users and writable only by SYSTEM and Administrators.
+log `logs\<role>.log` (10 MiB, one rotated file). The first system service
+start (or elevated run) creates it readable by Users and writable only by
+SYSTEM and Administrators, so the first start already logs.
 An existing directory that others can change is refused, at install and at
 service start, and never repaired: delete it from an elevated terminal and
 install again. Uninstall leaves the directory and its log in place; after

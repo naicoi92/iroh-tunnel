@@ -391,7 +391,9 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
     match cmd {
         RoleCmd::Run { config } => {
             let path = resolve_config_path(role, config)?;
-            config_ops::require_existing(status_role, &path)?;
+            // Existence only: the config is read once, by `load_config`,
+            // which under a system service reads it through the trust check.
+            config_ops::require_present(status_role, &path)?;
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
             crate::test_fault::bound_run(runtime::run_foreground(

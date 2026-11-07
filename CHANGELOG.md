@@ -34,8 +34,9 @@ Windows service scope changes:
 
 - **Windows system services:** `service install --system` registers a
   LocalSystem Windows Service that starts at boot, trusts one pinned user's
-  config and state, checks file ownership and access (no junctions or links)
-  at install and every start, logs to `%ProgramData%\iroh-tunnel\logs`, and
+  config and state, checks their ownership and access (no junctions or links)
+  at install and every start, checks the binary at install and CLI
+  start/restart, logs to `%ProgramData%\iroh-tunnel\logs`, and
   drains on stop. Thanks to @23rd for the original Windows Service work in
   #67.
 - `install.ps1` run elevated protects the install directory it creates, so

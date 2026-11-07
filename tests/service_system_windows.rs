@@ -1696,3 +1696,35 @@ async fn non_elevated_system_operations() -> Result<()> {
     assert!(!fx.service_exists(), "nothing may be registered");
     Ok(())
 }
+
+#[tokio::test]
+async fn first_start_creates_the_machine_dir_and_logs() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("firststart")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    // A host that never ran a system service: no machine directory yet. The
+    // verified (production) path creates it on the first service start.
+    std::fs::remove_dir(&fx.machine)?;
+    let out = install_with_env(&fx, &[VERIFY_MACHINE_DIR])?;
+    ensure!(
+        out.status.success(),
+        "install: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    wait_for_node(&fx, &node_id)?;
+    assert!(
+        fx.log_file().exists(),
+        "the first start must log to {}",
+        fx.log_file().display()
+    );
+    let owner = acl_state(&fx.machine)?;
+    assert!(
+        owner.starts_with("owner=S-1-5-32-544\n"),
+        "created by the service with the protected descriptor: {owner}"
+    );
+    Ok(())
+}

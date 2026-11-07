@@ -237,6 +237,35 @@ fn create_machine_dir(dir: &Path) -> std::io::Result<()> {
     create_dir(dir, 0o755)
 }
 
+/// Create the machine directory when it is missing (with its protected
+/// descriptor), or trust-verify an existing one. The Windows service calls
+/// this before it opens its log, which lives in this directory, so the first
+/// start on a host logs too.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] for an existing untrusted directory; the create
+/// error otherwise.
+///
+/// Only a directory that must be verified (the real `%ProgramData%` location)
+/// is created here; a test-utils directory is left to its owner.
+#[cfg(windows)]
+pub(crate) fn ensure_machine_dir(machine: &MachineDir) -> Result<()> {
+    if !machine.verify {
+        return Ok(());
+    }
+    match create_machine_dir(&machine.path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            crate::service::verify_machine_dir(&machine.path)
+        }
+        Err(e) => Err(anyhow::Error::new(e).context(format!(
+            "cannot create machine directory {}",
+            machine.path.display()
+        ))),
+    }
+}
+
 fn create_lock_file(path: &Path, mode: u32) -> std::io::Result<File> {
     let mut options = base_options();
     options.read(true).write(true).create(true);

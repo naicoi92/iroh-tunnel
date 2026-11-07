@@ -123,15 +123,14 @@ impl Write for CappedLog {
     }
 }
 
-/// The machine log directory, `<machine dir>/logs`. On Windows it is `None`
-/// when the machine directory must be trust-verified and does not pass.
+/// The machine log directory, `<machine dir>/logs`. On Windows the machine
+/// directory is created when missing; it is `None` when an existing one must
+/// be trust-verified and does not pass, or cannot be created.
 #[must_use]
 pub fn machine_log_dir() -> Option<PathBuf> {
     let machine = crate::ownership::machine_dir()?;
     #[cfg(windows)]
-    if machine.verify {
-        super::verify_machine_dir(&machine.path).ok()?;
-    }
+    crate::ownership::ensure_machine_dir(&machine).ok()?;
     Some(machine.path.join("logs"))
 }
 

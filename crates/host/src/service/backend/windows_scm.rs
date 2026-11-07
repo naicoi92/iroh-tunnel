@@ -282,7 +282,7 @@ fn wait_running(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) -> Re
                 let seen = state.map_or_else(|| "absent".to_string(), |s| format!("{s:?}"));
                 return Err(CliError::Service(format!(
                     "service {name} stopped right after start (state: {seen}); \
-                     check its configuration and the Windows event log"
+                     its log is %ProgramData%\\iroh-tunnel\\logs\\<role>.log"
                 ))
                 .into());
             }
