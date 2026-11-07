@@ -700,6 +700,53 @@ fn publish_with(
     result
 }
 
+fn is_not_found(e: &io::Error) -> bool {
+    [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]
+        .iter()
+        .any(|c| e.raw_os_error() == Some(*c as i32))
+}
+
+/// Read `dir\name` under a verified directory chain, without following a
+/// link; `None` when absent. Unlike [`read_verified`] the file's own DACL is
+/// not judged: this reads a file the service itself wrote (its DACL may
+/// carry inherited entries), and only the path to it must be safe.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] when the directory is no longer safe or the name
+/// is a link or a directory.
+pub(crate) fn read_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<Option<String>> {
+    let name = plain_name(name)?;
+    let chain = verified(dir, LastAccess::Inspect, trusted)?;
+    let (_, d) = chain.target()?;
+    if !d.is_dir {
+        return Err(not_a("directory", d));
+    }
+    let shown = dir.join(name);
+    let file = match open_raw(
+        &child_path(d, name),
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    ) {
+        Ok(file) => file,
+        Err(e) if is_not_found(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", shown.display())),
+    };
+    let attrs = attributes(&file).with_context(|| format!("cannot stat {}", shown.display()))?;
+    if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return Err(permission(format!(
+            "{} is a link or a directory, not a regular file",
+            shown.display()
+        )));
+    }
+    let bytes = read_all(&file, &shown)?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .with_context(|| format!("{} is not UTF-8", shown.display()))
+}
+
 /// Remove `dir\name` (a file or a link, never its target) under a verified
 /// directory chain; absent is fine.
 ///
@@ -721,13 +768,7 @@ pub(crate) fn remove_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<
         FILE_FLAG_OPEN_REPARSE_POINT,
     ) {
         Ok(file) => file,
-        Err(e)
-            if [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]
-                .iter()
-                .any(|c| e.raw_os_error() == Some(*c as i32)) =>
-        {
-            return Ok(());
-        }
+        Err(e) if is_not_found(&e) => return Ok(()),
         Err(e) => {
             return Err(e).with_context(|| format!("cannot remove {name} in {}", dir.display()))
         }
@@ -1218,6 +1259,38 @@ mod tests {
         remove_in(dir, &me(), "serve.toml").unwrap();
         assert!(!file.exists());
         remove_in(dir, &me(), "serve.toml").unwrap();
+    }
+
+    #[test]
+    fn read_in_returns_none_for_missing_and_content_for_present() {
+        let (tmp, _file) = fixture();
+        let dir = tmp.path();
+        assert_eq!(
+            read_in(dir, &me(), "serve.toml").unwrap().as_deref(),
+            Some("x = 1\n")
+        );
+        assert_eq!(read_in(dir, &me(), "absent.json").unwrap(), None);
+        assert!(read_in(dir, &me(), "..").is_err());
+    }
+
+    #[test]
+    fn read_in_refuses_a_planted_symlink() {
+        let (tmp, file) = fixture();
+        let link = tmp.path().join("link.json");
+        if !run(
+            "cmd",
+            &[
+                "/c",
+                "mklink",
+                link.to_str().unwrap(),
+                file.to_str().unwrap(),
+            ],
+        ) {
+            println!("skipped: mklink is unavailable (no symlink privilege)");
+            return;
+        }
+        let text = permission_text(read_in(tmp.path(), &me(), "link.json").unwrap_err());
+        assert!(text.contains("link"), "{text}");
     }
 
     #[test]

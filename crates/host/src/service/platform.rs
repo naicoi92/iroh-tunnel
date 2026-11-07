@@ -202,6 +202,7 @@ mod windows_tests {
         let _env = EnvGuard::set(&[
             ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
             ("IROH_TUNNEL_STATE_DIR", None),
+            ("IROH_TUNNEL_SCM", None),
         ]);
         match error_of(load_config::<ServeConfig>(&file)) {
             CliError::Config(m) => assert!(m.contains("config keygen"), "{m}"),
@@ -224,6 +225,7 @@ mod windows_tests {
         let _env = EnvGuard::set(&[
             ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
             ("IROH_TUNNEL_STATE_DIR", None),
+            ("IROH_TUNNEL_SCM", None),
         ]);
         let err = load_config::<ServeConfig>(&file).unwrap_err();
         assert!(format!("{err:#}").contains("failed to parse"), "{err:#}");
@@ -242,6 +244,7 @@ mod windows_tests {
         let _env = EnvGuard::set(&[
             ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
             ("IROH_TUNNEL_STATE_DIR", None),
+            ("IROH_TUNNEL_SCM", None),
         ]);
         assert!(matches!(
             error_of(load_config::<ServeConfig>(&file)),

@@ -310,6 +310,32 @@ fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path
         }
         return;
     }
+    #[cfg(windows)]
+    if let Ok(Some(sid)) = crate::service::trust_windows::trusted_sid_from_env() {
+        use crate::service::trust_windows::{model::TrustedSet, read_in, remove_in};
+        let trusted = TrustedSet::for_user_files(&sid);
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+        else {
+            return;
+        };
+        let ours = match read_in(dir, &trusted, name) {
+            Ok(Some(body)) => matches!(
+                serde_json::from_str::<StatusFilePid>(&body),
+                Ok(probe) if probe.pid == std::process::id()
+            ),
+            Ok(None) => false,
+            Err(e) => {
+                tracing::debug!("not reading status file: {e:#}");
+                false
+            }
+        };
+        if ours {
+            if let Err(e) = remove_in(dir, &trusted, name) {
+                tracing::debug!("failed to remove status file: {e:#}");
+            }
+        }
+        return;
+    }
     let owns = match std::fs::read_to_string(&path) {
         Ok(body) => {
             matches!(
@@ -334,6 +360,25 @@ mod tests {
     use super::super::fixtures::{sample_access_status, sample_status};
     use super::super::schema::{AccessStatusFile, StatusFile};
     use super::*;
+
+    /// Plain-path branch for every test below: on Windows the service
+    /// variables are cleared under the shared env lock, so a guarded test
+    /// cannot flip these onto the verified branch.
+    #[cfg(windows)]
+    fn plain_env() -> crate::service::trust_windows::test_env::EnvGuard {
+        crate::service::trust_windows::test_env::EnvGuard::set(&[
+            ("IROH_TUNNEL_TRUSTED_SID", None),
+            ("IROH_TUNNEL_SCM", None),
+        ])
+    }
+
+    #[cfg(not(windows))]
+    struct NoEnv;
+
+    #[cfg(not(windows))]
+    fn plain_env() -> NoEnv {
+        NoEnv
+    }
 
     /// [`sample_status`] with a chosen top-level `pid` for the ownership
     /// tests.
@@ -373,6 +418,7 @@ mod tests {
 
     #[test]
     fn save_to_writes_serve_json_file_into_injected_dir() {
+        let _env = plain_env();
         let tmp = tempfile::tempdir().unwrap();
         let status = sample_status();
         let written = StatusWriter::serve()
@@ -394,6 +440,7 @@ mod tests {
 
     #[test]
     fn save_to_writes_access_json_file_into_injected_dir() {
+        let _env = plain_env();
         // Issue #59: the access writer targets its own file name in the same
         // injected dir — and must NOT touch the serve file.
         let tmp = tempfile::tempdir().unwrap();
@@ -421,6 +468,7 @@ mod tests {
 
     #[test]
     fn save_to_creates_missing_parent_dir() {
+        let _env = plain_env();
         // A nested path that doesn't exist yet — save_to must mkdir -p it.
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("a").join("b").join("c");
@@ -435,6 +483,7 @@ mod tests {
 
     #[test]
     fn save_to_uses_atomic_rename_temp_file_gone() {
+        let _env = plain_env();
         // After a successful save_to, no sibling temp file may linger —
         // atomic rename consumes it. Temp names carry a unique
         // `.tmp.<pid>.<n>` suffix, so scan for the prefix.
@@ -459,6 +508,7 @@ mod tests {
 
     #[test]
     fn save_to_overwrites_existing_status() {
+        let _env = plain_env();
         // A second save_to on the same dir replaces the previous file
         // atomically — no stale contents.
         let tmp = tempfile::tempdir().unwrap();
@@ -479,6 +529,7 @@ mod tests {
 
     #[test]
     fn save_to_cleans_up_temp_file_when_rename_fails() {
+        let _env = plain_env();
         // Drive rename failure by making the destination path unwritable:
         // create a *directory* at serve-status.json's slot so the rename
         // target is occupied by an incompatible entry. This forces rename()
@@ -565,6 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_own_status_file_spares_a_foreign_pid() {
+        let _env = plain_env();
         // Two processes sharing one state dir: this process's shutdown
         // cleanup must NOT remove a file another live instance wrote.
         let tmp = tempfile::tempdir().unwrap();
@@ -586,6 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_own_status_file_removes_own_pid() {
+        let _env = plain_env();
         // The file carries THIS process's pid — graceful shutdown owns it.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
@@ -606,6 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_own_status_file_skips_missing_file() {
+        let _env = plain_env();
         // Never written (or already gone) — cleanup is a no-op, not an
         // error.
         let tmp = tempfile::tempdir().unwrap();
@@ -618,7 +672,15 @@ mod tests {
 mod windows_tests {
     use super::super::fixtures::sample_status;
     use super::*;
+    use crate::error::CliError;
     use crate::service::trust_windows::{test_env::EnvGuard, token_user};
+
+    fn icacls_grants_everyone(path: &Path) -> bool {
+        std::process::Command::new("icacls")
+            .args([path.to_str().unwrap(), "/grant", "*S-1-1-0:M"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
 
     #[test]
     fn status_publish_goes_through_verified_dir() {
@@ -636,14 +698,66 @@ mod windows_tests {
             ])
             .output()
             .is_ok_and(|o| o.status.success());
-        // Without symlink privilege the plain publish path is still checked.
-        let _ = linked;
+        // The elevated CI runner must really exercise the link case.
+        if std::env::var("IROH_TUNNEL_E2E_SERVICE").as_deref() == Ok("1") {
+            assert!(linked, "mklink must work on the elevated runner");
+        } else if !linked {
+            println!("skipped link case: mklink is unavailable (no symlink privilege)");
+        }
         let sid = token_user().unwrap().0;
-        let _env = EnvGuard::set(&[("IROH_TUNNEL_TRUSTED_SID", Some(&sid))]);
+        let _env = EnvGuard::set(&[
+            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
+            ("IROH_TUNNEL_SCM", None),
+        ]);
         let payload = StatusPayload::Serve(sample_status());
         StatusWriter::serve().save_to(dir, &payload).unwrap();
         let meta = std::fs::symlink_metadata(&status).unwrap();
         assert!(meta.file_type().is_file() && !meta.file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    #[test]
+    fn status_publish_refuses_an_untrusted_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(icacls_grants_everyone(tmp.path()));
+        let sid = token_user().unwrap().0;
+        let _env = EnvGuard::set(&[
+            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
+            ("IROH_TUNNEL_SCM", None),
+        ]);
+        let err = StatusWriter::serve()
+            .save_to(tmp.path(), &StatusPayload::Serve(sample_status()))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ),
+            "{err:#}"
+        );
+        assert!(!tmp.path().join("serve-status.json").exists());
+    }
+
+    #[test]
+    fn remove_own_status_file_under_service_goes_through_verified_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let sid = token_user().unwrap().0;
+        let _env = EnvGuard::set(&[
+            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
+            ("IROH_TUNNEL_SCM", None),
+        ]);
+        let writer = StatusWriter::serve();
+        let mut foreign = sample_status();
+        foreign.pid = std::process::id().wrapping_add(1);
+        writer.save_to(dir, &StatusPayload::Serve(foreign)).unwrap();
+        remove_own_status_file_blocking(StatusWriter::serve(), Some(dir));
+        assert!(dir.join("serve-status.json").exists(), "foreign pid kept");
+
+        let mut own = sample_status();
+        own.pid = std::process::id();
+        writer.save_to(dir, &StatusPayload::Serve(own)).unwrap();
+        remove_own_status_file_blocking(StatusWriter::serve(), Some(dir));
+        assert!(!dir.join("serve-status.json").exists(), "own pid removed");
     }
 }

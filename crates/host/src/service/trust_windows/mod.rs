@@ -17,7 +17,7 @@ pub(crate) mod win32;
 #[allow(unused_imports)]
 // `account_of`, `owner_of`, `token_user`, `verify_binary` are consumed by the SCM install later
 pub(crate) use win32::{
-    account_of, create_dir_with_sddl, owner_of, program_data_dir, publish, read_verified,
+    account_of, create_dir_with_sddl, owner_of, program_data_dir, publish, read_in, read_verified,
     remove_in, token_user, verify_binary, verify_dir,
 };
 
