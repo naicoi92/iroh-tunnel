@@ -145,6 +145,13 @@ pub(crate) enum Refusal {
     Remote {
         path: PathBuf,
     },
+    /// Chain shape or path segment that cannot be verified safely
+    /// (alternate data stream, wildcard, trailing dot/space, file ancestor).
+    Malformed {
+        path: PathBuf,
+    },
+    /// No elements were supplied.
+    EmptyChain,
 }
 
 impl fmt::Display for Refusal {
@@ -178,6 +185,14 @@ impl fmt::Display for Refusal {
             Self::Remote { path } => {
                 write!(f, "{} is not a local absolute path", path.display())
             }
+            Self::Malformed { path } => {
+                write!(
+                    f,
+                    "{} is malformed or has an unsafe segment",
+                    path.display()
+                )
+            }
+            Self::EmptyChain => write!(f, "nothing to verify"),
         }
     }
 }
@@ -208,7 +223,7 @@ pub(crate) fn components(path: &str) -> Result<Vec<String>, Refusal> {
     if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'\\' {
         return Err(remote());
     }
-    let root = format!("{}\\", &body[..2]);
+    let root = format!("{}:\\", body[..1].to_ascii_uppercase());
     let mut out = vec![root.clone()];
     let mut acc = root;
     for seg in body[3..].split('\\') {
@@ -216,6 +231,11 @@ pub(crate) fn components(path: &str) -> Result<Vec<String>, Refusal> {
             "" | "." => continue,
             ".." => return Err(remote()),
             s => {
+                if s.contains([':', '*', '?', '<', '>', '|', '"']) || s.ends_with(['.', ' ']) {
+                    return Err(Refusal::Malformed {
+                        path: PathBuf::from(path),
+                    });
+                }
                 if !acc.ends_with('\\') {
                     acc.push('\\');
                 }
@@ -235,11 +255,21 @@ fn names(mask: u32) -> Vec<&'static str> {
         .collect()
 }
 
-/// Evaluate a root → target chain. Returns the first offending element (chain
-/// order) and, within it, the first offending ACE (DACL order).
+/// Evaluate a chain ordered from the volume root to the target. The last
+/// element is the target (file or directory mask); every earlier element is
+/// an ancestor (ancestor mask) and must be a directory. Returns the first
+/// offending element (chain order) and, within it, the first offending ACE
+/// (DACL order). An empty chain is refused, never trusted.
 pub(crate) fn evaluate(chain: &[Descriptor], trusted: &TrustedSet) -> Result<(), Refusal> {
-    let last = chain.len().saturating_sub(1);
+    let Some(last) = chain.len().checked_sub(1) else {
+        return Err(Refusal::EmptyChain);
+    };
     for (i, d) in chain.iter().enumerate() {
+        if i != last && !d.is_dir {
+            return Err(Refusal::Malformed {
+                path: d.path.clone(),
+            });
+        }
         if d.reparse {
             return Err(Refusal::Reparse {
                 path: d.path.clone(),
@@ -544,6 +574,168 @@ mod tests {
             components("D:\\cfg\\s.toml").unwrap(),
             vec!["D:\\", "D:\\cfg", "D:\\cfg\\s.toml"]
         );
+    }
+
+    fn mal(p: &str) -> Refusal {
+        Refusal::Malformed { path: p.into() }
+    }
+
+    #[test]
+    fn empty_chain_is_refused() {
+        assert_eq!(evaluate(&[], &set()), Err(Refusal::EmptyChain));
+        assert_eq!(Refusal::EmptyChain.to_string(), "nothing to verify");
+        assert!(matches!(
+            CliError::from(Refusal::EmptyChain),
+            CliError::Permission(_)
+        ));
+    }
+
+    #[test]
+    fn non_directory_ancestor_is_malformed() {
+        let mut c = good_chain();
+        c[1].is_dir = false;
+        assert_eq!(evaluate(&c, &set()), Err(mal("C:\\u")));
+    }
+
+    #[test]
+    fn untrusted_fa_is_refused_on_file_dir_and_ancestor() {
+        for idx in [0usize, 1, 2] {
+            let mut c = good_chain();
+            c[idx].dacl.as_mut().unwrap().push(allow(bob(), FA));
+            assert!(
+                matches!(evaluate(&c, &set()), Err(Refusal::Access { .. })),
+                "file/ancestor idx {idx}"
+            );
+        }
+        let mut c = good_chain();
+        c.pop();
+        c.push(d(
+            "C:\\u\\dir",
+            pinned(),
+            vec![allow(pinned(), FA), allow(bob(), FA)],
+            false,
+            true,
+        ));
+        assert!(matches!(evaluate(&c, &set()), Err(Refusal::Access { .. })));
+    }
+
+    #[test]
+    fn untrusted_owner_on_ancestor_is_refused() {
+        let mut c = good_chain();
+        c[1].owner = bob();
+        assert_eq!(
+            evaluate(&c, &set()),
+            Err(Refusal::Owner {
+                path: "C:\\u".into(),
+                owner: bob()
+            })
+        );
+    }
+
+    #[test]
+    fn reparse_at_first_and_last_position() {
+        for (idx, p) in [(0usize, "C:\\"), (2, "C:\\u\\s.toml")] {
+            let mut c = good_chain();
+            c[idx].reparse = true;
+            assert_eq!(
+                evaluate(&c, &set()),
+                Err(Refusal::Reparse { path: p.into() })
+            );
+        }
+    }
+
+    #[test]
+    fn first_bad_element_in_chain_order_is_reported() {
+        let mut c = good_chain();
+        c[2].owner = bob();
+        c[1].reparse = true;
+        assert_eq!(
+            evaluate(&c, &set()),
+            Err(Refusal::Reparse {
+                path: "C:\\u".into()
+            })
+        );
+    }
+
+    #[test]
+    fn inherited_non_inherit_only_ace_counts() {
+        let mut c = good_chain();
+        c[2].dacl.as_mut().unwrap().push(Ace {
+            sid: bob(),
+            mask: GENERIC_ALL,
+            inherit_only: false,
+            allow: true,
+        });
+        assert!(matches!(evaluate(&c, &set()), Err(Refusal::Access { .. })));
+    }
+
+    #[test]
+    fn generic_read_execute_accepted_and_generic_write_on_ancestor() {
+        let mut c = good_chain();
+        c[2].dacl.as_mut().unwrap().push(allow(bob(), GXGR));
+        c[1].dacl.as_mut().unwrap().push(allow(bob(), GXGR));
+        c[1].dacl
+            .as_mut()
+            .unwrap()
+            .push(allow(bob(), GENERIC_WRITE));
+        assert_eq!(evaluate(&c, &set()), Ok(()));
+    }
+
+    #[test]
+    fn components_shapes() {
+        let root = vec!["C:\\".to_string()];
+        assert_eq!(components("C:\\").unwrap(), root);
+        assert_eq!(components("C:\\a\\").unwrap(), vec!["C:\\", "C:\\a"]);
+        assert_eq!(
+            components("C:/a/b").unwrap(),
+            vec!["C:\\", "C:\\a", "C:\\a\\b"]
+        );
+        assert_eq!(components("C:\\\\a").unwrap(), vec!["C:\\", "C:\\a"]);
+        assert_eq!(components("c:\\a").unwrap(), vec!["C:\\", "C:\\a"]);
+        assert_eq!(
+            components("C:\\Users\\Nguyễn Văn\\x").unwrap(),
+            vec![
+                "C:\\",
+                "C:\\Users",
+                "C:\\Users\\Nguyễn Văn",
+                "C:\\Users\\Nguyễn Văn\\x"
+            ]
+        );
+    }
+
+    #[test]
+    fn components_refusals() {
+        for bad in [
+            "C:",
+            "",
+            "\\\\.\\C:\\a",
+            "\\\\?\\UNC\\server\\share",
+            "C:\\a\\..\\b",
+        ] {
+            assert!(
+                matches!(components(bad), Err(Refusal::Remote { .. })),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn components_refuse_unsafe_segments() {
+        for bad in [
+            "C:\\a:ads",
+            "C:\\a\\f.txt:s:$DATA",
+            "C:\\a*",
+            "C:\\a?",
+            "C:\\a<",
+            "C:\\a>",
+            "C:\\a|b",
+            "C:\\a\"b",
+            "C:\\a.",
+            "C:\\a ",
+            "C:\\a. \\b",
+        ] {
+            assert_eq!(components(bad), Err(mal(bad)), "{bad:?}");
+        }
     }
 
     #[test]
