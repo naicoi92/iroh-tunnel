@@ -523,8 +523,6 @@ impl LockDirs {
     /// # Errors
     ///
     /// The user state directory cannot be resolved.
-    // Task 5 (install.rs) is the first non-test caller.
-    #[allow(dead_code)]
     pub(crate) fn resolve(home: Option<&Path>) -> Result<LockDirs> {
         #[cfg(unix)]
         let user = match home {
@@ -544,8 +542,6 @@ impl LockDirs {
 }
 
 /// The seam the install path resolves lock directories through.
-// Task 5 (install.rs) is the first non-test user.
-#[allow(dead_code)]
 pub(crate) type LockResolver<'a> = &'a dyn Fn(Option<&Path>) -> Result<LockDirs>;
 
 /// Probe exactly `dir` for `role`'s lock and report it as `tier`.
@@ -569,15 +565,13 @@ pub(crate) fn tier_liveness_in(role: Role, tier: Tier, dir: &Path) -> Result<Liv
 
 /// Liveness of `role` at one tier of `dirs`.
 ///
-/// # Errors
-///
-/// As [`tier_liveness_in`].
-///
 /// The machine tier probes with a write lock, so another account's shared
 /// hold there is seen as running: root running `install --user` can be
 /// refused by someone else's user process. This mirrors `probe_tiers`.
-// Task 5 (install.rs) is the first non-test caller.
-#[allow(dead_code)]
+///
+/// # Errors
+///
+/// As [`tier_liveness_in`].
 pub(crate) fn tier_liveness(role: Role, tier: Tier, dirs: &LockDirs) -> Result<Liveness> {
     let dir = match tier {
         Tier::User => Some(&dirs.user),
