@@ -58,6 +58,13 @@ jobs:
         env:
           IROH_TUNNEL_E2E_SERVICE: "1"
         run: cargo test --all-features --locked --test service_user_windows -- --nocapture --test-threads=1
+      # TEMPORARY (windows-system-service Task 1 spike): removed in Task 13.
+      - name: Windows trust probe (spike)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        env:
+          IROH_TUNNEL_E2E_SERVICE: "1"
+        run: cargo test --all-features --locked --test windows_trust_probe -- --nocapture
       # The image tag must match the `iroh` version in Cargo.lock.
       - name: Start self-hosted relay
         if: ${{ !cancelled() && matrix.name == 'linux' }}

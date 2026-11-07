@@ -40,7 +40,10 @@ fn powershell(label: &str, script: &str) {
 /// Print the SDDL of `path`, quoting it as a PowerShell literal.
 fn sddl(label: &str, path: &Path) {
     let quoted = path.display().to_string().replace('\'', "''");
-    powershell(label, &format!("(Get-Acl -LiteralPath '{quoted}').Sddl"));
+    powershell(
+        label,
+        &format!("(Get-Acl -LiteralPath '{quoted}' -ErrorAction Stop).Sddl"),
+    );
 }
 
 /// Removes the probe directory on drop, including on early return or panic.
@@ -51,20 +54,20 @@ impl Drop for ProbeDir {
         let quoted = self.0.display().to_string().replace('\'', "''");
         powershell(
             "probe-dir-cleanup",
-            &format!("Remove-Item -LiteralPath '{quoted}' -Recurse -Force"),
+            &format!("Remove-Item -LiteralPath '{quoted}' -Recurse -Force -ErrorAction Stop"),
         );
     }
 }
 
 /// Ancestors of `%LOCALAPPDATA%` from the drive root down to itself, then
-/// `iroh-tunnel` and `iroh-tunnel\config` when they already exist.
+/// `iroh-tunnel` and `iroh-tunnel\config` (callers report which are absent).
 fn config_chain(local_app_data: &Path) -> Vec<PathBuf> {
     let mut chain: Vec<PathBuf> = local_app_data.ancestors().map(Path::to_path_buf).collect();
     chain.retain(|p| p.file_name().is_some());
     chain.reverse();
     let app = local_app_data.join("iroh-tunnel");
     let config = app.join("config");
-    chain.extend([app, config].into_iter().filter(|p| p.exists()));
+    chain.extend([app, config]);
     chain
 }
 
@@ -77,7 +80,12 @@ fn probe_windows_trust_assumptions() {
 
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         for (i, dir) in config_chain(Path::new(&local)).iter().enumerate() {
-            sddl(&format!("config-chain[{i}] {}", dir.display()), dir);
+            let label = format!("config-chain[{i}] {}", dir.display());
+            if dir.exists() {
+                sddl(&label, dir);
+            } else {
+                println!("EVIDENCE {label} ABSENT {}", dir.display());
+            }
         }
     } else {
         println!("EVIDENCE config-chain ERROR env LOCALAPPDATA unset");
@@ -98,7 +106,7 @@ fn probe_windows_trust_assumptions() {
         let _guard = ProbeDir(dir.clone());
         powershell(
             "probe-dir-create",
-            &format!("New-Item -ItemType Directory -Path '{quoted}' | Out-Null"),
+            &format!("New-Item -ItemType Directory -Path '{quoted}' -ErrorAction Stop | Out-Null"),
         );
         sddl("probe-dir-sddl", &dir);
     }
