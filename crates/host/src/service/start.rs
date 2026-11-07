@@ -33,9 +33,7 @@ mod tests {
         let mut notes = |_: &ServiceNote| {};
         let mut call = ServiceCall::capture(&mut notes);
         let result = start(Role::Serve, ServiceScope::System, BATCH, &mut call);
-        if cfg!(windows) {
-            assert!(result.is_err());
-        } else if !crate::service::is_elevated() {
+        if !crate::service::is_elevated() {
             let err = anyhow::Error::from(result.unwrap_err());
             assert!(matches!(
                 err.downcast_ref::<CliError>(),

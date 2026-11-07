@@ -51,19 +51,23 @@ pub(crate) fn status_via(
         Err(error) => Fact::Unavailable(error.to_string()),
     };
     let mut native = Native::new(call.output, runner);
-    let output = backend_status(&mut native, &mut *call.notes, role.name(), scope);
+    let output = backend_status(&mut native, &mut *call.notes, role, scope);
     let (applied, outputs) = native.finish();
     let output = output.map_err(|error| ServiceFailure {
         applied,
         native: outputs,
         error,
     })?;
-    // On Windows the task backend refuses an unregistered task, so reaching
-    // here means it exists.
+    // On Windows the backends refuse an unregistered task or service, so
+    // reaching here means it exists.
     #[cfg(windows)]
-    let registration = Fact::Known(Registration::Present {
-        location: "scheduled task".to_owned(),
-    });
+    let registration = if scope == ServiceScope::System {
+        Fact::from_result(super::system_verb::system_registration(role))
+    } else {
+        Fact::Known(Registration::Present {
+            location: "scheduled task".to_owned(),
+        })
+    };
     #[cfg(not(windows))]
     let registration = Fact::from_result(registration_of(role.name(), scope));
     Ok(ServiceStatusReport {
@@ -101,9 +105,10 @@ fn registration_of(role: &str, scope: ServiceScope) -> Result<Registration> {
 fn backend_status(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
+    role_id: Role,
     scope: ServiceScope,
 ) -> Result<NativeOutput> {
+    let role = role_id.name();
     #[cfg(target_os = "linux")]
     {
         if super::platform::linux_is_systemd() {
@@ -118,6 +123,12 @@ fn backend_status(
     }
     #[cfg(windows)]
     {
+        if scope == ServiceScope::System {
+            // The registration fact reports an absent service (exit 5).
+            super::system_verb::system_registration(role_id)?;
+            super::system_verb::system_status_notes(role_id, notes)?;
+            return Ok(NativeOutput::none());
+        }
         super::backend::windows::status(native, notes, role, scope)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

@@ -33,6 +33,7 @@ mod status;
 mod stop;
 #[cfg(unix)]
 pub(crate) mod system;
+mod system_verb;
 mod system_windows;
 mod task_xml;
 #[cfg(unix)]

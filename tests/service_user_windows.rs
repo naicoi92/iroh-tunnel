@@ -1,8 +1,9 @@
 //! #92: run a role in the Windows logged-in session, driven through the real
 //! binary and the real Task Scheduler (SM-04, AC-SM-04, story 53).
 //!
-//! - `system_scope_is_unsupported_on_windows`: `--system` is refused as
-//!   unsupported (a Windows Service is deferred) and nothing is registered.
+//! - `non_elevated_system_scope_is_permission_error`: a non-elevated
+//!   `--system` is refused (exit 3) and nothing is registered. Ignored until
+//!   the restricted-token helper (Task 13); the CI runner is elevated.
 //! - `user_background_task_lifecycle`: install, start, status, stop, restart
 //!   and uninstall against the host's Task Scheduler, with the pinned absolute
 //!   config and state paths and a working directory unrelated to either.
@@ -158,7 +159,8 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn system_scope_is_unsupported_on_windows() -> Result<()> {
+#[ignore = "needs the restricted-token helper (Task 13)"]
+fn non_elevated_system_scope_is_permission_error() -> Result<()> {
     let fx = Fixture::new()?;
     fx.write_config("https://relay.invalid")?;
     let config = fx.config();
@@ -174,11 +176,8 @@ fn system_scope_is_unsupported_on_windows() -> Result<()> {
     ] {
         let out = fx.command(&args).output()?;
         let err = stderr(&out);
-        assert_eq!(out.status.code(), Some(5), "{args:?}: {err}");
-        assert!(
-            err.contains("not supported on Windows") && err.contains("--user"),
-            "{args:?}: {err}"
-        );
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {err}");
+        assert!(err.contains("Run as administrator"), "{args:?}: {err}");
     }
     assert!(!fx.task_exists(), "nothing may be registered");
     Ok(())

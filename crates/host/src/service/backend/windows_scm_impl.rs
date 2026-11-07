@@ -311,7 +311,6 @@ impl ScmPort for Scm {
 }
 
 /// Full `binPath` command line of `name`; `None` when absent or marked for delete.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 fn command_line(name: &str) -> Result<Option<String>> {
     let manager = connect(ServiceManagerAccess::CONNECT)?;
     let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {

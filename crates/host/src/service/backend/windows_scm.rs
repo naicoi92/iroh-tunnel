@@ -30,7 +30,6 @@ const STOPPED_TIMEOUT: Duration = Duration::from_secs(20);
 /// Delete waits this long until the service is gone.
 const GONE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Restart waits this long for the role lock to be released.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 /// The failure counter resets after this long without a failure.
 const FAILURE_RESET: Duration = Duration::from_secs(86_400);
@@ -142,7 +141,6 @@ pub(crate) enum ScmState {
 
 /// Result of [`status_with`]; the adapter maps it to `ServiceStatusReport`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) enum ScmStatus {
     /// No such service.
     Absent,
@@ -161,7 +159,6 @@ pub(crate) trait ScmPort {
     /// Description of `name` (the pin record), if any.
     fn description(&mut self, name: &str) -> Result<Option<String>>;
     /// Executable of `name`'s command line, if any.
-    #[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
     fn executable(&mut self, name: &str) -> Result<Option<PathBuf>>;
 }
 
@@ -190,8 +187,7 @@ impl Clock for SystemClock {
     }
 }
 
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
-fn not_installed(name: &str, role: &str) -> anyhow::Error {
+pub(crate) fn not_installed(name: &str, role: &str) -> anyhow::Error {
     CliError::Service(format!(
         "service {name} is not installed; run `iroh-tunnel {role} service install --system`"
     ))
@@ -321,7 +317,6 @@ pub(crate) fn install_with(
 /// # Errors
 ///
 /// [`CliError::Service`] when the service is absent or does not stop in time.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) fn stop_with(port: &mut dyn ScmPort, clock: &mut dyn Clock, role: &str) -> Result<()> {
     let name = service_name(role);
     if port.state(&name)?.is_none() {
@@ -331,7 +326,6 @@ pub(crate) fn stop_with(port: &mut dyn ScmPort, clock: &mut dyn Clock, role: &st
 }
 
 /// Stop and delete the role's service; absent is fine.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) fn uninstall_with(
     port: &mut dyn ScmPort,
     clock: &mut dyn Clock,
@@ -349,7 +343,6 @@ pub(crate) fn uninstall_with(
 /// # Errors
 ///
 /// [`CliError::Service`] when the service is absent or never runs.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) fn start_with(port: &mut dyn ScmPort, clock: &mut dyn Clock, role: &str) -> Result<()> {
     let name = service_name(role);
     if port.state(&name)?.is_none() {
@@ -361,7 +354,6 @@ pub(crate) fn start_with(port: &mut dyn ScmPort, clock: &mut dyn Clock, role: &s
 
 /// Stop, wait for the role lock via `wait_released(LOCK_TIMEOUT)`, then start.
 /// When the wait fails the service is not started.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) fn restart_with(
     port: &mut dyn ScmPort,
     clock: &mut dyn Clock,
@@ -389,7 +381,6 @@ pub(crate) fn existing_registration_body(
 }
 
 /// State of the role's service.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) fn status_with(port: &mut dyn ScmPort, role: &str) -> Result<ScmStatus> {
     Ok(port
         .state(&service_name(role))?
@@ -400,7 +391,6 @@ pub(crate) fn status_with(port: &mut dyn ScmPort, role: &str) -> Result<ScmStatu
 /// `CommandLineToArgvW` rule for the program name: a quoted token runs to the
 /// next `"` (no escapes; an unterminated quote takes the rest), an unquoted
 /// one to the first whitespace. `None` when the line is empty.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) fn first_command_line_arg(cmd: &str) -> Option<String> {
     let cmd = cmd.trim_start();
     if cmd.is_empty() {
