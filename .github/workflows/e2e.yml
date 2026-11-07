@@ -63,9 +63,15 @@ jobs:
         shell: pwsh
         env:
           IROH_TUNNEL_E2E_SERVICE: "1"
-        run: |
-          cargo test -p iroh-tunnel-host --all-features --locked --lib -- --test-threads=1
-          cargo test --all-features --locked --test restricted_token_windows --test installer_acl_windows --test service_system_windows -- --nocapture --test-threads=1
+        run: cargo test --all-features --locked --test restricted_token_windows --test installer_acl_windows --test service_system_windows -- --nocapture --test-threads=1
+      # Host unit tests that need an elevated Windows runner (gated on
+      # IROH_TUNNEL_E2E_SERVICE); a separate step so a failure is not masked.
+      - name: Host unit tests (elevated Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        env:
+          IROH_TUNNEL_E2E_SERVICE: "1"
+        run: cargo test -p iroh-tunnel-host --all-features --locked --lib -- --test-threads=1
       # The image tag must match the `iroh` version in Cargo.lock.
       - name: Start self-hosted relay
         if: ${{ !cancelled() && matrix.name == 'linux' }}

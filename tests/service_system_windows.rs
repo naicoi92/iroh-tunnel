@@ -1344,9 +1344,8 @@ fn run_with_input(mut command: Command, input: &str) -> Result<Output> {
 }
 
 /// An interactive reinstall of the fixture's config answering `answer`.
-fn reinstall_answering(fx: &Fixture, answer: &str) -> Result<Output> {
-    let config = fx.config();
-    let mut command = fx.command(&fx_install_args(&config));
+fn reinstall_answering(fx: &Fixture, config: &Path, answer: &str) -> Result<Output> {
+    let mut command = fx.command(&fx_install_args(config));
     command.env("IROH_TUNNEL_TEST_INTERACTIVE", "1");
     run_with_input(command, answer)
 }
@@ -1408,8 +1407,23 @@ async fn retarget_declined_and_approved() -> Result<()> {
     let bobs = ours.replace(&format!("sid={runner}"), &format!("sid={}", bob.sid));
     svc::set_description(&name, &bobs)?;
 
+    // The runner's own config, at another path: the retarget target.
+    let mine = fx.config().with_file_name("mine.toml");
+    std::fs::copy(fx.config(), &mine)?;
+    let definition = |name: &str| -> Result<(String, String, Vec<String>)> {
+        Ok((
+            svc::image_path(name)?,
+            svc::reg_string(name, "Description")?,
+            svc::service_env(name)?,
+        ))
+    };
+    let files = || -> Result<(Vec<u8>, Vec<u8>)> {
+        Ok((std::fs::read(fx.config())?, std::fs::read(&mine)?))
+    };
+    let (before, bytes) = (definition(&name)?, files()?);
+
     // Declined: exit 5, the prompt names bob, nothing changes.
-    let out = reinstall_answering(&fx, "n\n")?;
+    let out = reinstall_answering(&fx, &mine, "n\n")?;
     assert_exit(&out, 5);
     let err = stderr(&out);
     assert!(err.contains("Retarget"), "{err}");
@@ -1418,14 +1432,11 @@ async fn retarget_declined_and_approved() -> Result<()> {
         "the prompt must name {}: {err}",
         bob.name
     );
-    assert_eq!(
-        svc::reg_string(&name, "Description")?,
-        bobs,
-        "pin unchanged"
-    );
+    assert_eq!(definition(&name)?, before, "definition and pin unchanged");
+    assert_eq!(files()?, bytes, "both configs unchanged");
 
-    // Approved: the pin is the runner again and the config is kept.
-    let out = reinstall_answering(&fx, "y\n")?;
+    // Approved: the pin is the runner and the new config; both configs kept.
+    let out = reinstall_answering(&fx, &mine, "y\n")?;
     ensure!(
         out.status.success(),
         "approved retarget: {}{}",
@@ -1435,7 +1446,20 @@ async fn retarget_declined_and_approved() -> Result<()> {
     let pinned = svc::reg_string(&name, "Description")?;
     assert!(pinned.contains(&format!("sid={runner}")), "{pinned}");
     assert!(!pinned.contains(&bob.sid), "{pinned}");
-    assert!(fx.config().exists(), "the config is kept");
+    let wanted = mine.to_string_lossy().replace('\\', "/").to_lowercase();
+    assert_eq!(
+        svc::pin_config(&pinned).as_deref(),
+        Some(wanted.as_str()),
+        "pin record: {pinned}"
+    );
+    assert!(
+        svc::image_path(&name)?
+            .to_lowercase()
+            .contains(&mine.to_string_lossy().to_lowercase()),
+        "ImagePath must name {}",
+        mine.display()
+    );
+    assert_eq!(files()?, bytes, "both configs kept unchanged");
 
     // Same user again: no prompt (stdin is not a terminal here).
     fx.install_ok(&["--system"])?;
@@ -1622,7 +1646,15 @@ async fn already_running_is_clean_stop() -> Result<()> {
         );
         std::thread::sleep(Duration::from_millis(250));
     }
-    let _ = foreground.join().expect("foreground thread");
+    let foreground = foreground.join().expect("foreground thread")?;
+    // It held the lock through the whole window: it ends only by the test
+    // fault deadline (40 s), never early on a conflict.
+    assert_ne!(
+        foreground.status.code(),
+        Some(6),
+        "the foreground run lost the lock: {}",
+        stderr(&foreground)
+    );
     Ok(())
 }
 
