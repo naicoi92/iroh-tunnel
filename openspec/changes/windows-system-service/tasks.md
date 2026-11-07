@@ -108,9 +108,9 @@ Traceability:
 
 ## 7. Running under the Service Control Manager (design D5)
 
-- [ ] 7.1 In `src/app.rs`, when `IROH_TUNNEL_SCM=1`, start `service_dispatcher` and run the role in `service_main`. `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` gives a configuration error (exit 2) with no foreground fallback. A panic is caught at the `service_main` boundary and reported as a failure. (SSM: Windows service start requires the service context and a pin — Service marker outside the SCM)
-- [ ] 7.2 Add `StopSource::Scm` to `lifecycle.rs`. Stop, Shutdown and Preshutdown feed the same trigger as SIGINT/SIGTERM; the drain budget, repeated-signal and watchdog rules are unchanged. Report StopPending with a 15 s wait hint and advance the checkpoint every second. Unit-test the trigger mapping on all platforms. (ROS: Stop signals begin a graceful drain — Service stop request; SSM: Windows service stop drains — Stop removes the status file; Stop pending while draining)
-- [ ] 7.3 Report Running only after the ownership claim and the trust-checked config load. Exit-status mapping:
+- [x] 7.1 In `src/app.rs`, when `IROH_TUNNEL_SCM=1`, start `service_dispatcher` and run the role in `service_main`. `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` gives a configuration error (exit 2) with no foreground fallback. A panic is caught at the `service_main` boundary and reported as a failure. (SSM: Windows service start requires the service context and a pin — Service marker outside the SCM)
+- [x] 7.2 Add `StopSource::Scm` to `lifecycle.rs`. Stop, Shutdown and Preshutdown feed the same trigger as SIGINT/SIGTERM; the drain budget, repeated-signal and watchdog rules are unchanged. Report StopPending with a 15 s wait hint and advance the checkpoint every second. Unit-test the trigger mapping on all platforms. (ROS: Stop signals begin a graceful drain — Service stop request; SSM: Windows service stop drains — Stop removes the status file; Stop pending while draining)
+- [x] 7.3 Report Running only after the ownership claim and the trust-checked config load. Exit-status mapping:
   - exit 6 → Stopped with `Win32(0)`;
   - other errors → `ServiceSpecific(code)`;
   - normal exit → Stopped with `Win32(0)`.
