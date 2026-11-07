@@ -45,7 +45,7 @@ Traceability:
 
 ## 3. Windows trust model (design D2, D3)
 
-- [ ] 3.1 Add `windows-sys` as a direct `cfg(windows)` dependency of `crates/host`, reusing the locked version and only the features named in D10. Add `windows-service` likewise to `crates/host` and to the root crate. Confirm `cargo tree` resolves on MSRV 1.91.
+- [x] 3.1 Add `windows-sys` as a direct `cfg(windows)` dependency of `crates/host`, reusing the locked version and only the features named in D10. Add `windows-service` likewise to `crates/host` and to the root crate. Confirm `cargo tree` resolves on MSRV 1.91.
 - [x] 3.2 Add the pure `trust_windows::model` (all platforms): `Sid`, `Ace`, `Descriptor`, `TrustedSet` (config/state set with the pinned SID; binary set without it), and `evaluate`. Write a TDD test per rule:
   - reparse point refused;
   - NULL or unreadable DACL refused;
@@ -58,14 +58,14 @@ Traceability:
   - the refusal names the path, owner and offending SID with its rights.
 
   (WST: Trusted principals; Path components are held and never followed; Owner and DACL of every component; Write rights refused on the final object; Replacement rights refused on ancestors; Never repair access on user files)
-- [ ] 3.3 Add the `trust_windows::win32` adapter (cfg windows): descend from the volume root with `CreateFileW` (`FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`, no `FILE_SHARE_DELETE`), then `GetFileInformationByHandle` and `GetSecurityInfo`, feeding `evaluate`. Each `unsafe` block gets a `// SAFETY:` comment. Windows unit tests:
+- [x] 3.3 Add the `trust_windows::win32` adapter (cfg windows): descend from the volume root with `CreateFileW` (`FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`, no `FILE_SHARE_DELETE`), then `GetFileInformationByHandle` and `GetSecurityInfo`, feeding `evaluate`. Each `unsafe` block gets a `// SAFETY:` comment. Windows unit tests:
   - a temp tree with an Everyone-modify ACE is refused;
   - a junction is refused;
   - a NULL DACL is refused;
   - the profile-default ACL passes.
 
   (WST: Junction in the config path; Everyone may modify the config; NULL DACL; Config in the pinned user's profile; Binary writable by the pinned user)
-- [ ] 3.4 Add `read_verified` (read the config from the verified handle) and `publish` / `remove_in` for the status snapshot: create the temp file with `CREATE_NEW` + no-follow under the held directory, then rename relative to the directory handle, using the D1 fallback if needed. Windows unit test: a planted symbolic link at the snapshot name is replaced and its target is unchanged. (WST: Verified handles only)
+- [x] 3.4 Add `read_verified` (read the config from the verified handle) and `publish` / `remove_in` for the status snapshot: create the temp file with `CREATE_NEW` + no-follow under the held directory, then rename relative to the directory handle, using the D1 fallback if needed. Windows unit test: a planted symbolic link at the snapshot name is replaced and its target is unchanged. (WST: Verified handles only)
 
 ## 4. Pin, installing user and accounts (design D4)
 
