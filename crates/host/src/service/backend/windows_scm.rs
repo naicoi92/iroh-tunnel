@@ -394,6 +394,12 @@ pub(crate) fn existing_registration_body(
     Ok(Some(port.description(name)?.unwrap_or_default()))
 }
 
+/// Whether the role's SCM service exists (any state, including pending
+/// delete). A failed query is an error, never "absent".
+pub(crate) fn service_registered(port: &mut dyn ScmPort, role: &str) -> Result<bool> {
+    Ok(port.state(&service_name(role))?.is_some())
+}
+
 /// State of the role's service.
 pub(crate) fn status_with(port: &mut dyn ScmPort, role: &str) -> Result<ScmStatus> {
     Ok(port
@@ -608,6 +614,13 @@ mod tests {
 
     fn spec() -> ServiceSpec {
         spec_for("serve")
+    }
+
+    #[test]
+    fn service_registered_reflects_scm_state() {
+        assert!(!service_registered(&mut FakeScm::with(None), "serve").unwrap());
+        assert!(service_registered(&mut FakeScm::with(Some(ScmState::Stopped)), "serve").unwrap());
+        assert!(service_registered(&mut FakeScm::with(Some(ScmState::Running)), "serve").unwrap());
     }
 
     #[test]

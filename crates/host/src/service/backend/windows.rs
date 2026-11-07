@@ -93,6 +93,11 @@ fn is_installed(native: &mut Native, role: &str) -> Result<bool> {
     Ok(listing.lines().any(|line| line.contains(&wanted)))
 }
 
+/// [`is_installed`] for the cross-scope check in `service install --system`.
+pub(crate) fn task_registered(native: &mut Native, role: &str) -> Result<bool> {
+    is_installed(native, role)
+}
+
 fn require_installed(native: &mut Native, role: &str) -> Result<()> {
     if is_installed(native, role)? {
         Ok(())

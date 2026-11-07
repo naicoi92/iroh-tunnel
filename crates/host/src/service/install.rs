@@ -11,6 +11,8 @@ use super::execute::execute;
 use super::native::system_runner;
 #[cfg(windows)]
 use super::native::InstalledAt;
+#[cfg(windows)]
+use super::native::OutputMode;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
 use super::pin::Pin;
 use super::policy::{ensure_privilege, ensure_supported};
@@ -61,7 +63,11 @@ pub(crate) fn install_via(
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
 ) -> Result<InstallOutcome, ServiceFailure> {
-    let plan = match plan_install(req, env).map_err(ServiceFailure::before_effects)? {
+    let planned = {
+        let mut probe = other_scope_probe(&mut *runner);
+        plan_install(req, env, &mut probe)
+    };
+    let plan = match planned.map_err(ServiceFailure::before_effects)? {
         Planned::Needs(need) => return Ok(InstallOutcome::Needs(need)),
         Planned::Ready(plan) => plan,
     };
@@ -81,6 +87,74 @@ pub(crate) fn install_via(
     Ok(InstallOutcome::Installed(report))
 }
 
+/// Asks whether `role` is registered in the scope *other* than the requested
+/// one (a user task for `--system`, an SCM service for `--user`). A failed
+/// query is an error, never "absent".
+type OtherScopeProbe<'a> = dyn FnMut(ServiceScope, Role) -> Result<bool> + 'a;
+
+/// The real probe: `schtasks` listing for `--system`, the SCM for `--user`.
+/// Neither needs administrator rights.
+#[cfg(windows)]
+fn other_scope_probe<'a>(
+    runner: &'a mut Runner<'a>,
+) -> impl FnMut(ServiceScope, Role) -> Result<bool> + 'a {
+    move |requested, role| match requested {
+        ServiceScope::System => {
+            let mut native = Native::new(OutputMode::Capture, &mut *runner);
+            super::backend::windows::task_registered(&mut native, role.name())
+        }
+        ServiceScope::User => super::backend::windows_scm::service_registered(
+            &mut super::backend::windows_scm_impl::Scm,
+            role.name(),
+        ),
+    }
+}
+
+/// No other scope is consulted on targets without Windows cross-scope rules.
+#[cfg(not(windows))]
+fn other_scope_probe<'a>(
+    _runner: &'a mut Runner<'a>,
+) -> impl FnMut(ServiceScope, Role) -> Result<bool> + 'a {
+    |_, _| Ok(false)
+}
+
+/// Refuse to install `requested` while the same role is registered in the
+/// other scope: two registrations would fight over one node identity and
+/// state directory. Pure; `other_registered` comes from the platform probe.
+///
+/// # Errors
+///
+/// [`CliError::Service`] naming the uninstall command for the other scope.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn cross_scope_conflict(
+    requested: ServiceScope,
+    other_registered: bool,
+    role: Role,
+) -> Result<()> {
+    if !other_registered {
+        return Ok(());
+    }
+    let role = role.name();
+    let (other, other_flag, kind) = match requested {
+        ServiceScope::System => ("user", "--user", "a user task"),
+        ServiceScope::User => ("system", "--system", "a system service"),
+    };
+    Err(CliError::Service(format!(
+        "iroh-tunnel-{role} is already installed as {kind}; remove it first with \
+         `iroh-tunnel {role} service uninstall {other_flag}`, then install the {requested_name} \
+         {requested_kind}. Nothing was changed ({other} registration left in place).",
+        requested_name = match requested {
+            ServiceScope::System => "system",
+            ServiceScope::User => "user",
+        },
+        requested_kind = match requested {
+            ServiceScope::System => "service",
+            ServiceScope::User => "task",
+        },
+    ))
+    .into())
+}
+
 /// What `plan_install` decided.
 enum Planned {
     Needs(InstallNeed),
@@ -98,7 +172,12 @@ struct InstallPlan {
 
 /// Every check that precedes the write, in the order the CLI always ran them:
 /// scope, platform support, then the scope's own privilege and trust checks.
-fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
+#[cfg_attr(not(windows), allow(unused_variables))] // the probe is Windows-only
+fn plan_install(
+    req: &InstallRequest,
+    env: Environment,
+    probe: &mut OtherScopeProbe<'_>,
+) -> Result<Planned> {
     if !req.tunnel_executable.is_absolute() {
         return Err(CliError::Service(format!(
             "the tunnel executable {} is not an absolute path; the service must not depend on \
@@ -114,7 +193,7 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
     };
     ensure_supported(scope)?;
     if scope == ServiceScope::System {
-        return plan_system_install(req, env);
+        return plan_system_install(req, env, probe);
     }
     // Persist absolute paths: the installed service runs with a different CWD
     // and home, so nothing may stay relative (SM-02).
@@ -125,6 +204,8 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
     let state = pinned_state_dir(req.state_dir_override.as_deref())?;
     let rerun = install_rerun(role, scope, &config);
     ensure_privilege(scope, env.elevated, &rerun)?;
+    #[cfg(windows)]
+    cross_scope_conflict(scope, probe(scope, role)?, role)?;
     check_installable_config(role, &config)?;
     Ok(Planned::Ready(InstallPlan {
         scope,
@@ -138,7 +219,11 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
 /// SM-04). Unprivileged callers are refused with rerun guidance; an elevated
 /// caller must name a real user, never root's own home.
 #[cfg(unix)]
-fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
+fn plan_system_install(
+    req: &InstallRequest,
+    env: Environment,
+    _probe: &mut OtherScopeProbe<'_>,
+) -> Result<Planned> {
     use super::{system, trust};
 
     let role = req.role;
@@ -194,7 +279,11 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
 /// Unprivileged callers are refused with rerun guidance; every file the
 /// service will trust is checked before anything is registered.
 #[cfg(windows)]
-fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
+fn plan_system_install(
+    req: &InstallRequest,
+    env: Environment,
+    probe: &mut OtherScopeProbe<'_>,
+) -> Result<Planned> {
     use super::backend::windows_scm::{existing_registration_body, service_name};
     use super::backend::windows_scm_impl::Scm;
     use super::pin::{retarget_decision_for, RetargetDecision};
@@ -228,6 +317,12 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
         let rerun = install_rerun(role, ServiceScope::System, &config);
         ensure_privilege(ServiceScope::System, false, &rerun)?;
     }
+    // Before any trust check or registration: the user task is the other scope.
+    cross_scope_conflict(
+        ServiceScope::System,
+        probe(ServiceScope::System, role)?,
+        role,
+    )?;
 
     let token = token_user()?;
     // The token user is the elevated process's own user: the shell resolves
@@ -303,7 +398,11 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn plan_system_install(_req: &InstallRequest, _env: Environment) -> Result<Planned> {
+fn plan_system_install(
+    _req: &InstallRequest,
+    _env: Environment,
+    _probe: &mut OtherScopeProbe<'_>,
+) -> Result<Planned> {
     Err(CliError::Service("system services are not supported on this platform".into()).into())
 }
 
@@ -474,6 +573,41 @@ mod tests {
         assert!(commands(&log).is_empty(), "{log:?}");
     }
 
+    fn conflict_text(requested: ServiceScope, role: Role) -> String {
+        let err = cross_scope_conflict(requested, true, role).expect_err("must be refused");
+        let Some(CliError::Service(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("expected Service, got {err:?}");
+        };
+        msg.clone()
+    }
+
+    #[test]
+    fn system_install_refused_when_user_task_exists() {
+        let msg = conflict_text(ServiceScope::System, Role::Serve);
+        assert!(
+            msg.contains("iroh-tunnel serve service uninstall --user"),
+            "{msg}"
+        );
+        assert!(msg.contains("user task"), "{msg}");
+    }
+
+    #[test]
+    fn user_install_refused_when_system_service_exists() {
+        let msg = conflict_text(ServiceScope::User, Role::Access);
+        assert!(
+            msg.contains("iroh-tunnel access service uninstall --system"),
+            "{msg}"
+        );
+        assert!(msg.contains("system service"), "{msg}");
+    }
+
+    #[test]
+    fn no_conflict_when_other_absent() {
+        for scope in [ServiceScope::System, ServiceScope::User] {
+            assert!(cross_scope_conflict(scope, false, Role::Serve).is_ok());
+        }
+    }
+
     #[test]
     fn relative_tunnel_executable_is_rejected() {
         let mut req = request(Some(ServiceScope::User));
@@ -621,6 +755,32 @@ mod windows_plan_tests {
     use super::super::trust_windows::token_user;
     use super::*;
 
+    /// The privilege refusal (exit 3) comes before the cross-scope probe runs.
+    #[test]
+    fn unprivileged_system_install_still_exits_3_before_cross_scope() {
+        let mut req = request(Some(ServiceScope::System));
+        req.config = Some(PathBuf::from(r"C:\iroh-tunnel-test\serve.toml"));
+        let env = Environment {
+            elevated: false,
+            can_answer: false,
+        };
+        let mut probed = false;
+        let err = plan_install(&req, env, &mut |_, _| {
+            probed = true;
+            Ok(true)
+        })
+        .err()
+        .expect("must be refused");
+        assert!(!probed, "the probe must not run before the privilege check");
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn system_install_plan_pins_the_token_sid() {
         if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none_or(|v| v != "1") {
@@ -650,7 +810,7 @@ mod windows_plan_tests {
             elevated: true,
             can_answer: false,
         };
-        let planned = plan_install(&req, env);
+        let planned = plan_install(&req, env, &mut |_, _| Ok(false));
         let _ = std::fs::remove_dir_all(&root);
         let Ok(Planned::Ready(plan)) = planned else {
             panic!("expected a ready plan");
