@@ -15,13 +15,14 @@
 
 - **Branch**: `fix/launchd-user-install`
 - **Base branch**: `main`
-- **Final state**: `pr-updated` (worktree branch fast-forward merged into the feature branch, which is pushed to origin; no PR exists yet)
-- **PR URL**: `N/A`
+- **Final state**: `pr-updated` (worktree branch fast-forward merged into the feature branch and pushed to origin; PR opened at finalize step 11)
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/188`
 
 Deviations from the canonical flow, as required by the project's `AGENTS.md`:
 - The feature branch is checked out in its own worktree (`iroh-tunnel.fix-launchd-user-install`), not in the main checkout. That worktree was the merge target. `git pull` was skipped because the branch had no remote tracking branch before this push.
 - The implementation worktree was removed with Worktrunk (`wt remove fix-launchd-user-install`) instead of `git worktree remove`. Worktrunk compares against `main`, so it reported the branch as unmerged. The branch was then deleted with `git branch -d`, which succeeded because the branch is merged into `fix/launchd-user-install`.
-- Push needs explicit approval under `AGENTS.md`. The user gave it with the code review approval (Plannotator Inbox msg_01M6T8D15NRD5T47E0EAW191AB). Opening a PR needs a separate approval.
+- Push needs explicit approval under `AGENTS.md`. The user gave it with the code review approval (Plannotator Inbox msg_01M6T8D15NRD5T47E0EAW191AB). Opening a PR needed a separate approval. The user approved it, with the suggested title (msg_01M6TBKG9TGQT2T84KGH1SJBS6).
+- SSH push was refused because both local SSH keys authenticate as `ttdua`, while the repository owner is `naicoi92`. The push went through HTTPS once, using `gh auth git-credential` after `gh auth switch -u naicoi92`. Remote and git config are unchanged.
 
 ---
 
@@ -34,7 +35,7 @@ Deviations from the canonical flow, as required by the project's `AGENTS.md`:
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted`
 
 ---
 
@@ -54,4 +55,4 @@ Deviations from the canonical flow, as required by the project's `AGENTS.md`:
 
 ## Next step
 
-Wait for PR code review; the logic pre-review has already happened. No PR exists yet, so open one first (`gh pr create` against `main`) once the user approves. After approval, run `/opsx-archive` on this feature branch so its commits land here. Push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch`, or the GitHub UI). That single merge lands the implementation and the archive into main.
+Wait for PR code review on #188; the logic pre-review has already happened. After approval, run `/opsx-archive` on this feature branch so its commits land here. Push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch`, or the GitHub UI). That single merge lands the implementation and the archive into main.
