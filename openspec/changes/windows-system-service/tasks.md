@@ -116,7 +116,7 @@ Traceability:
   - normal exit → Stopped with `Win32(0)`.
 
   (SSM: Windows service reports running only after startup checks — Invalid config at start; Windows service recovery and exit mapping — Role already running; Crash recovery)
-- [ ] 7.4 Windows branches of `service::load_config` and `status/writer.rs`:
+- [x] 7.4 Windows branches of `service::load_config` and `status/writer.rs`:
   - with `IROH_TUNNEL_TRUSTED_SID`: verify the state directory, read the config from the verified handle, refuse an empty `secret_key` with `config keygen` guidance, and publish snapshots link-safely;
   - running as a service without a parseable SID: permission error naming `service install --system`.
 
