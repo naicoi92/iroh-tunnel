@@ -36,6 +36,7 @@ pub(crate) mod system;
 mod task_xml;
 #[cfg(unix)]
 pub(crate) mod trust;
+mod trust_windows;
 mod types;
 mod uninstall;
 mod verb;
