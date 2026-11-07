@@ -1921,6 +1921,7 @@ dependencies = [
  "tracing-subscriber",
  "vergen-gitcl",
  "which 8.0.5",
+ "windows-service",
  "zip",
 ]
 

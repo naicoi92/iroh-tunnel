@@ -72,3 +72,9 @@ pub use uninstall::uninstall;
 /// Set to `1` in the environment of a Windows Service registration so the
 /// binary knows the SCM started it and enters the service dispatcher.
 pub const ENV_SCM: &str = "IROH_TUNNEL_SCM";
+
+/// SCM name of the role's system service (plus the test-only instance suffix).
+#[must_use]
+pub fn system_service_name(role: &str) -> String {
+    backend::windows_scm::service_name(role)
+}

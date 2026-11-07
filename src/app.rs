@@ -98,6 +98,14 @@ fn quick_host(addr: &ServiceAddr) -> String {
 pub(crate) type ReadyHook = Option<Box<dyn FnOnce() + Send>>;
 
 fn execute(parsed: Cli, binary: Binary) -> ! {
+    // The SCM starts the service with this marker; it owns tracing (a log
+    // file, no console), so it takes over before the console tracing init.
+    #[cfg(windows)]
+    if std::env::var_os(iroh_tunnel_host::service::ENV_SCM).as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        crate::scm_runtime::run_as_service(parsed, binary)
+    }
     cli::init_tracing(parsed.verbose, parsed.quiet);
     std::process::exit(run_to_code(parsed, binary, None))
 }
@@ -117,11 +125,12 @@ fn exit_code_for(e: &anyhow::Error) -> i32 {
 /// Wrap the CLI's ready printer so `hook` runs right after it.
 fn compose_ready(print: iroh_tunnel_host::OnReady, hook: ReadyHook) -> iroh_tunnel_host::OnReady {
     Box::new(move |report| {
-        let result = print(report);
+        // A failed print aborts the start: never report Running after it.
+        print(report)?;
         if let Some(hook) = hook {
             hook();
         }
-        result
+        Ok(())
     })
 }
 
@@ -170,6 +179,9 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook) -> i32 
             if let Some(role) = status_role {
                 runtime::remove_own_status_file_for_exit(role);
             }
+            // Do not wait for blocking tasks: an abandoned shutdown must
+            // never hang here.
+            rt.shutdown_background();
             return forced.exit_code();
         }
     };
@@ -359,13 +371,13 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
             config_ops::require_existing(status_role, &path)?;
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
-            runtime::run_foreground(
+            crate::test_fault::bound_run(runtime::run_foreground(
                 status_role,
                 &path,
                 ctx,
-                compose_ready(crate::render::print_ready(), ready),
+                crate::test_fault::wrap_ready(compose_ready(crate::render::print_ready(), ready)),
                 lifecycle::wait_for_signal(),
-            )
+            ))
             .await
         }
         // Host operations are synchronous (and may prompt on stdin), so they
@@ -485,6 +497,23 @@ mod run_to_code_tests {
             assert_eq!(exit_code_for(&anyhow::Error::new(err)), code);
         }
         assert_eq!(exit_code_for(&anyhow::anyhow!("other")), 1);
+    }
+
+    #[test]
+    fn failed_print_skips_the_hook() {
+        let hook_ran = Arc::new(AtomicU8::new(0));
+        let flag = hook_ran.clone();
+        let print: iroh_tunnel_host::OnReady = Box::new(|_| anyhow::bail!("print failed"));
+        let hook: ReadyHook = Some(Box::new(move || {
+            flag.store(1, Ordering::SeqCst);
+        }));
+        let report = ReadyReport {
+            node_id: "n".into(),
+            home_relay: None,
+            services: iroh_tunnel_host::ReadyServices::Serve(vec![]),
+        };
+        assert!(compose_ready(print, hook)(&report).is_err());
+        assert_eq!(hook_ran.load(Ordering::SeqCst), 0);
     }
 
     #[test]

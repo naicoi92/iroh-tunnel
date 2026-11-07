@@ -66,6 +66,9 @@ serde_json.workspace = true
 which = "8"
 edit = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"
+
 [dev-dependencies]
 tempfile.workspace = true
 serde.workspace = true
