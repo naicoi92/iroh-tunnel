@@ -819,17 +819,55 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Machine-dir tests write under `%ProgramData%`, outside the temp dir, so
+    /// they only run where the e2e service environment opts in.
+    #[cfg(windows)]
+    fn programdata_enabled() -> bool {
+        if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+            eprintln!("skipped: IROH_TUNNEL_E2E_SERVICE is unset (writes under %ProgramData%)");
+            return false;
+        }
+        true
+    }
+
+    /// A unique directory under `%ProgramData%`, removed on drop.
+    #[cfg(windows)]
+    struct ProgramDataDir(PathBuf);
+
+    #[cfg(windows)]
+    impl ProgramDataDir {
+        fn new() -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let base = crate::service::program_data_dir().unwrap();
+            Self(base.join(format!("iroh-tunnel-test-{}-{nanos}", std::process::id())))
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ProgramDataDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn untrusted_existing_machine_dir_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_path_buf();
+        if !programdata_enabled() {
+            return;
+        }
+        let guard = ProgramDataDir::new();
+        let dir = guard.0.clone();
+        std::fs::create_dir(&dir).unwrap();
         let grant = std::process::Command::new("icacls")
             .arg(&dir)
             .args(["/grant", "*S-1-1-0:M"])
             .output()
             .unwrap();
-        assert!(grant.status.success());
+        assert!(grant.status.success(), "{grant:?}");
         let before = sddl_of(&dir);
         let err = claim_machine(Role::Serve, &dir, true)
             .err()
@@ -849,15 +887,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn existing_trusted_machine_dir_is_accepted() {
+        if !programdata_enabled() {
+            return;
+        }
+        let guard = ProgramDataDir::new();
+        create_machine_dir(&guard.0).unwrap();
+        let claim = claim_machine(Role::Serve, &guard.0, true).unwrap();
+        assert!(matches!(claim, MachineClaim::Exclusive(_)));
+        drop(claim);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn created_machine_dir_has_the_protected_sddl() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("iroh-tunnel");
         create_machine_dir(&dir).unwrap();
         let sddl = sddl_of(&dir);
+        assert!(sddl.starts_with("O:BA"), "{sddl}");
+        // CreateDirectoryW with an explicit descriptor drops the AI
+        // (auto-inherited) control flag; the DACL stays protected (P).
+        let dacl = sddl.split_once("D:").expect("DACL present").1;
+        let aces = "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
         assert!(
-            sddl.contains("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"),
+            dacl == format!("P{aces}") || dacl == format!("PAI{aces}"),
             "{sddl}"
         );
-        assert!(sddl.starts_with("O:BA"), "{sddl}");
     }
 }
