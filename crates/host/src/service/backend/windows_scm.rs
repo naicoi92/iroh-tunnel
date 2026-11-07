@@ -6,9 +6,7 @@
 //! `windows-service` crate is added separately and implements [`ScmPort`].
 //! Time and the role-lock wait are injected so tests never sleep.
 
-#![cfg_attr(not(windows), allow(dead_code))]
-// Nothing consumes this module until the SCM adapter and verb wiring land.
-#![cfg_attr(windows, allow(dead_code))]
+#![allow(dead_code)] // TODO(Task 9): remove once the SCM adapter is wired
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -86,7 +84,8 @@ impl ServiceSpec {
     ///
     /// # Errors
     ///
-    /// [`CliError::Service`] when `pin` is not a SID pin.
+    /// [`CliError::Service`] when `role` is not `serve`/`access` or `pin` is
+    /// not a SID pin.
     pub(crate) fn render(
         role: &str,
         executable: &Path,
@@ -95,6 +94,12 @@ impl ServiceSpec {
         pin: &Pin,
         policy: &RestartPolicy,
     ) -> Result<Self> {
+        if !matches!(role, "serve" | "access") {
+            return Err(CliError::Service(format!(
+                "internal: unknown service role `{role}` (expected serve or access)"
+            ))
+            .into());
+        }
         let PinOwner::Sid(sid) = &pin.owner else {
             return Err(CliError::Service(
                 "internal: Windows service registration needs a SID pin".into(),
@@ -106,7 +111,7 @@ impl ServiceSpec {
             display_name: format!("iroh-tunnel {role}"),
             executable: executable.to_path_buf(),
             launch_arguments: vec![
-                "serve".into(),
+                role.into(),
                 "run".into(),
                 "--config".into(),
                 config.as_os_str().to_owned(),
@@ -231,10 +236,32 @@ fn wait_or_fail(
     }
 }
 
+/// Wait for `Running`; fail at once when the service falls back to `Stopped`
+/// (it crashed on start) or disappears.
 fn wait_running(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) -> Result<()> {
-    wait_or_fail(port, clock, name, RUNNING_TIMEOUT, "Running", |s| {
-        s == Some(ScmState::Running)
-    })
+    let deadline = clock.now() + RUNNING_TIMEOUT;
+    loop {
+        let state = port.state(name)?;
+        match state {
+            Some(ScmState::Running) => return Ok(()),
+            None | Some(ScmState::Stopped) => {
+                let seen = state.map_or_else(|| "absent".to_string(), |s| format!("{s:?}"));
+                return Err(CliError::Service(format!(
+                    "service {name} stopped right after start (state: {seen}); \
+                     check its configuration and the Windows event log"
+                ))
+                .into());
+            }
+            Some(_) if clock.now() >= deadline => {
+                return Err(CliError::Service(format!(
+                    "service {name} did not become Running within {}s (state: {state:?})",
+                    RUNNING_TIMEOUT.as_secs()
+                ))
+                .into());
+            }
+            Some(_) => clock.sleep(POLL),
+        }
+    }
 }
 
 /// Stop `name` if it runs and wait for `Stopped`. A missing service is fine.
@@ -247,6 +274,13 @@ fn stop_existing(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) -> R
     wait_or_fail(port, clock, name, STOPPED_TIMEOUT, "Stopped", |s| {
         matches!(s, None | Some(ScmState::Stopped))
     })
+}
+
+/// Stop (waiting for `Stopped`), then delete and wait until gone: a delete of
+/// a running service only marks it, so the stop must come first.
+fn stop_and_delete(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) -> Result<()> {
+    stop_existing(port, clock, name)?;
+    delete_and_wait(port, clock, name)
 }
 
 fn delete_and_wait(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) -> Result<()> {
@@ -263,8 +297,7 @@ pub(crate) fn install_with(
 ) -> Result<()> {
     let name = &spec.name;
     if port.state(name)?.is_some() {
-        stop_existing(port, clock, name)?;
-        delete_and_wait(port, clock, name)?;
+        stop_and_delete(port, clock, name)?;
     }
     port.create(spec)?;
     let started = port
@@ -272,7 +305,7 @@ pub(crate) fn install_with(
         .and_then(|()| wait_running(port, clock, name));
     if let Err(err) = started {
         // Best effort: the start failure is the error worth reporting.
-        let _ = delete_and_wait(port, clock, name);
+        let _ = stop_and_delete(port, clock, name);
         return Err(err);
     }
     Ok(())
@@ -301,8 +334,7 @@ pub(crate) fn uninstall_with(
     if port.state(&name)?.is_none() {
         return Ok(());
     }
-    stop_existing(port, clock, &name)?;
-    delete_and_wait(port, clock, &name)
+    stop_and_delete(port, clock, &name)
 }
 
 /// Start the role's service and wait for `Running`.
@@ -344,9 +376,11 @@ mod tests {
     use super::*;
     use crate::service::PinOwner;
     use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::rc::Rc;
 
     const SID: &str = "S-1-5-21-1-2-3-1001";
+    const SERVE: &str = "iroh-tunnel-serve";
 
     fn pin(config: &Path) -> Pin {
         Pin {
@@ -355,62 +389,137 @@ mod tests {
         }
     }
 
-    fn spec() -> ServiceSpec {
+    fn spec_for(role: &str) -> ServiceSpec {
+        let cfg = format!(r"C:\cfg\{role}.toml");
         ServiceSpec::render(
-            "serve",
+            role,
             Path::new(r"C:\bin\iroh-tunnel.exe"),
-            Path::new(r"C:\cfg\serve.toml"),
+            Path::new(&cfg),
             Path::new(r"C:\ProgramData\iroh-tunnel"),
-            &pin(Path::new(r"C:\cfg\serve.toml")),
+            &pin(Path::new(&cfg)),
             &RestartPolicy::DEFAULT,
         )
         .unwrap()
     }
 
-    #[derive(Default)]
+    fn spec() -> ServiceSpec {
+        spec_for("serve")
+    }
+
+    /// One registered service in the fake.
+    struct Svc {
+        current: ScmState,
+        /// States returned by successive `state()` polls; the last one sticks.
+        script: VecDeque<ScmState>,
+        marked_for_delete: bool,
+    }
+
+    /// Scriptable SCM: per-name services whose state advances on every poll,
+    /// `delete` that only marks a not-stopped service, one-shot failures.
     struct FakeScm {
-        state: Option<ScmState>,
+        services: HashMap<String, Svc>,
         calls: Rc<RefCell<Vec<String>>>,
-        /// State after `start`; `StartPending` simulates a service that never runs.
-        after_start: Option<ScmState>,
-        fail_start: bool,
+        /// Script installed by `start`.
+        start_script: Vec<ScmState>,
+        /// Script installed by `stop`.
+        stop_script: Vec<ScmState>,
+        /// A marked service never disappears (open handles keep it alive).
+        never_gone: bool,
+        /// Operations (`"stop"`, `"delete"`, `"create"`, `"start"`) to fail once.
+        fail_once: HashSet<&'static str>,
     }
 
     impl FakeScm {
         fn with(state: Option<ScmState>) -> Self {
-            Self {
-                state,
-                after_start: Some(ScmState::Running),
-                ..Self::default()
+            let mut fake = Self {
+                services: HashMap::new(),
+                calls: Rc::default(),
+                start_script: vec![ScmState::Running],
+                stop_script: vec![ScmState::Stopped],
+                never_gone: false,
+                fail_once: HashSet::new(),
+            };
+            if let Some(state) = state {
+                fake.add(SERVE, state, &[]);
             }
+            fake
+        }
+
+        fn add(&mut self, name: &str, current: ScmState, script: &[ScmState]) {
+            self.services.insert(
+                name.to_string(),
+                Svc {
+                    current,
+                    script: script.iter().copied().collect(),
+                    marked_for_delete: false,
+                },
+            );
+        }
+
+        fn record(&self, op: &'static str) -> Result<()> {
+            self.calls.borrow_mut().push(op.into());
+            if self.fail_once.contains(op) {
+                return Err(CliError::Service(format!("{op} boom")).into());
+            }
+            Ok(())
+        }
+
+        fn svc(&mut self, name: &str) -> Result<&mut Svc> {
+            self.services
+                .get_mut(name)
+                .ok_or_else(|| CliError::Service(format!("no such service {name}")).into())
+        }
+
+        fn current(&self) -> Option<ScmState> {
+            self.services.get(SERVE).map(|s| s.current)
         }
     }
 
     impl ScmPort for FakeScm {
-        fn state(&mut self, _: &str) -> Result<Option<ScmState>> {
-            Ok(self.state)
-        }
-        fn create(&mut self, _: &ServiceSpec) -> Result<()> {
-            self.calls.borrow_mut().push("create".into());
-            self.state = Some(ScmState::Stopped);
-            Ok(())
-        }
-        fn delete(&mut self, _: &str) -> Result<()> {
-            self.calls.borrow_mut().push("delete".into());
-            self.state = None;
-            Ok(())
-        }
-        fn start(&mut self, _: &str) -> Result<()> {
-            self.calls.borrow_mut().push("start".into());
-            if self.fail_start {
-                return Err(CliError::Service("start boom".into()).into());
+        fn state(&mut self, name: &str) -> Result<Option<ScmState>> {
+            let never_gone = self.never_gone;
+            let Some(svc) = self.services.get_mut(name) else {
+                return Ok(None);
+            };
+            if let Some(next) = svc.script.pop_front() {
+                svc.current = next;
             }
-            self.state = self.after_start;
+            let state = svc.current;
+            if svc.marked_for_delete && state == ScmState::Stopped && !never_gone {
+                self.services.remove(name);
+                return Ok(None);
+            }
+            Ok(Some(state))
+        }
+        fn create(&mut self, spec: &ServiceSpec) -> Result<()> {
+            self.record("create")?;
+            if self.services.contains_key(&spec.name) {
+                return Err(CliError::Service("already exists".into()).into());
+            }
+            self.add(&spec.name, ScmState::Stopped, &[]);
             Ok(())
         }
-        fn stop(&mut self, _: &str) -> Result<()> {
-            self.calls.borrow_mut().push("stop".into());
-            self.state = Some(ScmState::Stopped);
+        fn delete(&mut self, name: &str) -> Result<()> {
+            self.record("delete")?;
+            let never_gone = self.never_gone;
+            let svc = self.svc(name)?;
+            if svc.current == ScmState::Stopped && svc.script.is_empty() && !never_gone {
+                self.services.remove(name);
+            } else {
+                svc.marked_for_delete = true;
+            }
+            Ok(())
+        }
+        fn start(&mut self, name: &str) -> Result<()> {
+            self.record("start")?;
+            let script = self.start_script.iter().copied().collect();
+            self.svc(name)?.script = script;
+            Ok(())
+        }
+        fn stop(&mut self, name: &str) -> Result<()> {
+            self.record("stop")?;
+            let script = self.stop_script.iter().copied().collect();
+            self.svc(name)?.script = script;
             Ok(())
         }
         fn description(&mut self, _: &str) -> Result<Option<String>> {
@@ -442,6 +551,10 @@ mod tests {
         }
     }
 
+    fn calls(port: &FakeScm) -> Vec<String> {
+        port.calls.borrow().clone()
+    }
+
     #[test]
     fn service_spec_for_serve() {
         let s = spec();
@@ -464,6 +577,25 @@ mod tests {
         );
         assert_eq!(s.description, pin(Path::new(r"C:\cfg\serve.toml")).record());
         assert!(s.failure.is_some());
+    }
+
+    #[test]
+    fn service_spec_for_access() {
+        let s = spec_for("access");
+        assert_eq!(s.name, "iroh-tunnel-access");
+        assert_eq!(s.display_name, "iroh-tunnel access");
+        assert_eq!(
+            s.launch_arguments,
+            ["access", "run", "--config", r"C:\cfg\access.toml"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn render_rejects_unknown_role() {
+        let cfg = Path::new(r"C:\cfg\x.toml");
+        let err = ServiceSpec::render("bogus", cfg, cfg, cfg, &pin(cfg), &RestartPolicy::DEFAULT)
+            .unwrap_err();
+        assert!(service_msg(err).contains("bogus"));
     }
 
     #[test]
@@ -520,51 +652,175 @@ mod tests {
     fn install_replaces_existing() {
         let mut port = FakeScm::with(Some(ScmState::Running));
         install_with(&mut port, &mut FakeClock::default(), &spec()).unwrap();
-        assert_eq!(*port.calls.borrow(), ["stop", "delete", "create", "start"]);
-        assert_eq!(port.state, Some(ScmState::Running));
+        assert_eq!(calls(&port), ["stop", "delete", "create", "start"]);
+        assert_eq!(port.current(), Some(ScmState::Running));
+    }
+
+    #[test]
+    fn install_waits_through_pending_states() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.stop_script = vec![
+            ScmState::StopPending,
+            ScmState::StopPending,
+            ScmState::Stopped,
+        ];
+        port.start_script = vec![
+            ScmState::StartPending,
+            ScmState::StartPending,
+            ScmState::Running,
+        ];
+        let mut clock = FakeClock::default();
+        install_with(&mut port, &mut clock, &spec()).unwrap();
+        assert_eq!(calls(&port), ["stop", "delete", "create", "start"]);
+        assert_eq!(port.current(), Some(ScmState::Running));
+        assert!(clock.now > Duration::ZERO && clock.now < Duration::from_secs(5));
     }
 
     #[test]
     fn install_rolls_back_when_start_fails() {
         let mut port = FakeScm::with(None);
-        port.fail_start = true;
+        port.fail_once.insert("start");
         let err = install_with(&mut port, &mut FakeClock::default(), &spec()).unwrap_err();
         assert_eq!(service_msg(err), "start boom");
-        assert_eq!(*port.calls.borrow(), ["create", "start", "delete"]);
-        assert_eq!(port.state, None);
+        assert_eq!(calls(&port), ["create", "start", "delete"]);
+        assert_eq!(port.current(), None);
     }
 
     #[test]
-    fn install_rolls_back_when_never_running() {
+    fn install_rolls_back_a_service_stuck_in_start_pending() {
         let mut port = FakeScm::with(None);
-        port.after_start = Some(ScmState::StartPending);
+        port.start_script = vec![ScmState::StartPending];
+        let mut clock = FakeClock::default();
+        let err = install_with(&mut port, &mut clock, &spec()).unwrap_err();
+        let msg = service_msg(err);
+        assert!(msg.contains(SERVE) && msg.contains("StartPending"), "{msg}");
+        assert!(clock.now >= Duration::from_secs(30));
+        // Stopped before deleted, so the delete really removes it.
+        assert_eq!(calls(&port), ["create", "start", "stop", "delete"]);
+        assert_eq!(port.current(), None);
+        assert!(port.services.is_empty());
+    }
+
+    #[test]
+    fn install_fails_fast_when_service_stops_after_start() {
+        let mut port = FakeScm::with(None);
+        port.start_script = vec![ScmState::StartPending, ScmState::Stopped];
+        let mut clock = FakeClock::default();
+        let err = install_with(&mut port, &mut clock, &spec()).unwrap_err();
+        let msg = service_msg(err);
+        assert!(msg.contains("Stopped"), "{msg}");
+        assert!(clock.now < Duration::from_secs(5), "{:?}", clock.now);
+        assert!(port.services.is_empty());
+    }
+
+    #[test]
+    fn install_returns_original_error_when_rollback_fails() {
+        let mut port = FakeScm::with(None);
+        port.fail_once.insert("start");
+        port.never_gone = true;
+        let err = install_with(&mut port, &mut FakeClock::default(), &spec()).unwrap_err();
+        assert_eq!(service_msg(err), "start boom");
+    }
+
+    #[test]
+    fn install_stop_failure_keeps_the_old_service() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.fail_once.insert("stop");
+        let err = install_with(&mut port, &mut FakeClock::default(), &spec()).unwrap_err();
+        assert_eq!(service_msg(err), "stop boom");
+        assert_eq!(calls(&port), ["stop"]);
+        assert_eq!(port.current(), Some(ScmState::Running));
+    }
+
+    #[test]
+    fn install_delete_failure_creates_nothing() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.fail_once.insert("delete");
+        let err = install_with(&mut port, &mut FakeClock::default(), &spec()).unwrap_err();
+        assert_eq!(service_msg(err), "delete boom");
+        assert_eq!(calls(&port), ["stop", "delete"]);
+        assert_eq!(port.services.len(), 1);
+    }
+
+    #[test]
+    fn install_create_failure_leaves_no_service() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.fail_once.insert("create");
+        let err = install_with(&mut port, &mut FakeClock::default(), &spec()).unwrap_err();
+        assert_eq!(service_msg(err), "create boom");
+        assert_eq!(calls(&port), ["stop", "delete", "create"]);
+        assert!(port.services.is_empty());
+    }
+
+    #[test]
+    fn replace_times_out_when_old_service_never_stops() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.stop_script = vec![ScmState::StopPending];
         let mut clock = FakeClock::default();
         let err = install_with(&mut port, &mut clock, &spec()).unwrap_err();
         let msg = service_msg(err);
         assert!(
-            msg.contains("iroh-tunnel-serve") && msg.contains("StartPending"),
+            msg.contains("Stopped") && msg.contains("StopPending"),
             "{msg}"
         );
-        assert!(clock.now >= Duration::from_secs(30));
-        assert_eq!(
-            port.calls.borrow().last().map(String::as_str),
-            Some("delete")
+        assert!(clock.now >= Duration::from_secs(20) && clock.now < Duration::from_secs(21));
+        assert_eq!(calls(&port), ["stop"]);
+    }
+
+    #[test]
+    fn stop_waits_for_an_already_stopping_service() {
+        let mut port = FakeScm::with(None);
+        port.add(
+            SERVE,
+            ScmState::StopPending,
+            &[ScmState::StopPending, ScmState::Stopped],
         );
-        assert_eq!(port.state, None);
+        stop_with(&mut port, &mut FakeClock::default(), "serve").unwrap();
+        assert!(calls(&port).is_empty());
+    }
+
+    #[test]
+    fn stop_times_out_after_20_seconds() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.stop_script = vec![ScmState::StopPending];
+        let mut clock = FakeClock::default();
+        let err = stop_with(&mut port, &mut clock, "serve").unwrap_err();
+        assert!(service_msg(err).contains("within 20s"));
+        assert!(clock.now >= Duration::from_secs(20) && clock.now < Duration::from_secs(21));
+    }
+
+    #[test]
+    fn delete_times_out_after_10_seconds() {
+        let mut port = FakeScm::with(Some(ScmState::Stopped));
+        port.never_gone = true;
+        let mut clock = FakeClock::default();
+        let err = uninstall_with(&mut port, &mut clock, "serve").unwrap_err();
+        let msg = service_msg(err);
+        assert!(msg.contains("gone") && msg.contains("within 10s"), "{msg}");
+        assert!(clock.now >= Duration::from_secs(10) && clock.now < Duration::from_secs(11));
+    }
+
+    #[test]
+    fn delete_of_running_service_only_marks_it() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.delete(SERVE).unwrap();
+        assert_eq!(port.state(SERVE).unwrap(), Some(ScmState::Running));
+        port.stop(SERVE).unwrap();
+        assert_eq!(port.state(SERVE).unwrap(), None);
     }
 
     #[test]
     fn stop_of_stopped_is_ok() {
         let mut port = FakeScm::with(Some(ScmState::Stopped));
         stop_with(&mut port, &mut FakeClock::default(), "serve").unwrap();
-        assert!(port.calls.borrow().is_empty());
+        assert!(calls(&port).is_empty());
     }
 
     #[test]
     fn stop_stops_a_running_service() {
         let mut port = FakeScm::with(Some(ScmState::Running));
         stop_with(&mut port, &mut FakeClock::default(), "serve").unwrap();
-        assert_eq!(*port.calls.borrow(), ["stop"]);
+        assert_eq!(calls(&port), ["stop"]);
     }
 
     #[test]
@@ -575,17 +831,28 @@ mod tests {
     }
 
     #[test]
+    fn operations_honour_the_service_name() {
+        // Only the serve service exists; the access role must not see it.
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        let err = stop_with(&mut port, &mut FakeClock::default(), "access").unwrap_err();
+        assert!(service_msg(err).contains("iroh-tunnel-access"));
+        assert!(port.stop("iroh-tunnel-access").is_err());
+        assert_eq!(port.current(), Some(ScmState::Running));
+    }
+
+    #[test]
     fn uninstall_absent_is_ok() {
         let mut port = FakeScm::with(None);
         uninstall_with(&mut port, &mut FakeClock::default(), "serve").unwrap();
-        assert!(port.calls.borrow().is_empty());
+        assert!(calls(&port).is_empty());
     }
 
     #[test]
     fn uninstall_removes_a_running_service() {
         let mut port = FakeScm::with(Some(ScmState::Running));
         uninstall_with(&mut port, &mut FakeClock::default(), "serve").unwrap();
-        assert_eq!(*port.calls.borrow(), ["stop", "delete"]);
+        assert_eq!(calls(&port), ["stop", "delete"]);
+        assert!(port.services.is_empty());
     }
 
     #[test]
@@ -598,15 +865,17 @@ mod tests {
     #[test]
     fn start_waits_for_running() {
         let mut port = FakeScm::with(Some(ScmState::Stopped));
+        port.start_script = vec![ScmState::StartPending, ScmState::Running];
         start_with(&mut port, &mut FakeClock::default(), "serve").unwrap();
-        assert_eq!(*port.calls.borrow(), ["start"]);
+        assert_eq!(calls(&port), ["start"]);
+        assert_eq!(port.current(), Some(ScmState::Running));
     }
 
     #[test]
     fn status_reports_absent_and_state() {
         let mut port = FakeScm::with(None);
         assert_eq!(status_with(&mut port, "serve").unwrap(), ScmStatus::Absent);
-        port.state = Some(ScmState::Running);
+        port.add(SERVE, ScmState::Running, &[]);
         assert_eq!(
             status_with(&mut port, "serve").unwrap(),
             ScmStatus::Installed(ScmState::Running)
@@ -616,16 +885,16 @@ mod tests {
     #[test]
     fn restart_waits_for_lock_then_starts() {
         let mut port = FakeScm::with(Some(ScmState::Running));
-        let calls = Rc::clone(&port.calls);
+        let log = Rc::clone(&port.calls);
         let mut seen_at_wait = None;
         restart_with(&mut port, &mut FakeClock::default(), "serve", |t| {
             assert_eq!(t, Duration::from_secs(15));
-            seen_at_wait = Some(calls.borrow().clone());
+            seen_at_wait = Some(log.borrow().clone());
             Ok(())
         })
         .unwrap();
         assert_eq!(seen_at_wait.unwrap(), ["stop"]);
-        assert_eq!(*port.calls.borrow(), ["stop", "start"]);
+        assert_eq!(calls(&port), ["stop", "start"]);
     }
 
     #[test]
@@ -636,6 +905,6 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(service_msg(err), "still running");
-        assert_eq!(*port.calls.borrow(), ["stop"]);
+        assert_eq!(calls(&port), ["stop"]);
     }
 }
