@@ -84,7 +84,7 @@ Traceability:
 
 ## 6. Windows Service backend (design D4, D6)
 
-- [ ] 6.1 Add pure rendering in `backend/windows_service.rs`, unit-tested on all platforms:
+- [x] 6.1 Add pure rendering in `backend/windows_service.rs`, unit-tested on all platforms:
   - `ServiceSpec`: name with test suffix, quoted command line `"<binary>" <role> run --config "<config>"`;
   - environment block `IROH_TUNNEL_STATE_DIR`, `IROH_TUNNEL_TRUSTED_SID`, `IROH_TUNNEL_SCM=1`;
   - pin description;
