@@ -4,7 +4,41 @@
 
 pub mod release_server;
 
+use sha2::{Digest, Sha256};
+use std::io::Write as _;
 use std::path::Path;
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Publish `version` for `target`: one `<exe>-<version>-<target>.zip` per
+/// `(exe, entry, contents)`, plus one `checksums.txt` listing them all.
+pub fn publish_zips(
+    root: &Path,
+    version: &str,
+    target: &str,
+    exes: &[(&str, &str, &[u8])],
+) -> anyhow::Result<()> {
+    let dir = root.join(version);
+    std::fs::create_dir_all(&dir)?;
+    let mut sums = String::new();
+    for (exe, entry, contents) in exes {
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            zip.start_file(*entry, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(contents)?;
+            zip.finish()?;
+        }
+        let name = format!("{exe}-{version}-{target}.zip");
+        std::fs::write(dir.join(&name), &buf)?;
+        sums.push_str(&format!("{}  {name}\n", hex(&Sha256::digest(&buf))));
+    }
+    std::fs::write(dir.join("checksums.txt"), sums)?;
+    std::fs::write(dir.join("checksums.txt.sigstore.json"), "{}")?;
+    Ok(())
+}
 
 /// Role-ownership runtime state (#87): lock and owner records in the default
 /// state directory. They are neither configuration nor keys.

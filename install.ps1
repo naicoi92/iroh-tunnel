@@ -165,6 +165,38 @@ function Test-OnPath([string]$Path, [string]$Dir) {
     return $false
 }
 
+# --- install directory ------------------------------------------------------
+
+# Creates a directory only SYSTEM, Administrators and TrustedInstaller can
+# change: the parent's rules minus the creating user and CREATOR OWNER (which
+# would hand the creator full control), owned by Administrators.
+function New-ProtectedBinDir {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Private helper; the installer honours -DryRun before calling it.')]
+    param([string]$Dir)
+
+    New-Item -ItemType Directory -Path $Dir | Out-Null
+    try {
+        $parentAcl = Get-Acl -LiteralPath (Split-Path -LiteralPath $Dir -Parent)
+        $sec = New-Object System.Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        foreach ($rule in $parentAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+            $sid = $rule.IdentityReference.Value
+            if ($sid -eq $me -or $sid -eq 'S-1-3-0') { continue }
+            $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                        $rule.IdentityReference, $rule.FileSystemRights, $rule.InheritanceFlags,
+                        $rule.PropagationFlags, $rule.AccessControlType)))
+        }
+        $sec.SetOwner([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544')
+        Set-Acl -LiteralPath $Dir -AclObject $sec
+    }
+    catch {
+        $reason = $_.Exception.Message
+        Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
+        Fail "cannot protect $Dir ($reason). Rerun from an elevated PowerShell (Run as administrator)."
+    }
+}
+
 # --- main -------------------------------------------------------------------
 
 # Everything that changes the system lives here, called on the last line: a
@@ -200,8 +232,13 @@ function Install-IrohTunnel {
     # the probe is removed again unless the install completes.
     $binDirExisted = Test-Path -LiteralPath $BinDir
     $completed = $false
+    if (-not $binDirExisted) {
+        # A parent we cannot write to fails here; the helper removes what it made.
+        try { New-ProtectedBinDir $BinDir }
+        catch [InstallError] { throw }
+        catch { Fail "cannot write to $BinDir. Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
+    }
     try {
-        New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
         $probe = Join-Path $BinDir ".write-test.$PID"
         Set-Content -LiteralPath $probe -Value 'x'
         Remove-Item -LiteralPath $probe -Force

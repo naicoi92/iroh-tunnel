@@ -69,6 +69,17 @@ pub use types::{
 };
 pub use uninstall::uninstall;
 
+/// Runs the service binary trust check on `path` (installer ACL test).
+///
+/// # Errors
+///
+/// The trust refusal for `path`.
+#[cfg(all(windows, feature = "test-utils"))]
+#[doc(hidden)]
+pub fn __test_verify_binary(path: &std::path::Path) -> anyhow::Result<()> {
+    trust_windows::verify_binary(path)
+}
+
 /// Set to `1` in the environment of a Windows Service registration so the
 /// binary knows the SCM started it and enters the service dispatcher.
 pub const ENV_SCM: &str = "IROH_TUNNEL_SCM";

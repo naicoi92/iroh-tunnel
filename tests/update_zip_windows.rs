@@ -14,8 +14,6 @@ use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::{
     update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
 };
-use sha2::{Digest, Sha256};
-use std::io::Write as _;
 use std::path::Path;
 
 const EXE: &str = "iroh-tunnel-serve";
@@ -29,10 +27,6 @@ impl SignatureVerifier for Accept {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// Publish `version` for `target` as a `.zip` holding `entry` with `contents`.
 fn publish_zip(
     root: &Path,
@@ -41,23 +35,7 @@ fn publish_zip(
     entry: &str,
     contents: &[u8],
 ) -> Result<()> {
-    let dir = root.join(version);
-    std::fs::create_dir_all(&dir)?;
-    let mut buf = Vec::new();
-    {
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-        zip.start_file(entry, zip::write::SimpleFileOptions::default())?;
-        zip.write_all(contents)?;
-        zip.finish()?;
-    }
-    let name = format!("{EXE}-{version}-{target}.zip");
-    std::fs::write(dir.join(&name), &buf)?;
-    std::fs::write(
-        dir.join("checksums.txt"),
-        format!("{}  {name}\n", hex(&Sha256::digest(&buf))),
-    )?;
-    std::fs::write(dir.join("checksums.txt.sigstore.json"), "{}")?;
-    Ok(())
+    common::publish_zips(root, version, target, &[(EXE, entry, contents)])
 }
 
 fn run_update(server: &ReleaseServer, target: &str, install: &Path) -> Result<()> {
