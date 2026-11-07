@@ -458,12 +458,29 @@ fn read_all(handle: &OwnedHandle, path: &Path) -> Result<Vec<u8>> {
 /// [`CliError::Permission`] when the binary or any directory above it can be
 /// changed by a non-system principal.
 pub(crate) fn verify_binary(path: &Path) -> Result<()> {
+    check_binary(path).map_err(|e| name_binary(path, e))
+}
+
+fn check_binary(path: &Path) -> Result<()> {
     let chain = verified(path, LastAccess::Inspect, &TrustedSet::for_binary())?;
     let (_, d) = chain.target()?;
     if d.is_dir {
         return Err(not_a("file", d));
     }
     Ok(())
+}
+
+/// Re-raise a trust refusal so it names the service binary (the refusal
+/// itself may name only an offending ancestor), keeping exit code 3.
+fn name_binary(path: &Path, e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<CliError>() {
+        Some(CliError::Permission(reason)) => CliError::Permission(format!(
+            "the service binary {} is not protected: {reason}",
+            path.display()
+        ))
+        .into(),
+        _ => e,
+    }
 }
 
 /// `name` as a single plain path segment (no separator, stream, wildcard,
@@ -1288,6 +1305,20 @@ mod tests {
         }
         let text = permission_text(read_in(tmp.path(), &me(), "link.json").unwrap_err());
         assert!(text.contains("link"), "{text}");
+    }
+
+    #[test]
+    fn name_binary_names_the_binary_and_keeps_the_reason() {
+        let e = name_binary(
+            Path::new("C:\\x\\tunnel.exe"),
+            CliError::Permission("C:\\x grants untrusted SID".into()).into(),
+        );
+        let text = e.to_string();
+        assert!(text.contains("C:\\x\\tunnel.exe") && text.contains("grants untrusted SID"));
+        assert!(matches!(
+            e.downcast_ref::<CliError>(),
+            Some(CliError::Permission(_))
+        ));
     }
 
     #[test]
