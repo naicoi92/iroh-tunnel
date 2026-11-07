@@ -124,13 +124,13 @@ Traceability:
 
 ## 8. Cross-scope refusal and update guidance
 
-- [ ] 8.1 Windows install refuses the other scope:
+- [x] 8.1 Windows install refuses the other scope:
   - `--system` probes the user task (`schtasks /Query` exit status);
   - `--user` probes the service (`OpenService(SERVICE_QUERY_STATUS)`);
   - exit 5 naming `service uninstall --user|--system`, nothing registered.
 
   Unit-test the decision with fake probes. (SSM: Windows cross-scope registration is refused — User task exists; System service exists)
-- [ ] 8.2 Append the unconditional `iroh-tunnel <role> service stop --system` (elevated) hint to the Windows locked-executable failure in `update/`. Nothing is stopped. Unit test on the message; extend `tests/update_zip_windows.rs`. (SU: Locked executable on Windows fails cleanly — Running image; Guidance for a system service)
+- [x] 8.2 Append the unconditional `iroh-tunnel <role> service stop --system` (elevated) hint to the Windows locked-executable failure in `update/`. Nothing is stopped. Unit test on the message; extend `tests/update_zip_windows.rs`. (SU: Locked executable on Windows fails cleanly — Running image; Guidance for a system service)
 
 ## 9. Installer directory protection (design D9)
 
