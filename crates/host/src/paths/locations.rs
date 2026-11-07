@@ -1,6 +1,6 @@
 //! Platform base directories shared by the path operations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -24,16 +24,29 @@ pub(super) fn home_dir() -> Result<PathBuf> {
     }
 }
 
+/// The LocalAppData root of the current user (without the app directory).
 #[cfg(windows)]
 pub(super) fn local_app_data() -> Result<PathBuf> {
     match dirs::data_local_dir() {
-        Some(dir) if dir.is_absolute() => Ok(dir.join(APP_DIR)),
+        Some(dir) if dir.is_absolute() => Ok(dir),
         _ => Err(config_err(
             "could not resolve the LocalAppData folder; \
              pass --config / IROH_TUNNEL_STATE_DIR explicitly"
                 .into(),
         )),
     }
+}
+
+/// Config directory under a Windows LocalAppData `root`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn windows_config_dir(root: &Path) -> PathBuf {
+    root.join(APP_DIR).join("config")
+}
+
+/// State directory under a Windows LocalAppData `root`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn windows_state_dir(root: &Path) -> PathBuf {
+    root.join(APP_DIR).join("state")
 }
 
 /// Default directory holding `<role>.toml`.
@@ -44,7 +57,7 @@ pub(super) fn local_app_data() -> Result<PathBuf> {
 /// is missing or not absolute.
 pub(super) fn default_config_dir() -> Result<PathBuf> {
     #[cfg(windows)]
-    return Ok(local_app_data()?.join("config"));
+    return Ok(windows_config_dir(&local_app_data()?));
     #[cfg(not(windows))]
     Ok(home_dir()?.join(".config").join(APP_DIR))
 }
