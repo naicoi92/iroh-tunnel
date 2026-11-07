@@ -165,7 +165,11 @@ impl fmt::Display for Refusal {
                 )
             }
             Self::NoDacl { path } => {
-                write!(f, "{} has no DACL (everyone has access)", path.display())
+                write!(
+                    f,
+                    "{} has no access list (NULL DACL: everyone has access)",
+                    path.display()
+                )
             }
             Self::Owner { path, owner } => {
                 write!(
@@ -386,6 +390,18 @@ mod tests {
             Err(Refusal::NoDacl {
                 path: "C:\\u\\s.toml".into()
             })
+        );
+    }
+
+    #[test]
+    fn null_dacl_refusal_names_the_missing_access_list() {
+        let text = Refusal::NoDacl {
+            path: "C:\\u\\s.toml".into(),
+        }
+        .to_string();
+        assert!(
+            text.contains("C:\\u\\s.toml") && text.contains("access list"),
+            "{text}"
         );
     }
 
