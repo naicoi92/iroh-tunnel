@@ -124,6 +124,9 @@ impl Shared {
 }
 
 /// Advance the pending checkpoint every second until the service is done.
+/// While Running, `tick` yields nothing, so the once-a-second wake-up is a
+/// cheap no-op (kept deliberately: it also covers a later stop's pending
+/// state without extra signalling).
 fn spawn_ticker(shared: Arc<Shared>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(TICK);
@@ -183,9 +186,11 @@ fn service_main(_arguments: Vec<OsString>) {
         .get()
         .and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
     let Some((parsed, binary)) = taken else {
+        eprintln!("error: service started without a pending command");
         return;
     };
     let Some(role) = role_name(&parsed) else {
+        eprintln!("error: only the serve and access roles run as a Windows service");
         return;
     };
     let shared = Arc::new(Shared {
@@ -207,8 +212,13 @@ fn service_main(_arguments: Vec<OsString>) {
                 _ => ServiceControlHandlerResult::NotImplemented,
             },
         );
-    let Ok(handle) = registered else {
-        return;
+    let handle = match registered {
+        Ok(handle) => handle,
+        Err(e) => {
+            // No status handle: the SCM cannot be told anything.
+            eprintln!("error: cannot register the service control handler: {e}");
+            return;
+        }
     };
     let _ = shared.handle.set(handle);
 
@@ -220,14 +230,16 @@ fn service_main(_arguments: Vec<OsString>) {
     }
     spawn_ticker(shared.clone());
 
-    init_tracing_with(parsed.verbose, parsed.quiet, log_writer(role));
-
     let hook_shared = shared.clone();
+    // Tracing setup is inside the unwind guard so a failure still ends in the
+    // single Stopped report.
     let code = catch_unwind(AssertUnwindSafe(|| {
+        init_tracing_with(parsed.verbose, parsed.quiet, log_writer(role));
         run_to_code(
             parsed,
             binary,
             Some(Box::new(move || hook_shared.on_ready())),
+            true,
         )
     }))
     .unwrap_or(1);

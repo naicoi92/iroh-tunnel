@@ -14,12 +14,14 @@ const ENV_EXIT_AFTER_MS: &str = "IROH_TUNNEL_TEST_EXIT_AFTER_MS";
 const ENV_FAIL_BEFORE_READY: &str = "IROH_TUNNEL_TEST_FAIL_BEFORE_READY";
 
 /// Faults requested through the environment.
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TestFault {
     pub exit_after: Option<std::time::Duration>,
     pub fail_before_ready: bool,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl TestFault {
     /// Parse the raw variable values; `None` when no fault is requested.
     pub(crate) fn parse(

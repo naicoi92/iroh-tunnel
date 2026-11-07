@@ -107,7 +107,7 @@ fn execute(parsed: Cli, binary: Binary) -> ! {
         crate::scm_runtime::run_as_service(parsed, binary)
     }
     cli::init_tracing(parsed.verbose, parsed.quiet);
-    std::process::exit(run_to_code(parsed, binary, None))
+    std::process::exit(run_to_code(parsed, binary, None, false))
 }
 
 /// Exit code for a failed command that is not a usage error.
@@ -134,8 +134,23 @@ fn compose_ready(print: iroh_tunnel_host::OnReady, hook: ReadyHook) -> iroh_tunn
     })
 }
 
+/// Forward a failure text to `log` only when running as a service: there is
+/// no console under the SCM, so stderr output never reaches the service log.
+fn forward_failure(to_log: bool, text: &str, log: impl FnOnce(&str)) {
+    if to_log {
+        log(text);
+    }
+}
+
+/// Production sink: the failure text as a `tracing` error event.
+fn log_failure(to_log: bool, text: &str) {
+    forward_failure(to_log, text, |t| tracing::error!("{t}"));
+}
+
 /// Run the parsed command to completion and return its process exit code.
-pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook) -> i32 {
+/// With `log_errors` (service mode) every failure is also written through
+/// `tracing`; stdout/stderr output is identical either way.
+pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook, log_errors: bool) -> i32 {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -143,6 +158,7 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook) -> i32 
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("error: failed to start runtime: {e}");
+            log_failure(log_errors, &format!("failed to start runtime: {e}"));
             return 1;
         }
     };
@@ -176,6 +192,10 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook) -> i32 
             // Exit statuses: 130 repeated stop after grace, 1 watchdog (see
             // CHANGELOG). Own-state cleanup is still attempted here.
             eprintln!("error: shutdown abandoned ({forced:?}), exiting");
+            log_failure(
+                log_errors,
+                &format!("shutdown abandoned ({forced:?}), exiting"),
+            );
             if let Some(role) = status_role {
                 runtime::remove_own_status_file_for_exit(role);
             }
@@ -189,9 +209,11 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook) -> i32 
         Ok(()) => 0,
         Err(e) => {
             if let Some(usage) = e.downcast_ref::<UsageError>() {
+                log_failure(log_errors, &usage.message);
                 return usage::print_usage_error(binary, &usage.command_path, &usage.message);
             }
             if let (Some(set_err), Some(role)) = (e.downcast_ref::<SetError>(), role_name) {
+                log_failure(log_errors, &set_err.to_string());
                 return usage::print_usage_error(
                     binary,
                     &config_set_path(binary, role),
@@ -199,6 +221,7 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook) -> i32 
                 );
             }
             eprintln!("error: {e:#}");
+            log_failure(log_errors, &format!("{e:#}"));
             exit_code_for(&e)
         }
     }
@@ -497,6 +520,17 @@ mod run_to_code_tests {
             assert_eq!(exit_code_for(&anyhow::Error::new(err)), code);
         }
         assert_eq!(exit_code_for(&anyhow::anyhow!("other")), 1);
+    }
+
+    #[test]
+    fn failures_reach_the_log_only_in_service_mode() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        forward_failure(false, "foreground", |t| {
+            seen.borrow_mut().push(t.to_owned())
+        });
+        assert!(seen.borrow().is_empty());
+        forward_failure(true, "service", |t| seen.borrow_mut().push(t.to_owned()));
+        assert_eq!(*seen.borrow(), vec!["service".to_owned()]);
     }
 
     #[test]
