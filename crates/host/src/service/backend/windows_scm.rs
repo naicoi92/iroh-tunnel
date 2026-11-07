@@ -139,6 +139,18 @@ pub(crate) enum ScmState {
     Other,
 }
 
+impl std::fmt::Display for ScmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stopped => "stopped",
+            Self::StartPending => "start pending",
+            Self::StopPending => "stop pending",
+            Self::Running => "running",
+            Self::Other => "other",
+        })
+    }
+}
+
 /// Result of [`status_with`]; the adapter maps it to `ServiceStatusReport`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScmStatus {
@@ -312,17 +324,19 @@ pub(crate) fn install_with(
     Ok(())
 }
 
-/// Stop the role's service; already stopped is fine.
+/// Stop the role's service; already stopped is fine. Returns whether the
+/// service was already stopped when called.
 ///
 /// # Errors
 ///
 /// [`CliError::Service`] when the service is absent or does not stop in time.
-pub(crate) fn stop_with(port: &mut dyn ScmPort, clock: &mut dyn Clock, role: &str) -> Result<()> {
+pub(crate) fn stop_with(port: &mut dyn ScmPort, clock: &mut dyn Clock, role: &str) -> Result<bool> {
     let name = service_name(role);
-    if port.state(&name)?.is_none() {
+    let Some(state) = port.state(&name)? else {
         return Err(not_installed(&name, role));
-    }
-    stop_existing(port, clock, &name)
+    };
+    stop_existing(port, clock, &name)?;
+    Ok(state == ScmState::Stopped)
 }
 
 /// Stop and delete the role's service; absent is fine.
@@ -360,7 +374,7 @@ pub(crate) fn restart_with(
     role: &str,
     wait_released: impl FnOnce(Duration) -> Result<()>,
 ) -> Result<()> {
-    stop_with(port, clock, role)?;
+    let _already_stopped = stop_with(port, clock, role)?;
     wait_released(LOCK_TIMEOUT)?;
     start_with(port, clock, role)
 }
@@ -404,68 +418,46 @@ pub(crate) fn first_command_line_arg(cmd: &str) -> Option<String> {
     Some(cmd[..end].to_owned())
 }
 
+/// Scriptable in-memory SCM shared by this module's and the system verb glue's tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
     use super::*;
-    use crate::service::PinOwner;
+    use crate::error::CliError;
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::rc::Rc;
 
-    const SID: &str = "S-1-5-21-1-2-3-1001";
-    const SERVE: &str = "iroh-tunnel-serve";
-
-    fn pin(config: &Path) -> Pin {
-        Pin {
-            config: config.to_path_buf(),
-            owner: PinOwner::Sid(SID.into()),
-        }
-    }
-
-    fn spec_for(role: &str) -> ServiceSpec {
-        let cfg = format!(r"C:\cfg\{role}.toml");
-        ServiceSpec::render(
-            role,
-            Path::new(r"C:\bin\iroh-tunnel.exe"),
-            Path::new(&cfg),
-            Path::new(r"C:\ProgramData\iroh-tunnel"),
-            &pin(Path::new(&cfg)),
-            &RestartPolicy::DEFAULT,
-        )
-        .unwrap()
-    }
-
-    fn spec() -> ServiceSpec {
-        spec_for("serve")
-    }
+    pub(crate) const SERVE: &str = "iroh-tunnel-serve";
 
     /// One registered service in the fake.
-    struct Svc {
-        current: ScmState,
+    pub(crate) struct Svc {
+        pub(crate) current: ScmState,
         /// States returned by successive `state()` polls; the last one sticks.
-        script: VecDeque<ScmState>,
-        marked_for_delete: bool,
+        pub(crate) script: VecDeque<ScmState>,
+        pub(crate) marked_for_delete: bool,
     }
 
     /// Scriptable SCM: per-name services whose state advances on every poll,
     /// `delete` that only marks a not-stopped service, one-shot failures.
-    struct FakeScm {
-        services: HashMap<String, Svc>,
-        calls: Rc<RefCell<Vec<String>>>,
+    pub(crate) struct FakeScm {
+        pub(crate) services: HashMap<String, Svc>,
+        pub(crate) calls: Rc<RefCell<Vec<String>>>,
         /// Script installed by `start`.
-        start_script: Vec<ScmState>,
+        pub(crate) start_script: Vec<ScmState>,
         /// Script installed by `stop`.
-        stop_script: Vec<ScmState>,
+        pub(crate) stop_script: Vec<ScmState>,
         /// A marked service never disappears (open handles keep it alive).
-        never_gone: bool,
+        pub(crate) never_gone: bool,
         /// Operations (`"stop"`, `"delete"`, `"create"`, `"start"`) to fail once.
-        fail_once: HashSet<&'static str>,
+        pub(crate) fail_once: HashSet<&'static str>,
         /// What `description` returns for any existing service.
-        description: Option<String>,
+        pub(crate) description: Option<String>,
+        /// What `executable` returns for any existing service.
+        pub(crate) exe: Option<PathBuf>,
     }
 
     impl FakeScm {
-        fn with(state: Option<ScmState>) -> Self {
+        pub(crate) fn with(state: Option<ScmState>) -> Self {
             let mut fake = Self {
                 services: HashMap::new(),
                 calls: Rc::default(),
@@ -474,6 +466,7 @@ mod tests {
                 never_gone: false,
                 fail_once: HashSet::new(),
                 description: None,
+                exe: None,
             };
             if let Some(state) = state {
                 fake.add(SERVE, state, &[]);
@@ -481,7 +474,7 @@ mod tests {
             fake
         }
 
-        fn add(&mut self, name: &str, current: ScmState, script: &[ScmState]) {
+        pub(crate) fn add(&mut self, name: &str, current: ScmState, script: &[ScmState]) {
             self.services.insert(
                 name.to_string(),
                 Svc {
@@ -492,7 +485,7 @@ mod tests {
             );
         }
 
-        fn record(&self, op: &'static str) -> Result<()> {
+        pub(crate) fn record(&self, op: &'static str) -> Result<()> {
             self.calls.borrow_mut().push(op.into());
             if self.fail_once.contains(op) {
                 return Err(CliError::Service(format!("{op} boom")).into());
@@ -500,13 +493,13 @@ mod tests {
             Ok(())
         }
 
-        fn svc(&mut self, name: &str) -> Result<&mut Svc> {
+        pub(crate) fn svc(&mut self, name: &str) -> Result<&mut Svc> {
             self.services
                 .get_mut(name)
                 .ok_or_else(|| CliError::Service(format!("no such service {name}")).into())
         }
 
-        fn current(&self) -> Option<ScmState> {
+        pub(crate) fn current(&self) -> Option<ScmState> {
             self.services.get(SERVE).map(|s| s.current)
         }
     }
@@ -561,14 +554,18 @@ mod tests {
         fn description(&mut self, _: &str) -> Result<Option<String>> {
             Ok(self.description.clone())
         }
-        fn executable(&mut self, _: &str) -> Result<Option<PathBuf>> {
-            Ok(None)
+        fn executable(&mut self, name: &str) -> Result<Option<PathBuf>> {
+            Ok(self
+                .services
+                .contains_key(name)
+                .then(|| self.exe.clone())
+                .flatten())
         }
     }
 
     #[derive(Default)]
-    struct FakeClock {
-        now: Duration,
+    pub(crate) struct FakeClock {
+        pub(crate) now: Duration,
     }
 
     impl Clock for FakeClock {
@@ -578,6 +575,39 @@ mod tests {
         fn sleep(&mut self, d: Duration) {
             self.now += d;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::{FakeClock, FakeScm, SERVE};
+    use super::*;
+    use crate::service::PinOwner;
+    use std::rc::Rc;
+
+    const SID: &str = "S-1-5-21-1-2-3-1001";
+    fn pin(config: &Path) -> Pin {
+        Pin {
+            config: config.to_path_buf(),
+            owner: PinOwner::Sid(SID.into()),
+        }
+    }
+
+    fn spec_for(role: &str) -> ServiceSpec {
+        let cfg = format!(r"C:\cfg\{role}.toml");
+        ServiceSpec::render(
+            role,
+            Path::new(r"C:\bin\iroh-tunnel.exe"),
+            Path::new(&cfg),
+            Path::new(r"C:\ProgramData\iroh-tunnel"),
+            &pin(Path::new(&cfg)),
+            &RestartPolicy::DEFAULT,
+        )
+        .unwrap()
+    }
+
+    fn spec() -> ServiceSpec {
+        spec_for("serve")
     }
 
     #[test]
