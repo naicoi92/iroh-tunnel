@@ -17,9 +17,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run a program and print every stdout line as evidence, or an ERROR line.
-fn run(label: &str, program: &str, args: &[&str]) {
-    match Command::new(program).args(args).output() {
+/// Print every stdout line as evidence, or an ERROR line.
+fn report(label: &str, result: std::io::Result<std::process::Output>) {
+    match result {
         Ok(out) if out.status.success() => {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 println!("EVIDENCE {label} {line}");
@@ -33,8 +33,33 @@ fn run(label: &str, program: &str, args: &[&str]) {
     }
 }
 
+fn run(label: &str, program: &str, args: &[&str]) {
+    report(label, Command::new(program).args(args).output());
+}
+
+const PS_ARGS: [&str; 2] = ["-NoProfile", "-NonInteractive"];
+
+/// Run a PowerShell snippet through `pwsh`, falling back to Windows
+/// PowerShell with `PSModulePath` removed (a PowerShell 7 parent leaves a
+/// module path that Windows PowerShell 5.1 cannot load).
 fn powershell(label: &str, script: &str) {
-    run(label, "powershell", &["-NoProfile", "-Command", script]);
+    static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    let mut pwsh = Command::new("pwsh");
+    pwsh.args(PS_ARGS).args(["-Command", script]);
+    let (shell, result) = match pwsh.output() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut legacy = Command::new("powershell");
+            legacy.args(PS_ARGS).args(["-Command", script]);
+            legacy.env_remove("PSModulePath");
+            ("powershell", legacy.output())
+        }
+        other => ("pwsh", other),
+    };
+    SHELL.get_or_init(|| {
+        println!("EVIDENCE shell {shell}");
+        shell
+    });
+    report(label, result);
 }
 
 /// Print the SDDL of `path`, quoting it as a PowerShell literal.
