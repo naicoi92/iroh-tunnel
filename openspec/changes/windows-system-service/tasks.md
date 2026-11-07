@@ -40,7 +40,7 @@ Traceability:
 ## 2. Scope rules and elevation on Windows
 
 - [x] 2.1 Implement `is_elevated()` on Windows with `GetTokenInformation(TokenElevation)`, keeping the existing test shape. (SSM: Install scope selection; Default scope for verbs)
-- [ ] 2.2 Remove the forced-user line in `install.rs`, and remove the Windows branch of `policy::ensure_supported`. Unit-test `decide_install_scope`/`default_scope` on Windows for: elevated without a flag means system; a non-elevated terminal prompts; non-elevated without a terminal means user. (SSM: Elevated Windows terminal installs without a scope prompt; Elevated Windows terminal without a flag; Interactive user is offered both scopes)
+- [x] 2.2 Remove the forced-user line in `install.rs`, and remove the Windows branch of `policy::ensure_supported`. Unit-test `decide_install_scope`/`default_scope` on Windows for: elevated without a flag means system; a non-elevated terminal prompts; non-elevated without a terminal means user. (SSM: Elevated Windows terminal installs without a scope prompt; Elevated Windows terminal without a flag; Interactive user is offered both scopes)
 - [x] 2.3 Make the `ensure_privilege` rerun guidance platform-specific: `sudo <argv>` on Unix, "Run as administrator" plus `<argv>` on Windows. Exit code 3 and the absolute config path stay. Unit tests for both texts. (SSM: Non-elevated system install on Windows; Non-elevated system verbs on Windows; FIM: Non-elevated Windows system scope; Windows system scope without elevation)
 
 ## 3. Windows trust model (design D2, D3)
@@ -70,7 +70,7 @@ Traceability:
 ## 4. Pin, installing user and accounts (design D4)
 
 - [x] 4.1 Change `Pin.uid` to `Pin.owner: PinOwner { Uid, Sid }`. The record text emits `uid=` or `sid=`; `find` parses both, and existing Unix records still parse. Update `account_name` to take `&PinOwner` (`LookupAccountSidW` on Windows) and port `src/cli_service.rs`. Unit tests cover round trip, legacy record and malformed record. (SSM: Registration pins the owner — Pin in the script; Pin in the Windows service)
-- [ ] 4.2 Windows installing user: take the token user SID, resolve `%LOCALAPPDATA%` with `SHGetKnownFolderPath(FOLDERID_LocalAppData, token)`, and cross-check the `--config` directory owner:
+- [x] 4.2 Windows installing user: take the token user SID, resolve `%LOCALAPPDATA%` with `SHGetKnownFolderPath(FOLDERID_LocalAppData, token)`, and cross-check the `--config` directory owner:
   - a different user SID gives exit 2 naming both accounts;
   - Administrators, SYSTEM or TrustedInstaller defers to the token user.
 
@@ -91,7 +91,7 @@ Traceability:
   - `RestartPolicy` mapped to failure actions (5 s, reset after 1 day, none when disabled, applied to non-crash failures).
 
   Credit #67 with `Co-authored-by: 23rd <23rd@vivaldi.net>` where its code is reused. (SSM: Windows system service registration; Windows service recovery and exit mapping)
-- [ ] 6.2 Add the SCM adapter (cfg windows) through `windows-service`:
+- [x] 6.2 Add the SCM adapter (cfg windows) through `windows-service`:
   - install = stop, delete, wait-gone, create (LocalSystem, AutoStart), set description, environment and failure actions, then start; any failure after create deletes the service;
   - start/stop/restart/status/uninstall use least-access opens and structured `ServiceState`;
   - restart waits up to 15 s for the role lock;
@@ -99,7 +99,7 @@ Traceability:
   - stop of an already-stopped service and uninstall of an absent one succeed.
 
   (SSM: Windows system install replaces and rolls back; Windows system verbs on a missing service; Windows restart waits for the old process — System service restart)
-- [ ] 6.3 Wire system scope on Windows into `install.rs` (`plan_system_install`), `verb.rs`, `status.rs` and `platform::existing_registration`:
+- [x] 6.3 Wire system scope on Windows into `install.rs` (`plan_system_install`), `verb.rs`, `status.rs` and `platform::existing_registration`:
   - verify state and config through the trust check, and the binary with the binary set, before registering;
   - read the pin back for the retarget decision;
   - CLI `start`/`restart --system` re-check the binary read back with `QueryServiceConfig`.
