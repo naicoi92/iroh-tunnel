@@ -190,6 +190,21 @@ impl StatusWriter {
             let _ = crate::service::trust::remove_in(dir, uid, LEGACY_STATUS_FILE_NAME);
             return Ok(path);
         }
+        #[cfg(windows)]
+        if let Some(sid) = crate::service::trust_windows::trusted_sid_from_env()? {
+            use crate::service::trust_windows::{model::TrustedSet, publish, remove_in};
+            let trusted = TrustedSet::for_user_files(&sid);
+            let temp = format!(
+                "{}.tmp.{}.{}",
+                self.file_name(),
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            publish(dir, &trusted, self.file_name(), &temp, content.as_bytes())?;
+            // Best-effort, like the path-based branch below.
+            let _ = remove_in(dir, &trusted, LEGACY_STATUS_FILE_NAME);
+            return Ok(path);
+        }
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create status dir: {}", dir.display()))?;
         // Write to a temp file in the same directory, then rename — atomic
@@ -596,5 +611,39 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         remove_own_status_file(StatusWriter::serve(), Some(tmp.path())).await;
         assert!(!tmp.path().join("serve-status.json").exists());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::super::fixtures::sample_status;
+    use super::*;
+    use crate::service::trust_windows::{test_env::EnvGuard, token_user};
+
+    #[test]
+    fn status_publish_goes_through_verified_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let target = dir.join("target");
+        std::fs::write(&target, "keep").unwrap();
+        let status = dir.join("serve-status.json");
+        let linked = std::process::Command::new("cmd")
+            .args([
+                "/c",
+                "mklink",
+                status.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        // Without symlink privilege the plain publish path is still checked.
+        let _ = linked;
+        let sid = token_user().unwrap().0;
+        let _env = EnvGuard::set(&[("IROH_TUNNEL_TRUSTED_SID", Some(&sid))]);
+        let payload = StatusPayload::Serve(sample_status());
+        StatusWriter::serve().save_to(dir, &payload).unwrap();
+        let meta = std::fs::symlink_metadata(&status).unwrap();
+        assert!(meta.file_type().is_file() && !meta.file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
     }
 }

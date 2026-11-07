@@ -380,7 +380,6 @@ fn not_a(kind: &str, d: &Descriptor) -> anyhow::Error {
 ///
 /// [`CliError::Permission`] naming the unsafe element, or when the
 /// directory is missing (the service never creates it).
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the service runtime later
 pub(crate) fn verify_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
     let chain = verified(path, LastAccess::Inspect, trusted).map_err(|e| {
         let missing = e.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error);
@@ -407,7 +406,6 @@ pub(crate) fn verify_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
 /// # Errors
 ///
 /// [`CliError::Permission`] when the file or any element above it is unsafe.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the service runtime later
 pub(crate) fn read_verified(path: &Path, trusted: &TrustedSet) -> Result<String> {
     let chain = verified(path, LastAccess::ReadFile, trusted)?;
     let (handle, d) = chain.target()?;
@@ -653,7 +651,6 @@ fn write_all(file: &OwnedHandle, mut bytes: &[u8]) -> io::Result<()> {
 /// # Errors
 ///
 /// [`CliError::Permission`] when the directory is no longer safe.
-#[cfg_attr(not(test), allow(dead_code))] // no consumer until the status writer (Task 8)
 pub(crate) fn publish(
     dir: &Path,
     trusted: &TrustedSet,
@@ -709,7 +706,6 @@ fn publish_with(
 /// # Errors
 ///
 /// [`CliError::Permission`] when the directory is no longer safe.
-#[cfg_attr(not(test), allow(dead_code))] // no consumer until the status writer (Task 8)
 pub(crate) fn remove_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<()> {
     let name = plain_name(name)?;
     let chain = verified(dir, LastAccess::WriteDir, trusted)?;

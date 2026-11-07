@@ -14,11 +14,57 @@ pub(crate) mod model;
 pub(crate) mod win32;
 
 #[cfg(windows)]
-#[allow(unused_imports)] // consumed by the service runtime and SCM install later
+#[allow(unused_imports)]
+// `account_of`, `owner_of`, `token_user`, `verify_binary` are consumed by the SCM install later
 pub(crate) use win32::{
     account_of, create_dir_with_sddl, owner_of, program_data_dir, publish, read_verified,
     remove_in, token_user, verify_binary, verify_dir,
 };
+
+/// Serialised, scoped process-environment edits shared by every test that
+/// sets the service variables (the environment is global).
+#[cfg(all(test, windows))]
+pub(crate) mod test_env {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        /// Set (`Some`) or unset (`None`) each variable until dropped.
+        pub(crate) fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = vars
+                .iter()
+                .map(|(k, v)| {
+                    let old = std::env::var_os(k);
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                    (*k, old)
+                })
+                .collect();
+            Self { saved, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, old) in self.saved.drain(..).rev() {
+                match old {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
 
 use crate::error::CliError;
 use model::Sid;
@@ -54,7 +100,6 @@ pub const ENV_TRUSTED_SID: &str = "IROH_TUNNEL_TRUSTED_SID";
 /// # Errors
 ///
 /// [`CliError::Config`] when the variable is set but is not a SID.
-#[cfg_attr(windows, allow(dead_code))] // consumed by the service runtime later
 pub(crate) fn trusted_sid_from_env() -> anyhow::Result<Option<Sid>> {
     trusted_sid_from(std::env::var(ENV_TRUSTED_SID))
 }
