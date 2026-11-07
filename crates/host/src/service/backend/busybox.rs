@@ -62,7 +62,7 @@ fn format_script(
     let pidfile = format!("/var/run/iroh-tunnel-{role}.pid");
     let logfile = format!("/var/log/iroh-tunnel-{role}.log");
     // A root service reads a user's files: say whose (SM-04).
-    // A SID pin is rejected by `install_with` before this runs.
+    // A SID pin is rejected by `install` before this runs.
     let pin_lines = pin.map_or_else(String::new, |p| {
         let uid = p
             .unix_uid()

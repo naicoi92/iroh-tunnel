@@ -113,7 +113,7 @@ fn format_plist_with(
     };
     // A system daemon reads a user's files as root: say whose (SM-04).
     let pin_comment = pin.map_or_else(String::new, |p| format!("<!-- {} -->\n", p.record()));
-    // A SID pin is rejected by `install_with` before this runs.
+    // A SID pin is rejected by `install` before this runs.
     let trust_env = pin.and_then(Pin::unix_uid).map_or_else(String::new, |uid| {
         format!(
             "\t\t<key>{}</key>\n\t\t<string>{uid}</string>\n",

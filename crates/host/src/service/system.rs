@@ -304,6 +304,22 @@ mod tests {
     }
 
     #[test]
+    fn a_sid_pinned_registration_is_an_unknown_owner_on_unix() {
+        let sid_pin = Pin {
+            config: target(1000).config,
+            owner: crate::service::PinOwner::Sid("S-1-5-21-1-2-3-1000".into()),
+        };
+        let body = format!("# {}\n", sid_pin.record());
+        assert_eq!(
+            retarget_decision(Some(&body), &target(1000), None),
+            RetargetDecision::Needs {
+                previous: Some(sid_pin),
+                proposed: target(1000).pin(),
+            }
+        );
+    }
+
+    #[test]
     fn target_account_needs_invoking_user_instead_of_prompting() {
         let request = Request {
             role: "serve",

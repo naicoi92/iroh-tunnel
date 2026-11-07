@@ -97,7 +97,9 @@ impl Pin {
         }
         let owner = match (uid, sid) {
             (Some(uid), None) => PinOwner::Uid(uid),
-            (None, Some(sid)) if !sid.is_empty() => PinOwner::Sid(sid),
+            (None, Some(sid)) if super::trust_windows::model::parse_sid(&sid).is_some() => {
+                PinOwner::Sid(sid)
+            }
             _ => return None,
         };
         Some(Self {
@@ -303,6 +305,46 @@ mod tests {
             Pin::find("CONFIG=\"/x/iroh-tunnel-pin config=/evil uid=0\"\n"),
             None
         );
+    }
+
+    #[test]
+    fn empty_or_malformed_sid_is_unknown_not_a_pin() {
+        assert_eq!(Pin::find("# iroh-tunnel-pin config=C%3A%5Ca sid="), None);
+        assert_eq!(
+            Pin::find("# iroh-tunnel-pin config=C%3A%5Ca sid=garbage"),
+            None
+        );
+        assert_eq!(
+            Pin::find("# iroh-tunnel-pin config=C%3A%5Ca sid=S-1-5"),
+            None
+        );
+        assert!(Pin::find("# iroh-tunnel-pin config=C%3A%5Ca sid=S-1-5-18").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_unix_pin_rejects_only_a_sid_pin() {
+        assert!(require_unix_pin(None).is_ok());
+        assert!(require_unix_pin(Some(&pin("/a"))).is_ok());
+        let err = require_unix_pin(Some(&sid_pin("/a"))).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<crate::error::CliError>(),
+            Some(crate::error::CliError::Service(_))
+        ));
+    }
+
+    #[test]
+    fn windows_target_match_is_exact_apart_from_ascii_case_and_separators() {
+        assert!(!same_target_with(
+            true,
+            &sid_pin("C:\\a"),
+            &sid_pin("C:\\a\\")
+        ));
+        assert!(!same_target_with(
+            true,
+            &sid_pin("C:\\Ä\\s.toml"),
+            &sid_pin("C:\\ä\\s.toml")
+        ));
     }
 
     #[test]
