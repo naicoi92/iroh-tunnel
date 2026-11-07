@@ -2,8 +2,9 @@
 //! binary and the real Task Scheduler (SM-04, AC-SM-04, story 53).
 //!
 //! - `non_elevated_system_scope_is_permission_error`: a non-elevated
-//!   `--system` is refused (exit 3) and nothing is registered. Ignored until
-//!   the restricted-token helper (Task 13); the CI runner is elevated.
+//!   `--system` is refused (exit 3) and nothing is registered. Each command
+//!   runs under a restricted token (`common::restricted`) because the CI
+//!   runner is elevated. Opt-in (`IROH_TUNNEL_E2E_SERVICE=1`).
 //! - `user_background_task_lifecycle`: install, start, status, stop, restart
 //!   and uninstall against the host's Task Scheduler, with the pinned absolute
 //!   config and state paths and a working directory unrelated to either.
@@ -19,6 +20,8 @@
 //! in-process relay is used, never public relays or real secrets.
 
 #![cfg(windows)]
+
+mod common;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -159,8 +162,11 @@ impl Drop for Fixture {
 }
 
 #[test]
-#[ignore = "needs the restricted-token helper (Task 13)"]
 fn non_elevated_system_scope_is_permission_error() -> Result<()> {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to launch restricted-token children");
+        return Ok(());
+    }
     let fx = Fixture::new()?;
     fx.write_config("https://relay.invalid")?;
     let config = fx.config();
@@ -174,7 +180,7 @@ fn non_elevated_system_scope_is_permission_error() -> Result<()> {
         vec!["serve", "service", "stop", "--system"],
         vec!["serve", "service", "status", "--system"],
     ] {
-        let out = fx.command(&args).output()?;
+        let out = common::restricted::run_non_elevated(&mut fx.command(&args))?;
         let err = stderr(&out);
         assert_eq!(out.status.code(), Some(3), "{args:?}: {err}");
         assert!(err.contains("Run as administrator"), "{args:?}: {err}");

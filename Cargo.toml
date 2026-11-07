@@ -86,6 +86,15 @@ sha2 = "0.11"
 dirs = "6"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
+# Restricted-token launcher for the non-elevated E2E paths (tests/common/restricted.rs).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 [build-dependencies]
 # vergen-gitcl 9.x — inject git tag into APP_VERSION at build time.
 # Pinned to 9.x: 10.x requires rustc 1.95, but this crate targets rust-version 1.91.

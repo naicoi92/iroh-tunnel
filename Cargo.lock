@@ -1922,6 +1922,7 @@ dependencies = [
  "vergen-gitcl",
  "which 8.0.5",
  "windows-service",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
