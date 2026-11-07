@@ -115,12 +115,12 @@ mod tests {
         let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
             panic!("expected Permission, got {err:?}");
         };
-        assert!(
-            msg.contains(
-                r"sudo iroh-tunnel serve service install --system --config '/a b/it'\''s.toml'"
-            ),
-            "{msg}"
-        );
+        let expected = if cfg!(windows) {
+            r#"Run as administrator: open an elevated terminal and run `iroh-tunnel serve service install --system --config "/a b/it's.toml"`"#
+        } else {
+            r"sudo iroh-tunnel serve service install --system --config '/a b/it'\''s.toml'"
+        };
+        assert!(msg.contains(expected), "{msg}");
     }
 
     #[test]

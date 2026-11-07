@@ -371,6 +371,23 @@ pub(crate) fn status_with(port: &mut dyn ScmPort, role: &str) -> Result<ScmStatu
         .map_or(ScmStatus::Absent, ScmStatus::Installed))
 }
 
+/// First argument (argv[0]) of a Windows command line, following the
+/// `CommandLineToArgvW` rule for the program name: a quoted token runs to the
+/// next `"` (no escapes; an unterminated quote takes the rest), an unquoted
+/// one to the first whitespace. `None` when the line is empty.
+pub(crate) fn first_command_line_arg(cmd: &str) -> Option<String> {
+    let cmd = cmd.trim_start();
+    if cmd.is_empty() {
+        return None;
+    }
+    if let Some(rest) = cmd.strip_prefix('"') {
+        let end = rest.find('"').unwrap_or(rest.len());
+        return Some(rest[..end].to_owned());
+    }
+    let end = cmd.find(char::is_whitespace).unwrap_or(cmd.len());
+    Some(cmd[..end].to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +923,32 @@ mod tests {
         .unwrap_err();
         assert_eq!(service_msg(err), "still running");
         assert_eq!(calls(&port), ["stop"]);
+    }
+
+    #[test]
+    fn first_arg_of_a_quoted_command_line_is_the_program() {
+        let line = r#""C:\Program Files\x\iroh-tunnel.exe" serve run --config "C:\a b\c.toml""#;
+        assert_eq!(
+            first_command_line_arg(line).as_deref(),
+            Some(r"C:\Program Files\x\iroh-tunnel.exe")
+        );
+    }
+
+    #[test]
+    fn first_arg_of_an_unquoted_command_line_stops_at_whitespace() {
+        assert_eq!(
+            first_command_line_arg(r"C:\Windows\System32\cmd.exe /c exit").as_deref(),
+            Some(r"C:\Windows\System32\cmd.exe")
+        );
+    }
+
+    #[test]
+    fn first_arg_edge_cases() {
+        assert_eq!(first_command_line_arg(""), None);
+        assert_eq!(first_command_line_arg("   "), None);
+        assert_eq!(
+            first_command_line_arg(r#""C:\a b\x.exe --flag"#).as_deref(),
+            Some(r"C:\a b\x.exe --flag")
+        );
     }
 }

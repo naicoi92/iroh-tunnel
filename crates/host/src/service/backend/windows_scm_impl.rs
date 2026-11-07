@@ -25,7 +25,7 @@ use windows_sys::Win32::System::Registry::{
     RegGetValueW, RegSetKeyValueW, HKEY_LOCAL_MACHINE, REG_MULTI_SZ, RRF_RT_REG_SZ,
 };
 
-use super::windows_scm::{ScmPort, ScmState, ServiceSpec};
+use super::windows_scm::{first_command_line_arg, ScmPort, ScmState, ServiceSpec};
 
 /// `ERROR_FILE_NOT_FOUND`.
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -33,6 +33,8 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
 /// `ERROR_SERVICE_DOES_NOT_EXIST`: the service is not registered.
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+/// `ERROR_SERVICE_NOT_ACTIVE`: stop requested for a service that is not running.
+const ERROR_SERVICE_NOT_ACTIVE: i32 = 1062;
 /// `ERROR_SERVICE_MARKED_FOR_DELETE`: deleted but still held open or running.
 const ERROR_SERVICE_MARKED_FOR_DELETE: i32 = 1072;
 /// Restarts configured for the first, second and subsequent failures.
@@ -42,7 +44,7 @@ const RESTART_ACTIONS: usize = 3;
 pub(crate) struct Scm;
 
 /// Registry sub-key of the service `name`.
-pub(crate) fn service_key(name: &str) -> Vec<u16> {
+fn service_key(name: &str) -> Vec<u16> {
     wide(&format!(r"SYSTEM\CurrentControlSet\Services\{name}"))
 }
 
@@ -52,7 +54,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// REG_MULTI_SZ payload: each `K=V` NUL-terminated, plus a final NUL.
-pub(crate) fn multi_sz(env: &[(String, String)]) -> Vec<u16> {
+fn multi_sz(env: &[(String, String)]) -> Vec<u16> {
     let mut data: Vec<u16> = env
         .iter()
         .flat_map(|(k, v)| {
@@ -70,6 +72,11 @@ fn raw_os_error(err: &ScmError) -> Option<i32> {
         ScmError::Winapi(io) => io.raw_os_error(),
         _ => None,
     }
+}
+
+/// Whether a stop failure only means the service is already not running.
+fn is_already_stopped(code: Option<i32>) -> bool {
+    code == Some(ERROR_SERVICE_NOT_ACTIVE)
 }
 
 fn connect(access: ServiceManagerAccess) -> Result<ServiceManager> {
@@ -130,7 +137,7 @@ fn write_environment(name: &str, env: &[(String, String)]) -> Result<()> {
 }
 
 /// Read the REG_SZ `value` under the service key; `None` when absent.
-pub(crate) fn read_service_string(name: &str, value: &str) -> Result<Option<String>> {
+fn read_service_string(name: &str, value: &str) -> Result<Option<String>> {
     let key = service_key(name);
     let value_w = wide(value);
     let mut bytes: u32 = 0;
@@ -279,40 +286,54 @@ impl ScmPort for Scm {
     }
 
     fn stop(&mut self, name: &str) -> Result<()> {
-        let service = open_existing(name, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS)?;
-        service
-            .stop()
-            .map(|_| ())
-            .with_context(|| format!("cannot stop service `{name}`"))
+        let service = open_existing(name, ServiceAccess::STOP)?;
+        match service.stop() {
+            Ok(_) => Ok(()),
+            // Lost a race with the service exiting: stop is idempotent.
+            Err(e) if is_already_stopped(raw_os_error(&e)) => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("cannot stop service `{name}`")),
+        }
     }
 
     fn description(&mut self, name: &str) -> Result<Option<String>> {
         read_service_string(name, "Description")
     }
 
+    /// The program of the service, i.e. argv[0] of its `binPath` (the SCM
+    /// stores the whole command line). A service marked for delete (1072) is
+    /// `Ok(None)` by design: it is going away and has no usable binary.
     fn executable(&mut self, name: &str) -> Result<Option<PathBuf>> {
-        let manager = connect(ServiceManagerAccess::CONNECT)?;
-        let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {
-            Ok(service) => service,
-            Err(e) => {
-                return match raw_os_error(&e) {
-                    Some(ERROR_SERVICE_DOES_NOT_EXIST | ERROR_SERVICE_MARKED_FOR_DELETE) => {
-                        Ok(None)
-                    }
-                    _ => Err(e).with_context(|| format!("cannot open service `{name}`")),
-                };
-            }
+        let Some(command_line) = command_line(name)? else {
+            return Ok(None);
         };
-        let config = service
-            .query_config()
-            .with_context(|| format!("cannot query the configuration of `{name}`"))?;
-        Ok(Some(config.executable_path))
+        let program = first_command_line_arg(&command_line)
+            .with_context(|| format!("service `{name}` has an empty command line"))?;
+        Ok(Some(PathBuf::from(program)))
     }
+}
+
+/// Full `binPath` command line of `name`; `None` when absent or marked for delete.
+fn command_line(name: &str) -> Result<Option<String>> {
+    let manager = connect(ServiceManagerAccess::CONNECT)?;
+    let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {
+        Ok(service) => service,
+        Err(e) => {
+            return match raw_os_error(&e) {
+                Some(ERROR_SERVICE_DOES_NOT_EXIST | ERROR_SERVICE_MARKED_FOR_DELETE) => Ok(None),
+                _ => Err(e).with_context(|| format!("cannot open service `{name}`")),
+            };
+        }
+    };
+    let config = service
+        .query_config()
+        .with_context(|| format!("cannot query the configuration of `{name}`"))?;
+    Ok(Some(config.executable_path.to_string_lossy().into_owned()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::backend::windows_scm::FailurePlan;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::Registry::RRF_RT_REG_MULTI_SZ;
 
@@ -363,6 +384,13 @@ mod tests {
     }
 
     #[test]
+    fn only_service_not_active_is_a_benign_stop_error() {
+        assert!(is_already_stopped(Some(ERROR_SERVICE_NOT_ACTIVE)));
+        assert!(!is_already_stopped(Some(5)));
+        assert!(!is_already_stopped(None));
+    }
+
+    #[test]
     fn multi_sz_terminates_every_entry_and_the_block() {
         let data = multi_sz(&[("A".into(), "1".into()), ("B".into(), "2".into())]);
         let expected: Vec<u16> = "A=1\0B=2\0\0".encode_utf16().collect();
@@ -398,7 +426,10 @@ mod tests {
             scm.description(&name).unwrap().as_deref(),
             Some("scm test description")
         );
-        assert_eq!(scm.executable(&name).unwrap(), Some(exe));
+        assert_eq!(scm.executable(&name).unwrap(), Some(exe.clone()));
+        let line = command_line(&name).unwrap().unwrap();
+        assert!(line.ends_with(r#" /c exit"#), "{line}");
+        assert!(line.contains("cmd.exe"), "{line}");
         assert_eq!(read_environment(&name), ["IROH_TUNNEL_SCM=1", "K=v w"]);
         scm.delete(&name).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -409,5 +440,40 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn scm_impl_applies_failure_actions() {
+        if std::env::var("IROH_TUNNEL_E2E_SERVICE").as_deref() != Ok("1") {
+            return;
+        }
+        let name = format!("iroh-tunnel-scmfail-{}", std::process::id());
+        let spec = ServiceSpec {
+            name: name.clone(),
+            display_name: "iroh-tunnel scm failure test".into(),
+            executable: PathBuf::from(r"C:\Windows\System32\cmd.exe"),
+            launch_arguments: vec!["/c".into(), "exit".into()],
+            env: vec![],
+            description: "scm failure test".into(),
+            failure: Some(FailurePlan {
+                restart_after: Duration::from_secs(5),
+                reset_after: Duration::from_secs(86_400),
+                on_non_crash_failures: true,
+            }),
+        };
+        let _cleanup = Cleanup(name.clone());
+        Scm.create(&spec).unwrap();
+        let service = open_existing(&name, ServiceAccess::QUERY_CONFIG).unwrap();
+        let actions = service.get_failure_actions().unwrap();
+        assert_eq!(
+            actions.reset_period,
+            ServiceFailureResetPeriod::After(Duration::from_secs(86_400))
+        );
+        let restart = ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(5),
+        };
+        assert_eq!(actions.actions, Some(vec![restart; 3]));
+        assert!(service.get_failure_actions_on_non_crash_failures().unwrap());
     }
 }
