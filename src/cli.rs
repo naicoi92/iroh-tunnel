@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli_args::{AccessServiceArgs, ColorArg, ProtocolArg, ServeServiceArgs, ServiceAddr};
@@ -520,6 +521,12 @@ pub enum ServiceAction {
 /// Default (no flags, no `RUST_LOG`) is `info`, so connection lifecycle
 /// notices (peer connect/disconnect, "endpoint ready", …) surface by default.
 pub fn init_tracing(verbose: u8, quiet: bool) {
+    // `fmt()` defaults to stdout; keep that writer.
+    init_tracing_with(verbose, quiet, BoxMakeWriter::new(std::io::stdout));
+}
+
+/// [`init_tracing`] with an explicit log writer.
+pub fn init_tracing_with(verbose: u8, quiet: bool, writer: BoxMakeWriter) {
     let filter = if let Ok(rust_log) = std::env::var("RUST_LOG") {
         EnvFilter::new(rust_log)
     } else if quiet {
@@ -536,6 +543,7 @@ pub fn init_tracing(verbose: u8, quiet: bool) {
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_writer(writer)
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)

@@ -93,9 +93,40 @@ fn quick_host(addr: &ServiceAddr) -> String {
     addr.host.clone().unwrap_or_else(|| "127.0.0.1".to_owned())
 }
 
+/// Callback invoked once a configured `run` reports readiness, after the
+/// CLI's own ready output. Used by the Windows service runtime.
+pub(crate) type ReadyHook = Option<Box<dyn FnOnce() + Send>>;
+
 fn execute(parsed: Cli, binary: Binary) -> ! {
     cli::init_tracing(parsed.verbose, parsed.quiet);
+    std::process::exit(run_to_code(parsed, binary, None))
+}
 
+/// Exit code for a failed command that is not a usage error.
+fn exit_code_for(e: &anyhow::Error) -> i32 {
+    match e.downcast_ref::<CliError>() {
+        Some(CliError::Config(_)) => 2,
+        Some(CliError::Permission(_)) => 3,
+        Some(CliError::Iroh(_)) => 4,
+        Some(CliError::Service(_)) => 5,
+        Some(CliError::Conflict(_)) => 6,
+        None => 1,
+    }
+}
+
+/// Wrap the CLI's ready printer so `hook` runs right after it.
+fn compose_ready(print: iroh_tunnel_host::OnReady, hook: ReadyHook) -> iroh_tunnel_host::OnReady {
+    Box::new(move |report| {
+        let result = print(report);
+        if let Some(hook) = hook {
+            hook();
+        }
+        result
+    })
+}
+
+/// Run the parsed command to completion and return its process exit code.
+pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook) -> i32 {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -103,7 +134,7 @@ fn execute(parsed: Cli, binary: Binary) -> ! {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("error: failed to start runtime: {e}");
-            std::process::exit(1);
+            return 1;
         }
     };
 
@@ -126,7 +157,7 @@ fn execute(parsed: Cli, binary: Binary) -> ! {
     let ctx = RunContext::new();
     let outcome = rt.block_on(async {
         tokio::select! {
-            result = run(parsed, binary, ctx.clone()) => Ok(result),
+            result = run(parsed, binary, ctx.clone(), ready) => Ok(result),
             forced = lifecycle::forced_exit(&ctx) => Err(forced),
         }
     });
@@ -139,41 +170,29 @@ fn execute(parsed: Cli, binary: Binary) -> ! {
             if let Some(role) = status_role {
                 runtime::remove_own_status_file_for_exit(role);
             }
-            std::process::exit(forced.exit_code());
+            return forced.exit_code();
         }
     };
     match outcome {
-        Ok(()) => std::process::exit(0),
+        Ok(()) => 0,
         Err(e) => {
             if let Some(usage) = e.downcast_ref::<UsageError>() {
-                std::process::exit(usage::print_usage_error(
-                    binary,
-                    &usage.command_path,
-                    &usage.message,
-                ));
+                return usage::print_usage_error(binary, &usage.command_path, &usage.message);
             }
             if let (Some(set_err), Some(role)) = (e.downcast_ref::<SetError>(), role_name) {
-                std::process::exit(usage::print_usage_error(
+                return usage::print_usage_error(
                     binary,
                     &config_set_path(binary, role),
                     &set_err.to_string(),
-                ));
+                );
             }
             eprintln!("error: {e:#}");
-            let code = match e.downcast_ref::<CliError>() {
-                Some(CliError::Config(_)) => 2,
-                Some(CliError::Permission(_)) => 3,
-                Some(CliError::Iroh(_)) => 4,
-                Some(CliError::Service(_)) => 5,
-                Some(CliError::Conflict(_)) => 6,
-                None => 1,
-            };
-            std::process::exit(code);
+            exit_code_for(&e)
         }
     }
 }
 
-async fn run(cli: Cli, binary: Binary, ctx: RunContext) -> anyhow::Result<()> {
+async fn run(cli: Cli, binary: Binary, ctx: RunContext, ready: ReadyHook) -> anyhow::Result<()> {
     // The typed role tag comes from ONE match on the CLI enum; the dispatch
     // string is derived from it — an invalid role is unrepresentable, and
     // the two can never disagree.
@@ -187,10 +206,10 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext) -> anyhow::Result<()> {
     match cli.role {
         Role::Update(_) => unreachable!("handled above"),
         Role::Serve { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd, binary, ctx).await
+            dispatch_role_cmd(status_role, cmd, binary, ctx, ready).await
         }
         Role::Access { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd, binary, ctx).await
+            dispatch_role_cmd(status_role, cmd, binary, ctx, ready).await
         }
         Role::Serve { quick, cmd: None } => {
             let svc = quick.service;
@@ -331,6 +350,7 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
     cmd: RoleCmd<S>,
     binary: Binary,
     ctx: RunContext,
+    ready: ReadyHook,
 ) -> anyhow::Result<()> {
     let role = status_role.name();
     match cmd {
@@ -343,7 +363,7 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
                 status_role,
                 &path,
                 ctx,
-                crate::render::print_ready(),
+                compose_ready(crate::render::print_ready(), ready),
                 lifecycle::wait_for_signal(),
             )
             .await
@@ -443,4 +463,47 @@ fn read_key_file(path: Option<&Path>) -> anyhow::Result<String> {
         ))
     })?;
     Ok(key.to_owned())
+}
+
+#[cfg(test)]
+mod run_to_code_tests {
+    use super::*;
+    use iroh_tunnel_host::ReadyReport;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn exit_codes_map_cli_errors() {
+        let cases = [
+            (CliError::Config("x".into()), 2),
+            (CliError::Permission("x".into()), 3),
+            (CliError::Iroh("x".into()), 4),
+            (CliError::Service("x".into()), 5),
+            (CliError::Conflict("x".into()), 6),
+        ];
+        for (err, code) in cases {
+            assert_eq!(exit_code_for(&anyhow::Error::new(err)), code);
+        }
+        assert_eq!(exit_code_for(&anyhow::anyhow!("other")), 1);
+    }
+
+    #[test]
+    fn ready_hook_runs_after_print_and_propagates_result() {
+        let step = Arc::new(AtomicU8::new(0));
+        let (s1, s2) = (step.clone(), step.clone());
+        let print: iroh_tunnel_host::OnReady = Box::new(move |_| {
+            assert_eq!(s1.swap(1, Ordering::SeqCst), 0);
+            Ok(())
+        });
+        let hook: ReadyHook = Some(Box::new(move || {
+            assert_eq!(s2.swap(2, Ordering::SeqCst), 1);
+        }));
+        let report = ReadyReport {
+            node_id: "n".into(),
+            home_relay: None,
+            services: iroh_tunnel_host::ReadyServices::Serve(vec![]),
+        };
+        compose_ready(print, hook)(&report).unwrap();
+        assert_eq!(step.load(Ordering::SeqCst), 2);
+    }
 }
