@@ -139,6 +139,29 @@ fn write_service_env(name: &str, entries: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Overwrite the service's `Description` (where the pin record lives).
+pub fn set_description(name: &str, text: &str) -> Result<()> {
+    let out = Command::new("reg")
+        .args([
+            "add",
+            &registry_key(name),
+            "/v",
+            "Description",
+            "/t",
+            "REG_SZ",
+            "/d",
+            text,
+            "/f",
+        ])
+        .output()?;
+    ensure!(
+        out.status.success(),
+        "reg add Description: {}",
+        stderr(&out)
+    );
+    Ok(())
+}
+
 /// The SID of the user running the test (`whoami /user`, SID column only).
 pub fn runner_sid() -> Result<String> {
     let out = Command::new("whoami")

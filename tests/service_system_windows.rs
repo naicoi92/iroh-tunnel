@@ -1195,3 +1195,410 @@ async fn binary_check_at_install_and_start() -> Result<()> {
     assert!(svc::service_stopped_or_absent(&fx.name()));
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Identity, scope and concurrency (Task 13, commit D)
+// ---------------------------------------------------------------------------
+
+/// A throwaway local account, deleted on drop.
+struct LocalUser {
+    name: String,
+    sid: String,
+}
+
+impl LocalUser {
+    /// `itb<pid><tag>` with a generated 14-character password (lower, upper,
+    /// digit, symbol). 14 characters keep `net user` from asking about
+    /// pre-Windows 2000 compatibility.
+    fn create(tag: &str) -> Result<Self> {
+        let name = format!("itb{}{tag}", std::process::id());
+        let key = iroh::SecretKey::generate();
+        let hex: String = key.to_bytes()[..5]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let password = format!("{hex}Aa1!");
+        let out = Command::new("net")
+            .args(["user", &name, &password, "/add"])
+            .stdin(Stdio::null())
+            .output()?;
+        ensure!(
+            out.status.success(),
+            "net user /add: {}{}",
+            stdout(&out),
+            stderr(&out)
+        );
+        let mut user = Self {
+            name,
+            sid: String::new(),
+        };
+        let out = pwsh(&format!(
+            "(New-Object System.Security.Principal.NTAccount('{}')).Translate(\
+             [System.Security.Principal.SecurityIdentifier]).Value",
+            user.name
+        ))?;
+        ensure!(
+            out.status.success(),
+            "SID of {}: {}",
+            user.name,
+            stderr(&out)
+        );
+        user.sid = stdout(&out).trim().to_owned();
+        ensure!(user.sid.starts_with("S-1-5-21-"), "SID {:?}", user.sid);
+        Ok(user)
+    }
+}
+
+impl Drop for LocalUser {
+    fn drop(&mut self) {
+        let _ = Command::new("net")
+            .args(["user", &self.name, "/delete"])
+            .stdin(Stdio::null())
+            .output();
+    }
+}
+
+/// The runner's account name (without the machine part), lowercased.
+fn runner_name() -> String {
+    std::env::var("USERNAME")
+        .expect("USERNAME must be set on Windows")
+        .to_lowercase()
+}
+
+/// Run `command` with `input` on stdin.
+fn run_with_input(mut command: Command, input: &str) -> Result<Output> {
+    use std::io::Write as _;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())?;
+    Ok(child.wait_with_output()?)
+}
+
+/// An interactive reinstall of the fixture's config answering `answer`.
+fn reinstall_answering(fx: &Fixture, answer: &str) -> Result<Output> {
+    let config = fx.config();
+    let mut command = fx.command(&fx_install_args(&config));
+    command.env("IROH_TUNNEL_TEST_INTERACTIVE", "1");
+    run_with_input(command, answer)
+}
+
+fn fx_install_args(config: &Path) -> Vec<&str> {
+    vec![
+        "serve",
+        "service",
+        "install",
+        "--system",
+        "--config",
+        config.to_str().unwrap(),
+    ]
+}
+
+#[tokio::test]
+async fn config_owned_by_other_user() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("otheruser")?;
+    fx.write_config(relay.as_ref(), 9)?;
+    let bob = LocalUser::create("o")?;
+    let dir = fx.config().parent().unwrap().to_path_buf();
+    icacls(&[dir.to_str().unwrap(), "/setowner", &bob.name])?;
+
+    let out = fx.install(&["--system"])?;
+    assert_exit(&out, 2);
+    let err = stderr(&out).to_lowercase();
+    assert!(
+        err.contains(&bob.name.to_lowercase()) && err.contains(&runner_name()),
+        "the refusal must name both accounts: {err}"
+    );
+    assert!(!fx.service_exists(), "nothing may be registered");
+    Ok(())
+}
+
+#[tokio::test]
+async fn retarget_declined_and_approved() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("retarget")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+    let name = fx.name();
+    let runner = svc::runner_sid()?;
+
+    // The service now looks as if bob had installed it.
+    let bob = LocalUser::create("r")?;
+    let ours = svc::reg_string(&name, "Description")?;
+    ensure!(
+        ours.contains(&format!("sid={runner}")),
+        "pin record: {ours}"
+    );
+    let bobs = ours.replace(&format!("sid={runner}"), &format!("sid={}", bob.sid));
+    svc::set_description(&name, &bobs)?;
+
+    // Declined: exit 5, the prompt names bob, nothing changes.
+    let out = reinstall_answering(&fx, "n\n")?;
+    assert_exit(&out, 5);
+    let err = stderr(&out);
+    assert!(err.contains("Retarget"), "{err}");
+    assert!(
+        err.to_lowercase().contains(&bob.name.to_lowercase()),
+        "the prompt must name {}: {err}",
+        bob.name
+    );
+    assert_eq!(
+        svc::reg_string(&name, "Description")?,
+        bobs,
+        "pin unchanged"
+    );
+
+    // Approved: the pin is the runner again and the config is kept.
+    let out = reinstall_answering(&fx, "y\n")?;
+    ensure!(
+        out.status.success(),
+        "approved retarget: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    let pinned = svc::reg_string(&name, "Description")?;
+    assert!(pinned.contains(&format!("sid={runner}")), "{pinned}");
+    assert!(!pinned.contains(&bob.sid), "{pinned}");
+    assert!(fx.config().exists(), "the config is kept");
+
+    // Same user again: no prompt (stdin is not a terminal here).
+    fx.install_ok(&["--system"])?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_dir_owned_by_administrators() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("admindir")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    let dir = fx.config().parent().unwrap().to_path_buf();
+    icacls(&[dir.to_str().unwrap(), "/setowner", "*S-1-5-32-544"])?;
+
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+    let description = svc::reg_string(&fx.name(), "Description")?;
+    assert!(
+        description.contains(&format!("sid={}", svc::runner_sid()?)),
+        "the token user must be pinned: {description}"
+    );
+    Ok(())
+}
+
+/// Removes this fixture's user task on drop.
+struct TaskGuard<'a>(&'a Fixture);
+
+impl Drop for TaskGuard<'_> {
+    fn drop(&mut self) {
+        let _ = user_scope(self.0, &["serve", "service", "uninstall", "--user"]).output();
+    }
+}
+
+/// A `--user` command: the task cannot carry `IROH_TUNNEL_STATE_DIR`.
+fn user_scope(fx: &Fixture, args: &[&str]) -> Command {
+    let mut command = fx.command(args);
+    command.env_remove("IROH_TUNNEL_STATE_DIR");
+    command
+}
+
+#[tokio::test]
+async fn cross_scope_refused_both_ways() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("crossscope")?;
+    fx.write_config(relay.as_ref(), 9)?;
+    let config = fx.config();
+    let config = config.to_str().unwrap();
+    let _task = TaskGuard(&fx);
+
+    // A system service exists: a user install is refused.
+    fx.install_ok(&["--system"])?;
+    let out = user_scope(
+        &fx,
+        &["serve", "service", "install", "--user", "--config", config],
+    )
+    .output()?;
+    assert_exit(&out, 5);
+    assert!(
+        stderr(&out).contains("service uninstall --system"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!fx.task_exists(), "no user task may be registered");
+
+    // A user task exists: a system install is refused.
+    fx.service_ok("uninstall", &["--system"])?;
+    fx.wait_absent()?;
+    let out = user_scope(
+        &fx,
+        &["serve", "service", "install", "--user", "--config", config],
+    )
+    .output()?;
+    ensure!(
+        out.status.success(),
+        "user install: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(fx.task_exists(), "the user task must exist");
+    let out = fx.install(&["--system"])?;
+    assert_exit(&out, 5);
+    assert!(
+        stderr(&out).contains("service uninstall --user"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!fx.service_exists(), "no system service may be registered");
+    Ok(())
+}
+
+#[tokio::test]
+async fn user_task_blocked_while_service_runs() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("userblocked")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+
+    let config = fx.config();
+    let mut command = fx.command(&["serve", "run", "--config", config.to_str().unwrap()]);
+    command.env("IROH_TUNNEL_STATE_DIR", fx.base().join("user-state"));
+    let out = common::restricted::run_non_elevated(&mut command)?;
+    assert_exit(&out, 6);
+    assert!(stderr(&out).contains("system service"), "{}", stderr(&out));
+    assert!(sc_running(&fx), "the system service keeps running");
+    Ok(())
+}
+
+/// `WIN32_EXIT_CODE` of the service, as `sc query` reports it.
+fn win32_exit_code(fx: &Fixture) -> Option<u32> {
+    stdout(&fx.sc("query")).lines().find_map(|line| {
+        let (_, rest) = line.split_once("WIN32_EXIT_CODE")?;
+        rest.trim_start_matches([' ', ':'])
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+
+#[tokio::test]
+async fn already_running_is_clean_stop() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("alreadyrunning")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    // The service runs once, so the machine lock file exists.
+    fx.install_ok(&["--system"])?;
+    wait_for_node(&fx, &node_id)?;
+    fx.service_ok("stop", &["--system"])?;
+    wait_for("the service to stop", || {
+        svc::service_stopped_or_absent(&fx.name())
+    })?;
+
+    // A non-elevated foreground run holds the machine lock shared.
+    let user_state = fx.base().join("user-state");
+    let config = fx.config();
+    let mut command = fx.command(&["serve", "run", "--config", config.to_str().unwrap()]);
+    command
+        .env("IROH_TUNNEL_STATE_DIR", &user_state)
+        .env("IROH_TUNNEL_TEST_EXIT_AFTER_MS", "40000");
+    let foreground = std::thread::spawn(move || common::restricted::run_non_elevated(&mut command));
+    let status = user_state.join("serve-status.json");
+    wait_for("the foreground run to be ready", || {
+        node_id_of(&status).as_deref() == Some(node_id.as_str())
+    })?;
+
+    // The SCM starts the service directly (no CLI precheck).
+    let log_before = log_text(&fx).len();
+    let start = fx.sc("start");
+    ensure!(start.status.success(), "sc start: {}", stdout(&start));
+    wait_for("the service to stop by itself", || {
+        svc::service_stopped_or_absent(&fx.name())
+    })?;
+    assert_eq!(
+        win32_exit_code(&fx),
+        Some(0),
+        "a role already running is a clean stop:\n{}",
+        stdout(&fx.sc("query"))
+    );
+    wait_for("\"already running\" in the new log", || {
+        log_text(&fx)
+            .get(log_before..)
+            .is_some_and(|new| new.contains("already running"))
+    })?;
+    // A clean stop triggers no recovery action.
+    let end = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < end {
+        assert!(
+            svc::service_stopped_or_absent(&fx.name()),
+            "the SCM restarted the service:\n{}",
+            stdout(&fx.sc("query"))
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let _ = foreground.join().expect("foreground thread");
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_elevated_system_operations() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("nonelevated")?;
+    fx.write_config(relay.as_ref(), 9)?;
+    let config = fx.config();
+
+    let out = common::restricted::run_non_elevated(&mut fx.command(&fx_install_args(&config)))?;
+    assert_exit(&out, 3);
+    let err = stderr(&out);
+    assert!(err.contains("Run as administrator"), "{err}");
+    assert!(err.contains("serve service install --system"), "{err}");
+    assert!(
+        normalised(&err).contains(&normalised(config.to_str().unwrap())),
+        "the guidance must name {}: {err}",
+        config.display()
+    );
+    assert!(!fx.service_exists(), "no service may be registered");
+    assert!(!fx.task_exists(), "no task may be registered");
+
+    for verb in ["uninstall", "start", "stop", "restart"] {
+        let out = common::restricted::run_non_elevated(
+            &mut fx.command(&["serve", "service", verb, "--system"]),
+        )?;
+        assert_exit(&out, 3);
+        let err = stderr(&out);
+        assert!(err.contains("Run as administrator"), "{verb}: {err}");
+        assert!(
+            err.contains(&format!("iroh-tunnel serve service {verb} --system")),
+            "{verb}: {err}"
+        );
+    }
+    assert!(!fx.service_exists(), "nothing may be registered");
+    Ok(())
+}
