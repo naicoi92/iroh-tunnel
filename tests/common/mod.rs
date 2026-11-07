@@ -5,6 +5,8 @@
 pub mod release_server;
 #[cfg(windows)]
 pub mod restricted;
+#[cfg(windows)]
+pub mod windows_service;
 
 use sha2::{Digest, Sha256};
 use std::io::Write as _;

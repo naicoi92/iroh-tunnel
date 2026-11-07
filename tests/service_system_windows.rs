@@ -51,6 +51,10 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod common;
+
+use common::windows_service as svc;
+
 const BIN: &str = env!("CARGO_BIN_EXE_iroh-tunnel");
 
 fn enabled() -> bool {
@@ -130,9 +134,54 @@ fn local_app_data() -> PathBuf {
 struct Fixture {
     root: tempfile::TempDir,
     suffix: String,
-    exe_dir: PathBuf,
     exe: PathBuf,
     machine: PathBuf,
+    /// Removes `exe_dir` and `machine` after the service is gone; declared
+    /// last so it drops after `root`.
+    _dirs: DirGuard,
+}
+
+/// Owns directories created so far and removes them on drop (also when
+/// `Fixture::new` fails half way).
+#[derive(Default)]
+struct DirGuard {
+    dirs: Vec<PathBuf>,
+}
+
+impl DirGuard {
+    fn create(&mut self, dir: &Path) -> Result<()> {
+        // Registered first: a failed create may still leave the directory.
+        self.dirs.push(dir.to_path_buf());
+        std::fs::create_dir(dir)?;
+        Ok(())
+    }
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        for dir in &self.dirs {
+            remove_dir_retrying(dir);
+        }
+    }
+}
+
+/// Remove `dir` (taking ownership first), retrying for up to 30 s while a
+/// just-stopped process may still hold a file open.
+fn remove_dir_retrying(dir: &Path) {
+    let dir_text = dir.to_string_lossy().into_owned();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let _ = pwsh(&format!(
+            "if (Test-Path -LiteralPath '{dir_text}') {{ takeown /f '{dir_text}' /r /d y | Out-Null; icacls '{dir_text}' /grant '*S-1-5-32-544:(OI)(CI)F' /t | Out-Null; Remove-Item -LiteralPath '{dir_text}' -Recurse -Force -ErrorAction SilentlyContinue }}"
+        ));
+        if !dir.exists() || Instant::now() >= deadline {
+            if dir.exists() {
+                eprintln!("could not remove {}", dir.display());
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 impl Fixture {
@@ -143,8 +192,9 @@ impl Fixture {
         let machine =
             env_dir("ProgramData", r"C:\ProgramData").join(format!("iroh-tunnel-e2e-{tag}"));
         // Created by this elevated process, so they inherit the parents' ACL.
-        std::fs::create_dir(&exe_dir)?;
-        std::fs::create_dir(&machine)?;
+        let mut dirs = DirGuard::default();
+        dirs.create(&exe_dir)?;
+        dirs.create(&machine)?;
         let exe = exe_dir.join("iroh-tunnel.exe");
         std::fs::copy(BIN, &exe)?;
         let fx = Self {
@@ -152,9 +202,9 @@ impl Fixture {
                 .prefix("iroh-tunnel-e2e-")
                 .tempdir_in(local_app_data())?,
             suffix: format!("-e2e-{tag}"),
-            exe_dir,
             exe,
             machine,
+            _dirs: dirs,
         };
         std::fs::create_dir_all(fx.state())?;
         Ok(fx)
@@ -283,14 +333,11 @@ impl Fixture {
     }
 
     fn sc(&self, verb: &str) -> Output {
-        Command::new("sc.exe")
-            .args([verb, &self.name()])
-            .output()
-            .expect("run sc.exe")
+        svc::sc(verb, &self.name())
     }
 
     fn service_exists(&self) -> bool {
-        self.sc("query").status.success()
+        svc::service_exists(&self.name())
     }
 
     fn task_exists(&self) -> bool {
@@ -305,65 +352,19 @@ impl Fixture {
         wait_for("the service to be gone", || !self.service_exists())
     }
 
-    fn registry_key(&self) -> String {
-        format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{}", self.name())
-    }
-
     /// `ImagePath` of the service, as the SCM stores it.
     fn image_path(&self) -> Result<String> {
-        let out = Command::new("reg")
-            .args(["query", &self.registry_key(), "/v", "ImagePath"])
-            .output()?;
-        ensure!(
-            out.status.success(),
-            "reg query ImagePath: {}",
-            stderr(&out)
-        );
-        reg_value(&stdout(&out), "REG_EXPAND_SZ")
-            .or_else(|| reg_value(&stdout(&out), "REG_SZ"))
-            .ok_or_else(|| anyhow::anyhow!("no ImagePath in {}", stdout(&out)))
+        svc::image_path(&self.name())
     }
 
-    /// Upsert `extra` into the service's `Environment` (REG_MULTI_SZ). The
-    /// change applies from the next start.
     fn set_service_env(&self, extra: &[(&str, &str)]) -> Result<()> {
-        let out = Command::new("reg")
-            .args(["query", &self.registry_key(), "/v", "Environment"])
-            .output()?;
-        ensure!(
-            out.status.success(),
-            "reg query Environment: {}",
-            stderr(&out)
-        );
-        let mut entries: Vec<String> = reg_value(&stdout(&out), "REG_MULTI_SZ")
-            .unwrap_or_default()
-            .split("\\0")
-            .filter(|e| !e.is_empty())
-            .map(str::to_owned)
-            .collect();
-        for (key, value) in extra {
-            entries.retain(|e| !e.starts_with(&format!("{key}=")));
-            entries.push(format!("{key}={value}"));
-        }
-        let out = Command::new("reg")
-            .args([
-                "add",
-                &self.registry_key(),
-                "/v",
-                "Environment",
-                "/t",
-                "REG_MULTI_SZ",
-                "/d",
-                &entries.join("\\0"),
-                "/f",
-            ])
-            .output()?;
-        ensure!(
-            out.status.success(),
-            "reg add Environment: {}",
-            stderr(&out)
-        );
-        Ok(())
+        svc::set_service_env(&self.name(), extra)
+    }
+
+    /// Install `config` (another file of the fixture) as the service target.
+    fn install_config(&self, config: &Path) -> Result<Output> {
+        let args = self.install_args(config.to_str().unwrap(), &["--system"]);
+        self.service("install", &args)
     }
 
     fn dump(&self) {
@@ -376,37 +377,23 @@ impl Fixture {
     }
 }
 
-/// The data of a `reg query` line of the given type.
-fn reg_value(output: &str, kind: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let (_, data) = line.split_once(kind)?;
-        Some(data.trim().to_owned())
-    })
-}
-
 impl Drop for Fixture {
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.dump();
         }
-        let pid = pid_of(&self.status_file());
         let _ = self.service("uninstall", &["--system"]);
         if self.service_exists() {
             let _ = self.sc("stop");
+            let _ = wait_for("the service to stop", || {
+                svc::service_stopped_or_absent(&self.name())
+            });
             let _ = Command::new("sc.exe")
                 .args(["delete", &self.name()])
                 .output();
         }
         let _ = self.wait_absent();
-        if let Some(pid) = pid {
-            let _ = wait_for("the service process to exit", || !pid_alive(pid));
-        }
-        for dir in [&self.exe_dir, &self.machine] {
-            let dir = dir.to_string_lossy().into_owned();
-            let _ = pwsh(&format!(
-                "if (Test-Path -LiteralPath '{dir}') {{ takeown /f '{dir}' /r /d y | Out-Null; icacls '{dir}' /grant '*S-1-5-32-544:(OI)(CI)F' /t | Out-Null; Remove-Item -LiteralPath '{dir}' -Recurse -Force }}"
-            ));
-        }
+        // `_dirs` removes the directories after this, with retries.
     }
 }
 
@@ -454,6 +441,29 @@ async fn system_service_lifecycle() -> Result<()> {
         fx.exe.display()
     );
 
+    // The definition: automatic start, LocalSystem, own process, pin record
+    // and trusted SID.
+    let name = fx.name();
+    assert_eq!(
+        svc::reg_dword(&name, "Start")?,
+        2,
+        "Start must be AUTO_START"
+    );
+    assert_eq!(svc::reg_string(&name, "ObjectName")?, "LocalSystem");
+    let kind = svc::reg_dword(&name, "Type")?;
+    assert_eq!(kind & 0x10, 0x10, "Type {kind:#x} lacks WIN32_OWN_PROCESS");
+    let sid = svc::runner_sid()?;
+    let description = svc::reg_string(&name, "Description")?;
+    assert!(
+        description.contains("iroh-tunnel-pin") && description.contains(&format!("sid={sid}")),
+        "pin record: {description}"
+    );
+    assert!(
+        svc::service_env(&name)?.contains(&format!("IROH_TUNNEL_TRUSTED_SID={sid}")),
+        "environment: {:?}",
+        svc::service_env(&name)?
+    );
+
     // stop: the process ends and the status file is removed (the drain).
     fx.service_ok("stop", &["--system"])?;
     wait_for("the process to exit", || !pid_alive(pid))?;
@@ -477,6 +487,54 @@ async fn system_service_lifecycle() -> Result<()> {
     fx.wait_absent()?;
     let gone = fx.service("status", &["--system"])?;
     assert_eq!(gone.status.code(), Some(5), "{}", stderr(&gone));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reinstall_replaces_the_definition() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("reinstall")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    let old_pid = wait_for_node(&fx, &node_id)?;
+
+    // A second config of the same owner, same identity.
+    let second = fx.config().with_file_name("serve2.toml");
+    std::fs::copy(fx.config(), &second)?;
+    let out = fx.install_config(&second)?;
+    ensure!(
+        out.status.success(),
+        "reinstall: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+
+    let name = fx.name();
+    assert_eq!(svc::service_count(&name)?, 1, "exactly one service");
+    let new_pid = wait_for_new_pid(&fx, &node_id, old_pid)?;
+    wait_for("the old process to exit", || !pid_alive(old_pid))?;
+    assert!(pid_alive(new_pid));
+    assert!(fx
+        .service_ok("status", &["--system"])?
+        .contains("is running"));
+
+    let image = svc::image_path(&name)?.to_lowercase();
+    assert!(
+        image.contains(&second.to_string_lossy().to_lowercase()),
+        "ImagePath must name {}: {image}",
+        second.display()
+    );
+    assert!(!image.contains("serve.toml"), "old config in {image}");
+    let description = svc::reg_string(&name, "Description")?;
+    let wanted = second.to_string_lossy().replace('\\', "/").to_lowercase();
+    assert_eq!(
+        svc::pin_config(&description).as_deref(),
+        Some(wanted.as_str()),
+        "pin record: {description}"
+    );
     Ok(())
 }
 
@@ -705,6 +763,21 @@ async fn rollback_when_start_fails() -> Result<()> {
         .env("IROH_TUNNEL_TEST_FAIL_BEFORE_READY", "1")
         .output()?;
     assert!(!out.status.success(), "install must fail: {}", stdout(&out));
+    // The failure came from the started service, not an earlier refusal: the
+    // product reports the service name with a start failure, and only the
+    // running service process creates its log file.
+    let err = stderr(&out);
+    assert!(
+        err.contains(&fx.name())
+            && (err.contains("stopped right after start")
+                || err.contains("did not become Running")),
+        "unexpected failure: {err}"
+    );
+    assert!(
+        fx.log_file().exists(),
+        "the service never ran (no {}): {err}",
+        fx.log_file().display()
+    );
     fx.wait_absent()?;
     Ok(())
 }
