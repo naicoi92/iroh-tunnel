@@ -64,7 +64,9 @@ jobs:
         shell: pwsh
         env:
           IROH_TUNNEL_E2E_SERVICE: "1"
-        run: cargo test --all-features --locked --test windows_trust_probe -- --nocapture
+        run: |
+          cargo test --all-features --locked --test windows_trust_probe -- --nocapture
+          cargo test -p iroh-tunnel-host --all-features --locked --lib trust_windows -- --nocapture
       # The image tag must match the `iroh` version in Cargo.lock.
       - name: Start self-hosted relay
         if: ${{ !cancelled() && matrix.name == 'linux' }}
