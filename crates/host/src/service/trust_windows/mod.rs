@@ -33,6 +33,18 @@ pub(crate) fn verify_machine_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     verify_dir(dir, &model::TrustedSet::machine())
 }
 
+/// The `io::ErrorKind` for a failed `CreateDirectoryW` with the protected
+/// machine descriptor. A non-elevated token cannot assign the Administrators
+/// owner (`ERROR_INVALID_OWNER` 1307, `ERROR_PRIVILEGE_NOT_HELD` 1314); that
+/// means "not elevated", the same as `ERROR_ACCESS_DENIED` (5).
+pub(crate) fn map_create_error(code: u32) -> std::io::ErrorKind {
+    match code {
+        5 | 1307 | 1314 => std::io::ErrorKind::PermissionDenied,
+        183 => std::io::ErrorKind::AlreadyExists,
+        _ => std::io::ErrorKind::Other,
+    }
+}
+
 /// Set by the SCM registration of a system service: the SID whose files the
 /// service may trust besides the system principals.
 pub const ENV_TRUSTED_SID: &str = "IROH_TUNNEL_TRUSTED_SID";
@@ -66,6 +78,16 @@ fn trusted_sid_from(value: Result<String, std::env::VarError>) -> anyhow::Result
 mod tests {
     use super::*;
     use std::env::VarError;
+
+    #[test]
+    fn create_errors_for_an_unelevated_token_are_permission_denied() {
+        use std::io::ErrorKind::{AlreadyExists, Other, PermissionDenied};
+        assert_eq!(map_create_error(1307), PermissionDenied);
+        assert_eq!(map_create_error(1314), PermissionDenied);
+        assert_eq!(map_create_error(5), PermissionDenied);
+        assert_eq!(map_create_error(183), AlreadyExists);
+        assert_eq!(map_create_error(3), Other);
+    }
 
     fn config_message(r: anyhow::Result<Option<Sid>>) -> String {
         match r.unwrap_err().downcast_ref::<CliError>() {

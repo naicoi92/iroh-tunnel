@@ -44,8 +44,25 @@ use crate::error::CliError;
 use crate::role::Role;
 
 /// Test-only stand-in for the root-owned machine lock directory.
+///
+/// Test-utils locations are never trust-verified (the harness points this at
+/// a user-owned temp dir), unless `IROH_TUNNEL_TEST_VERIFY_MACHINE_DIR=1`
+/// (see [`ENV_TEST_VERIFY_MACHINE_DIR`]) is also set.
 #[cfg(feature = "test-utils")]
 const ENV_MACHINE_LOCK_DIR: &str = "IROH_TUNNEL_MACHINE_LOCK_DIR";
+
+/// Test-only switch: `1` makes test-utils machine directories go through the
+/// Windows machine trust check like the real `%ProgramData%` location.
+#[cfg(feature = "test-utils")]
+const ENV_TEST_VERIFY_MACHINE_DIR: &str = "IROH_TUNNEL_TEST_VERIFY_MACHINE_DIR";
+
+/// The machine-wide lock directory and whether it must be trust-verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MachineDir {
+    pub(crate) path: PathBuf,
+    /// Windows only: the directory must pass the machine trust check.
+    pub(crate) verify: bool,
+}
 
 /// Mode bit that lets other users open a lock file for reading.
 #[cfg(unix)]
@@ -109,14 +126,21 @@ fn user_dir() -> Result<PathBuf> {
 }
 
 #[cfg(feature = "test-utils")]
-pub(crate) fn machine_dir() -> Option<PathBuf> {
+pub(crate) fn machine_dir() -> Option<MachineDir> {
+    let verify = std::env::var_os(ENV_TEST_VERIFY_MACHINE_DIR).is_some_and(|v| v == "1");
     if let Some(dir) = std::env::var_os(ENV_MACHINE_LOCK_DIR).filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(dir));
+        return Some(MachineDir {
+            path: PathBuf::from(dir),
+            verify,
+        });
     }
     // Test builds never touch the real machine-wide location: without an
     // explicit directory it lives beside the user tier, so tests that
     // isolate HOME are isolated from each other and from a real service.
-    user_dir().ok().map(|dir| dir.join("machine"))
+    user_dir().ok().map(|dir| MachineDir {
+        path: dir.join("machine"),
+        verify,
+    })
 }
 
 /// The Windows machine directory under the `%ProgramData%` folder.
@@ -126,21 +150,28 @@ fn windows_machine_dir(program_data: &Path) -> PathBuf {
 }
 
 #[cfg(all(windows, not(feature = "test-utils")))]
-pub(crate) fn machine_dir() -> Option<PathBuf> {
+pub(crate) fn machine_dir() -> Option<MachineDir> {
     crate::service::program_data_dir()
         .ok()
-        .map(|dir| windows_machine_dir(&dir))
+        .map(|dir| MachineDir {
+            path: windows_machine_dir(&dir),
+            verify: true,
+        })
 }
 
 #[cfg(all(not(windows), not(feature = "test-utils")))]
-pub(crate) fn machine_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "linux") {
-        Some(PathBuf::from("/run/iroh-tunnel"))
+pub(crate) fn machine_dir() -> Option<MachineDir> {
+    let path = if cfg!(target_os = "linux") {
+        PathBuf::from("/run/iroh-tunnel")
     } else if cfg!(target_os = "macos") {
-        Some(PathBuf::from("/var/run/iroh-tunnel"))
+        PathBuf::from("/var/run/iroh-tunnel")
     } else {
-        None
-    }
+        return None;
+    };
+    Some(MachineDir {
+        path,
+        verify: false,
+    })
 }
 
 fn lock_name(role: Role) -> String {
@@ -380,8 +411,8 @@ pub(crate) fn claim(role: Role) -> Result<RoleClaim> {
 
     let mut locks = vec![user_lock];
     let mut held_machine = None;
-    if let Some(dir) = machine_dir() {
-        match claim_machine(role, &dir)? {
+    if let Some(MachineDir { path: dir, verify }) = machine_dir() {
+        match claim_machine(role, &dir, verify)? {
             MachineClaim::Exclusive(file) => {
                 locks.push(file);
                 held_machine = Some(dir);
@@ -420,7 +451,9 @@ enum MachineClaim {
     Absent,
 }
 
-fn claim_machine(role: Role, dir: &Path) -> Result<MachineClaim> {
+/// Claim the machine tier. `verify` (Windows only) requires an existing
+/// directory to pass the machine trust check before anything is created in it.
+fn claim_machine(role: Role, dir: &Path, verify: bool) -> Result<MachineClaim> {
     let path = dir.join(lock_name(role));
     // An existing machine directory must be trusted before anything is
     // created in it, and is never repaired. A refusal is a permission error,
@@ -428,11 +461,11 @@ fn claim_machine(role: Role, dir: &Path) -> Result<MachineClaim> {
     #[cfg(windows)]
     let dir_exists = std::fs::symlink_metadata(dir).is_ok();
     #[cfg(windows)]
-    if dir_exists {
+    if dir_exists && verify {
         crate::service::verify_machine_dir(dir)?;
     }
     #[cfg(not(windows))]
-    let dir_exists = false;
+    let (dir_exists, _) = (false, verify);
     // Elevated side: able to create the directory and write the lock. Only
     // "no permission" means "not elevated"; any other failure is real.
     // Windows creates only a missing directory (`CreateDirectoryW` fails on an
@@ -441,6 +474,18 @@ fn claim_machine(role: Role, dir: &Path) -> Result<MachineClaim> {
         Ok(())
     } else {
         create_machine_dir(dir)
+    };
+    // Another process may have created the directory since the check above:
+    // trust it only after verification.
+    #[cfg(windows)]
+    let ensure_dir = match ensure_dir {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if verify {
+                crate::service::verify_machine_dir(dir)?;
+            }
+            Ok(())
+        }
+        other => other,
     };
     match ensure_dir.and_then(|()| create_lock_file(&path, 0o644)) {
         Ok(file) => {
@@ -556,7 +601,7 @@ fn probe_tiers(role: Role) -> Result<Vec<Liveness>> {
             owner: read_owner(&user_dir, role),
         });
     }
-    if let Some(dir) = machine_dir() {
+    if let Some(MachineDir { path: dir, .. }) = machine_dir() {
         // A prober that can open the machine lock for writing tests it
         // exclusively, or it would miss shared (non-elevated) holders.
         if lock_is_held(&dir.join(lock_name(role)), true)? {
@@ -614,6 +659,15 @@ fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
 /// [`probe`].
 #[allow(dead_code)] // consumed by the restart verb in a later task
 pub(crate) fn wait_released(role: Role, timeout: std::time::Duration) -> Result<()> {
+    wait_released_with(role, timeout, probe)
+}
+
+/// [`wait_released`] with the probe injected, so tests need no real lock.
+fn wait_released_with(
+    role: Role,
+    timeout: std::time::Duration,
+    mut probe: impl FnMut(Role) -> Result<Liveness>,
+) -> Result<()> {
     const POLL: std::time::Duration = std::time::Duration::from_millis(100);
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -622,9 +676,8 @@ pub(crate) fn wait_released(role: Role, timeout: std::time::Duration) -> Result<
         }
         if std::time::Instant::now() >= deadline {
             return Err(CliError::Service(format!(
-                "{} did not stop within {}s; not starting a second instance",
+                "{} did not stop within {timeout:?}; not starting a second instance",
                 role.name(),
-                timeout.as_secs().max(1)
             ))
             .into());
         }
@@ -704,7 +757,7 @@ mod tests {
     #[test]
     fn machine_lock_exclusive_then_shared_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let first = claim_machine(Role::Serve, dir.path()).unwrap();
+        let first = claim_machine(Role::Serve, dir.path(), false).unwrap();
         assert!(matches!(first, MachineClaim::Exclusive(_)));
         let path = dir.path().join(lock_name(Role::Serve));
         let reader = base_options().read(true).open(&path).unwrap();
@@ -720,32 +773,39 @@ mod tests {
         ));
     }
 
-    /// Serialises the tests that hold a real user-tier lock.
-    fn user_lock_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        GUARD
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn running() -> Result<Liveness> {
+        Ok(Liveness::Running {
+            tier: Tier::User,
+            owner: None,
+        })
     }
 
     #[test]
     fn wait_released_times_out() {
-        let _guard = user_lock_guard();
-        let Ok(claim) = claim(Role::Access) else {
-            return; // a real process holds the role; nothing to assert
-        };
-        let err = wait_released(Role::Access, Duration::from_millis(200)).unwrap_err();
+        let err = wait_released_with(Role::Access, Duration::from_millis(200), |_| running())
+            .unwrap_err();
         match err.downcast_ref::<CliError>() {
             Some(CliError::Service(m)) => {
-                assert!(m.contains("did not stop"), "{m}");
+                assert!(m.contains("did not stop within 200ms"), "{m}");
                 assert!(m.contains("not starting a second instance"), "{m}");
             }
             other => panic!("expected Service, got {other:?}"),
         }
-        drop(claim);
-        let started = std::time::Instant::now();
-        wait_released(Role::Access, Duration::from_secs(5)).unwrap();
-        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn wait_released_returns_once_the_role_is_free() {
+        let mut polls = 0;
+        wait_released_with(Role::Access, Duration::from_secs(5), |_| {
+            polls += 1;
+            if polls < 3 {
+                running()
+            } else {
+                Ok(Liveness::NotRunning)
+            }
+        })
+        .unwrap();
+        assert_eq!(polls, 3);
     }
 
     #[cfg(windows)]
@@ -771,7 +831,9 @@ mod tests {
             .unwrap();
         assert!(grant.status.success());
         let before = sddl_of(&dir);
-        let err = claim_machine(Role::Serve, &dir).err().expect("refused");
+        let err = claim_machine(Role::Serve, &dir, true)
+            .err()
+            .expect("refused");
         match err.downcast_ref::<CliError>() {
             Some(CliError::Permission(m)) => {
                 assert!(m.contains("S-1-1-0"), "{m}");

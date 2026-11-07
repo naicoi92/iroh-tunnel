@@ -939,7 +939,18 @@ pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     // that `descriptor` keeps alive until after the call.
     let created = unsafe { CreateDirectoryW(path.as_ptr(), &attributes) };
     if created == 0 {
-        return Err(io::Error::last_os_error());
+        let err = io::Error::last_os_error();
+        let code = err.raw_os_error().unwrap_or(0) as u32;
+        // `CreateDirectoryW` is atomic: a failure leaves no directory behind.
+        return Err(match super::map_create_error(code) {
+            io::ErrorKind::PermissionDenied if err.kind() != io::ErrorKind::PermissionDenied => {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("{err} (os error {code})"),
+                )
+            }
+            _ => err,
+        });
     }
     Ok(())
 }
