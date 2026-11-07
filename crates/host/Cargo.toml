@@ -45,3 +45,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Elevation check (`TokenElevation`); later tasks add the SCM features.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
