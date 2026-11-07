@@ -359,6 +359,7 @@ fn backend_install(
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        // Same BusyBox-vs-systemd condition as `platform::system_wide_only`.
         if super::platform::linux_is_systemd() {
             super::backend::systemd::install(native, notes, role, scope, binary, config, state, pin)
         } else {
