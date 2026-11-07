@@ -129,7 +129,7 @@ fn format_plist_with(
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          {pin_comment}\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyManifest-1.0.dtd\">\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
          <dict>\n\
          \t<key>Label</key>\n\
@@ -383,6 +383,29 @@ mod tests {
     use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
     use crate::service::native::{Native, OutputMode};
     use crate::service::ServiceNote;
+
+    #[test]
+    fn plist_declares_apples_property_list_doctype() {
+        let body = format_plist("serve", Path::new("/b"), Path::new("/c"), Path::new("/s"));
+        assert!(body.contains("PropertyList-1.0.dtd"), "{body}");
+        assert!(!body.contains("PropertyManifest"), "{body}");
+    }
+
+    #[test]
+    fn plist_carries_no_exit_status_exemption() {
+        // launchd's KeepAlive cannot exempt an exit status the way systemd's
+        // RestartPreventExitStatus does; see design.md. This pins the gap so a
+        // future edit cannot claim containment the platform does not provide.
+        let body = format_plist("serve", Path::new("/b"), Path::new("/c"), Path::new("/s"));
+        assert!(
+            body.contains("<key>SuccessfulExit</key>\n\t\t<false/>"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("ExitStatus") && !body.contains("OtherJobEnabled"),
+            "{body}"
+        );
+    }
 
     #[test]
     fn capture_mode_returns_native_output() {
