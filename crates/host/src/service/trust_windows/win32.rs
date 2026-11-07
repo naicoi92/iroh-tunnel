@@ -44,11 +44,14 @@ use super::ace::ace_layout;
 use super::model::{self, Ace, Descriptor, Refusal, Sid, TrustedSet};
 use crate::error::CliError;
 
-/// What the last element of a chain is opened for; ancestors always get
-/// `READ_CONTROL | FILE_READ_ATTRIBUTES` only.
+/// What the last element of a chain is opened for. Every element gets
+/// `READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY`: NT skips the
+/// share-mode check for an open whose access mask holds no data right, and
+/// `FILE_LIST_DIRECTORY` and `FILE_READ_DATA` are the same bit, so this makes
+/// directories and `Inspect` files really held without delete sharing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LastAccess {
-    /// Owner, DACL and attributes only.
+    /// Owner, DACL and attributes (plus the read bit that holds the open).
     Inspect,
     /// Also `FILE_READ_DATA`, for [`read_verified`].
     ReadFile,
@@ -167,7 +170,11 @@ unsafe fn sid_string(sid: PSID) -> io::Result<Sid> {
     let mut text: *mut u16 = std::ptr::null_mut();
     // SAFETY: the caller guarantees `sid` is valid; `text` is a valid out
     // pointer that receives a LocalAlloc'ed string.
-    if unsafe { IsValidSid(sid) } == 0 || unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+    if unsafe { IsValidSid(sid) } == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid SID"));
+    }
+    // SAFETY: as above; `sid` was just validated.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let guard = LocalBox(text.cast());
@@ -185,9 +192,18 @@ unsafe fn sid_string(sid: PSID) -> io::Result<Sid> {
     Ok(Sid(s))
 }
 
+/// What `GetSecurityInfo` returned for the DACL.
+enum DaclState {
+    /// No DACL pointer: a NULL DACL (or none at all).
+    Null,
+    Aces(Vec<Ace>),
+    /// Some ACE has no SID that can be read.
+    Unreadable,
+}
+
 /// Decode a DACL into model ACEs. `None` when any ACE has no SID that can
-/// be read (an unknown or compound layout): the element is then reported as
-/// having no usable access list, so an unreadable grant is never ignored.
+/// be read (an unknown or compound layout): the element is then refused as
+/// having an unreadable access list, so an unreadable grant is never ignored.
 /// Object, callback and audit ACEs count as allow ACEs (see `ace.rs`).
 ///
 /// # Safety
@@ -226,7 +242,7 @@ unsafe fn read_dacl(acl: *const ACL) -> Option<Vec<Ace>> {
 }
 
 /// Owner and DACL of an open handle (READ_CONTROL).
-fn owner_and_dacl(handle: &OwnedHandle) -> io::Result<(Sid, Option<Vec<Ace>>)> {
+fn owner_and_dacl(handle: &OwnedHandle) -> io::Result<(Sid, DaclState)> {
     let mut owner: PSID = std::ptr::null_mut();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -255,13 +271,13 @@ fn owner_and_dacl(handle: &OwnedHandle) -> io::Result<(Sid, Option<Vec<Ace>>)> {
     let owner = unsafe { sid_string(owner) }?;
     // A null DACL pointer is a NULL DACL (or none at all): everyone has
     // access, which the model refuses.
-    let aces = if dacl.is_null() {
-        None
+    let state = if dacl.is_null() {
+        DaclState::Null
     } else {
         // SAFETY: `dacl` points into `sd`, alive until `_sd` drops.
-        unsafe { read_dacl(dacl) }
+        unsafe { read_dacl(dacl) }.map_or(DaclState::Unreadable, DaclState::Aces)
     };
-    Ok((owner, aces))
+    Ok((owner, state))
 }
 
 fn components_of(path: &Path) -> Result<Vec<String>> {
@@ -289,24 +305,35 @@ pub(crate) fn open_chain(path: &Path, last: LastAccess) -> Result<Chain> {
     };
     for (index, component) in components.iter().enumerate() {
         let is_last = index == final_index;
-        let mut access = READ_CONTROL | FILE_READ_ATTRIBUTES;
+        let mut access = READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY;
         if is_last {
             access |= match last {
                 LastAccess::Inspect => 0,
                 LastAccess::ReadFile => FILE_READ_DATA,
-                LastAccess::WriteDir => FILE_ADD_FILE | FILE_LIST_DIRECTORY,
+                LastAccess::WriteDir => FILE_ADD_FILE,
             };
         }
         let handle = open_element(component, access).map_err(|e| {
-            permission(format!(
+            let msg = format!(
                 "cannot open {component} to verify {} ({e}); nothing was changed",
                 path.display()
-            ))
+            );
+            // Keep the io::Error reachable for callers that map error codes.
+            anyhow::Error::new(e).context(CliError::Permission(msg))
         })?;
         let attrs = attributes(&handle)
             .and_then(|attrs| owner_and_dacl(&handle).map(|od| (attrs, od)))
             .map_err(|e| permission(format!("cannot read the security of {component}: {e}")));
         let (attrs, (owner, dacl)) = attrs?;
+        let dacl = match dacl {
+            DaclState::Null => None,
+            DaclState::Aces(aces) => Some(aces),
+            DaclState::Unreadable => {
+                return Err(refusal(Refusal::UnreadableDacl {
+                    path: PathBuf::from(component),
+                }));
+            }
+        };
         let reparse = attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0;
         let is_dir = attrs & FILE_ATTRIBUTE_DIRECTORY != 0;
         chain.handles.push(handle);
@@ -351,14 +378,19 @@ fn not_a(kind: &str, d: &Descriptor) -> anyhow::Error {
 /// directory is missing (the service never creates it).
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the service runtime later
 pub(crate) fn verify_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
-    if !path.exists() {
-        return Err(permission(format!(
-            "{} does not exist; create it as the installing user, the service does not \
-             create directories in a user's profile",
-            path.display()
-        )));
-    }
-    let chain = verified(path, LastAccess::Inspect, trusted)?;
+    let chain = verified(path, LastAccess::Inspect, trusted).map_err(|e| {
+        let missing = e.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error);
+        if matches!(missing, Some(c) if c == ERROR_FILE_NOT_FOUND as i32 || c == ERROR_PATH_NOT_FOUND as i32)
+        {
+            permission(format!(
+                "{} does not exist; create it as the installing user, the service does not \
+                 create directories in a user's profile",
+                path.display()
+            ))
+        } else {
+            e
+        }
+    })?;
     let (_, d) = chain.target()?;
     if !d.is_dir {
         return Err(not_a("directory", d));
@@ -378,11 +410,11 @@ pub(crate) fn read_verified(path: &Path, trusted: &TrustedSet) -> Result<String>
     if d.is_dir {
         return Err(not_a("file", d));
     }
-    let bytes = read_all(handle).with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes = read_all(handle, path)?;
     String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
 }
 
-fn read_all(handle: &OwnedHandle) -> io::Result<Vec<u8>> {
+fn read_all(handle: &OwnedHandle, path: &Path) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -400,10 +432,18 @@ fn read_all(handle: &OwnedHandle) -> io::Result<Vec<u8>> {
             )
         };
         if ok == 0 {
-            return Err(io::Error::last_os_error());
+            return Err(anyhow::Error::new(io::Error::last_os_error())
+                .context(format!("failed to read {}", path.display())));
         }
         if read == 0 {
             return Ok(out);
+        }
+        if model::exceeds_read_limit(out.len(), read as usize) {
+            return Err(permission(format!(
+                "{} is larger than the {} byte limit for a verified read",
+                path.display(),
+                model::MAX_VERIFIED_READ
+            )));
         }
         out.extend_from_slice(&buf[..read as usize]);
     }
@@ -910,6 +950,47 @@ mod tests {
         let text = permission_text(read_verified(&file, &me()).unwrap_err());
         assert!(text.contains("access list"), "{text}");
         assert!(text.contains(&reported(&file)), "{text}");
+    }
+
+    #[test]
+    fn held_ancestor_cannot_be_renamed() {
+        let (tmp, _f) = fixture();
+        let a = tmp.path().join("a");
+        let file = a.join("b").join("file");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "x").unwrap();
+        let a2 = tmp.path().join("a2");
+        let chain = open_chain(&file, LastAccess::Inspect).unwrap();
+        assert!(std::fs::rename(&a, &a2).is_err());
+        drop(chain);
+        std::fs::rename(&a, &a2).unwrap();
+    }
+
+    #[test]
+    fn oversized_file_is_refused_with_path_and_limit() {
+        let (_tmp, file) = fixture();
+        std::fs::write(&file, vec![b'x'; model::MAX_VERIFIED_READ + 1]).unwrap();
+        let text = permission_text(read_verified(&file, &me()).unwrap_err());
+        assert!(text.contains(&reported(&file)), "{text}");
+        assert!(
+            text.contains(&model::MAX_VERIFIED_READ.to_string()),
+            "{text}"
+        );
+        std::fs::write(&file, vec![b'x'; model::MAX_VERIFIED_READ]).unwrap();
+        assert_eq!(
+            read_verified(&file, &me()).unwrap().len(),
+            model::MAX_VERIFIED_READ
+        );
+    }
+
+    #[test]
+    fn missing_directory_gets_the_create_it_text_and_other_errors_keep_theirs() {
+        let (tmp, _f) = fixture();
+        let text = permission_text(verify_dir(&tmp.path().join("nope"), &me()).unwrap_err());
+        assert!(text.contains("does not exist; create it"), "{text}");
+        let text =
+            permission_text(verify_dir(Path::new("\\\\server\\share\\x"), &me()).unwrap_err());
+        assert!(!text.contains("does not exist"), "{text}");
     }
 
     #[test]

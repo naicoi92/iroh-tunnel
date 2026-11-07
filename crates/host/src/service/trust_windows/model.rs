@@ -124,12 +124,24 @@ impl TrustedSet {
     }
 }
 
+/// Largest file `read_verified` returns (1 MiB).
+pub(crate) const MAX_VERIFIED_READ: usize = 1 << 20;
+
+/// Whether reading `chunk` more bytes after `total` passes [`MAX_VERIFIED_READ`].
+pub(crate) fn exceeds_read_limit(total: usize, chunk: usize) -> bool {
+    total.saturating_add(chunk) > MAX_VERIFIED_READ
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Reparse {
         path: PathBuf,
     },
     NoDacl {
+        path: PathBuf,
+    },
+    /// The DACL exists but holds an ACE that cannot be decoded.
+    UnreadableDacl {
         path: PathBuf,
     },
     Owner {
@@ -168,6 +180,13 @@ impl fmt::Display for Refusal {
                 write!(
                     f,
                     "{} has no access list (NULL DACL: everyone has access)",
+                    path.display()
+                )
+            }
+            Self::UnreadableDacl { path } => {
+                write!(
+                    f,
+                    "{} has an access list that cannot be read",
                     path.display()
                 )
             }
@@ -403,6 +422,25 @@ mod tests {
             text.contains("C:\\u\\s.toml") && text.contains("access list"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn unreadable_dacl_has_its_own_refusal_text_and_is_a_permission_error() {
+        let r = Refusal::UnreadableDacl {
+            path: "C:\\u\\s.toml".into(),
+        };
+        let text = r.to_string();
+        assert_eq!(text, "C:\\u\\s.toml has an access list that cannot be read");
+        assert!(!text.contains("everyone"), "{text}");
+        assert!(matches!(CliError::from(r), CliError::Permission(m) if m == text));
+    }
+
+    #[test]
+    fn read_limit_allows_exactly_one_mebibyte() {
+        assert!(!exceeds_read_limit(0, MAX_VERIFIED_READ));
+        assert!(!exceeds_read_limit(MAX_VERIFIED_READ - 1, 1));
+        assert!(exceeds_read_limit(MAX_VERIFIED_READ, 1));
+        assert!(exceeds_read_limit(usize::MAX, 1));
     }
 
     #[test]
