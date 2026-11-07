@@ -38,3 +38,28 @@ fn restricted_child_is_not_elevated() {
     // The deny-only attribute text of the Administrators line is localized,
     // so it is not asserted; integrity level is the locale-independent proof.
 }
+
+/// The product's own elevation decision (`is_elevated`) for the restricted
+/// child: a `--system` install must be refused as a permission error before
+/// anything else runs (Option A: the real CLI, no test-only probe).
+#[test]
+fn restricted_child_is_not_elevated_per_product() {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to launch restricted-token children");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("serve.toml");
+    let out = run_non_elevated(Command::new(env!("CARGO_BIN_EXE_iroh-tunnel")).args([
+        "serve",
+        "service",
+        "install",
+        "--system",
+        "--config",
+        config.to_str().unwrap(),
+    ]))
+    .expect("launch iroh-tunnel under a restricted token");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("Run as administrator"), "{err}");
+}
