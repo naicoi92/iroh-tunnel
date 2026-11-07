@@ -31,12 +31,12 @@
 
 - [x] 4.1 Document in `crates/host/src/service/install.rs` why the check compares a tier rather than calling `ensure_not_running`, and the two residual gaps: a foreground run in the same tier, and a job loaded outside `service install`.
 - [x] 4.2 Record the launchd restart-containment limitation where the restart policy lives (`crates/host/src/service/types.rs` or the launchd backend), stating that systemd expresses the exemption and launchd cannot.
-- [ ] 4.3 Check `docs/` and `README.md` for text describing macOS service install or the service exit codes that this change makes stale, and update it; report if nothing needs changing rather than inventing an edit.
+- [x] 4.3 Check `docs/` and `README.md` for text describing macOS service install or the service exit codes that this change makes stale, and update it; report if nothing needs changing rather than inventing an edit.
 
 ## 5. Verification
 
-- [ ] 5.1 Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`, fixing what they report.
-- [ ] 5.2 Run `cargo test` for the workspace and confirm the service test files pass: `tests/service_user.rs`, `tests/service_system.rs`, `tests/service_user_windows.rs` where applicable.
+- [x] 5.1 Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`, fixing what they report.
+- [x] 5.2 Run `cargo test` for the workspace and confirm the service test files pass: `tests/service_user.rs`, `tests/service_system.rs`, `tests/service_user_windows.rs` where applicable.
 - [ ] 5.3 Manually verify the disabled-label path on macOS, since the `Native` fake cannot hold a real disable list. Record the exact commands and output in this change's `verify.md`: `launchctl disable gui/<uid>/dev.iroh-tunnel.serve`, then `iroh-tunnel serve service install --user` on a host with no conflicting system service, then `launchctl print gui/<uid>/dev.iroh-tunnel.serve` showing the job loaded. State explicitly if the environment prevents this and what was done instead.
 - [ ] 5.4 Manually verify the conflict refusal: with a system service of the role running, `iroh-tunnel serve service install --user` fails with exit 6, names the machine-wide tier and the uninstall command, and leaves no file in `~/Library/LaunchAgents`. Record the output in `verify.md`.
-- [ ] 5.5 Confirm `openspec validate fix-launchd-user-install` passes and that the delta's scenarios each map to a test or a recorded manual verification; list any scenario covered only manually.
+- [x] 5.5 Confirm `openspec validate fix-launchd-user-install` passes and that the delta's scenarios each map to a test or a recorded manual verification; list any scenario covered only manually.
