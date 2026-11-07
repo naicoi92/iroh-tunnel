@@ -271,12 +271,13 @@ fn ensure_no_cross_scope_conflict_in(
         ServiceScope::System => (Tier::User, ServiceScope::User),
     };
     if let Liveness::Running { tier, owner } = ownership::tier_liveness(role, other_tier, dirs)? {
+        let flag = super::verb::flag(other_scope);
         return Err(CliError::Conflict(format!(
-            "{role} is already running ({}; {}); stop it first with \
-             `iroh-tunnel {role} service uninstall {}`, then install again",
+            "{role} is already running ({}; {}); {}; to remove that service run \
+             `iroh-tunnel {role} service uninstall {flag}`, then install again",
             tier.label(),
             ownership::describe_owner(owner.as_ref()),
-            super::verb::flag(other_scope),
+            ownership::stop_hint_scoped(role, flag),
             role = role.name(),
         ))
         .into());
@@ -434,6 +435,10 @@ mod tests {
             "{err:?}"
         );
         assert!(text.contains("service uninstall --system"), "{text}");
+        assert!(text.contains("service stop --system"), "{text}");
+        assert!(text.contains("Ctrl+C"), "{text}");
+        assert!(text.contains("nothing is stopped automatically"), "{text}");
+        assert!(text.contains("machine-wide"), "{text}");
         assert!(!text.contains("start refused"), "{text}");
     }
 
@@ -453,6 +458,10 @@ mod tests {
             "{err:?}"
         );
         assert!(text.contains("service uninstall --user"), "{text}");
+        assert!(text.contains("service stop --user"), "{text}");
+        assert!(text.contains("Ctrl+C"), "{text}");
+        assert!(text.contains("nothing is stopped automatically"), "{text}");
+        assert!(text.contains("this user"), "{text}");
         assert!(!text.contains("start refused"), "{text}");
     }
 

@@ -307,9 +307,20 @@ fn already_running(role: Role, scope: &str, owner: Option<&OwnerRecord>) -> anyh
 }
 
 fn stop_hint(role: Role) -> String {
+    stop_hint_for(role, "")
+}
+
+/// [`stop_hint`] whose service command carries `scope_flag` (for example
+/// `--system`), for a holder in the other service scope. An empty flag adds
+/// nothing.
+pub(crate) fn stop_hint_scoped(role: Role, scope_flag: &str) -> String {
+    stop_hint_for(role, &format!(" {scope_flag}"))
+}
+
+fn stop_hint_for(role: Role, flag_suffix: &str) -> String {
     let name = role.name();
     format!(
-        "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop` for a service); \
+        "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop{flag_suffix}` for a service); \
          nothing is stopped automatically"
     )
 }

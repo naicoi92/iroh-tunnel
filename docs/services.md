@@ -73,8 +73,9 @@ are logged in unless lingering is enabled (`loginctl enable-linger $USER`).
   foreground.
 - `install` is refused with code `6` while the role is held at the other
   scope (for example a running system service when you install `--user`). The
-  error names the holder and the command to run, `iroh-tunnel <role> service
-  uninstall --system` or `--user`.
+  error names the holder, how to stop it (`Ctrl+C`, or `iroh-tunnel <role>
+  service stop --system` or `--user`) and how to remove it (`iroh-tunnel <role>
+  service uninstall --system` or `--user`). Nothing is stopped automatically.
 - On macOS, `install` enables the launchd label, replaces any loaded copy and
   bootstraps the job. If bootstrap fails, a disabled label is the usual cause;
   check `launchctl print-disabled <domain>`.
