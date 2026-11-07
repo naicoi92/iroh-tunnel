@@ -433,6 +433,7 @@ mod tests {
             "{err:?}"
         );
         assert!(text.contains("service uninstall --system"), "{text}");
+        assert!(!text.contains("start refused"), "{text}");
     }
 
     #[test]
@@ -451,6 +452,7 @@ mod tests {
             "{err:?}"
         );
         assert!(text.contains("service uninstall --user"), "{text}");
+        assert!(!text.contains("start refused"), "{text}");
     }
 
     #[test]

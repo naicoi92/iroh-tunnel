@@ -88,8 +88,10 @@ pub enum Liveness {
     },
 }
 
-fn conflict(msg: String) -> anyhow::Error {
-    CliError::Conflict(msg).into()
+/// A start refused by a conflict. `CliError::Conflict` carries no prefix of its
+/// own because an install can conflict too; the start paths say so here.
+fn start_refused(msg: String) -> anyhow::Error {
+    CliError::Conflict(format!("start refused: {msg}")).into()
 }
 
 /// Test builds on Windows scope the user tier by `HOME` like Unix does, so
@@ -296,7 +298,7 @@ impl Tier {
 
 /// The refusal for a start that finds `role` already running at `scope`.
 fn already_running(role: Role, scope: &str, owner: Option<&OwnerRecord>) -> anyhow::Error {
-    conflict(format!(
+    start_refused(format!(
         "{} is already running ({scope}; {}); {}",
         role.name(),
         describe_owner(owner),
@@ -471,7 +473,7 @@ impl RoleClaim {
                 continue;
             };
             if owner.node_id.as_deref() == Some(node_id) {
-                return Err(conflict(format!(
+                return Err(start_refused(format!(
                     "the {} role already runs with the same public identity ({}); \
                      two processes must not share a key — use `config keygen` to create another one",
                     other.name(),
@@ -657,6 +659,12 @@ pub(crate) fn ensure_not_running(role: Role) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_start_says_so() {
+        let text = already_running(Role::Serve, "this user", None).to_string();
+        assert!(text.starts_with("start refused:"), "{text}");
+    }
 
     #[test]
     fn roles_are_each_others_counterpart() {
