@@ -856,17 +856,79 @@ fn sc_running(fx: &Fixture) -> bool {
     stdout(&fx.sc("query")).contains("RUNNING")
 }
 
-/// The service must not be Running at any sample during `window`.
-fn assert_never_running(fx: &Fixture, window: Duration) {
-    let end = Instant::now() + window;
-    while Instant::now() < end {
-        assert!(
-            !sc_running(fx),
-            "the service reached Running:\n{}",
-            stdout(&fx.sc("query"))
-        );
-        std::thread::sleep(Duration::from_millis(200));
+/// How long a refused start is watched after its first failure: the SCM
+/// recovery action restarts the service after 5 s, and that start must be
+/// refused too.
+const RECOVERY_WINDOW: Duration = Duration::from_secs(8);
+
+/// Start the stopped service through the SCM itself (no CLI precheck) and
+/// watch it from before the request. The service must never report Running,
+/// must end Stopped with a fresh service-specific exit code (the prior clean
+/// stop left `Win32(0)`), and the recovery restart must not reach Running
+/// either. Returns that exit code. Query errors fail the test.
+fn refused_start(fx: &Fixture) -> Result<u32> {
+    use windows_service::service::{ServiceAccess, ServiceExitCode, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    fn open(name: &str, access: ServiceAccess) -> Result<windows_service::service::Service> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        Ok(manager.open_service(name, access)?)
     }
+    let name = fx.name();
+    let before = open(&name, ServiceAccess::QUERY_STATUS)?.query_status()?;
+    ensure!(
+        before.current_state == ServiceState::Stopped
+            && before.exit_code == ServiceExitCode::Win32(0),
+        "the service must be cleanly stopped first: {before:?}"
+    );
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn({
+        let name = name.clone();
+        move || -> Result<u32> {
+            let watched = open(&name, ServiceAccess::QUERY_STATUS)?;
+            let mut failed: Option<(u32, Instant)> = None;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            ready_tx.send(()).ok();
+            loop {
+                let status = watched.query_status()?;
+                ensure!(
+                    status.current_state != ServiceState::Running,
+                    "the service reported Running: {status:?}"
+                );
+                match (failed, status.exit_code) {
+                    (None, ServiceExitCode::ServiceSpecific(code))
+                        if status.current_state == ServiceState::Stopped =>
+                    {
+                        failed = Some((code, Instant::now()));
+                    }
+                    (Some((code, at)), _) if at.elapsed() >= RECOVERY_WINDOW => return Ok(code),
+                    _ => {}
+                }
+                ensure!(
+                    Instant::now() < deadline,
+                    "no service-specific failure within 60 s: {status:?}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    });
+    ready_rx.recv()?;
+    // A refused start reports Stopped from the service main, so the request
+    // itself normally succeeds; the observer's exit code is the evidence.
+    let started = open(&name, ServiceAccess::START)?.start::<&str>(&[]);
+    observer
+        .join()
+        .map_err(|_| anyhow::anyhow!("observer panicked"))?
+        .map_err(|e| e.context(format!("start request: {started:?}")))
+}
+
+/// Stop the running service cleanly, so a refused start can be observed.
+fn stop_cleanly(fx: &Fixture) -> Result<()> {
+    fx.service_ok("stop", &["--system"])?;
+    wait_for("the service to stop", || {
+        svc::service_stopped_or_absent(&fx.name())
+    })
 }
 
 /// Retry `start --system` until the service is Running: after a refusal the
@@ -917,18 +979,12 @@ async fn unsafe_config_refused_then_fixed() -> Result<()> {
     fx.install_ok(&["--system"])?;
     wait_for_node(&fx, &node_id)?;
 
+    stop_cleanly(&fx)?;
+
     let grant = GrantGuard::everyone_modify(&fx.config())?;
     // icacls rewrites the DACL on grant, so compare against this state.
     let granted = acl_state(&fx.config())?;
-    // `restart` waits for Running, so the CLI itself fails.
-    let out = fx.service("restart", &["--system"])?;
-    assert!(
-        !out.status.success(),
-        "restart must fail: {}{}",
-        stdout(&out),
-        stderr(&out)
-    );
-    assert_never_running(&fx, Duration::from_secs(3));
+    assert_eq!(refused_start(&fx)?, 3, "a permission error");
     wait_for_log(&fx, "permission error")?;
     wait_for_log(&fx, fx.config().to_str().unwrap())?;
     assert_eq!(
@@ -937,9 +993,17 @@ async fn unsafe_config_refused_then_fixed() -> Result<()> {
         "the product must not repair or alter the config ACL while refusing"
     );
 
+    // The user fixes the file; the product then keeps it exactly as set.
+    icacls(&[fx.config().to_str().unwrap(), "/remove", EVERYONE])?;
     drop(grant);
+    let fixed = acl_state(&fx.config())?;
     start_until_running(&fx)?;
     wait_for_node(&fx, &node_id)?;
+    assert_eq!(
+        acl_state(&fx.config())?,
+        fixed,
+        "owner and DACL stay as the user set them"
+    );
     Ok(())
 }
 
@@ -992,13 +1056,12 @@ async fn invalid_config_never_runs() -> Result<()> {
     let node_id = fx.write_config(relay.as_ref(), 9)?;
     fx.install_ok(&["--system"])?;
     wait_for_node(&fx, &node_id)?;
+    stop_cleanly(&fx)?;
     let before = acl_state(&fx.config())?;
 
     // Overwriting in place keeps the owner and the DACL.
     std::fs::write(fx.config(), "[node\nthis is = = not toml\n")?;
-    let out = fx.service("restart", &["--system"])?;
-    assert!(!out.status.success(), "restart must fail");
-    assert_never_running(&fx, Duration::from_secs(3));
+    assert_eq!(refused_start(&fx)?, 2, "a config error");
     wait_for_log(&fx, "failed to parse")?;
     assert_eq!(acl_state(&fx.config())?, before, "owner and DACL unchanged");
     Ok(())
@@ -1031,9 +1094,8 @@ async fn empty_key_never_written() -> Result<()> {
     std::fs::write(fx.config(), &emptied)?;
     let bytes = std::fs::read(fx.config())?;
 
-    let out = fx.service("restart", &["--system"])?;
-    assert!(!out.status.success(), "restart must fail");
-    assert_never_running(&fx, Duration::from_secs(3));
+    stop_cleanly(&fx)?;
+    assert_eq!(refused_start(&fx)?, 2, "a config error");
     wait_for_log(&fx, "config keygen")?;
     assert_eq!(
         std::fs::read(fx.config())?,
@@ -1054,10 +1116,9 @@ async fn pinless_service_refused() -> Result<()> {
     fx.install_ok(&["--system"])?;
     wait_for_node(&fx, &node_id)?;
 
+    stop_cleanly(&fx)?;
     svc::remove_service_env(&fx.name(), "IROH_TUNNEL_TRUSTED_SID")?;
-    let out = fx.service("restart", &["--system"])?;
-    assert!(!out.status.success(), "restart must fail");
-    assert_never_running(&fx, Duration::from_secs(3));
+    assert_eq!(refused_start(&fx)?, 3, "a permission error");
     wait_for_log(&fx, "service install --system")?;
     Ok(())
 }
@@ -1116,15 +1177,14 @@ async fn untrusted_machine_dir_refused() -> Result<()> {
     // The service checks the directory too; the CLI below does not.
     fx.set_service_env(&[VERIFY_MACHINE_DIR])?;
     wait_for_node(&fx, &node_id)?;
-    fx.service_ok("stop", &["--system"])?;
+    stop_cleanly(&fx)?;
     wait_for("the status file to go", || !fx.status_file().exists())?;
     let log_len = std::fs::metadata(fx.log_file())?.len();
 
     let _grant = GrantGuard::everyone_modify(&fx.machine)?;
     let rules = acl_state(&fx.machine)?;
-    let out = fx.service("start", &["--system"])?;
-    assert!(!out.status.success(), "start must fail");
-    assert_never_running(&fx, Duration::from_secs(3));
+    // A fresh SCM start that the service itself refuses.
+    assert_eq!(refused_start(&fx)?, 3, "a permission error");
     // Its log lives in the untrusted directory, so the service writes none.
     assert_eq!(
         std::fs::metadata(fx.log_file())?.len(),

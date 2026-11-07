@@ -1322,6 +1322,21 @@ mod tests {
     }
 
     #[test]
+    fn name_binary_passes_other_errors_through() {
+        let e = name_binary(
+            Path::new("C:\\x.exe"),
+            CliError::Config("bad".into()).into(),
+        );
+        assert!(matches!(
+            e.downcast_ref::<CliError>(),
+            Some(CliError::Config(m)) if m == "bad"
+        ));
+        let io = anyhow::Error::new(std::io::Error::other("io")).context("ctx");
+        let e = name_binary(Path::new("C:\\x.exe"), io);
+        assert_eq!(format!("{e:#}"), "ctx: io");
+    }
+
+    #[test]
     fn verify_binary_accepts_a_system_binary_and_refuses_a_directory() {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
         let system32 = Path::new(&root).join("System32");
