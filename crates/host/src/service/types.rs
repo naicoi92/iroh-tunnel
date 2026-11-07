@@ -197,6 +197,11 @@ pub enum ScopeDecision {
 /// interval internally and has no user-settable knob for it. The field stays
 /// shared so the policy reads as one coherent thing, even if one platform
 /// ignores the backoff.
+///
+/// Containment differs: `on_failure` becomes `RestartPreventExitStatus=6`
+/// under systemd, but a bare `KeepAlive{SuccessfulExit=false}` under launchd,
+/// which has no exit-status exemption. A macOS job refused for "already
+/// running" is therefore respawned until it is booted out.
 #[allow(dead_code)] // unused on targets without a service backend
 pub(crate) struct RestartPolicy {
     /// Restart the service when it exits with a non-zero status.
