@@ -11,6 +11,12 @@
 //! volume), not `TEMP`: the product's trust check walks from the volume root,
 //! and the runner's TEMP is on `D:\`, which NETWORK SERVICE owns.
 //!
+//! ## PATH
+//!
+//! `PATH` is pinned to the copied exe's directory plus the Windows system
+//! directories: the product registers the `iroh-tunnel` found on `PATH`, and
+//! the runner's `PATH` holds the user-owned `target\debug` build.
+//!
 //! ## Binary trust (R1)
 //!
 //! `service install --system` refuses a binary in a user-writable directory,
@@ -195,11 +201,28 @@ impl Fixture {
         Ok(key.public().to_string())
     }
 
+    /// Deterministic `PATH`: the protected copy first, then system directories.
+    fn pinned_path(&self) -> std::ffi::OsString {
+        let root =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()));
+        let dirs = [
+            self.exe
+                .parent()
+                .expect("copied exe has a parent")
+                .to_path_buf(),
+            root.join("System32"),
+            root.clone(),
+            root.join(r"System32\WindowsPowerShell\v1.0"),
+        ];
+        std::env::join_paths(dirs).expect("PATH entries contain no ';'")
+    }
+
     /// The copied CLI with the shared test environment.
     fn command_of(&self, program: &Path, args: &[&str]) -> Command {
         let mut command = Command::new(program);
         command
             .args(args)
+            .env("PATH", self.pinned_path())
             .env("IROH_TUNNEL_STATE_DIR", self.state())
             .env("IROH_TUNNEL_MACHINE_LOCK_DIR", &self.machine)
             .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
@@ -427,7 +450,8 @@ async fn system_service_lifecycle() -> Result<()> {
     assert_eq!(
         fx.image_path()?.to_lowercase(),
         expected.to_lowercase(),
-        "registered command line"
+        "registered command line must start with the protected copy {}",
+        fx.exe.display()
     );
 
     // stop: the process ends and the status file is removed (the drain).
