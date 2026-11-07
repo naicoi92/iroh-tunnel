@@ -179,10 +179,13 @@ mod locked {
         eprintln!("locked replace error: {err:#}");
         assert!(format!("{err:#}").contains("cannot replace"), "{err:#}");
         assert!(format!("{err:#}").contains("stop it"), "{err:#}");
-        assert!(
-            format!("{err:#}").contains("service stop --system"),
-            "{err:#}"
-        );
+        for cmd in [
+            "iroh-tunnel serve service stop --system",
+            "iroh-tunnel access service stop --system",
+        ] {
+            assert!(format!("{err:#}").contains(cmd), "{err:#}");
+        }
+        assert!(!format!("{err:#}").contains("<role>"), "{err:#}");
         assert!(!format!("{err:#}").contains("sudo"), "{err:#}");
         assert!(alive, "the running process must not be stopped");
         assert_eq!(std::fs::read(&exe)?, before);

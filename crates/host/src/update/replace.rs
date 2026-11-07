@@ -17,12 +17,13 @@ const REPLACE_DENIED_HINT: &str =
      stop it and run the update again from another copy; otherwise check the file permissions";
 
 /// Appended on Windows: a system service holds its executable open, and only
-/// an elevated `service stop --system` releases it. `<role>` stays literal
-/// because `update` does not know which role the service runs.
+/// an elevated `service stop --system` releases it. Both role commands are
+/// named because `update` does not know which role the service runs, and a
+/// `<role>` placeholder would break copy-paste (`<` redirects in shells).
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn windows_locked_hint() -> &'static str {
     "; if a system service runs this executable, stop it first from an elevated terminal: \
-     iroh-tunnel <role> service stop --system"
+     iroh-tunnel serve service stop --system or iroh-tunnel access service stop --system"
 }
 
 #[cfg(not(windows))]
@@ -213,7 +214,15 @@ mod tests {
     #[test]
     fn windows_locked_hint_mentions_service_stop_system() {
         let hint = windows_locked_hint();
-        assert!(hint.contains("service stop --system"), "{hint}");
+        assert!(
+            hint.contains("iroh-tunnel serve service stop --system"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("iroh-tunnel access service stop --system"),
+            "{hint}"
+        );
+        assert!(!hint.contains("<role>"), "{hint}");
         assert!(hint.contains("elevated"), "{hint}");
     }
 
