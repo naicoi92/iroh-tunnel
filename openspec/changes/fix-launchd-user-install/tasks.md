@@ -11,9 +11,9 @@
 
 ## 2. Load-failure diagnostics
 
-- [ ] 2.1 Add a failing test in `src/render.rs` asserting the rendered `ServiceNote::LaunchdBootstrapHint` text contains `launchctl print-disabled` with the domain, beside the existing hint test.
-- [ ] 2.2 Change the hint text in `src/render.rs` so it names the disable list as the first thing to inspect, keeping `bootstrap <domain> <plist>` for the direct-run diagnosis and dropping `launchctl print <target>` as the lead suggestion, since it reports only that the service is absent.
-- [ ] 2.3 Decide whether `ServiceNote::LaunchdBootstrapHint` still needs its `target` field. `ServiceNote` is re-exported from the host crate, so removing a field is a public API change: confirm it with the user first. If it goes ahead, update `crates/host/src/service/native.rs`, the destructuring and the test literal in `src/render.rs`, the construction in the launchd backend, and the backend test asserting the note.
+- [x] 2.1 Add a failing test in `src/render.rs` asserting the rendered `ServiceNote::LaunchdBootstrapHint` text contains `launchctl print-disabled` with the domain, beside the existing hint test.
+- [x] 2.2 Change the hint text in `src/render.rs` so it names the disable list as the first thing to inspect, keeping `bootstrap <domain> <plist>` for the direct-run diagnosis and dropping `launchctl print <target>` as the lead suggestion, since it reports only that the service is absent.
+- [x] 2.3 Decide whether `ServiceNote::LaunchdBootstrapHint` still needs its `target` field. `ServiceNote` is re-exported from the host crate, so removing a field is a public API change: confirm it with the user first. If it goes ahead, update `crates/host/src/service/native.rs`, the destructuring and the test literal in `src/render.rs`, the construction in the launchd backend, and the backend test asserting the note.
 
 ## 3. Cross-scope install conflict
 
