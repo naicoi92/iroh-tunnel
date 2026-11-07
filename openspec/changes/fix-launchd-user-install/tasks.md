@@ -5,9 +5,9 @@
 - [x] 1.3 Add a failing test asserting a `bootout` failure is still ignored: with `enable` succeeding and `bootout` returning non-zero, `bootstrap` is still issued and `load` succeeds.
 - [x] 1.4 Insert `launchctl enable <service_target>` as the first command of `load`, through `run_launchctl` so its failure propagates, keeping the existing `native.output(...)` swallow for `bootout`. Make 1.1-1.3 pass.
 - [x] 1.5 Update the module doc comment and `load`'s doc comment to state that loading enables the label first, and why: the per-domain disable list is persistent, survives `bootout` and uninstall, and makes `bootstrap` fail with `5: Input/output error`. Note the parallel with `systemctl enable` in the systemd backend.
-- [ ] 1.6 Fix the plist DOCTYPE in `format_plist_with` to `PropertyList-1.0.dtd`, with a failing-first test asserting `PropertyList-1.0.dtd` is present and `PropertyManifest-1.0.dtd` is absent.
-- [ ] 1.7 Add a failing-first test asserting the rendered plist's `KeepAlive` sets `SuccessfulExit` false and carries no exit-status exemption key, then confirm it passes unchanged — this is a regression guard for the documented launchd limitation, not a behaviour change.
-- [ ] 1.8 Verify the existing systemd guard for `RestartPreventExitStatus=6` is present and named clearly; add one if the current assertion is only incidental.
+- [x] 1.6 Fix the plist DOCTYPE in `format_plist_with` to `PropertyList-1.0.dtd`, with a failing-first test asserting `PropertyList-1.0.dtd` is present and `PropertyManifest-1.0.dtd` is absent.
+- [x] 1.7 Add a failing-first test asserting the rendered plist's `KeepAlive` sets `SuccessfulExit` false and carries no exit-status exemption key, then confirm it passes unchanged — this is a regression guard for the documented launchd limitation, not a behaviour change.
+- [x] 1.8 Verify the existing systemd guard for `RestartPreventExitStatus=6` is present and named clearly; add one if the current assertion is only incidental.
 
 ## 2. Load-failure diagnostics
 
@@ -30,7 +30,7 @@
 ## 4. Documentation
 
 - [ ] 4.1 Document in `crates/host/src/service/install.rs` why the check compares a tier rather than calling `ensure_not_running`, and the two residual gaps: a foreground run in the same tier, and a job loaded outside `service install`.
-- [ ] 4.2 Record the launchd restart-containment limitation where the restart policy lives (`crates/host/src/service/types.rs` or the launchd backend), stating that systemd expresses the exemption and launchd cannot.
+- [x] 4.2 Record the launchd restart-containment limitation where the restart policy lives (`crates/host/src/service/types.rs` or the launchd backend), stating that systemd expresses the exemption and launchd cannot.
 - [ ] 4.3 Check `docs/` and `README.md` for text describing macOS service install or the service exit codes that this change makes stale, and update it; report if nothing needs changing rather than inventing an edit.
 
 ## 5. Verification
