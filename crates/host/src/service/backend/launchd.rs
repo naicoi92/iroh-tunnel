@@ -232,7 +232,6 @@ fn load(
     // etc.) rather than the legacy `load`'s opaque `5: Input/output error`.
     if let Err(e) = run_launchctl(native, &["bootstrap", &domain, &path_str]) {
         notes(&ServiceNote::LaunchdBootstrapHint {
-            target,
             domain,
             plist: path.to_owned(),
         });
@@ -546,7 +545,6 @@ mod tests {
                     OutputMode::Inherit
                 ),
                 Event::Note(ServiceNote::LaunchdBootstrapHint {
-                    target: "system/dev.iroh-tunnel.serve".into(),
                     domain: "system".into(),
                     plist,
                 }),

@@ -59,10 +59,8 @@ pub enum ServiceNote {
         /// The system-wide script that was installed.
         script: PathBuf,
     },
-    /// `launchctl bootstrap` failed; commands that give richer diagnostics.
+    /// `launchctl bootstrap` failed; points at the disable list and a retry.
     LaunchdBootstrapHint {
-        /// The `launchctl` service target.
-        target: String,
         /// The `launchctl` domain.
         domain: String,
         /// The plist that failed to bootstrap.
