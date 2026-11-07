@@ -862,6 +862,88 @@ pub(crate) fn owner_of(path: &Path) -> Result<Sid> {
     Ok(chain.target()?.1.owner.clone())
 }
 
+/// The `%ProgramData%` known folder (`FOLDERID_ProgramData`).
+///
+/// # Errors
+///
+/// An error naming the HRESULT when the shell cannot resolve the folder.
+#[cfg_attr(feature = "test-utils", allow(dead_code))] // test builds use a temp machine dir
+pub(crate) fn program_data_dir() -> Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+
+    let mut out: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `FOLDERID_ProgramData` is a static GUID; a null token means the
+    // current process token; `out` is a valid out-pointer.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut out) };
+    let result = if hr >= 0 && !out.is_null() {
+        // SAFETY: on success `out` is a NUL-terminated UTF-16 string, valid
+        // until the `CoTaskMemFree` below.
+        let units = unsafe {
+            let mut len = 0;
+            while *out.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(out, len)
+        };
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(units)))
+    } else {
+        Err(anyhow!(
+            "cannot resolve the ProgramData folder (HRESULT {hr:#x})"
+        ))
+    };
+    // SAFETY: the block is released exactly once, also after a failure
+    // (the documented contract of `SHGetKnownFolderPath`).
+    unsafe { CoTaskMemFree(out.cast()) };
+    result
+}
+
+/// Create the single directory `path` with the security descriptor given in
+/// SDDL form. The parent must exist; an existing directory is an error.
+///
+/// # Errors
+///
+/// The OS error from the SDDL conversion or from `CreateDirectoryW`.
+pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let sddl = wide(sddl);
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and outlives the call; the out-pointer
+    // is valid and the size is not requested.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let descriptor = LocalBox(descriptor);
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let path = wide(&path.to_string_lossy());
+    // SAFETY: `path` is NUL-terminated; `attributes` points at a descriptor
+    // that `descriptor` keeps alive until after the call.
+    let created = unsafe { CreateDirectoryW(path.as_ptr(), &attributes) };
+    if created == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

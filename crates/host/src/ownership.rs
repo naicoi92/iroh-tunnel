@@ -15,8 +15,8 @@
 //!   so foreground and user-service runs of one user share it however they
 //!   were started and whichever binary started them.
 //! - **Machine tier** — `/run/iroh-tunnel/<role>.lock` (Linux),
-//!   `/var/run/iroh-tunnel/<role>.lock` (macOS); not supported on Windows,
-//!   which has no service backend. A process that can create and write the
+//!   `/var/run/iroh-tunnel/<role>.lock` (macOS),
+//!   `%ProgramData%\iroh-tunnel\<role>.lock` (Windows). A process that can create and write the
 //!   file (the root-owned system service) holds it *exclusively*. Any other
 //!   process opens it read-only and holds it *shared*. That refuses a user
 //!   start while the system service runs and a system start while any user
@@ -109,7 +109,7 @@ fn user_dir() -> Result<PathBuf> {
 }
 
 #[cfg(feature = "test-utils")]
-fn machine_dir() -> Option<PathBuf> {
+pub(crate) fn machine_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(ENV_MACHINE_LOCK_DIR).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
@@ -119,8 +119,21 @@ fn machine_dir() -> Option<PathBuf> {
     user_dir().ok().map(|dir| dir.join("machine"))
 }
 
-#[cfg(not(feature = "test-utils"))]
-fn machine_dir() -> Option<PathBuf> {
+/// The Windows machine directory under the `%ProgramData%` folder.
+#[cfg_attr(any(feature = "test-utils", not(windows)), allow(dead_code))] // Windows non-test builds only
+fn windows_machine_dir(program_data: &Path) -> PathBuf {
+    program_data.join("iroh-tunnel")
+}
+
+#[cfg(all(windows, not(feature = "test-utils")))]
+pub(crate) fn machine_dir() -> Option<PathBuf> {
+    crate::service::program_data_dir()
+        .ok()
+        .map(|dir| windows_machine_dir(&dir))
+}
+
+#[cfg(all(not(windows), not(feature = "test-utils")))]
+pub(crate) fn machine_dir() -> Option<PathBuf> {
     if cfg!(target_os = "linux") {
         Some(PathBuf::from("/run/iroh-tunnel"))
     } else if cfg!(target_os = "macos") {
@@ -173,6 +186,24 @@ fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
         let _ = mode;
         std::fs::create_dir_all(dir)
     }
+}
+
+/// SDDL of the machine directory (D7): owner and group are Administrators and
+/// SYSTEM, the DACL is protected, SYSTEM and Administrators have full control
+/// and Users may only read.
+#[cfg(windows)]
+const MACHINE_DIR_SDDL: &str =
+    "O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
+
+/// Create the machine directory. Windows creates it with the protected DACL;
+/// the parent (`%ProgramData%`) already exists.
+fn create_machine_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        crate::service::create_dir_with_sddl(dir, MACHINE_DIR_SDDL)
+    }
+    #[cfg(not(windows))]
+    create_dir(dir, 0o755)
 }
 
 fn create_lock_file(path: &Path, mode: u32) -> std::io::Result<File> {
@@ -391,9 +422,27 @@ enum MachineClaim {
 
 fn claim_machine(role: Role, dir: &Path) -> Result<MachineClaim> {
     let path = dir.join(lock_name(role));
+    // An existing machine directory must be trusted before anything is
+    // created in it, and is never repaired. A refusal is a permission error,
+    // never "not elevated".
+    #[cfg(windows)]
+    let dir_exists = std::fs::symlink_metadata(dir).is_ok();
+    #[cfg(windows)]
+    if dir_exists {
+        crate::service::verify_machine_dir(dir)?;
+    }
+    #[cfg(not(windows))]
+    let dir_exists = false;
     // Elevated side: able to create the directory and write the lock. Only
     // "no permission" means "not elevated"; any other failure is real.
-    match create_dir(dir, 0o755).and_then(|()| create_lock_file(&path, 0o644)) {
+    // Windows creates only a missing directory (`CreateDirectoryW` fails on an
+    // existing one); Unix keeps its idempotent create.
+    let ensure_dir = if cfg!(windows) && dir_exists {
+        Ok(())
+    } else {
+        create_machine_dir(dir)
+    };
+    match ensure_dir.and_then(|()| create_lock_file(&path, 0o644)) {
         Ok(file) => {
             return match claim_lock(file)? {
                 Lock::Held(file) => Ok(MachineClaim::Exclusive(file)),
@@ -557,6 +606,32 @@ fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
     }
 }
 
+/// Wait until no process holds `role`, polling every 100 ms.
+///
+/// # Errors
+///
+/// [`CliError::Service`] when the role still runs after `timeout`; errors from
+/// [`probe`].
+#[allow(dead_code)] // consumed by the restart verb in a later task
+pub(crate) fn wait_released(role: Role, timeout: std::time::Duration) -> Result<()> {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if matches!(probe(role)?, Liveness::NotRunning) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(CliError::Service(format!(
+                "{} did not stop within {}s; not starting a second instance",
+                role.name(),
+                timeout.as_secs().max(1)
+            ))
+            .into());
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
 /// Refuse when `role` is running; used before `service start`.
 ///
 /// # Errors
@@ -574,6 +649,7 @@ pub(crate) fn ensure_not_running(role: Role) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn roles_are_each_others_counterpart() {
@@ -617,5 +693,109 @@ mod tests {
         assert_eq!(owner.node_id.as_deref(), Some("abc"));
         let raw = std::fs::read_to_string(dir.path().join("serve.owner.json")).unwrap();
         assert!(!raw.contains("secret"), "{raw}");
+    }
+
+    #[test]
+    fn windows_machine_dir_is_programdata_child() {
+        let dir = windows_machine_dir(Path::new("C:\\ProgramData"));
+        assert!(dir.ends_with("iroh-tunnel"), "{}", dir.display());
+    }
+
+    #[test]
+    fn machine_lock_exclusive_then_shared_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = claim_machine(Role::Serve, dir.path()).unwrap();
+        assert!(matches!(first, MachineClaim::Exclusive(_)));
+        let path = dir.path().join(lock_name(Role::Serve));
+        let reader = base_options().read(true).open(&path).unwrap();
+        assert!(matches!(
+            try_lock(reader, LockKind::Shared).unwrap(),
+            Lock::Busy
+        ));
+        drop(first);
+        let reader = base_options().read(true).open(&path).unwrap();
+        assert!(matches!(
+            try_lock(reader, LockKind::Shared).unwrap(),
+            Lock::Held(_)
+        ));
+    }
+
+    /// Serialises the tests that hold a real user-tier lock.
+    fn user_lock_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn wait_released_times_out() {
+        let _guard = user_lock_guard();
+        let Ok(claim) = claim(Role::Access) else {
+            return; // a real process holds the role; nothing to assert
+        };
+        let err = wait_released(Role::Access, Duration::from_millis(200)).unwrap_err();
+        match err.downcast_ref::<CliError>() {
+            Some(CliError::Service(m)) => {
+                assert!(m.contains("did not stop"), "{m}");
+                assert!(m.contains("not starting a second instance"), "{m}");
+            }
+            other => panic!("expected Service, got {other:?}"),
+        }
+        drop(claim);
+        let started = std::time::Instant::now();
+        wait_released(Role::Access, Duration::from_secs(5)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(windows)]
+    fn sddl_of(path: &Path) -> String {
+        let out = std::process::Command::new("pwsh")
+            .args(["-NoProfile", "-Command"])
+            .arg(format!("(Get-Acl -LiteralPath '{}').Sddl", path.display()))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn untrusted_existing_machine_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let grant = std::process::Command::new("icacls")
+            .arg(&dir)
+            .args(["/grant", "*S-1-1-0:M"])
+            .output()
+            .unwrap();
+        assert!(grant.status.success());
+        let before = sddl_of(&dir);
+        let err = claim_machine(Role::Serve, &dir).err().expect("refused");
+        match err.downcast_ref::<CliError>() {
+            Some(CliError::Permission(m)) => {
+                assert!(m.contains("S-1-1-0"), "{m}");
+                assert!(
+                    m.contains(dir.file_name().unwrap().to_str().unwrap()),
+                    "{m}"
+                );
+            }
+            other => panic!("expected Permission, got {other:?}"),
+        }
+        assert_eq!(before, sddl_of(&dir), "the directory must not be repaired");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn created_machine_dir_has_the_protected_sddl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("iroh-tunnel");
+        create_machine_dir(&dir).unwrap();
+        let sddl = sddl_of(&dir);
+        assert!(
+            sddl.contains("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"),
+            "{sddl}"
+        );
+        assert!(sddl.starts_with("O:BA"), "{sddl}");
     }
 }

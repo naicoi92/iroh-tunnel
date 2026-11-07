@@ -41,11 +41,13 @@ mod types;
 mod uninstall;
 mod verb;
 
+mod log_file;
 pub use account_name::account_name;
 pub use decide_install_scope::decide_install_scope;
 pub use default_scope::default_scope;
 pub use install::install;
 pub use is_elevated::is_elevated;
+pub use log_file::{machine_log_dir, CappedLog};
 pub use native::{InstalledAt, NativeOutput, OutputMode, ServiceCall, ServiceNote};
 pub use parse_scope_answer::parse_scope_answer;
 pub use pin::{Pin, PinOwner, RetargetConsent};
@@ -56,6 +58,9 @@ pub use status::status;
 pub use stop::stop;
 #[cfg(unix)]
 pub use system::unknown_user;
+#[cfg(windows)]
+#[cfg_attr(feature = "test-utils", allow(unused_imports))]
+pub(crate) use trust_windows::{create_dir_with_sddl, program_data_dir, verify_machine_dir};
 pub use types::{
     AppliedEffect, Environment, Fact, InstallNeed, InstallOutcome, InstallRequest, Registration,
     ScopeDecision, ServiceFailure, ServiceReport, ServiceScope, ServiceStatusReport,

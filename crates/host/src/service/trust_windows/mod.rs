@@ -16,11 +16,22 @@ pub(crate) mod win32;
 #[cfg(windows)]
 #[allow(unused_imports)] // consumed by the service runtime and SCM install later
 pub(crate) use win32::{
-    account_of, owner_of, publish, read_verified, remove_in, token_user, verify_binary, verify_dir,
+    account_of, create_dir_with_sddl, owner_of, program_data_dir, publish, read_verified,
+    remove_in, token_user, verify_binary, verify_dir,
 };
 
 use crate::error::CliError;
 use model::Sid;
+
+/// Verify the machine directory against the machine trust set.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the unsafe element.
+#[cfg(windows)]
+pub(crate) fn verify_machine_dir(dir: &std::path::Path) -> anyhow::Result<()> {
+    verify_dir(dir, &model::TrustedSet::machine())
+}
 
 /// Set by the SCM registration of a system service: the SID whose files the
 /// service may trust besides the system principals.
