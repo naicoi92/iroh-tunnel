@@ -30,11 +30,11 @@ exit=0
 
 - [x] Every box is ticked, or each open box has a recorded reason
 
-26 of 28 tasks are ticked (`openspec instructions apply` progress: complete 26, remaining 2). Task 5.4 was verified manually in this run (see section 4) and is ticked with this receipt.
+28 of 28 tasks are ticked. Tasks 5.3 and 5.4 were verified manually during this verify run (see section 4).
 
 | Open task | Reason | Blocks archive? |
 |---|---|---|
-| 5.3 Manual disabled-label install on macOS | Not run. The task needs a host with no conflicting system service. This host runs a real root `serve` LaunchDaemon (`system/dev.iroh-tunnel.serve`, pid 18692), so `serve service install --user` is refused before `load` runs; 5.4 below shows this. Stopping that daemon needs `sudo`, which is not available to the agent (`sudo -n true` reports that a password is required). The automated tests cover the command sequence (`load_enables_the_label_before_bootout_and_bootstrap`, `load_fails_without_bootstrapping_when_enable_fails`), but not a real launchd disable list. | No, but the end-to-end fix for the reported bug is unverified until it runs. |
+| — | — | — |
 
 ---
 
@@ -117,9 +117,33 @@ $ launchctl print system/dev.iroh-tunnel.serve | grep state (after)
 
 Result: exit 6. The message names the machine-wide holder, how to stop it and the uninstall command, with no `start refused` prefix. The plist at `~/Library/LaunchAgents/dev.iroh-tunnel.serve.plist` already existed before the run, left over from an earlier install, so the evidence for "leaves no file" is that the file is unchanged (same SHA-256 and mtime). No user job was loaded, and the system service kept running.
 
-### Manual verification 5.3: disabled-label install (not performed)
+### Manual verification 5.3: disabled-label install (performed by the operator)
 
-See section 2. Status: **Not verified**.
+The operator ran this, because stopping the root daemon needs `sudo`. First, `sudo iroh-tunnel serve service stop --system` stopped the conflicting LaunchDaemon. The install then used the debug binary built from this worktree at `f20609a`. The output was captured with `tee` to `/tmp/fix-launchd-5.3.log`, and the agent read it back.
+
+```text
+Sat Nov  7 05:34:01 UTC 2026
+$ launchctl print system/dev.iroh-tunnel.serve | grep state
+	state = not running
+$ launchctl disable gui/501/dev.iroh-tunnel.serve
+$ launchctl print-disabled gui/501 | grep iroh-tunnel
+		"dev.iroh-tunnel.serve" => disabled
+$ iroh-tunnel serve service install --user        # worktree target/debug binary
+Installed and started dev.iroh-tunnel.serve at /Users/naicoi/Library/LaunchAgents/dev.iroh-tunnel.serve.plist
+exit=0
+$ launchctl print-disabled gui/501 | grep iroh-tunnel (after)
+		"dev.iroh-tunnel.serve" => enabled
+$ launchctl print gui/501/dev.iroh-tunnel.serve | head -12
+gui/501/dev.iroh-tunnel.serve = {
+	active count = 1
+	path = /Users/naicoi/Library/LaunchAgents/dev.iroh-tunnel.serve.plist
+	type = LaunchAgent
+	state = xpcproxy
+	program = /opt/homebrew/bin/iroh-tunnel
+	...
+```
+
+Result: the label was disabled before the install. The install succeeded (exit 0). The label is now `enabled`, and the job is loaded in `gui/501` (`active count = 1`; `state = xpcproxy` means it was spawning). Before the fix, this disabled-label state gave `Bootstrap failed: 5: Input/output error`. The registered program is `/opt/homebrew/bin/iroh-tunnel`, as specified: the registration runs the `iroh-tunnel` found on `PATH`. The operator then removed the agent with `serve service uninstall --user`. At the time of this receipt, `system/dev.iroh-tunnel.serve` shows `state = running` again.
 
 ---
 
@@ -172,8 +196,7 @@ Design decisions checked against the code:
 **CRITICAL**: none.
 
 **WARNING**
-1. Manual task 5.3 (the end-to-end disabled-label install on real launchd) is not verified. It needs either the root `serve` LaunchDaemon stopped (`sudo iroh-tunnel serve service stop --system`) or a role with no system service. Recommendation: the operator runs the 5.3 commands from `tasks.md` (after stopping the daemon), or authorises the agent to run the equivalent with the `access` role, which has no system service but would restart the operator's running `access` agent. Record the output here, then tick 5.3.
-2. The BusyBox effective-scope wiring (`install.rs:133` → `platform::system_wide_only()`) has no end-to-end test. Only the pure `effective_scope_for` is tested. Recommendation: accept it as recorded residual risk, or add a non-systemd Linux run (an Alpine container without systemd) of an install-level test in a follow-up.
+1. The BusyBox effective-scope wiring (`install.rs:133` → `platform::system_wide_only()`) has no end-to-end test. Only the pure `effective_scope_for` is tested. Recommendation: accept it as recorded residual risk, or add a non-systemd Linux run (an Alpine container without systemd) of an install-level test in a follow-up.
 
 **SUGGESTION**
 1. Pre-existing behaviour: a non-root account's shared machine-lock hold can refuse root's `install --user`. This is pinned by `ownership.rs` `a_shared_hold_is_seen_on_the_machine_tier_only` and documented. Recommendation: open a follow-up issue.
@@ -184,14 +207,14 @@ Design decisions checked against the code:
 ## Overall Decision
 
 - [ ] PASS: proceed with `/opsx-continue` to finalize
-- [x] PASS_WITH_WARNINGS: proceed, noting: manual check 5.3 is not verified because the environment prevents it (a root LaunchDaemon is running and no sudo is available); all automated checks and manual 5.4 pass.
+- [x] PASS_WITH_WARNINGS: proceed, noting: all six checks pass, fresh tests are green, and manual checks 5.3 and 5.4 pass on real launchd. One warning remains: the BusyBox effective-scope wiring has no end-to-end test.
 - [ ] FAIL: fix the cause, then re-apply (iteration N+1)
 
 Any check recorded as Not verified caps the outcome at PASS_WITH_WARNINGS.
 
 **Next step**:
 
-Run 5.3 manually if possible and append the evidence here. Then run `/opsx-continue` with the worktree as the working directory to create the finalize artifact, then `/opsx-archive`.
+Run `/opsx-continue` with the worktree as the working directory to create the finalize artifact, then `/opsx-archive`.
 
 > **Convergence loop reminder**:
 > - PASS / PASS_WITH_WARNINGS: `/opsx-continue` advances to the finalize artifact.
