@@ -139,7 +139,7 @@ Traceability:
 
 ## 10. End-to-end on Windows
 
-- [ ] 10.1 Add `tests/service_system_windows.rs` (cfg windows, `IROH_TUNNEL_E2E_SERVICE=1`, unique test suffix, cleanup on drop) covering:
+- [x] 10.1 Add `tests/service_system_windows.rs` (cfg windows, `IROH_TUNNEL_E2E_SERVICE=1`, unique test suffix, cleanup on drop) covering:
   - full lifecycle: install, running, status, stop (drain removes the snapshot), start, restart, uninstall;
   - stop-pending during a drain;
   - a refused unsafe config with the log line;
@@ -152,16 +152,16 @@ Traceability:
   - user task blocked while the service runs.
 
   (traces the SSM, WST and ROS scenarios listed in groups 3-8)
-- [ ] 10.2 Cover the non-elevated paths:
+- [x] 10.2 Cover the non-elevated paths:
   - a restricted-token child process (`CreateRestrictedToken`) asserts exit 3 and "Run as administrator" for install and verbs;
   - if a restricted token is not obtainable on the runner, the decision logic is covered by group 2 unit tests and the gap is recorded in `verify.md`.
 
   (SSM: Non-elevated system install on Windows; Non-elevated system verbs on Windows; FIM scenarios)
-- [ ] 10.3 Add the step "Service lifecycle (Windows Service)" to the Windows cell of `.github/workflows/e2e.yml`, running `service_system_windows` with `--test-threads=1`. Run the workflow on the branch and record the run URL.
+- [x] 10.3 Add the step "Service lifecycle (Windows Service)" to the Windows cell of `.github/workflows/e2e.yml`, running `service_system_windows` with `--test-threads=1`. Run the workflow on the branch and record the run URL. Run: https://github.com/naicoi92/iroh-tunnel/actions/runs/42407117357
 
 ## 11. Documentation and release notes
 
-- [ ] 11.1 `docs/services.md` Windows section, covering:
+- [x] 11.1 `docs/services.md` Windows section, covering:
   - system scope;
   - the elevated default;
   - the trust rules and how to fix a refusal;
@@ -170,8 +170,8 @@ Traceability:
   - cross-scope refusal.
 
   Update `docs/troubleshooting.md`: replace "Windows has no system services (exit 5)" with the exit-3 elevated guidance, and add the trust refusal messages.
-- [ ] 11.2 CHANGELOG under Unreleased:
+- [x] 11.2 CHANGELOG under Unreleased:
   - Added: Windows system services;
   - Changed (breaking): an elevated Windows terminal without a scope flag now targets system scope; non-elevated `--system` exits 3 instead of 5;
   - credit to @23rd for #67.
-- [ ] 11.3 Run `openspec validate windows-system-service --strict`; run `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, and `cargo test --workspace --all-features --locked` on the local host. Confirm that the Windows CI unit and E2E cells are green.
+- [x] 11.3 Run `openspec validate windows-system-service --strict`; run `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, and `cargo test --workspace --all-features --locked` on the local host. Confirm that the Windows CI unit and E2E cells are green.
