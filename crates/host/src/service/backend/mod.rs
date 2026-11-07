@@ -8,3 +8,4 @@ pub(super) mod launchd;
 pub(super) mod systemd;
 #[cfg(windows)]
 pub(super) mod windows;
+pub(super) mod windows_scm;

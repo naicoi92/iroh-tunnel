@@ -66,3 +66,7 @@ pub use types::{
     ScopeDecision, ServiceFailure, ServiceReport, ServiceScope, ServiceStatusReport,
 };
 pub use uninstall::uninstall;
+
+/// Set to `1` in the environment of a Windows Service registration so the
+/// binary knows the SCM started it and enters the service dispatcher.
+pub const ENV_SCM: &str = "IROH_TUNNEL_SCM";

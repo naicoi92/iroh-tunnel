@@ -19,7 +19,7 @@ const LEGACY_STATUS_FILE_NAME: &str = "status.json";
 /// Environment variable overriding the status files' directory entirely
 /// (advanced/testing seam; empty is treated as unset). Shared by both
 /// roles — one directory, two role-scoped file names.
-const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
+pub(crate) const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
 
 /// Atomic writer for one role's status file.
 ///
