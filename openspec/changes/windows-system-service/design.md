@@ -146,3 +146,38 @@ Rules in `evaluate`:
 
 - The D1 measurements. Implementation of D2, D7 and D9 waits on them.
 - Whether `FileRenameInfoEx` with `POSIX_SEMANTICS` is available on every supported Windows build. The fallback is `FileRenameInfo` with `ReplaceIfExists`; this is confirmed in D1 on the runners.
+
+## Measurements
+
+Probe: `tests/windows_trust_probe.rs`, Windows cell of e2e run https://github.com/naicoi92/iroh-tunnel/actions/runs/42326341180 (commit `1cc2e69`, `windows-latest`, x64; the e2e matrix has no ARM64 Windows cell). First run 42324440692 failed every `Get-Acl` because `powershell` 5.1 inherited PowerShell 7's `PSModulePath`; the probe now uses `pwsh`.
+
+Runner token: `runnervmm7ud1\runneradmin`, SID `S-1-5-21-3289802278-1561746829-1498425070-500` (the built-in Administrator, `LA`), High integrity (`S-1-16-12288`), member of `BA`. There is no UAC split token on this runner.
+
+Raw SDDL:
+
+```
+C:\Users                                O:SY G:SY D:PAI(A;OICIIO;GXGR;;;WD)(A;;0x1200a9;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GXGR;;;BU)(A;;0x100021;;;S-1-15-3-65536-4045685566-…)
+C:\Users\runneradmin                    O:SY G:SY D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)(A;;0x100020;;;S-1-15-3-65536-599108337-…)
+…\AppData, …\AppData\Local, …\Local\iroh-tunnel
+                                        O:BA G:<Domain Users> D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)
+…\iroh-tunnel\config                    ABSENT
+C:\                                     O:<TrustedInstaller> G:SY D:AI(A;OICIIO;SDGXGWGR;;;AU)(A;;LC;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1000a1;;;S-1-15-3-65536-1888954469-…)
+C:\Program Files                        O:<TrustedInstaller> G:<TrustedInstaller> D:PAI(A;OICIIO;GA;;;CO)(A;OICIIO;GA;;;SY)(A;;0x1301bf;;;SY)(A;OICIIO;GA;;;BA)(A;;0x1301bf;;;BA)(A;OICIIO;GXGR;;;BU)(A;;0x1200a9;;;BU)(A;CIIO;GA;;;<TI>)(A;;FA;;;<TI>)(A;;0x1200a9;;;AC)(A;OICIIO;GXGR;;;AC)(A;;0x1200a9;;;S-1-15-2-2)(A;OICIIO;GXGR;;;S-1-15-2-2)
+C:\Program Files\iroh-tunnel-probe-<pid> (created by the elevated runner user)
+                                        O:BA G:<Domain Users> D:AI(A;ID;FA;;;<TI>)(A;CIIOID;GA;;;<TI>)(A;ID;FA;;;SY)(A;OICIIOID;GA;;;SY)(A;ID;FA;;;BA)(A;OICIIOID;GA;;;BA)(A;ID;0x1200a9;;;BU)(A;OICIIOID;GXGR;;;BU)(A;OICIIOID;GA;;;CO)(A;ID;0x1200a9;;;AC)(A;OICIIOID;GXGR;;;AC)(A;ID;0x1200a9;;;S-1-15-2-2)(A;OICIIOID;GXGR;;;S-1-15-2-2)
+C:\ProgramData                          O:SY G:SY D:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;DCLCRPCR;;;BU)
+```
+
+Verdicts (brainstorm "Known facts and assumptions"):
+
+1. **Profile ACL. Holds.** The `%LOCALAPPDATA%` chain grants write only to SYSTEM, Administrators and the user (`LA` here). Every other entry is read/traverse (`0x1200a9`, `0x100020`, `0x100021`) or inherit-only. `…\AppData` and below are owned by `BA`; brainstorm decision 11 already makes a group owner defer to the token user.
+2. **UAC token user. Not contradicted, not fully measured.** The runner token is the built-in Administrator with no split token, so a UAC-filtered versus elevated pair could not be compared. Microsoft documents that the linked elevated token carries the same user SID. Task 13's restricted-token helper and the Task 9 resolver tests cover the behaviour we depend on.
+3. **`C:\` create-subdirectory. Holds.** On the object itself, Authenticated Users (`AU`) hold only `LC` (= `FILE_ADD_SUBDIRECTORY`). Their `SDGXGWGR` entry is inherit-only. No untrusted SID holds a delete, delete-child, `WRITE_DAC` or `WRITE_OWNER` right. D2's ancestor rule accepts this chain.
+4. **`Program Files` install directory. Holds on the runner, but the runner is not representative.** The probe directory is owned by `BA`, and no entry names the creating user's SID. The `CREATOR OWNER` entry is inherit-only, so the binary check passes. This runner creates objects owned by Administrators because its user is the built-in Administrator. On client Windows the default owner of an object created by a UAC-elevated administrator is the user itself, and `CREATOR OWNER` would then grant that user full control.
+
+Additional facts:
+- `%ProgramData%` lets `BU` create files and subdirectories (`(A;CI;DCLCRPCR;;;BU)`). `(A;OICIIO;GA;;;CO)` gives the creator full control of what it creates. A non-administrator can therefore pre-create `%ProgramData%\iroh-tunnel`. This confirms that the "Directory pre-created by a user" refusal is reachable. D7's protected DACL does not inherit these entries.
+- AppContainer and capability SIDs (`AC`, `S-1-15-2-2`, `S-1-15-3-…`) appear with read/traverse rights only. They are untrusted SIDs with no refused right, so they pass.
+- The `FileRenameInfoEx` `POSIX_SEMANTICS` question was not measured, because the probe uses no Win32 bindings. Task 5 implements the `FileRenameInfo` fallback with its own test.
+
+Decision for D9. Implement `New-ProtectedBinDir` in Task 12 rather than skipping it. On this runner it changes nothing, since no creator entry exists. On client Windows it removes the creator entry assumption 4 warns about. The installer spec already requires the result unconditionally. Recorded as a Task 12 ruling.
