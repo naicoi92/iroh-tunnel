@@ -264,6 +264,81 @@ mod tests {
         }
     }
 
+    fn consent(previous: Option<Pin>, proposed: Pin) -> RetargetConsent {
+        RetargetConsent { previous, proposed }
+    }
+
+    fn sid(n: u32) -> PinOwner {
+        PinOwner::Sid(format!("S-1-5-21-1-2-3-{n}"))
+    }
+
+    #[test]
+    fn sid_mismatch_needs_consent_naming_the_previous_owner() {
+        let alice = Pin {
+            owner: sid(1001),
+            ..sid_pin("C:\\a.toml")
+        };
+        let bob = Pin {
+            owner: sid(1002),
+            ..sid_pin("C:\\b.toml")
+        };
+        let body = format!("# {}\n", alice.record());
+        assert_eq!(
+            retarget_decision_for(Some(&body), bob.clone(), None),
+            RetargetDecision::Needs {
+                previous: Some(alice),
+                proposed: bob
+            }
+        );
+    }
+
+    #[test]
+    fn same_sid_proceeds_whatever_the_path() {
+        let old = sid_pin("C:\\old.toml");
+        let body = format!("# {}\n", old.record());
+        assert_eq!(
+            retarget_decision_for(Some(&body), sid_pin("C:\\new.toml"), None),
+            RetargetDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn consent_matches_a_case_differing_path_on_windows_only() {
+        let previous = Pin {
+            owner: sid(1001),
+            ..sid_pin("C:\\Users\\A\\Serve.toml")
+        };
+        let given_for = Pin {
+            owner: sid(1002),
+            ..sid_pin("C:\\Users\\B\\Serve.toml")
+        };
+        let proposed = Pin {
+            owner: sid(1002),
+            ..sid_pin("c:/users/b/serve.toml")
+        };
+        assert!(same_target_with(true, &given_for, &proposed));
+        let body = format!("# {}\n", previous.record());
+        let given = consent(Some(previous), given_for);
+        let decision = retarget_decision_for(Some(&body), proposed, Some(&given));
+        assert_eq!(
+            decision == RetargetDecision::Proceed,
+            cfg!(windows),
+            "{decision:?}"
+        );
+    }
+
+    #[test]
+    fn empty_body_is_an_unknown_owner() {
+        let proposed = sid_pin("C:\\a.toml");
+        assert_eq!(
+            retarget_decision_for(Some(""), proposed.clone(), None),
+            RetargetDecision::Needs {
+                previous: None,
+                proposed
+            }
+        );
+    }
+
     #[test]
     fn sid_record_round_trips() {
         let p = sid_pin("C:\\Users\\a\\serve.toml");

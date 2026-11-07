@@ -373,6 +373,21 @@ pub(crate) fn restart_with(
     start_with(port, clock, role)
 }
 
+/// The text a retarget decision reads from an existing registration.
+///
+/// `None` only when the service is absent. A service that exists without a
+/// readable description yields `Some("")`, which carries no pin: an unknown
+/// owner, never "nothing installed".
+pub(crate) fn existing_registration_body(
+    port: &mut dyn ScmPort,
+    name: &str,
+) -> Result<Option<String>> {
+    if port.state(name)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(port.description(name)?.unwrap_or_default()))
+}
+
 /// State of the role's service.
 #[cfg_attr(windows, allow(dead_code))] // consumed by the verbs and status in Task 9 C2
 pub(crate) fn status_with(port: &mut dyn ScmPort, role: &str) -> Result<ScmStatus> {
@@ -455,6 +470,8 @@ mod tests {
         never_gone: bool,
         /// Operations (`"stop"`, `"delete"`, `"create"`, `"start"`) to fail once.
         fail_once: HashSet<&'static str>,
+        /// What `description` returns for any existing service.
+        description: Option<String>,
     }
 
     impl FakeScm {
@@ -466,6 +483,7 @@ mod tests {
                 stop_script: vec![ScmState::Stopped],
                 never_gone: false,
                 fail_once: HashSet::new(),
+                description: None,
             };
             if let Some(state) = state {
                 fake.add(SERVE, state, &[]);
@@ -551,7 +569,7 @@ mod tests {
             Ok(())
         }
         fn description(&mut self, _: &str) -> Result<Option<String>> {
-            Ok(None)
+            Ok(self.description.clone())
         }
         fn executable(&mut self, _: &str) -> Result<Option<PathBuf>> {
             Ok(None)
@@ -570,6 +588,35 @@ mod tests {
         fn sleep(&mut self, d: Duration) {
             self.now += d;
         }
+    }
+
+    #[test]
+    fn registration_body_is_none_only_when_absent() {
+        let mut port = FakeScm::with(None);
+        assert_eq!(existing_registration_body(&mut port, SERVE).unwrap(), None);
+    }
+
+    #[test]
+    fn registration_body_returns_the_pin_description() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.description = Some("iroh-tunnel-pin config=C:/a.toml sid=S-1-5-18".into());
+        assert_eq!(
+            existing_registration_body(&mut port, SERVE)
+                .unwrap()
+                .as_deref(),
+            Some("iroh-tunnel-pin config=C:/a.toml sid=S-1-5-18")
+        );
+    }
+
+    #[test]
+    fn registration_body_of_a_pinless_service_is_empty_not_absent() {
+        let mut port = FakeScm::with(Some(ScmState::Stopped));
+        assert_eq!(
+            existing_registration_body(&mut port, SERVE)
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
     }
 
     fn service_msg(err: anyhow::Error) -> String {

@@ -195,7 +195,7 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
 /// service will trust is checked before anything is registered.
 #[cfg(windows)]
 fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
-    use super::backend::windows_scm::{service_name, ScmPort};
+    use super::backend::windows_scm::{existing_registration_body, service_name};
     use super::backend::windows_scm_impl::Scm;
     use super::pin::{retarget_decision_for, RetargetDecision};
     use super::system_windows::{resolve_target, WinRequest};
@@ -207,15 +207,23 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
 
     let role = req.role;
     // Absolute before anything reads its parent: a bare filename has none.
-    let config_abs = req
-        .config
+    let absolute = |path: &Path| absolutize_config_path(path).map(strip_verbatim_prefix);
+    let config_abs = req.config.as_deref().map(absolute).transpose()?;
+    // A relative override is resolved here, like `--config`: the service runs
+    // elsewhere and `verify_dir` refuses a relative path.
+    let state_abs = req
+        .state_dir_override
         .as_deref()
-        .map(absolutize_config_path)
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|dir| {
+            std::path::absolute(dir)
+                .with_context(|| format!("cannot make state directory {} absolute", dir.display()))
+        })
         .transpose()?;
     if !env.elevated {
         let config = match &config_abs {
             Some(config) => config.clone(),
-            None => absolutize_config_path(&crate::config::resolve_config_path(role, None)?)?,
+            None => absolute(&crate::config::resolve_config_path(role, None)?)?,
         };
         let rerun = install_rerun(role, ServiceScope::System, &config);
         ensure_privilege(ServiceScope::System, false, &rerun)?;
@@ -228,7 +236,7 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
         &WinRequest {
             role: role.name(),
             config: config_abs.as_deref(),
-            state: req.state_dir_override.as_deref(),
+            state: state_abs.as_deref(),
         },
         &token,
         &|dir| owner_of(dir).ok(),
@@ -238,12 +246,7 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
 
     if let Some(machine) = crate::ownership::machine_dir() {
         if machine.verify && machine.path.exists() {
-            verify_machine_dir(&machine.path).map_err(|e| {
-                CliError::Permission(format!(
-                    "the machine directory {} is not safe to trust: {e:#}. Nothing was changed.",
-                    machine.path.display()
-                ))
-            })?;
+            verify_machine_dir(&machine.path).map_err(|e| machine_dir_refusal(e, &machine.path))?;
         }
     }
 
@@ -256,7 +259,7 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
 
     // Read the registration last, right before the write, so a consent given
     // for an earlier look at it is checked against the current one.
-    let existing = Scm.description(&service_name(role.name()))?;
+    let existing = existing_registration_body(&mut Scm, &service_name(role.name()))?;
     if let RetargetDecision::Needs { previous, proposed } =
         retarget_decision_for(existing.as_deref(), target.pin(), req.retarget.as_ref())
     {
@@ -268,6 +271,35 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
         config: target.config,
         state: target.state,
     }))
+}
+
+/// Keep a `Permission` refusal from the machine-directory check as it is
+/// (its text already says nothing was changed); wrap anything else into one.
+#[cfg(windows)]
+fn machine_dir_refusal(err: anyhow::Error, dir: &Path) -> anyhow::Error {
+    let context = format!(
+        "the machine directory {} is not safe to trust",
+        dir.display()
+    );
+    if matches!(
+        err.downcast_ref::<CliError>(),
+        Some(CliError::Permission(_))
+    ) {
+        return err.context(context);
+    }
+    CliError::Permission(format!("{context}: {err:#}. Nothing was changed.")).into()
+}
+
+/// Drop a leading `\\?\` (verbatim) prefix that `canonicalize` adds, so the
+/// pinned and displayed path matches what the user would type. A verbatim UNC
+/// path (`\\?\UNC\…`) is left alone: the trust walk refuses it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -552,22 +584,6 @@ mod tests {
         });
     }
 
-    /// `plan_install` needs the real token and file system on Windows, so the
-    /// scope decision is tested at its seam: an elevated request without a
-    /// flag chooses system, and the platform accepts it.
-    #[test]
-    fn windows_elevated_install_without_flag_plans_system() {
-        let env = Environment {
-            elevated: true,
-            can_answer: false,
-        };
-        assert_eq!(
-            decide_install_scope(None, env),
-            ScopeDecision::Chosen(ServiceScope::System)
-        );
-        assert!(ensure_supported(ServiceScope::System).is_ok());
-    }
-
     #[test]
     fn install_request_on_windows_no_longer_forces_user_scope() {
         // Neither a TTY nor elevation: user. Elevated: system, never forced to user.
@@ -583,10 +599,15 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_system_scope_is_supported() {
-        assert!(ensure_supported(ServiceScope::System).is_ok());
+    fn verbatim_prefix_is_stripped_but_not_for_unc() {
+        let strip = |p: &str| strip_verbatim_prefix(PathBuf::from(p));
+        assert_eq!(strip(r"\\?\C:\a\b.toml"), PathBuf::from(r"C:\a\b.toml"));
+        assert_eq!(strip(r"C:\a\b.toml"), PathBuf::from(r"C:\a\b.toml"));
+        assert_eq!(
+            strip(r"\\?\UNC\srv\share\b.toml"),
+            PathBuf::from(r"\\?\UNC\srv\share\b.toml")
+        );
     }
 }
 
@@ -620,7 +641,11 @@ mod windows_plan_tests {
         req.config = Some(config);
         req.state_dir_override = Some(root.join("state"));
         std::fs::create_dir_all(root.join("state")).unwrap();
-        req.tunnel_executable = std::env::current_exe().unwrap();
+        // The plan only reads the binary's trust, it never runs it. A test
+        // binary in a user-owned build tree is refused by `verify_binary`, so
+        // use a system one.
+        let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set");
+        req.tunnel_executable = PathBuf::from(system_root).join("System32\\cmd.exe");
         let env = Environment {
             elevated: true,
             can_answer: false,

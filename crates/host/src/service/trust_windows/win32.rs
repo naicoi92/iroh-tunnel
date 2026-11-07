@@ -457,7 +457,6 @@ fn read_all(handle: &OwnedHandle, path: &Path) -> Result<Vec<u8>> {
 ///
 /// [`CliError::Permission`] when the binary or any directory above it can be
 /// changed by a non-system principal.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the SCM install later
 pub(crate) fn verify_binary(path: &Path) -> Result<()> {
     let chain = verified(path, LastAccess::Inspect, &TrustedSet::for_binary())?;
     let (_, d) = chain.target()?;
@@ -781,7 +780,6 @@ pub(crate) fn remove_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<
 /// # Errors
 ///
 /// When the token cannot be queried.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the SCM install later
 pub(crate) fn token_user() -> Result<Sid> {
     let mut raw: HANDLE = std::ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
@@ -886,7 +884,6 @@ pub(crate) fn account_of(sid: &Sid) -> Option<String> {
 ///
 /// [`CliError::Permission`] when the path cannot be opened or an element
 /// above it is a reparse point or not a directory.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the SCM install later
 pub(crate) fn owner_of(path: &Path) -> Result<Sid> {
     let expected = components_of(path)?.len();
     let chain = open_chain(path, LastAccess::Inspect)?;

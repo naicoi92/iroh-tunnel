@@ -3,9 +3,8 @@
 //! A Task Scheduler task for the current user: logon trigger, interactive
 //! token, no elevation. It is driven through `schtasks` (`/Create /XML`,
 //! `/Run`, `/End`, `/Query`, `/Delete`), so install, start, status and stop
-//! need no administrator rights. There is no Windows system service: system
-//! scope is refused by `dispatch_service` (via `scope::ensure_supported`)
-//! before reaching this module.
+//! need no administrator rights. The system scope is a Windows Service,
+//! handled by `windows_scm`, and does not reach this module.
 //!
 //! Per RO-03 stop is `schtasks /End`; no control channel or stop command is
 //! added. Whether `/End` lets the tunnel drain is measured on real Windows in
