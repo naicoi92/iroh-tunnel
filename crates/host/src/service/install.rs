@@ -17,6 +17,7 @@ use super::types::{
     ServiceScope,
 };
 use crate::error::CliError;
+use crate::ownership::{self, Liveness, LockDirs, LockResolver, Tier};
 use crate::role::Role;
 
 /// The argv (after `sudo`) that repeats an install with absolute paths.
@@ -49,7 +50,7 @@ pub fn install(
     call: &mut ServiceCall,
 ) -> Result<InstallOutcome, ServiceFailure> {
     let mut runner = system_runner;
-    install_via(req, env, call, &mut runner)
+    install_via(req, env, call, &mut runner, &LockDirs::resolve)
 }
 
 /// [`install`] over an injected command runner.
@@ -58,8 +59,9 @@ pub(crate) fn install_via(
     env: Environment,
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
+    lock_dirs: LockResolver<'_>,
 ) -> Result<InstallOutcome, ServiceFailure> {
-    let plan = match plan_install(req, env).map_err(ServiceFailure::before_effects)? {
+    let plan = match plan_install(req, env, lock_dirs).map_err(ServiceFailure::before_effects)? {
         Planned::Needs(need) => return Ok(InstallOutcome::Needs(need)),
         Planned::Ready(plan) => plan,
     };
@@ -96,7 +98,11 @@ struct InstallPlan {
 
 /// Every check that precedes the write, in the order the CLI always ran them:
 /// scope, platform support, then the scope's own privilege and trust checks.
-fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
+fn plan_install(
+    req: &InstallRequest,
+    env: Environment,
+    lock_dirs: LockResolver<'_>,
+) -> Result<Planned> {
     if !req.tunnel_executable.is_absolute() {
         return Err(CliError::Service(format!(
             "the tunnel executable {} is not an absolute path; the service must not depend on \
@@ -114,7 +120,7 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
     };
     ensure_supported(scope)?;
     if scope == ServiceScope::System {
-        return plan_system_install(req, env);
+        return plan_system_install(req, env, lock_dirs);
     }
     // Persist absolute paths: the installed service runs with a different CWD
     // and home, so nothing may stay relative (SM-02).
@@ -125,6 +131,8 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
     let state = pinned_state_dir(req.state_dir_override.as_deref())?;
     let rerun = install_rerun(role, scope, &config);
     ensure_privilege(scope, env.elevated, &rerun)?;
+    let registering = effective_scope_for(scope, super::platform::system_wide_only());
+    ensure_no_cross_scope_conflict(role, registering, None, lock_dirs)?;
     check_installable_config(role, &config)?;
     Ok(Planned::Ready(InstallPlan {
         scope,
@@ -138,7 +146,11 @@ fn plan_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
 /// SM-04). Unprivileged callers are refused with rerun guidance; an elevated
 /// caller must name a real user, never root's own home.
 #[cfg(unix)]
-fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned> {
+fn plan_system_install(
+    req: &InstallRequest,
+    env: Environment,
+    lock_dirs: LockResolver<'_>,
+) -> Result<Planned> {
     use super::{system, trust};
 
     let role = req.role;
@@ -170,6 +182,12 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
         None if env.can_answer => return Ok(Planned::Needs(InstallNeed::InvokingUser)),
         None => return Err(system::unknown_user("no SUDO_USER", role.name())),
     };
+    ensure_no_cross_scope_conflict(
+        role,
+        ServiceScope::System,
+        Some(&target.account.home),
+        lock_dirs,
+    )?;
     // Fail closed before registering anything root would later refuse to run.
     trust::verify_dir(&target.state, target.account.uid)?;
     let text = trust::read_verified(&target.config, target.account.uid)?;
@@ -191,9 +209,80 @@ fn plan_system_install(req: &InstallRequest, env: Environment) -> Result<Planned
 }
 
 #[cfg(not(unix))]
-fn plan_system_install(_req: &InstallRequest, _env: Environment) -> Result<Planned> {
+fn plan_system_install(
+    _req: &InstallRequest,
+    _env: Environment,
+    _lock_dirs: LockResolver<'_>,
+) -> Result<Planned> {
     ensure_supported(ServiceScope::System)?;
     Err(CliError::Service("system services are not supported on this platform".into()).into())
+}
+
+/// The scope an install actually registers in: every registration is
+/// system-wide where the host has no per-user services.
+fn effective_scope_for(requested: ServiceScope, system_wide_only: bool) -> ServiceScope {
+    if system_wide_only {
+        ServiceScope::System
+    } else {
+        requested
+    }
+}
+
+/// Refuse an install while the role runs at the lock tier of the scope it will
+/// *not* register in: the service started there would collide with the new
+/// registration's.
+///
+/// The check compares a tier instead of calling `ensure_not_running`, because
+/// re-installing over the same scope's own running service is supported and
+/// specified. The tier is the effective scope's (see [`effective_scope_for`]):
+/// BusyBox has no per-user services, so a user request registers system-wide.
+/// The directories are injected so tests never probe the developer's real
+/// machine lock directory.
+///
+/// Known gaps, none of which this check sees: a foreground run in the same
+/// tier, a job loaded outside `service install`, a stopped service registered
+/// in the other scope (running roles are checked, not registrations), a
+/// shared machine-lock holder in another account, and a BusyBox user-scope
+/// request as root, where the non-registering tier is the calling process's
+/// own per-user directory rather than an invoking user's.
+///
+/// # Errors
+///
+/// [`CliError::Conflict`] when the other tier holds the role, or the error of
+/// resolving the lock directories.
+fn ensure_no_cross_scope_conflict(
+    role: Role,
+    registering: ServiceScope,
+    account_home: Option<&Path>,
+    resolve: LockResolver<'_>,
+) -> Result<()> {
+    let dirs = resolve(account_home)?;
+    ensure_no_cross_scope_conflict_in(role, registering, &dirs)
+}
+
+/// [`ensure_no_cross_scope_conflict`] over already resolved directories.
+fn ensure_no_cross_scope_conflict_in(
+    role: Role,
+    registering: ServiceScope,
+    dirs: &LockDirs,
+) -> Result<()> {
+    let (other_tier, other_scope) = match registering {
+        ServiceScope::User => (Tier::Machine, ServiceScope::System),
+        ServiceScope::System => (Tier::User, ServiceScope::User),
+    };
+    if let Liveness::Running { tier, owner } = ownership::tier_liveness(role, other_tier, dirs)? {
+        let flag = super::verb::flag(other_scope);
+        return Err(CliError::Conflict(format!(
+            "{role} is already running ({}; {}); {}; to remove that service run \
+             `iroh-tunnel {role} service uninstall {flag}`, then install again",
+            tier.label(),
+            ownership::describe_owner(owner.as_ref()),
+            ownership::stop_hint_scoped(role, flag),
+            role = role.name(),
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Make `path` absolute for embedding in a system service file.
@@ -271,6 +360,7 @@ fn backend_install(
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        // Same BusyBox-vs-systemd condition as `platform::system_wide_only`.
         if super::platform::linux_is_systemd() {
             super::backend::systemd::install(native, notes, role, scope, binary, config, state, pin)
         } else {
@@ -293,7 +383,7 @@ fn backend_install(
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::{commands, request, run_install, BATCH};
+    use super::super::fixtures::{commands, request, run_install, run_install_in, BATCH};
     #[cfg(unix)]
     use super::super::fixtures::{in_isolated_home, write_valid_config, CAN_ANSWER};
     #[cfg(unix)]
@@ -303,7 +393,175 @@ mod tests {
     #[cfg(unix)]
     use super::super::types::AppliedEffect;
     use super::*;
+    use crate::ownership::{hold_for_test, LockKind};
     use std::path::PathBuf;
+
+    fn dirs(user: &tempfile::TempDir, machine: &tempfile::TempDir) -> LockDirs {
+        LockDirs {
+            user: user.path().into(),
+            machine: Some(machine.path().into()),
+        }
+    }
+
+    #[test]
+    fn effective_scope_follows_the_host_capability() {
+        assert_eq!(
+            effective_scope_for(ServiceScope::User, false),
+            ServiceScope::User
+        );
+        assert_eq!(
+            effective_scope_for(ServiceScope::User, true),
+            ServiceScope::System
+        );
+        assert_eq!(
+            effective_scope_for(ServiceScope::System, true),
+            ServiceScope::System
+        );
+    }
+
+    #[test]
+    fn a_user_install_is_refused_while_the_machine_tier_holds_the_role() {
+        let (user, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let _hold = hold_for_test(Role::Serve, machine.path(), LockKind::Exclusive).unwrap();
+        let err = ensure_no_cross_scope_conflict_in(
+            Role::Serve,
+            ServiceScope::User,
+            &dirs(&user, &machine),
+        )
+        .expect_err("a machine-tier hold must refuse a user install");
+        let text = format!("{err:#}");
+        assert!(
+            matches!(err.downcast_ref::<CliError>(), Some(CliError::Conflict(_))),
+            "{err:?}"
+        );
+        assert!(text.contains("service uninstall --system"), "{text}");
+        assert!(text.contains("service stop --system"), "{text}");
+        assert!(text.contains("Ctrl+C"), "{text}");
+        assert!(text.contains("nothing is stopped automatically"), "{text}");
+        assert!(text.contains("machine-wide"), "{text}");
+        assert!(!text.contains("start refused"), "{text}");
+    }
+
+    #[test]
+    fn a_system_install_is_refused_while_the_user_tier_holds_the_role() {
+        let (user, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let _hold = hold_for_test(Role::Serve, user.path(), LockKind::Exclusive).unwrap();
+        let err = ensure_no_cross_scope_conflict_in(
+            Role::Serve,
+            ServiceScope::System,
+            &dirs(&user, &machine),
+        )
+        .expect_err("a user-tier hold must refuse a system install");
+        let text = format!("{err:#}");
+        assert!(
+            matches!(err.downcast_ref::<CliError>(), Some(CliError::Conflict(_))),
+            "{err:?}"
+        );
+        assert!(text.contains("service uninstall --user"), "{text}");
+        assert!(text.contains("service stop --user"), "{text}");
+        assert!(text.contains("Ctrl+C"), "{text}");
+        assert!(text.contains("nothing is stopped automatically"), "{text}");
+        assert!(text.contains("this user"), "{text}");
+        assert!(!text.contains("start refused"), "{text}");
+    }
+
+    #[test]
+    fn a_hold_at_the_registering_tier_is_permitted() {
+        for (scope, held_user) in [(ServiceScope::User, true), (ServiceScope::System, false)] {
+            let (user, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let held = if held_user { &user } else { &machine };
+            let _hold = hold_for_test(Role::Serve, held.path(), LockKind::Exclusive).unwrap();
+            ensure_no_cross_scope_conflict_in(Role::Serve, scope, &dirs(&user, &machine))
+                .unwrap_or_else(|e| panic!("{scope:?} re-install must pass: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn a_registered_but_stopped_service_does_not_refuse() {
+        let (user, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        drop(hold_for_test(Role::Serve, machine.path(), LockKind::Exclusive).unwrap());
+        ensure_no_cross_scope_conflict_in(Role::Serve, ServiceScope::User, &dirs(&user, &machine))
+            .expect("an unheld lock file is not a running role");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_system_install_probes_the_resolved_accounts_home() {
+        let account = tempfile::tempdir().unwrap();
+        let state = crate::paths::state_dir_in(account.path());
+        std::fs::create_dir_all(&state).unwrap(); // create_lock_file does not create parents
+        let _hold = hold_for_test(Role::Serve, &state, LockKind::Exclusive).unwrap();
+        ensure_no_cross_scope_conflict(
+            Role::Serve,
+            ServiceScope::System,
+            Some(account.path()),
+            &LockDirs::resolve,
+        )
+        .expect_err("the resolved account's per-user tier must refuse a system install");
+        let other = tempfile::tempdir().unwrap();
+        ensure_no_cross_scope_conflict(
+            Role::Serve,
+            ServiceScope::System,
+            Some(other.path()),
+            &LockDirs::resolve,
+        )
+        .expect("another account's empty home must not be refused");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_conflicting_install_changes_nothing() {
+        const NAME: &str = "service::install::tests::a_conflicting_install_changes_nothing";
+        in_isolated_home(NAME, |home| {
+            #[cfg(target_os = "linux")]
+            if !linux_is_systemd() {
+                return; // BusyBox registers system-wide and needs real root
+            }
+            let config = write_valid_config(home);
+            let mut req = request(Some(ServiceScope::User));
+            req.config = Some(config);
+            req.state_dir_override = Some(home.join("state"));
+            let (user, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let _hold = hold_for_test(Role::Serve, machine.path(), LockKind::Exclusive).unwrap();
+            let resolve = |_: Option<&Path>| Ok(dirs(&user, &machine));
+            let (result, log) = run_install_in(&req, BATCH, vec![], &resolve);
+            let failure = result.expect_err("the machine-tier hold must refuse");
+            assert!(failure.applied.is_empty(), "{:?}", failure.applied);
+            assert!(
+                commands(&log).is_empty(),
+                "the refusal precedes every command"
+            );
+            assert_eq!(existing_registration("serve", ServiceScope::User), None);
+            let err = anyhow::Error::from(failure);
+            assert!(
+                matches!(err.downcast_ref::<CliError>(), Some(CliError::Conflict(_))),
+                "{err:?}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn privilege_is_refused_before_a_cross_scope_conflict() {
+        if crate::service::is_elevated() {
+            return;
+        }
+        let (user, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let _hold = hold_for_test(Role::Serve, user.path(), LockKind::Exclusive).unwrap();
+        let mut req = request(Some(ServiceScope::System));
+        req.config = Some(PathBuf::from("/tmp/iroh-tunnel-test/serve.toml"));
+        let resolve = |_: Option<&Path>| Ok(dirs(&user, &machine));
+        let (result, log) = run_install_in(&req, BATCH, vec![], &resolve);
+        let err = anyhow::Error::from(result.expect_err("must be refused"));
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ),
+            "{err:?}"
+        );
+        assert!(commands(&log).is_empty(), "{log:?}");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -383,8 +641,8 @@ mod tests {
             let mut req = request(Some(ServiceScope::User));
             req.config = Some(config);
             req.state_dir_override = Some(home.join("state"));
-            // Linux: daemon-reload ok, `enable` fails. macOS: `bootout` ok,
-            // `bootstrap` fails.
+            // Linux: daemon-reload ok, `enable` fails. macOS: `enable` and
+            // `bootout` ok, `bootstrap` fails.
             let responses = if cfg!(target_os = "linux") {
                 vec![
                     crate::service::native::fake::output(0, "", ""),
@@ -392,6 +650,7 @@ mod tests {
                 ]
             } else {
                 vec![
+                    crate::service::native::fake::output(0, "", ""),
                     crate::service::native::fake::output(0, "", ""),
                     crate::service::native::fake::output(5, "", "boom"),
                 ]

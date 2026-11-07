@@ -67,6 +67,22 @@ pub(crate) fn linux_is_systemd() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether every registration on this host is system-wide: a Linux host whose
+/// init is not systemd (BusyBox), which has no per-user services.
+///
+/// `backend_install` picks its backend on the same condition.
+#[cfg(target_os = "linux")]
+pub(crate) fn system_wide_only() -> bool {
+    !linux_is_systemd()
+}
+
+/// Whether every registration on this host is system-wide; only Linux without
+/// systemd is, so never here.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn system_wide_only() -> bool {
+    false
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn unsupported<T>() -> Result<T> {
     anyhow::bail!(
@@ -77,7 +93,6 @@ pub(crate) fn unsupported<T>() -> Result<T> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
     use super::*;
 
     // Compile-only guard: on Linux the runtime probe must exist and be bool.
@@ -85,5 +100,17 @@ mod tests {
     #[test]
     fn linux_is_systemd_is_bool() {
         let _ = linux_is_systemd();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_wide_only_is_the_negation_of_systemd_on_linux() {
+        assert_eq!(system_wide_only(), !linux_is_systemd());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn system_wide_only_is_false_off_linux() {
+        assert!(!system_wide_only());
     }
 }

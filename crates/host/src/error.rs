@@ -31,9 +31,10 @@ pub enum CliError {
     #[error("service error: {0}")]
     Service(String),
 
-    /// A start was refused because the role, or its public identity, is
-    /// already running (RO-01..RO-03).
-    #[error("start refused: {0}")]
+    /// The role, or its public identity, is already held, so a start or an
+    /// install was refused (RO-01..RO-03). The message carries any
+    /// `start refused:` prefix itself (exit code 6).
+    #[error("{0}")]
     Conflict(String),
 }
 
@@ -53,9 +54,6 @@ mod tests {
             CliError::Service("x".into()).to_string(),
             "service error: x"
         );
-        assert_eq!(
-            CliError::Conflict("x".into()).to_string(),
-            "start refused: x"
-        );
+        assert_eq!(CliError::Conflict("x".into()).to_string(), "x");
     }
 }

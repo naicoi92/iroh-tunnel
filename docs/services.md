@@ -71,6 +71,14 @@ are logged in unless lingering is enabled (`loginctl enable-linger $USER`).
   anything; a bad config exits with code `2`.
 - `service start` is refused with code `6` while the role already runs in the
   foreground.
+- `install` is refused with code `6` while the role is held at the other
+  scope (for example a running system service when you install `--user`). The
+  error names the holder, how to stop it (`Ctrl+C`, or `iroh-tunnel <role>
+  service stop --system` or `--user`) and how to remove it (`iroh-tunnel <role>
+  service uninstall --system` or `--user`). Nothing is stopped automatically.
+- On macOS, `install` enables the launchd label, replaces any loaded copy and
+  bootstraps the job. If bootstrap fails, a disabled label is the usual cause;
+  check `launchctl print-disabled <domain>`.
 - The registration runs the `iroh-tunnel` found on `PATH`, or the absolute
   path of the running executable when there is none.
 

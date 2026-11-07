@@ -1,8 +1,6 @@
 //! Shared fixtures of the service unit tests.
 
-#[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::install::install_via;
 use super::native::fake::{Event, Events, FakeRunner};
@@ -12,6 +10,7 @@ use super::status::status_via;
 #[cfg(unix)]
 use super::types::ServiceStatusReport;
 use super::types::{Environment, InstallOutcome, InstallRequest, ServiceFailure, ServiceScope};
+use crate::ownership::{LockDirs, LockResolver};
 use crate::role::Role;
 
 pub(crate) fn tunnel_exe() -> PathBuf {
@@ -47,17 +46,38 @@ pub(crate) const BATCH: Environment = Environment {
 };
 
 /// Run `install` against a fake runner; returns the result and the events.
+///
+/// The lock directories are two fresh tempdirs, so no test probes the real
+/// machine or per-user lock directory.
 pub(crate) fn run_install(
     req: &InstallRequest,
     env: Environment,
     responses: Vec<NativeOutput>,
+) -> (Result<InstallOutcome, ServiceFailure>, Vec<Event>) {
+    let user = tempfile::tempdir().unwrap();
+    let machine = tempfile::tempdir().unwrap();
+    let resolve = |_: Option<&Path>| {
+        Ok(LockDirs {
+            user: user.path().to_path_buf(),
+            machine: Some(machine.path().to_path_buf()),
+        })
+    };
+    run_install_in(req, env, responses, &resolve)
+}
+
+/// [`run_install`] over an explicit lock-directory resolver.
+pub(crate) fn run_install_in(
+    req: &InstallRequest,
+    env: Environment,
+    responses: Vec<NativeOutput>,
+    lock_dirs: LockResolver<'_>,
 ) -> (Result<InstallOutcome, ServiceFailure>, Vec<Event>) {
     let events = Events::default();
     let mut fake = FakeRunner::new(&events, responses);
     let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
     let mut notes = crate::service::native::fake::note_sink(&events);
     let mut call = ServiceCall::capture(&mut notes);
-    let result = install_via(req, env, &mut call, &mut runner);
+    let result = install_via(req, env, &mut call, &mut runner, lock_dirs);
     let log = events.borrow().clone();
     (result, log)
 }
