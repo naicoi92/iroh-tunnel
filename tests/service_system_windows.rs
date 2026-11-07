@@ -916,9 +916,10 @@ async fn unsafe_config_refused_then_fixed() -> Result<()> {
     let node_id = fx.write_config(relay.as_ref(), 9)?;
     fx.install_ok(&["--system"])?;
     wait_for_node(&fx, &node_id)?;
-    let before = acl_state(&fx.config())?;
 
     let grant = GrantGuard::everyone_modify(&fx.config())?;
+    // icacls rewrites the DACL on grant, so compare against this state.
+    let granted = acl_state(&fx.config())?;
     // `restart` waits for Running, so the CLI itself fails.
     let out = fx.service("restart", &["--system"])?;
     assert!(
@@ -930,16 +931,15 @@ async fn unsafe_config_refused_then_fixed() -> Result<()> {
     assert_never_running(&fx, Duration::from_secs(3));
     wait_for_log(&fx, "permission error")?;
     wait_for_log(&fx, fx.config().to_str().unwrap())?;
-    assert_ne!(acl_state(&fx.config())?, before, "the grant is in place");
+    assert_eq!(
+        acl_state(&fx.config())?,
+        granted,
+        "the product must not repair or alter the config ACL while refusing"
+    );
 
     drop(grant);
     start_until_running(&fx)?;
     wait_for_node(&fx, &node_id)?;
-    assert_eq!(
-        acl_state(&fx.config())?,
-        before,
-        "the product must not repair or alter the config ACL"
-    );
     Ok(())
 }
 
