@@ -20,6 +20,8 @@
 
 The worktree branch `windows-system-service` was fast-forwarded into the feature branch (`fa85e51..0553669`) and then deleted. No PR existed for this branch, so the owner approved pushing it and opening a PR in the Inbox (AGENTS.md requires explicit push/PR approval).
 
+After the PR opened, it conflicted with two later commits on `main` (#187 and #188). `main` was merged into the feature branch in `70b0bde`; see "Merge of main" below.
+
 ---
 
 ## Workspace
@@ -49,6 +51,22 @@ The worktree branch `windows-system-service` was fast-forwarded into the feature
   - Worktree before the merge: `cargo test --workspace --all-features --locked` gave 735 passed and 0 failed.
   - Merged feature branch: the same command gave 735 passed and 0 failed.
   - Windows CI at `5c37c6a` (run 42435478414): all green.
+
+---
+
+## Merge of main
+
+The `main` merge in `70b0bde` resolved conflicts with #188, the lock-based install conflict check.
+
+**How the conflicts were resolved**
+- **Windows install paths.** Both the user install and the Windows system install keep their registration-based cross-scope refusal (exit 5). They also run the shared lock-based check (exit 6).
+- **`LockDirs`.** It now takes the machine directory path from `MachineDir`.
+
+**Re-verified after the merge**
+- **Local:** fmt and clippy are clean (native and xwin, with and without features); `cargo test --workspace --all-features --locked` gives 757 passed and 0 failed.
+- **PR CI** (`ci-ok`, unit linux/macos/windows, lint, scripts, action): all pass.
+- **e2e run 42439416443:** every cell is green.
+  - Windows: `service_system_windows` 23/23, host elevated 361.
 
 ---
 
