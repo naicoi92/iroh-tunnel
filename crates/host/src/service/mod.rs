@@ -33,21 +33,26 @@ mod status;
 mod stop;
 #[cfg(unix)]
 pub(crate) mod system;
+mod system_verb;
+mod system_windows;
 mod task_xml;
 #[cfg(unix)]
 pub(crate) mod trust;
+pub(crate) mod trust_windows;
 mod types;
 mod uninstall;
 mod verb;
 
+mod log_file;
 pub use account_name::account_name;
 pub use decide_install_scope::decide_install_scope;
 pub use default_scope::default_scope;
 pub use install::install;
 pub use is_elevated::is_elevated;
+pub use log_file::{machine_log_dir, CappedLog};
 pub use native::{InstalledAt, NativeOutput, OutputMode, ServiceCall, ServiceNote};
 pub use parse_scope_answer::parse_scope_answer;
-pub use pin::{Pin, RetargetConsent};
+pub use pin::{Pin, PinOwner, RetargetConsent};
 pub(crate) use platform::load_config;
 pub use restart::restart;
 pub use start::start;
@@ -55,8 +60,32 @@ pub use status::status;
 pub use stop::stop;
 #[cfg(unix)]
 pub use system::unknown_user;
+#[cfg(windows)]
+#[cfg_attr(feature = "test-utils", allow(unused_imports))]
+pub(crate) use trust_windows::{create_dir_with_sddl, program_data_dir, verify_machine_dir};
 pub use types::{
     AppliedEffect, Environment, Fact, InstallNeed, InstallOutcome, InstallRequest, Registration,
     ScopeDecision, ServiceFailure, ServiceReport, ServiceScope, ServiceStatusReport,
 };
 pub use uninstall::uninstall;
+
+/// Runs the service binary trust check on `path` (installer ACL test).
+///
+/// # Errors
+///
+/// The trust refusal for `path`.
+#[cfg(all(windows, feature = "test-utils"))]
+#[doc(hidden)]
+pub fn __test_verify_binary(path: &std::path::Path) -> anyhow::Result<()> {
+    trust_windows::verify_binary(path)
+}
+
+/// Set to `1` in the environment of a Windows Service registration so the
+/// binary knows the SCM started it and enters the service dispatcher.
+pub const ENV_SCM: &str = "IROH_TUNNEL_SCM";
+
+/// SCM name of the role's system service (plus the test-only instance suffix).
+#[must_use]
+pub fn system_service_name(role: &str) -> String {
+    backend::windows_scm::service_name(role)
+}

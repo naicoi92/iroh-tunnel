@@ -16,6 +16,16 @@ const REPLACE_DENIED_HINT: &str =
     "if this executable is running (a tunnel, or this very command), \
      stop it and run the update again from another copy; otherwise check the file permissions";
 
+/// Appended on Windows: a system service holds its executable open, and only
+/// an elevated `service stop --system` releases it. Both role commands are
+/// named because `update` does not know which role the service runs, and a
+/// `<role>` placeholder would break copy-paste (`<` redirects in shells).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn windows_locked_hint() -> &'static str {
+    "; if a system service runs this executable, stop it first from an elevated terminal: \
+     iroh-tunnel serve service stop --system or iroh-tunnel access service stop --system"
+}
+
 #[cfg(not(windows))]
 const REPLACE_DENIED_HINT: &str = "rerun with sufficient privileges (for example sudo)";
 
@@ -28,7 +38,12 @@ pub(super) fn classify_replace_error(err: anyhow::Error) -> anyhow::Error {
             .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
     });
     if denied {
-        CliError::Permission(format!("{err:#}; {REPLACE_DENIED_HINT}")).into()
+        let extra = if cfg!(windows) {
+            windows_locked_hint()
+        } else {
+            ""
+        };
+        CliError::Permission(format!("{err:#}; {REPLACE_DENIED_HINT}{extra}")).into()
     } else {
         err
     }
@@ -194,6 +209,21 @@ mod tests {
         ));
         let other = classify_replace_error(anyhow::anyhow!("boom"));
         assert!(other.downcast_ref::<CliError>().is_none());
+    }
+
+    #[test]
+    fn windows_locked_hint_mentions_service_stop_system() {
+        let hint = windows_locked_hint();
+        assert!(
+            hint.contains("iroh-tunnel serve service stop --system"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("iroh-tunnel access service stop --system"),
+            "{hint}"
+        );
+        assert!(!hint.contains("<role>"), "{hint}");
+        assert!(hint.contains("elevated"), "{hint}");
     }
 
     #[test]

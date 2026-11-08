@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-#[cfg(windows)]
-use super::locations::local_app_data;
 #[cfg(not(windows))]
 use super::locations::{home_dir, APP_DIR};
+#[cfg(windows)]
+use super::locations::{local_app_data, windows_state_dir};
 
 /// Default directory holding the `<role>-status.json` files.
 ///
@@ -17,7 +17,7 @@ use super::locations::{home_dir, APP_DIR};
 /// is missing or not absolute.
 pub fn default_state_dir() -> Result<PathBuf> {
     #[cfg(windows)]
-    return Ok(local_app_data()?.join("state"));
+    return Ok(windows_state_dir(&local_app_data()?));
     #[cfg(not(windows))]
     Ok(home_dir()?.join(".local").join("state").join(APP_DIR))
 }

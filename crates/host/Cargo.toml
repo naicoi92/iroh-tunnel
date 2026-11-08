@@ -45,3 +45,21 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Elevation check (`TokenElevation`) and the Win32 trust adapter (verified
+# no-follow opens, owner/DACL reads, link-safe rename, SID lookups).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+] }
+# SCM control dispatcher and service status (consumed by later tasks).
+windows-service = "0.8.1"

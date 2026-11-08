@@ -30,17 +30,19 @@ mod tests {
 
     #[test]
     fn restart_is_refused_for_system_scope_without_privilege() {
+        // An elevated run passes the policy and would act on a real service
+        // (systemd, launchd or the SCM); only the unprivileged refusal is safe
+        // to exercise.
+        if crate::service::is_elevated() {
+            return;
+        }
         let mut notes = |_: &ServiceNote| {};
         let mut call = ServiceCall::capture(&mut notes);
         let result = restart(Role::Serve, ServiceScope::System, BATCH, &mut call);
-        if cfg!(windows) {
-            assert!(result.is_err());
-        } else if !crate::service::is_elevated() {
-            let err = anyhow::Error::from(result.unwrap_err());
-            assert!(matches!(
-                err.downcast_ref::<CliError>(),
-                Some(CliError::Permission(_))
-            ));
-        }
+        let err = anyhow::Error::from(result.unwrap_err());
+        assert!(matches!(
+            err.downcast_ref::<CliError>(),
+            Some(CliError::Permission(_))
+        ));
     }
 }

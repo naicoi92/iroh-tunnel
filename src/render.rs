@@ -51,6 +51,13 @@ pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
             Stream::Stdout,
             format!("Installed and started task {name} (runs in your logged-in session)\n"),
         ),
+        ServiceNote::Installed {
+            name,
+            at: InstalledAt::WindowsService,
+        } => (
+            Stream::Stdout,
+            format!("Installed and started service {name} (runs at boot as LocalSystem)\n"),
+        ),
         ServiceNote::Uninstalled { name } => (Stream::Stdout, format!("Uninstalled {name}\n")),
         ServiceNote::AlreadyStopped { name } => {
             (Stream::Stdout, format!("{name} is already stopped.\n"))
@@ -375,6 +382,14 @@ mod tests {
             },
             Stream::Stdout,
             "Installed and started task iroh-tunnel-serve (runs in your logged-in session)\n",
+        );
+        check(
+            ServiceNote::Installed {
+                name: "iroh-tunnel-serve".into(),
+                at: InstalledAt::WindowsService,
+            },
+            Stream::Stdout,
+            "Installed and started service iroh-tunnel-serve (runs at boot as LocalSystem)\n",
         );
         check(
             ServiceNote::Uninstalled {

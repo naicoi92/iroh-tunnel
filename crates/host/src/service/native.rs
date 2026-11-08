@@ -48,6 +48,8 @@ pub enum InstalledAt {
     Path(PathBuf),
     /// A per-user Task Scheduler task (Windows).
     WindowsTask,
+    /// A Windows service in the Service Control Manager (system scope).
+    WindowsService,
 }
 
 /// A user-facing message from a service operation.
@@ -119,6 +121,18 @@ pub struct NativeOutput {
 }
 
 impl NativeOutput {
+    /// The output of a step that ran no native command.
+    #[cfg(windows)]
+    pub(crate) fn none() -> Self {
+        Self {
+            program: String::new(),
+            status: Some(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            status_display: None,
+        }
+    }
+
     /// Whether the command exited with code 0.
     pub(crate) fn success(&self) -> bool {
         self.status == Some(0)

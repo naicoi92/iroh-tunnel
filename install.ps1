@@ -34,6 +34,9 @@ Environment:
   IROH_TUNNEL_PROMPT_INPUT  read answers from this file instead of the console
   IROH_TUNNEL_PATH_FILE     keep the machine PATH in this file instead of the
                             registry (used by tests)
+  IROH_TUNNEL_TEST_ASSUME_NOT_ELEVATED  =1 treats the session as not elevated
+                            (used by tests; it can only skip the install
+                            directory protection, never add or weaken it)
 
 .PARAMETER Version
 Install release X (for example 1.2.3) instead of the latest stable release.
@@ -165,6 +168,75 @@ function Test-OnPath([string]$Path, [string]$Dir) {
     return $false
 }
 
+# --- install directory ------------------------------------------------------
+
+# Creates a directory only SYSTEM, Administrators and TrustedInstaller can
+# change, owned by Administrators. The DACL is built from scratch as a
+# whitelist and never reads the parent's ACL: a copy of the parent's rules (a
+# blacklist of what to skip) leaks whatever the parent grants, for example the
+# Users delete-child right under ProgramData. Users get read and execute only,
+# so ordinary accounts can still run the installed programs.
+#
+# The directory is created together with its security descriptor, so there is
+# no window with inherited rules: PowerShell 7 (.NET) uses
+# FileSystemAclExtensions.Create, Windows PowerShell 5.1 (.NET Framework) uses
+# the Directory.CreateDirectory(path, security) overload. The parent must
+# already exist, so no unprotected intermediate directory is ever created.
+function Test-Elevated {
+    # Test hook: may only turn protection off, matching a real non-elevated run.
+    if ($env:IROH_TUNNEL_TEST_ASSUME_NOT_ELEVATED -eq '1') { return $false }
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function New-ProtectedBinDir {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Private helper; the installer honours -DryRun before calling it.')]
+    param([string]$Dir)
+
+    $parent = [System.IO.Path]::GetDirectoryName($Dir)
+    if (-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        Fail "the parent of -BinDir must exist: $Dir"
+    }
+    $created = $false
+    try {
+        $admins = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+        $sec = New-Object System.Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        $none = [System.Security.AccessControl.PropagationFlags]::None
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') {
+            $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                        ([System.Security.Principal.SecurityIdentifier]$sid), $full, $inherit, $none, $allow)))
+        }
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    ([System.Security.Principal.SecurityIdentifier]'S-1-5-32-545'),
+                    [System.Security.AccessControl.FileSystemRights]'ReadAndExecute, Synchronize', $inherit, $none, $allow)))
+        $sec.SetOwner($admins)
+
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($Dir), $sec) | Out-Null
+        }
+        else {
+            [System.IO.Directory]::CreateDirectory($Dir, $sec) | Out-Null
+        }
+        $created = $true
+
+        $owner = (Get-Acl -LiteralPath $Dir).GetOwner([System.Security.Principal.SecurityIdentifier])
+        if ($owner -ne $admins) {
+            # Creation may keep the caller as owner; set it explicitly, then check.
+            Set-Acl -LiteralPath $Dir -AclObject $sec
+            $owner = (Get-Acl -LiteralPath $Dir).GetOwner([System.Security.Principal.SecurityIdentifier])
+            if ($owner -ne $admins) { throw "owner is $owner, expected Administrators" }
+        }
+    }
+    catch {
+        $reason = $_.Exception.Message
+        if ($created) { Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue }
+        Fail "cannot protect $Dir ($reason). Rerun from an elevated PowerShell (Run as administrator)."
+    }
+}
+
 # --- main -------------------------------------------------------------------
 
 # Everything that changes the system lives here, called on the last line: a
@@ -200,15 +272,31 @@ function Install-IrohTunnel {
     # the probe is removed again unless the install completes.
     $binDirExisted = Test-Path -LiteralPath $BinDir
     $completed = $false
+    if (-not $binDirExisted) {
+        # Only an elevated session protects the new directory: it is the one
+        # that can create it under Program Files and own it as Administrators.
+        # A non-elevated session keeps the plain behaviour (default access,
+        # missing parents created) so a per-user -BinDir keeps working.
+        if (Test-Elevated) {
+            # A parent we cannot write to fails here; the helper removes what it made.
+            try { New-ProtectedBinDir $BinDir }
+            catch [InstallError] { throw }
+            catch { Fail "cannot write to $BinDir ($($_.Exception.Message)). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
+        }
+        else {
+            try { New-Item -ItemType Directory -Force -Path $BinDir | Out-Null }
+            catch { Fail "cannot write to $BinDir ($($_.Exception.Message)). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR." }
+        }
+    }
     try {
-        New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
         $probe = Join-Path $BinDir ".write-test.$PID"
         Set-Content -LiteralPath $probe -Value 'x'
         Remove-Item -LiteralPath $probe -Force
     }
     catch {
+        $reason = $_.Exception.Message
         if (-not $binDirExisted) { Remove-Item -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue }
-        Fail "cannot write to $BinDir. Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR."
+        Fail "cannot write to $BinDir ($reason). Rerun from an elevated PowerShell (Run as administrator), or pass -BinDir DIR."
     }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "iroh-tunnel-install-$([Guid]::NewGuid().ToString('N'))"

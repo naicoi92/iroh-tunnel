@@ -66,6 +66,9 @@ serde_json.workspace = true
 which = "8"
 edit = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"
+
 [dev-dependencies]
 tempfile.workspace = true
 serde.workspace = true
@@ -82,6 +85,15 @@ libc = "0.2"
 sha2 = "0.11"
 dirs = "6"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+
+# Restricted-token launcher for the non-elevated E2E paths (tests/common/restricted.rs).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 # vergen-gitcl 9.x — inject git tag into APP_VERSION at build time.

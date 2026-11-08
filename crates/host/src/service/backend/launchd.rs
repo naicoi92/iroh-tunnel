@@ -119,11 +119,11 @@ fn format_plist_with(
     };
     // A system daemon reads a user's files as root: say whose (SM-04).
     let pin_comment = pin.map_or_else(String::new, |p| format!("<!-- {} -->\n", p.record()));
-    let trust_env = pin.map_or_else(String::new, |p| {
+    // A SID pin is rejected by `install` before this runs.
+    let trust_env = pin.and_then(Pin::unix_uid).map_or_else(String::new, |uid| {
         format!(
-            "\t\t<key>{}</key>\n\t\t<string>{}</string>\n",
+            "\t\t<key>{}</key>\n\t\t<string>{uid}</string>\n",
             super::super::trust::ENV_TRUSTED_UID,
-            p.uid
         )
     });
     format!(
@@ -187,6 +187,7 @@ pub(crate) fn install(
     state: &Path,
     pin: Option<&Pin>,
 ) -> Result<()> {
+    super::super::pin::require_unix_pin(pin)?;
     let plist = format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT, pin);
     let path = plist_path(role, scope)?;
     write_registration(&path, &plist)?;

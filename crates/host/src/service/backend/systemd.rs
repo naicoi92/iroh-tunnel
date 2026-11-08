@@ -60,8 +60,9 @@ fn format_unit_with(
     let restart_sec = policy.delay_secs;
     // A system service reads a user's files as root: say whose (SM-04).
     let pin_comment = pin.map_or_else(String::new, |p| format!("# {}\n", p.record()));
-    let trust_env = pin.map_or_else(String::new, |p| {
-        let var = format!("{}={}", super::super::trust::ENV_TRUSTED_UID, p.uid);
+    // A SID pin is rejected by `install` before this runs.
+    let trust_env = pin.and_then(Pin::unix_uid).map_or_else(String::new, |uid| {
+        let var = format!("{}={uid}", super::super::trust::ENV_TRUSTED_UID);
         format!("Environment={}\n", quote_arg(&var, Expand::Environment))
     });
     format!(
@@ -159,6 +160,7 @@ pub(crate) fn install(
     state: &Path,
     pin: Option<&Pin>,
 ) -> Result<()> {
+    super::super::pin::require_unix_pin(pin)?;
     let unit = format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT, pin);
     let path = unit_path(role, scope)?;
     write_registration(&path, &unit)?;

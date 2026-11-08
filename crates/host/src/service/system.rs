@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use super::account::{self, Account};
-use super::pin::{Pin, RetargetConsent};
+use super::pin::{Pin, PinOwner, RetargetConsent};
 use super::trust;
 use crate::error::CliError;
 
@@ -31,7 +31,7 @@ impl Target {
     pub fn pin(&self) -> Pin {
         Pin {
             config: self.config.clone(),
-            uid: self.account.uid,
+            owner: PinOwner::Uid(self.account.uid),
         }
     }
 }
@@ -167,39 +167,15 @@ pub fn resolve_target_account(
     }))
 }
 
-/// Whether an install may replace the existing registration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RetargetDecision {
-    Proceed,
-    Needs {
-        previous: Option<Pin>,
-        proposed: Pin,
-    },
-}
+pub(crate) use super::pin::RetargetDecision;
 
-/// Pure retarget policy: nothing installed or the same user proceeds; another
-/// owner (or an unpinned registration) proceeds only with consent that matches
-/// the current registration and the proposed pin.
+/// Pure retarget policy for a Unix [`Target`]; see [`super::pin::retarget_decision_for`].
 pub fn retarget_decision(
     existing: Option<&str>,
     target: &Target,
     consent: Option<&RetargetConsent>,
 ) -> RetargetDecision {
-    let Some(body) = existing else {
-        return RetargetDecision::Proceed;
-    };
-    let previous = Pin::find(body);
-    if previous
-        .as_ref()
-        .is_some_and(|p| p.uid == target.account.uid)
-    {
-        return RetargetDecision::Proceed;
-    }
-    let proposed = target.pin();
-    if consent.is_some_and(|c| c.previous == previous && c.proposed == proposed) {
-        return RetargetDecision::Proceed;
-    }
-    RetargetDecision::Needs { previous, proposed }
+    super::pin::retarget_decision_for(existing, target.pin(), consent)
 }
 
 #[cfg(test)]
@@ -295,6 +271,22 @@ mod tests {
             RetargetDecision::Needs {
                 previous: None,
                 proposed: target(1000).pin()
+            }
+        );
+    }
+
+    #[test]
+    fn a_sid_pinned_registration_is_an_unknown_owner_on_unix() {
+        let sid_pin = Pin {
+            config: target(1000).config,
+            owner: crate::service::PinOwner::Sid("S-1-5-21-1-2-3-1000".into()),
+        };
+        let body = format!("# {}\n", sid_pin.record());
+        assert_eq!(
+            retarget_decision(Some(&body), &target(1000), None),
+            RetargetDecision::Needs {
+                previous: Some(sid_pin),
+                proposed: target(1000).pin(),
             }
         );
     }

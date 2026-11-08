@@ -34,7 +34,7 @@ Only the all-in-one `iroh-tunnel` manages services. The standalone
 | Linux with systemd | systemd unit `iroh-tunnel-<role>.service` | `~/.config/systemd/user/` (`systemctl --user`) | `/etc/systemd/system/` |
 | Linux without systemd | init script `/etc/init.d/S96iroh-tunnel-<role>` | system only | `/etc/init.d/` |
 | macOS | launchd job `dev.iroh-tunnel.<role>` | LaunchAgent | LaunchDaemon |
-| Windows | Task Scheduler task `iroh-tunnel-<role>` | logon task | not supported |
+| Windows | Task Scheduler task or Windows Service `iroh-tunnel-<role>` | logon task | Windows Service (LocalSystem) |
 
 On Linux the backend is chosen at runtime: systemd when `/run/systemd/system`
 exists or PID 1 is systemd, otherwise the init-script backend.
@@ -47,16 +47,19 @@ Restart after a failure depends on the backend:
 | launchd | After any unsuccessful exit, at launchd's own pace |
 | BusyBox init script | None; the script only starts the role at boot |
 | Windows task | Retried every minute |
+| Windows Service | After 5 seconds, except after exit code `6` (the role is already running) |
 
 ## User or system scope
 
 - `install` with `--user` or `--system` uses that scope. Without a flag, root
-  gets a system service, an interactive non-root user is asked, and a
-  non-interactive non-root caller gets a user service.
+  (or an elevated Windows terminal) gets a system service, an interactive
+  non-root user is asked, and a non-interactive non-root caller gets a user
+  service.
 - Other verbs without a flag use system scope when run elevated and user scope
   otherwise. They never ask.
 - A system-scope command without privilege exits with code `3` and prints the
-  `sudo ...` command to run, including the absolute config path. Nothing is
+  `sudo ...` command to run (on Windows: run it from an elevated terminal),
+  including the absolute config path. Nothing is
   elevated for you, and nothing falls back to a user service.
 
 A user service runs as you and needs no privileges. On Linux it runs while you
@@ -115,10 +118,77 @@ request installs the same system-wide script, with a note. `stop` sends
 
 ## Windows
 
-Windows supports user services only: a Task Scheduler task that starts at
-your logon with least privilege and restarts on failure. No administrator
-rights are needed. `--system` exits with code `5` and suggests `--user`.
+### User scope
+
+A user service is a Task Scheduler task that starts at your logon with least
+privilege and restarts on failure. No administrator rights are needed.
 
 - `stop` ends the task; `restart` waits up to 15 seconds for the old process
   to exit before starting a new one.
 - Install refuses a non-default `IROH_TUNNEL_STATE_DIR`.
+
+### System scope
+
+A system service is a Windows Service that runs as LocalSystem, starts at
+boot and trusts one user's files, the same model as on Linux and macOS.
+
+```powershell
+# From an elevated terminal ("Run as administrator"):
+iroh-tunnel serve service install
+```
+
+- From an elevated terminal, `install` without a flag targets system scope.
+  Without elevation, `--system` exits with code `3` and prints the command to
+  run from an elevated terminal. Nothing is elevated for you.
+- The installing user (the token user, also when elevated) is pinned: the
+  service uses that user's default `%LOCALAPPDATA%` config and state paths,
+  or the `--config` given. A `--config` in a directory owned by another user
+  exits with code `2`, naming both accounts. A directory owned by
+  Administrators is fine.
+- The pin is stored in the service description. Reinstalling over a service
+  pinned to another user asks for confirmation; without it the command exits
+  with code `5` and changes nothing.
+- The service never writes a generated key: a config without `secret_key`
+  fails and the log says to run `config keygen` as the owner.
+- `stop` asks the service to drain (it reports `STOP_PENDING` while open
+  streams finish) and removes its status file.
+- A role cannot be installed in both scopes: installing a system service while
+  the user task exists (or the reverse) exits with code `5`, names the
+  `service uninstall` command for the other scope and changes nothing.
+- While the system service runs, a user start of the same role exits with code
+  `6`; a system start while a user process runs stops cleanly (no restart).
+
+#### Trust rules
+
+Before it registers, and at every service start, the config file, the state
+directory and every directory above them must be owned by and writable only
+by SYSTEM, Administrators, TrustedInstaller or the pinned user. No component
+may be a junction, symbolic link or mount point. The service binary and its
+directories must be writable only by SYSTEM, Administrators and
+TrustedInstaller, never by the pinned user, so a binary under your profile is
+refused. A refusal exits with code `3` and names the path, the account and
+the rights at fault.
+
+The product never changes access on your files. To fix a refusal, remove the
+grant it names (for example `icacls <path> /remove *S-1-1-0` for Everyone) or
+move the file, then run `service start --system` again.
+
+The installer (`install.ps1`) run from an elevated session creates its install
+directory with this protection. From a non-elevated session it creates a
+plain directory, and `service install --system` then refuses the binary in it.
+
+The binary check runs at install and in `service start|restart --system`. A
+start by the Service Control Manager at boot or through recovery does not
+re-check the binary; keep its directory protected.
+
+#### Machine directory
+
+`%ProgramData%\iroh-tunnel` holds the machine-wide role locks and the service
+log `logs\<role>.log` (10 MiB, one rotated file). The first system service
+start (or elevated run) creates it readable by Users and writable only by
+SYSTEM and Administrators, so the first start already logs.
+An existing directory that others can change is refused, at install and at
+service start, and never repaired: delete it from an elevated terminal and
+install again. Uninstall leaves the directory and its log in place; after
+uninstalling every role, remove it from an elevated terminal with
+`Remove-Item -Recurse "$env:ProgramData\iroh-tunnel"`.

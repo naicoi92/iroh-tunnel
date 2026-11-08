@@ -219,9 +219,9 @@ fn confirm_retarget(
 ) -> anyhow::Result<service::RetargetConsent> {
     let owner = match &previous {
         Some(p) => format!(
-            "user {} (uid {}, config {})",
-            service::account_name(p.uid),
-            p.uid,
+            "user {} ({}, config {})",
+            service::account_name(&p.owner),
+            p.owner,
             p.config.display()
         ),
         None => "an unknown owner (no pin recorded)".to_owned(),
@@ -229,7 +229,7 @@ fn confirm_retarget(
     let question = format!(
         "A system service is already installed for {owner}. Retarget it to user {} (config {})? \
          Both users' config files are kept. [y/N]: ",
-        service::account_name(proposed.uid),
+        service::account_name(&proposed.owner),
         proposed.config.display()
     );
     let declined = |why: &str| -> anyhow::Error {

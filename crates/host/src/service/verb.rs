@@ -67,7 +67,7 @@ pub(crate) fn verb_via(
         })
         .map_err(ServiceFailure::before_effects)?;
     execute(call, runner, |native, notes| {
-        backend_verb(verb, native, notes, role.name(), scope)
+        backend_verb(verb, native, notes, role, scope)
     })
 }
 
@@ -76,9 +76,10 @@ fn backend_verb(
     verb: Verb,
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
+    role_id: Role,
     scope: ServiceScope,
 ) -> Result<()> {
+    let role = role_id.name();
     #[cfg(target_os = "linux")]
     {
         use super::backend::{busybox, systemd};
@@ -111,6 +112,9 @@ fn backend_verb(
     #[cfg(windows)]
     {
         use super::backend::windows;
+        if scope == ServiceScope::System {
+            return super::system_verb::system_verb(verb, role_id, notes);
+        }
         match verb {
             Verb::Uninstall => windows::uninstall(native, notes, role, scope),
             Verb::Start => windows::start(native, role, scope),
