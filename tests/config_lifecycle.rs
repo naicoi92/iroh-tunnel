@@ -9,7 +9,6 @@
 #![cfg(unix)]
 
 use std::fs::File;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -368,8 +367,12 @@ fn lock_held_by_another_writer_times_out_with_a_clear_error() {
 
 // --- AC-CFG-07a ------------------------------------------------------------
 
+// Needs the root crate's `test-utils` seam `IROH_TUNNEL_TEST_INTERACTIVE`
+// (piped stdin stands in for a terminal); run with `--all-features`.
+#[cfg(feature = "test-utils")]
 #[test]
 fn keygen_rotation_needs_confirmation() {
+    use std::io::Write;
     let world = World::new();
     let cfg = world.file("serve.toml");
     let old = write_valid(&cfg);
