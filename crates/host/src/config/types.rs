@@ -211,6 +211,46 @@ pub struct SetService {
     pub node_id: Option<String>,
 }
 
+/// Plain inputs of a quick-mode serve run, for [`quick_serve_config`].
+///
+/// [`quick_serve_config`]: super::quick_serve_config
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickServe {
+    /// Service name.
+    pub name: String,
+    /// Transport protocol.
+    pub protocol: Protocol,
+    /// Target host; `None` means `127.0.0.1`.
+    pub host: Option<String>,
+    /// Target port.
+    pub port: u16,
+    /// Relay URL used by both peers; `None` uses the default relays.
+    pub relay_url: Option<String>,
+    /// File holding a persistent secret key; `None` means an ephemeral identity.
+    pub key_file: Option<PathBuf>,
+}
+
+/// Plain inputs of a quick-mode access run, for [`quick_access_config`].
+///
+/// [`quick_access_config`]: super::quick_access_config
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickAccess {
+    /// Service name (must match the serve side).
+    pub name: String,
+    /// Transport protocol.
+    pub protocol: Protocol,
+    /// Listen host; `None` means `127.0.0.1`.
+    pub host: Option<String>,
+    /// Listen port.
+    pub port: u16,
+    /// Peer node id, as typed; validated by the builder.
+    pub node_id: String,
+    /// Relay URL used by both peers; `None` uses the default relays.
+    pub relay_url: Option<String>,
+    /// File holding a persistent secret key; `None` means an ephemeral identity.
+    pub key_file: Option<PathBuf>,
+}
+
 /// Result of `set_service`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetOutcome {
