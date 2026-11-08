@@ -5,11 +5,11 @@
 //! The binaries are thin wrappers so each one is a self-contained executable
 //! that never needs another binary at runtime.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::cli;
 use crate::cli::{Binary, Cli, ConfigAction, Role, RoleCmd, ServiceArgs};
-use crate::cli_args::{ProtocolArg, ServiceAddr};
+use crate::cli_args::ProtocolArg;
 use crate::config_cmd;
 use crate::lifecycle;
 use crate::status_cmd;
@@ -86,11 +86,6 @@ fn config_set_path(binary: Binary, role: &str) -> Vec<String> {
     } else {
         std::iter::once(role.to_owned()).chain(tail).collect()
     }
-}
-
-/// Host of a quick-mode address; a bare port means loopback.
-fn quick_host(addr: &ServiceAddr) -> String {
-    addr.host.clone().unwrap_or_else(|| "127.0.0.1".to_owned())
 }
 
 /// Callback invoked once a configured `run` reports readiness, after the
@@ -247,27 +242,7 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext, ready: ReadyHook) -> any
             dispatch_role_cmd(status_role, cmd, binary, ctx, ready).await
         }
         Role::Serve { quick, cmd: None } => {
-            let svc = quick.service;
-            let (name, target) = svc
-                .name
-                .zip(svc.target)
-                .context("internal: quick mode requires --name and --target")?;
-            let protocol = svc.protocol.unwrap_or(ProtocolArg::Tcp).into();
-            let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = iroh_tunnel_host::config::ServeConfig {
-                node: iroh_tunnel_host::config::NodeConfig {
-                    secret_key,
-                    relay_urls: quick.relay_url.into_iter().collect(),
-                    ..Default::default()
-                },
-                services: vec![iroh_tunnel_host::config::ServeService {
-                    name,
-                    protocol,
-                    host: quick_host(&target),
-                    port: target.port.get(),
-                    udp: Default::default(),
-                }],
-            };
+            let cfg = config_ops::quick_serve_config(&quick_serve_request(quick)?)?;
             runtime::run_quick_serve(
                 cfg,
                 ctx,
@@ -277,34 +252,7 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext, ready: ReadyHook) -> any
             .await
         }
         Role::Access { quick, cmd: None } => {
-            let svc = quick.service;
-            let (name, listen, node_id) = svc
-                .name
-                .zip(svc.listen)
-                .zip(svc.node_id)
-                .map(|((n, l), i)| (n, l, i))
-                .context("internal: quick mode requires --name, --listen and --node-id")?;
-            let protocol = svc.protocol.unwrap_or(ProtocolArg::Tcp).into();
-            node_id.parse::<iroh::EndpointId>().map_err(|e| {
-                CliError::Config(format!("access quick mode: invalid --node-id: {e}"))
-            })?;
-            let secret_key = read_key_file(quick.key_file.as_deref())?;
-            let cfg = iroh_tunnel_host::config::AccessConfig {
-                node: iroh_tunnel_host::config::NodeConfig {
-                    secret_key,
-                    relay_urls: quick.relay_url.into_iter().collect(),
-                    ..Default::default()
-                },
-                services: vec![iroh_tunnel_host::config::AccessService {
-                    name,
-                    node_id,
-                    protocol,
-                    host: quick_host(&listen),
-                    port: listen.port.get(),
-                    relay_urls: vec![],
-                    udp: Default::default(),
-                }],
-            };
+            let cfg = config_ops::quick_access_config(&quick_access_request(quick)?)?;
             runtime::run_quick_access(
                 cfg,
                 ctx,
@@ -314,6 +262,44 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext, ready: ReadyHook) -> any
             .await
         }
     }
+}
+
+/// Map the quick serve flags to the host request; clap guarantees the
+/// required flags, so their absence is an internal error.
+fn quick_serve_request(quick: cli::ServeQuickArgs) -> anyhow::Result<config_ops::QuickServe> {
+    let svc = quick.service;
+    let (name, target) = svc
+        .name
+        .zip(svc.target)
+        .context("internal: quick mode requires --name and --target")?;
+    Ok(config_ops::QuickServe {
+        name,
+        protocol: svc.protocol.unwrap_or(ProtocolArg::Tcp).into(),
+        host: target.host,
+        port: target.port.get(),
+        relay_url: quick.relay_url,
+        key_file: quick.key_file,
+    })
+}
+
+/// Map the quick access flags to the host request; clap guarantees the
+/// required flags, so their absence is an internal error.
+fn quick_access_request(quick: cli::AccessQuickArgs) -> anyhow::Result<config_ops::QuickAccess> {
+    let svc = quick.service;
+    let ((name, listen), node_id) = svc
+        .name
+        .zip(svc.listen)
+        .zip(svc.node_id)
+        .context("internal: quick mode requires --name, --listen and --node-id")?;
+    Ok(config_ops::QuickAccess {
+        name,
+        protocol: svc.protocol.unwrap_or(ProtocolArg::Tcp).into(),
+        host: listen.host,
+        port: listen.port.get(),
+        node_id,
+        relay_url: quick.relay_url,
+        key_file: quick.key_file,
+    })
 }
 
 /// `update`: map the CLI options to a request, resolve the running
@@ -472,34 +458,6 @@ fn dispatch_config<S: ServiceArgs>(
         ConfigAction::Path { config } => config_cmd::path(role, config.as_deref()),
         ConfigAction::Check { config } => config_cmd::check(role, config.as_deref()),
     }
-}
-
-/// Read the persistent secret key supplied with `-k/--key-file`.
-///
-/// Returns an empty string (ephemeral identity) when no file is given. The
-/// file holds the base64 key written by `config keygen`. Diagnostics name the
-/// path but never echo file contents (RS-10); an unusable key is a config
-/// error and nothing is written back (RS-05, RS-06).
-fn read_key_file(path: Option<&Path>) -> anyhow::Result<String> {
-    let Some(path) = path else {
-        return Ok(String::new());
-    };
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        CliError::Config(format!("--key-file {}: cannot read: {e}", path.display()))
-    })?;
-    let key = text.trim();
-    if key.is_empty() {
-        return Err(
-            CliError::Config(format!("--key-file {}: file is empty", path.display())).into(),
-        );
-    }
-    iroh_tunnel_host::config::resolve_secret_key(key).map_err(|_| {
-        CliError::Config(format!(
-            "--key-file {}: not a valid base64 32-byte secret key",
-            path.display()
-        ))
-    })?;
-    Ok(key.to_owned())
 }
 
 #[cfg(test)]

@@ -13,7 +13,11 @@ mod identity_state;
 mod keygen;
 mod list_services;
 mod mutate;
+mod quick_access_config;
+mod quick_node;
+mod quick_serve_config;
 mod random_identity;
+mod read_key_file;
 mod remove_service;
 mod require_existing;
 mod require_present;
@@ -35,6 +39,8 @@ pub use identity_state::identity_state;
 pub use iroh_tunnel_engine::settings::{Protocol, UdpLimits};
 pub use keygen::keygen;
 pub use list_services::list_services;
+pub use quick_access_config::quick_access_config;
+pub use quick_serve_config::quick_serve_config;
 pub use random_identity::random_identity;
 pub use remove_service::remove_service;
 pub use require_existing::require_existing;
@@ -47,7 +53,7 @@ pub use show_config::show_config;
 pub use to_settings::{access_settings, serve_settings};
 pub use types::{
     Disclosure, EditAttempt, EditOutcome, EditRejection, GeneratedIdentity, IdentityState,
-    KeygenOutcome, Mutation, RotationConsent, ServiceList, ServiceRow, SetError, SetOutcome,
-    SetService, ShownConfig,
+    KeygenOutcome, Mutation, QuickAccess, QuickServe, RotationConsent, ServiceList, ServiceRow,
+    SetError, SetOutcome, SetService, ShownConfig,
 };
 pub use types::{FieldChange, ServiceField};
