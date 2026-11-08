@@ -24,7 +24,11 @@ whether it is `public`. If the change declares none, replace the table with
 
 ---
 
-## Task 1: <!-- Component Name --> — implements X.Y
+## Task 1: <!-- Component Name --> — implements N
+
+**Covers:** <!-- N.1, N.2, … -->
+**Difficulty:** <!-- Easy | Normal | Hard | Very Hard -->
+**Blocked by:** <!-- none | Task M[, Task M]* -->
 
 - [ ] **Step 1:** <!-- micro-step -->
 - [ ] **Step 2:** <!-- micro-step -->

@@ -43,6 +43,17 @@
 
 ---
 
+## Lanes
+
+> One row per plan task. Lane branch is `<change-name>--task-<N>` or
+> `sequential`. The Commit range above covers the lane merges too.
+
+| Task | Lane branch | Lane range | Review | Merge commit |
+|---|---|---|---|---|
+| `<task N>` | `<change-name>--task-<N>` or `sequential` | `<from-sha>..<to-sha>` | `<verdict>` | `<sha>` |
+
+---
+
 ## Next step
 
 `<e.g., "Run /opsx-verify" or "Re-run apply to address <issue>">`
