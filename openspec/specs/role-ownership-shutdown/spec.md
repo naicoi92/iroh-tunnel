@@ -68,12 +68,11 @@ Confidence: inferred
 - **THEN** the message reads "<role> is already running (<scope>; <owner>); stop it first (...); nothing is stopped automatically"
 
 ### Requirement: Machine-tier lock between system service and user processes
-The system SHALL prevent simultaneous system and user processes of one role using a machine lock: exclusive for its creator and shared for other processes, regardless of start order; this tier exists only on Linux and macOS.
-Evidence: src/ownership.rs:12-28, src/ownership.rs:97-122, src/ownership.rs:380-420, tests/role_ownership.rs:435-475 (system_tier_lock_refuses_user_start_and_blocks_a_system_start)
+The system SHALL prevent a system process and a user process of one role from running at the same time, using a machine lock that its creator holds exclusively and other processes hold shared, regardless of start order. The tier SHALL exist on Linux, macOS and Windows.
 
 #### Scenario: Machine lock location
 - **WHEN** a machine-tier lock is resolved
-- **THEN** its path is `/run/iroh-tunnel/<role>.lock` on Linux and `/var/run/iroh-tunnel/<role>.lock` on macOS
+- **THEN** its path is `/run/iroh-tunnel/<role>.lock` on Linux, `/var/run/iroh-tunnel/<role>.lock` on macOS and `%ProgramData%\iroh-tunnel\<role>.lock` on Windows
 
 #### Scenario: System lock held, user start
 - **WHEN** the machine lock is held exclusively on a read-only file and a user serve is started
@@ -82,6 +81,10 @@ Evidence: src/ownership.rs:12-28, src/ownership.rs:97-122, src/ownership.rs:380-
 #### Scenario: User running, system start
 - **WHEN** a user serve process is running
 - **THEN** the machine lock cannot be taken exclusively by another holder because the user process holds it shared
+
+#### Scenario: Windows user task while the system service runs
+- **WHEN** the Windows system service of a role is running and the same role is started in the logged-in user's session
+- **THEN** the user start exits with code 6 and stderr contains "system service"
 
 ### Requirement: Non-elevated start does not create a machine lock
 The system SHALL NOT create the machine lock file or directory from a non-elevated process, and SHALL proceed without machine-tier ownership when the lock file does not exist.
@@ -168,12 +171,15 @@ Evidence: src/ownership.rs:548-560, src/app.rs:342, tests/role_ownership.rs:478-
 - **THEN** exit code is 6 and stderr contains "already running"
 
 ### Requirement: Stop signals begin a graceful drain
-The system SHALL treat SIGINT (Ctrl+C) and SIGTERM (SIGINT only on non-Unix) as stop requests, log which signal was received, and begin shutdown by stopping admission before draining active channels.
-Evidence: src/shutdown.rs:1, src/shutdown.rs:113-160, tests/role_ownership.rs:336-358
+The system SHALL treat SIGINT (Ctrl+C), SIGTERM (SIGINT only on non-Unix) and, for a Windows system service, the Service Control Manager's stop, shutdown and pre-shutdown requests as stop requests. It SHALL log which one was received, and begin shutdown by stopping admission before draining active channels.
 
 #### Scenario: SIGTERM
 - **WHEN** a role receives SIGTERM
 - **THEN** it logs "received SIGTERM" and starts the drain
+
+#### Scenario: Service stop request
+- **WHEN** a Windows system service receives a stop request from the Service Control Manager
+- **THEN** it logs the stop request and starts the same drain
 
 ### Requirement: Single drain deadline of three seconds
 The system SHALL give all services and connections one shared drain budget of 3 seconds measured from the first stop, with later stop requests not extending it.
