@@ -105,8 +105,10 @@ pub enum Liveness {
     },
 }
 
-fn conflict(msg: String) -> anyhow::Error {
-    CliError::Conflict(msg).into()
+/// A start refused by a conflict. `CliError::Conflict` carries no prefix of its
+/// own because an install can conflict too; the start paths say so here.
+fn start_refused(msg: String) -> anyhow::Error {
+    CliError::Conflict(format!("start refused: {msg}")).into()
 }
 
 /// Test builds on Windows scope the user tier by `HOME` like Unix does, so
@@ -315,7 +317,7 @@ fn claim_lock(file: File) -> Result<Lock> {
 }
 
 #[derive(Clone, Copy)]
-enum LockKind {
+pub(crate) enum LockKind {
     Exclusive,
     Shared,
 }
@@ -387,7 +389,7 @@ impl Tier {
 
 /// The refusal for a start that finds `role` already running at `scope`.
 fn already_running(role: Role, scope: &str, owner: Option<&OwnerRecord>) -> anyhow::Error {
-    conflict(format!(
+    start_refused(format!(
         "{} is already running ({scope}; {}); {}",
         role.name(),
         describe_owner(owner),
@@ -396,9 +398,20 @@ fn already_running(role: Role, scope: &str, owner: Option<&OwnerRecord>) -> anyh
 }
 
 fn stop_hint(role: Role) -> String {
+    stop_hint_for(role, "")
+}
+
+/// [`stop_hint`] whose service command carries `scope_flag` (for example
+/// `--system`), for a holder in the other service scope. An empty flag adds
+/// nothing.
+pub(crate) fn stop_hint_scoped(role: Role, scope_flag: &str) -> String {
+    stop_hint_for(role, &format!(" {scope_flag}"))
+}
+
+fn stop_hint_for(role: Role, flag_suffix: &str) -> String {
     let name = role.name();
     format!(
-        "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop` for a service); \
+        "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop{flag_suffix}` for a service); \
          nothing is stopped automatically"
     )
 }
@@ -594,7 +607,7 @@ impl RoleClaim {
                 continue;
             };
             if owner.node_id.as_deref() == Some(node_id) {
-                return Err(conflict(format!(
+                return Err(start_refused(format!(
                     "the {} role already runs with the same public identity ({}); \
                      two processes must not share a key — use `config keygen` to create another one",
                     other.name(),
@@ -622,25 +635,108 @@ pub(crate) fn probe(role: Role) -> Result<Liveness> {
 
 /// Every tier at which `role` is running (user first), empty when none.
 fn probe_tiers(role: Role) -> Result<Vec<Liveness>> {
-    let mut running = Vec::new();
-    let user_dir = user_dir()?;
-    if lock_is_held(&user_dir.join(lock_name(role)), false)? {
-        running.push(Liveness::Running {
-            tier: Tier::User,
-            owner: read_owner(&user_dir, role),
-        });
-    }
+    let mut seen = vec![tier_liveness_in(role, Tier::User, &user_dir()?)?];
     if let Some(MachineDir { path: dir, .. }) = machine_dir() {
-        // A prober that can open the machine lock for writing tests it
-        // exclusively, or it would miss shared (non-elevated) holders.
-        if lock_is_held(&dir.join(lock_name(role)), true)? {
-            running.push(Liveness::Running {
-                tier: Tier::Machine,
-                owner: read_owner(&dir, role),
-            });
-        }
+        seen.push(tier_liveness_in(role, Tier::Machine, &dir)?);
     }
-    Ok(running)
+    seen.retain(|l| matches!(l, Liveness::Running { .. }));
+    Ok(seen)
+}
+
+/// Both tiers' lock directories in one value.
+#[derive(Debug, Clone)]
+pub(crate) struct LockDirs {
+    /// The user tier's directory.
+    pub user: PathBuf,
+    /// The machine tier's directory; `None` where the platform defines none.
+    pub machine: Option<PathBuf>,
+}
+
+impl LockDirs {
+    /// Resolve both directories; `home` selects an explicit account home for
+    /// the user tier (Unix only), otherwise the invoking user's directory.
+    ///
+    /// # Errors
+    ///
+    /// The user state directory cannot be resolved.
+    pub(crate) fn resolve(home: Option<&Path>) -> Result<LockDirs> {
+        #[cfg(unix)]
+        let user = match home {
+            Some(home) => crate::paths::state_dir_in(home),
+            None => user_dir()?,
+        };
+        #[cfg(not(unix))]
+        let user = {
+            let _ = home;
+            user_dir()?
+        };
+        Ok(LockDirs {
+            user,
+            machine: machine_dir().map(|m| m.path),
+        })
+    }
+}
+
+/// The seam the install path resolves lock directories through.
+pub(crate) type LockResolver<'a> = &'a dyn Fn(Option<&Path>) -> Result<LockDirs>;
+
+/// Probe exactly `dir` for `role`'s lock and report it as `tier`.
+///
+/// # Errors
+///
+/// I/O errors other than "no such lock" when opening or testing the lock.
+pub(crate) fn tier_liveness_in(role: Role, tier: Tier, dir: &Path) -> Result<Liveness> {
+    // A prober that can open the machine lock for writing tests it
+    // exclusively, or it would miss shared (non-elevated) holders.
+    let prefer_write = matches!(tier, Tier::Machine);
+    if lock_is_held(&dir.join(lock_name(role)), prefer_write)? {
+        Ok(Liveness::Running {
+            tier,
+            owner: read_owner(dir, role),
+        })
+    } else {
+        Ok(Liveness::NotRunning)
+    }
+}
+
+/// Liveness of `role` at one tier of `dirs`.
+///
+/// The machine tier probes with a write lock, so another account's shared
+/// hold there is seen as running: root running `install --user` can be
+/// refused by someone else's user process. This mirrors `probe_tiers`.
+///
+/// # Errors
+///
+/// As [`tier_liveness_in`].
+pub(crate) fn tier_liveness(role: Role, tier: Tier, dirs: &LockDirs) -> Result<Liveness> {
+    let dir = match tier {
+        Tier::User => Some(&dirs.user),
+        Tier::Machine => dirs.machine.as_ref(),
+    };
+    dir.map_or(Ok(Liveness::NotRunning), |dir| {
+        tier_liveness_in(role, tier, dir)
+    })
+}
+
+/// A lock held by a test at an explicit directory; released on drop.
+#[cfg(test)]
+pub(crate) struct TestHold {
+    _file: File,
+}
+
+/// Hold `role`'s lock in `dir` (which must exist) with `kind`.
+///
+/// # Errors
+///
+/// The lock file cannot be created, or another holder already has the lock.
+#[cfg(test)]
+pub(crate) fn hold_for_test(role: Role, dir: &Path, kind: LockKind) -> Result<TestHold> {
+    let path = dir.join(lock_name(role));
+    let file = create_lock_file(&path, 0o600)?;
+    match try_lock(file, kind)? {
+        Lock::Held(file) => Ok(TestHold { _file: file }),
+        Lock::Busy => anyhow::bail!("lock {} is already held", path.display()),
+    }
 }
 
 /// Whether another process holds the lock at `path`; a missing lock is not
@@ -732,6 +828,12 @@ pub(crate) fn ensure_not_running(role: Role) -> Result<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn a_refused_start_says_so() {
+        let text = already_running(Role::Serve, "this user", None).to_string();
+        assert!(text.starts_with("start refused:"), "{text}");
+    }
 
     #[test]
     fn roles_are_each_others_counterpart() {
@@ -943,5 +1045,86 @@ mod tests {
             dacl == format!("P{aces}") || dacl == format!("PAI{aces}"),
             "{sddl}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn lock_dirs_resolve_uses_the_given_home() {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = LockDirs::resolve(Some(home.path())).unwrap();
+        assert_eq!(dirs.user, crate::paths::state_dir_in(home.path()));
+    }
+
+    #[test]
+    fn lock_dirs_resolve_without_home_matches_the_ambient_dirs() {
+        let dirs = LockDirs::resolve(None).ok();
+        assert_eq!(dirs.as_ref().map(|d| d.user.clone()), user_dir().ok());
+        if let Some(dirs) = dirs {
+            assert_eq!(dirs.machine, machine_dir().map(|m| m.path));
+        }
+    }
+
+    #[test]
+    fn tier_liveness_in_reports_a_held_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Exclusive).unwrap();
+        let seen = tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap();
+        assert!(
+            matches!(
+                seen,
+                Liveness::Running {
+                    tier: Tier::Machine,
+                    ..
+                }
+            ),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn tier_liveness_in_is_not_running_for_an_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = tier_liveness_in(Role::Serve, Tier::User, dir.path()).unwrap();
+        assert!(matches!(seen, Liveness::NotRunning), "{seen:?}");
+    }
+
+    #[test]
+    fn tier_liveness_in_is_running_even_without_an_owner_record() {
+        // read_owner returns None when <role>.owner.json is missing. A held lock
+        // must still read as Running, or a conflict check would permit the install.
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Exclusive).unwrap();
+        let Liveness::Running { owner, .. } =
+            tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap()
+        else {
+            panic!("a held lock must read as Running")
+        };
+        assert!(owner.is_none(), "no record was written");
+    }
+
+    #[test]
+    fn tier_liveness_in_is_not_running_for_an_existing_but_unlocked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        create_lock_file(&dir.path().join(lock_name(Role::Serve)), 0o600).unwrap();
+        let seen = tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap();
+        assert!(matches!(seen, Liveness::NotRunning), "{seen:?}");
+    }
+
+    #[test]
+    fn a_shared_hold_is_seen_on_the_machine_tier_only() {
+        // probe_tiers prefers a write lock on the machine tier, so an exclusive
+        // probe collides with another account's shared hold. Pinned because it
+        // means root running `install --user` can be refused by someone else's
+        // user process. Not changed here; recorded.
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Shared).unwrap();
+        assert!(matches!(
+            tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap(),
+            Liveness::Running { .. }
+        ));
+        assert!(matches!(
+            tier_liveness_in(Role::Serve, Tier::User, dir.path()).unwrap(),
+            Liveness::NotRunning
+        ));
     }
 }

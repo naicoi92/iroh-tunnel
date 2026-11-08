@@ -86,7 +86,6 @@ pub async fn run_serve(
     // accept task takes ownership of `targets`.
     let status = StatusSnapshot {
         node_id: endpoint::node_id_string(&ep),
-        home_relay: endpoint::home_relay(&ep).map(|u| u.to_string()),
         pid: std::process::id(),
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -113,7 +112,7 @@ pub async fn run_serve(
             })
             .collect(),
     };
-    let initial = status.render(Vec::new());
+    let initial = status.render(current_home_relay(&ep), Vec::new());
     // Seed the flush loop's change detection with the initial write when
     // it succeeded — otherwise the first tick would rewrite an identical
     // idle snapshot. A failed initial write seeds `None`, so the first
@@ -237,13 +236,14 @@ impl ServiceTarget {
 
 /// Observation template: everything immutable for the life of the process,
 /// plus the live per-service counters rendered into `active_connections`.
+/// The home relay is not stored here: iroh assigns it after bind and may
+/// change it on failover, so each render takes the current value (#177).
 ///
 /// Since 0.2.0 `active_connections` counts *active streams* (in-flight pipes),
 /// not iroh connections — with multiplexing one connection carries many
 /// channels, so streams are what an operator cares about.
 struct StatusSnapshot {
     node_id: String,
-    home_relay: Option<String>,
     pid: u32,
     started_at: u64,
     services: Vec<StatusServiceRow>,
@@ -258,10 +258,14 @@ struct StatusServiceRow {
 }
 
 impl StatusSnapshot {
-    fn render(&self, connections: Vec<PeerConnectionObservation>) -> ServeObservation {
+    fn render(
+        &self,
+        home_relay: Option<String>,
+        connections: Vec<PeerConnectionObservation>,
+    ) -> ServeObservation {
         ServeObservation {
             node_id: self.node_id.clone(),
-            home_relay: self.home_relay.clone(),
+            home_relay,
             pid: self.pid,
             started_at: self.started_at,
             services: self
@@ -393,8 +397,15 @@ async fn render_connections(
     out
 }
 
+/// The endpoint's home relay as rendered into the status file, read live:
+/// `None` until iroh assigns one after bind (issue #177).
+fn current_home_relay(ep: &iroh::Endpoint) -> Option<String> {
+    endpoint::home_relay(ep).map(|relay| relay.to_string())
+}
+
 /// Periodically rewrite serve-status.json, but only when the rendered
-/// snapshot changed (stream counters, peer set, or transport states).
+/// snapshot changed (stream counters, peer set, home relay, or transport
+/// states).
 ///
 /// Stops COOPERATIVELY on `stop`: aborting this task would not cancel an
 /// in-flight `spawn_blocking` save (write+fsync+rename runs to completion
@@ -423,7 +434,7 @@ async fn status_flush_loop(
             _ = tokio::time::sleep(interval) => {}
         }
         let connections = render_connections(&ep, &peers).await;
-        let observation = status.render(connections);
+        let observation = status.render(current_home_relay(&ep), connections);
         if last.as_ref() == Some(&observation) {
             continue;
         }
@@ -1145,7 +1156,6 @@ mod tests {
     fn empty_snapshot() -> StatusSnapshot {
         StatusSnapshot {
             node_id: "flush-test".to_string(),
-            home_relay: None,
             pid: 1,
             started_at: 0,
             services: Vec::new(),
@@ -1205,7 +1215,7 @@ mod tests {
 
     #[tokio::test]
     async fn seeded_unchanged_status_is_never_rewritten() {
-        let seed = empty_snapshot().render(Vec::new());
+        let seed = empty_snapshot().render(None, Vec::new());
         let saved = run_flush_for_three_ticks(Some(seed), false).await;
         assert!(saved.is_empty(), "{saved:?}");
     }

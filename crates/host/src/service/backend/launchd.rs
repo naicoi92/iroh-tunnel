@@ -13,6 +13,12 @@
 //! `exit status: 3` reported on `service start/stop` after a `sudo ... install`:
 //! `launchctl start <label>` searched the *caller's* domain, found nothing, and
 //! returned 3 — even though the job was loaded in the system domain.
+//!
+//! Loading runs `launchctl enable <service-target>` first: launchd keeps a
+//! persistent per-domain disable list, keyed by label, which survives
+//! `bootout`, uninstall and reboot, and makes `bootstrap` fail with
+//! `5: Input/output error`. `systemctl enable` holds the same position in the
+//! systemd backend.
 
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
@@ -123,7 +129,7 @@ fn format_plist_with(
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          {pin_comment}\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyManifest-1.0.dtd\">\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
          <dict>\n\
          \t<key>Label</key>\n\
@@ -195,6 +201,9 @@ pub(crate) fn install(
 }
 
 /// Replace any loaded job with the plist at `path`, hinting on failure.
+///
+/// The leading `enable` is unconditional and idempotent. Unlike the
+/// best-effort `bootout`, its failure is reported and stops the load.
 fn load(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
@@ -205,6 +214,10 @@ fn load(
     let target = service_target(role, scope);
     let domain = domain_target(scope);
     let path_str = path.to_string_lossy().into_owned();
+
+    // Clear any persistent per-domain disable flag for this label first;
+    // otherwise `bootstrap` fails with `5: Input/output error`.
+    run_launchctl(native, &["enable", &target])?;
 
     // If a job is already registered (re-install over an existing load),
     // bootout first so bootstrap doesn't fail with a confusing
@@ -220,7 +233,6 @@ fn load(
     // etc.) rather than the legacy `load`'s opaque `5: Input/output error`.
     if let Err(e) = run_launchctl(native, &["bootstrap", &domain, &path_str]) {
         notes(&ServiceNote::LaunchdBootstrapHint {
-            target,
             domain,
             plist: path.to_owned(),
         });
@@ -373,6 +385,29 @@ mod tests {
     use crate::service::ServiceNote;
 
     #[test]
+    fn plist_declares_apples_property_list_doctype() {
+        let body = format_plist("serve", Path::new("/b"), Path::new("/c"), Path::new("/s"));
+        assert!(body.contains("PropertyList-1.0.dtd"), "{body}");
+        assert!(!body.contains("PropertyManifest"), "{body}");
+    }
+
+    #[test]
+    fn plist_carries_no_exit_status_exemption() {
+        // launchd's KeepAlive cannot exempt an exit status the way systemd's
+        // RestartPreventExitStatus does; see design.md. This pins the gap so a
+        // future edit cannot claim containment the platform does not provide.
+        let body = format_plist("serve", Path::new("/b"), Path::new("/c"), Path::new("/s"));
+        assert!(
+            body.contains("<key>SuccessfulExit</key>\n\t\t<false/>"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("ExitStatus") && !body.contains("OtherJobEnabled"),
+            "{body}"
+        );
+    }
+
+    #[test]
     fn capture_mode_returns_native_output() {
         let events = Events::default();
         let mut fake = FakeRunner::new(&events, vec![output(0, "state = running\n", "")]);
@@ -392,9 +427,93 @@ mod tests {
     }
 
     #[test]
+    fn load_enables_the_label_before_bootout_and_bootstrap() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(
+            &events,
+            vec![output(0, "", ""), output(0, "", ""), output(0, "", "")],
+        );
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        load(
+            &mut native,
+            &mut |_| {},
+            "serve",
+            ServiceScope::System,
+            Path::new("/tmp/x.plist"),
+        )
+        .unwrap();
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                call(
+                    "launchctl",
+                    &["enable", "system/dev.iroh-tunnel.serve"],
+                    OutputMode::Inherit
+                ),
+                call(
+                    "launchctl",
+                    &["bootout", "system/dev.iroh-tunnel.serve"],
+                    OutputMode::Capture
+                ),
+                call(
+                    "launchctl",
+                    &["bootstrap", "system", "/tmp/x.plist"],
+                    OutputMode::Inherit
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_fails_without_bootstrapping_when_enable_fails() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![output(1, "", "Operation not permitted")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let err = load(
+            &mut native,
+            &mut |_| {},
+            "serve",
+            ServiceScope::User,
+            Path::new("/tmp/x.plist"),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("enable"), "{err:#}");
+        assert_eq!(events.borrow().len(), 1, "no command after a failed enable");
+    }
+
+    #[test]
+    fn load_ignores_a_bootout_failure_and_still_bootstraps() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(
+            &events,
+            vec![
+                output(0, "", ""),
+                output(3, "", "Boot-out failed: 3: No such process"),
+                output(0, "", ""),
+            ],
+        );
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        load(
+            &mut native,
+            &mut |_| {},
+            "serve",
+            ServiceScope::System,
+            Path::new("/tmp/x.plist"),
+        )
+        .unwrap();
+        assert_eq!(events.borrow().len(), 3, "bootstrap still issued");
+    }
+
+    #[test]
     fn notes_reach_observer_before_native_command() {
         let events = Events::default();
-        let mut fake = FakeRunner::new(&events, vec![output(0, "", ""), output(5, "", "")]);
+        let mut fake = FakeRunner::new(
+            &events,
+            vec![output(0, "", ""), output(0, "", ""), output(5, "", "")],
+        );
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
         let mut notes = note_sink(&events);
@@ -413,6 +532,11 @@ mod tests {
             vec![
                 call(
                     "launchctl",
+                    &["enable", "system/dev.iroh-tunnel.serve"],
+                    OutputMode::Inherit
+                ),
+                call(
+                    "launchctl",
                     &["bootout", "system/dev.iroh-tunnel.serve"],
                     OutputMode::Capture
                 ),
@@ -422,7 +546,6 @@ mod tests {
                     OutputMode::Inherit
                 ),
                 Event::Note(ServiceNote::LaunchdBootstrapHint {
-                    target: "system/dev.iroh-tunnel.serve".into(),
                     domain: "system".into(),
                     plist,
                 }),

@@ -28,15 +28,12 @@ pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
              system-wide /etc/init.d script owned by root.\n"
                 .to_owned(),
         ),
-        ServiceNote::LaunchdBootstrapHint {
-            target,
-            domain,
-            plist,
-        } => (
+        ServiceNote::LaunchdBootstrapHint { domain, plist } => (
             Stream::Stderr,
             format!(
-                "Hint: run `launchctl print {target}` or \
-                 `launchctl bootstrap {domain} {}` for richer diagnostics.\n",
+                "Hint: a disabled label is the usual cause - check \
+                 `launchctl print-disabled {domain}`; run \
+                 `launchctl bootstrap {domain} {}` for launchd's own diagnostics.\n",
                 plist.display()
             ),
         ),
@@ -363,13 +360,12 @@ mod tests {
         );
         check(
             ServiceNote::LaunchdBootstrapHint {
-                target: "gui/501/dev.iroh-tunnel.serve".into(),
                 domain: "gui/501".into(),
                 plist: "/p/x.plist".into(),
             },
             Stream::Stderr,
-            "Hint: run `launchctl print gui/501/dev.iroh-tunnel.serve` or \
-             `launchctl bootstrap gui/501 /p/x.plist` for richer diagnostics.\n",
+            "Hint: a disabled label is the usual cause - check `launchctl print-disabled gui/501`; \
+             run `launchctl bootstrap gui/501 /p/x.plist` for launchd's own diagnostics.\n",
         );
         check(
             ServiceNote::Installed {

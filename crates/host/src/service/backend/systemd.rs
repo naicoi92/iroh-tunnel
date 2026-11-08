@@ -312,6 +312,20 @@ mod tests {
         .unwrap();
         let log = events.borrow();
         assert_eq!(log.len(), 4, "{log:?}");
+        // Re-install over a running unit must restart it: pin the order of the
+        // trailing arguments, independent of the scope flag run_systemctl adds.
+        let expected_tails: [&[&str]; 3] = [
+            &["daemon-reload"],
+            &["enable", "iroh-tunnel-serve.service"],
+            &["restart", "iroh-tunnel-serve.service"],
+        ];
+        for (event, tail) in log[..3].iter().zip(expected_tails) {
+            let Event::Call { args, .. } = event else {
+                panic!("expected a systemctl call, got {event:?}");
+            };
+            let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
+            assert!(args.ends_with(&tail), "{args:?}");
+        }
         assert_eq!(
             log[3],
             Event::Note(ServiceNote::Installed {
@@ -342,6 +356,19 @@ mod tests {
         // A refused start (exit 6, role already running) must not restart-loop.
         assert!(body.contains("RestartPreventExitStatus=6"), "body: {body}");
         assert!(body.contains("ExecStart=/usr/bin/iroh-tunnel serve run --config /etc/cfg"));
+    }
+
+    #[test]
+    fn unit_exempts_the_refused_start_status() {
+        // Deliberately duplicates one assertion of the test above so the
+        // systemd and launchd containment guards sit side by side.
+        let body = format_unit(
+            "serve",
+            Path::new("/usr/bin/iroh-tunnel"),
+            Path::new("/etc/cfg"),
+            Path::new("/var/state"),
+        );
+        assert!(body.contains("RestartPreventExitStatus=6"), "body: {body}");
     }
 
     #[test]

@@ -55,6 +55,13 @@ Windows service scope changes:
 - `-r` is a short option for `--relay-url`; short options for `-c`, `-n`, `-t`,
   `-l`, `-N`, `-p`, `-k` and `-y` are consistent across commands.
 
+### Fixed
+
+- macOS: `service install --user` no longer fails with a launchd bootstrap error. The job label is enabled before bootstrap, the plist uses the standard property-list DOCTYPE, and the failure hint points to `launchctl print-disabled`.
+- `service install` is refused with exit code `6` when the role is held at the other scope, naming how to stop it and the command that removes it.
+- `start refused:` is no longer prefixed to non-start conflicts.
+- `serve-status.json` and `serve status` now report `home_relay` once the endpoint registers with a relay, instead of `null` for the whole run (#177).
+
 ## [0.5.0] - 2026-11-06
 
 The largest release so far: quick mode, standalone role executables, UDP,
