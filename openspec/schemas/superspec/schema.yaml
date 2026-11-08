@@ -1,11 +1,11 @@
-# Superspec schema v6 for pi-superspec.
+# Superspec schema v8 for pi-superspec.
 #
 # Forked from Superspec v4 by Daniel Hanold (MIT License, see LICENSE),
 # upstream commit e1c8f417ee3601208416d988ba3b37d83ddb63f2.
 name: superspec
-version: 6
+version: 8
 x-pi-superspec:
-  version: 6
+  version: 8
 description: >
   Spec-driven workflow integrated with Superpowers skills.
   brainstorm → proposal → specs → tasks → plan → apply → verify → finalize.
@@ -28,6 +28,11 @@ artifacts:
         brainstorming design output directly to this change's `brainstorm.md`.
       - Keep technical decisions out of brainstorm.md; they belong in
         design.md. The two must not repeat each other.
+      - Before brainstorming, read the living spec in `openspec/specs/` of
+        each capability the change plausibly touches (judge from capability
+        names and Purpose lines) and cite the existing requirements involved.
+        Do not re-decide a specified requirement silently: state explicitly
+        when the change alters a specified requirement.
 
       After brainstorming completes, write the validated design to this
       change's `brainstorm.md` first, using the template structure. Then
@@ -58,6 +63,7 @@ artifacts:
       - **Capabilities**: Identify which specs will be created or modified:
         - **New Capabilities**: List capabilities being introduced. Each becomes a new `specs/<name>/spec.md`. Use kebab-case names.
         - **Modified Capabilities**: List existing capabilities whose REQUIREMENTS are changing. Check `openspec/specs/` for existing spec names.
+          List a capability here only after confirming in its living spec that existing requirements change.
       - **Impact**: Affected code, APIs, dependencies, or systems.
 
       Since brainstorming already explored the problem space,
@@ -114,6 +120,7 @@ artifacts:
       Create one spec file per capability listed in the proposal's Capabilities section.
       - New capabilities: use the exact kebab-case name from the proposal (specs/<capability>/spec.md).
       - Modified capabilities: use the existing spec folder name from openspec/specs/<capability>/ when creating the delta spec at specs/<capability>/spec.md.
+        For every `MODIFIED` requirement, first copy the full current requirement block from `openspec/specs/<capability>/spec.md`, then edit it. `MODIFIED`, `REMOVED` and `RENAMED` `FROM` headers MUST match the main spec header exactly. If a `MODIFIED` block drops a scenario, name the dropped scenario as intentional in the requirement text or the proposal.
 
       Delta operations (use ## headers):
       - **ADDED Requirements**: New capabilities
@@ -145,8 +152,15 @@ artifacts:
       Guidelines:
       - Group related tasks under ## numbered headings
       - Each task MUST be a checkbox: `- [ ] X.Y Task description`
-      - Tasks should be small enough to complete in one session
-      - Order tasks by dependency (what must be done first?)
+      - A task group (`## N. <name>`) is the unit handed to one agent;
+        that agent does its checkboxes in order. Work that should run
+        independently MUST be its own group, not a checkbox in another
+        group. Size groups by independence, not by checkbox count.
+      - Directly under every group heading, write one line that is not
+        a checkbox: `Blocked by: none` or `Blocked by: 1, 3`. Blocked by
+        lists group numbers only, separated by commas; never name an
+        individual checkbox.
+      - Order groups by dependency (what must be done first?)
 
       Reference specs for what needs to be built. If design.md exists,
       reference it for how to build it — but design is optional: design.md
@@ -179,8 +193,22 @@ artifacts:
       Plan rules:
       - Skip the skill's execution handoff; `/opsx-apply` chooses the
         executor.
-      - Every plan task names the tasks.md ID it implements (e.g.
-        `Task 3 — implements 1.2`).
+      - Every plan task names the tasks.md group it implements (e.g.
+        `Task 3 — implements 3`) and lists the checkboxes it covers in
+        a `**Covers:**` line. Plan task N implements exactly group N.
+      - Every plan task carries `**Difficulty:**` with one of `Easy`,
+        `Normal`, `Hard` or `Very Hard`, and `**Blocked by:**` with
+        `none` or a list of plan tasks (`Task 1, Task 2`). This
+        metadata is used to choose task order, parallel execution,
+        agent and effort.
+      - Every plan task lists the files it creates or modifies; a
+        task without a file list is treated as overlapping every
+        other task.
+      - Plan dependencies MUST carry the tasks.md dependencies of the
+        tasks the plan implements over to the plan, and dropping a
+        dependency needs a stated reason. A plan MAY add dependencies.
+        The plan reviewer reports a dropped dependency without a
+        reason.
       - List, for every `#### Scenario:` in specs/, the test that
         covers it.
       - The plan header's spec reference points at this change's
@@ -798,10 +826,24 @@ apply:
        Tell the executor:
        - Read plan.md in this change directory for micro-tasks
        - Update tasks.md checkboxes as coarse tasks complete
-       - When a plan task's review passes, tick its tasks.md box.
-         tasks.md is the official status; the executor's ledger is
-         for recovery only.
+       - When a plan task's review passes, tick the tasks.md boxes of
+         its group. tasks.md is the official status; the executor's
+         ledger is for recovery only.
        - Work within the created worktree
+
+       **Parallel lanes**: plan tasks (one task group each) whose
+       dependencies are all merged into `<change-name>`, and whose
+       files do not overlap, MAY run at the same time. Use one writer
+       per worktree: each writer lane that runs beside another writer
+       lane gets its own worktree on branch
+       `<change-name>--task-<N>`, cut from the current
+       `<change-name>` HEAD. At most three writer lanes run at once
+       unless project instructions set a lower limit. A lane is merged
+       back after its task review passes, in task order. On a merge
+       conflict, abort the merge, discard the lane and run that task
+       again alone on the new HEAD; a second conflict for the same
+       task stops apply and asks the user. A plan without dependency metadata runs its tasks one
+       after another, in plan order.
 
        IMPORTANT — transitive skill activation:
        subagent-driven-development internally enforces the
@@ -846,8 +888,13 @@ apply:
        (<change-name>), feature branch (the branch checked out before
        step 0), base branch (the integration branch), commit range,
        tasks completed X of Y, remaining tasks, executor identity,
-       "Contract deviations" (every entry so far, or `none`), and
-       an ISO timestamp. Commit it in the worktree. The receipt is the
+       "Contract deviations" (every entry so far, or `none`), the
+       `## Lanes` table, and an ISO timestamp. Lanes has one row for
+       each plan task: task, lane branch (`<change-name>--task-<N>`,
+       or `sequential`), lane commit range, task review verdict and
+       merge commit. The Commit range stays one range over
+       `<change-name>` that covers every commit, including the lane
+       merges. Commit it in the worktree. The receipt is the
        artifact that satisfies the DAG so `verify` becomes reachable.
 
        Apply stops after the final whole-branch review and the receipt.
