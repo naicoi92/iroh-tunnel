@@ -16,7 +16,7 @@
 - **Branch**: `feat/windows-system-service`
 - **Base branch**: `main`
 - **Final state**: `pr-open`
-- **PR URL**: `PR_URL_PLACEHOLDER`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/189`
 
 The worktree branch `windows-system-service` was fast-forwarded into the feature branch (`fa85e51..0553669`) and then deleted. No PR existed for this branch, so the owner approved pushing it and opening a PR in the Inbox (AGENTS.md requires explicit push/PR approval).
 
@@ -31,7 +31,7 @@ The worktree branch `windows-system-service` was fast-forwarded into the feature
 
 ## PR comment
 
-- **PR comment status**: `PR_COMMENT_PLACEHOLDER`
+- **PR comment status**: `posted`
 
 ---
 
