@@ -723,6 +723,8 @@ async fn scm_marker_outside_scm_is_config_error() -> Result<()> {
     Ok(())
 }
 
+// Needs the root `test-utils` seam `IROH_TUNNEL_TEST_EXIT_AFTER_MS`.
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn crash_is_restarted() -> Result<()> {
     if !enabled() {
@@ -743,6 +745,8 @@ async fn crash_is_restarted() -> Result<()> {
     Ok(())
 }
 
+// Needs the root `test-utils` seam `IROH_TUNNEL_TEST_FAIL_BEFORE_READY`.
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rollback_when_start_fails() -> Result<()> {
     if !enabled() {
@@ -1328,6 +1332,7 @@ fn runner_name() -> String {
 }
 
 /// Run `command` with `input` on stdin.
+#[cfg(feature = "test-utils")]
 fn run_with_input(mut command: Command, input: &str) -> Result<Output> {
     use std::io::Write as _;
     let mut child = command
@@ -1343,7 +1348,9 @@ fn run_with_input(mut command: Command, input: &str) -> Result<Output> {
     Ok(child.wait_with_output()?)
 }
 
-/// An interactive reinstall of the fixture's config answering `answer`.
+/// An interactive reinstall of the fixture's config answering `answer`,
+/// through the root `test-utils` seam `IROH_TUNNEL_TEST_INTERACTIVE`.
+#[cfg(feature = "test-utils")]
 fn reinstall_answering(fx: &Fixture, config: &Path, answer: &str) -> Result<Output> {
     let mut command = fx.command(&fx_install_args(config));
     command.env("IROH_TUNNEL_TEST_INTERACTIVE", "1");
@@ -1384,6 +1391,8 @@ async fn config_owned_by_other_user() -> Result<()> {
     Ok(())
 }
 
+// Needs the root `test-utils` seam `IROH_TUNNEL_TEST_INTERACTIVE`.
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn retarget_declined_and_approved() -> Result<()> {
     if !enabled() {
@@ -1578,6 +1587,7 @@ async fn user_task_blocked_while_service_runs() -> Result<()> {
 }
 
 /// `WIN32_EXIT_CODE` of the service, as `sc query` reports it.
+#[cfg(feature = "test-utils")]
 fn win32_exit_code(fx: &Fixture) -> Option<u32> {
     stdout(&fx.sc("query")).lines().find_map(|line| {
         let (_, rest) = line.split_once("WIN32_EXIT_CODE")?;
@@ -1589,6 +1599,8 @@ fn win32_exit_code(fx: &Fixture) -> Option<u32> {
     })
 }
 
+// Needs the root `test-utils` seam `IROH_TUNNEL_TEST_EXIT_AFTER_MS`.
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn already_running_is_clean_stop() -> Result<()> {
     if !enabled() {

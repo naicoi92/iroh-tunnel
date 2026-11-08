@@ -23,7 +23,9 @@
 //! feature disables relay TLS verification: only an unreachable relay is used,
 //! never public relays or real secrets.
 
-#![cfg(target_os = "linux")]
+// The prompts are answered through the root crate's `test-utils` seam
+// `IROH_TUNNEL_TEST_INTERACTIVE`, so the file needs `--all-features`.
+#![cfg(all(target_os = "linux", feature = "test-utils"))]
 
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};

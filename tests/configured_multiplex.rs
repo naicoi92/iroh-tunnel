@@ -1275,7 +1275,8 @@ async fn repeated_stop_after_grace_exits_130_and_cleans_status() -> Result<()> {
 
 // AC-S3 / #86: a stuck shutdown is abandoned by the watchdog (exit 1). The
 // watchdog extra time is shortened through the test-utils-only env seam.
-#[cfg(unix)]
+// That seam lives in the root crate, so the test needs `--all-features`.
+#[cfg(all(unix, feature = "test-utils"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stuck_shutdown_is_abandoned_by_watchdog_with_exit_1() -> Result<()> {
     let (exit, elapsed, status_file) =

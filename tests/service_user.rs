@@ -22,7 +22,6 @@
 #![cfg(unix)]
 
 use anyhow::Result;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -96,7 +95,11 @@ impl Fixture {
     fn run(&self, args: &[&str]) -> Result<Output> {
         Ok(self.command(args).output()?)
     }
+    /// Answers a prompt through the root crate's `test-utils` seam
+    /// `IROH_TUNNEL_TEST_INTERACTIVE`; only built with that feature.
+    #[cfg(feature = "test-utils")]
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Result<Output> {
+        use std::io::Write;
         let mut child = self
             .command(args)
             .env("IROH_TUNNEL_TEST_INTERACTIVE", "1")
@@ -182,6 +185,8 @@ fn system_scope_operations_without_privilege_are_refused_with_guidance() -> Resu
     Ok(())
 }
 
+// Needs `IROH_TUNNEL_TEST_INTERACTIVE` (root `test-utils`); run with `--all-features`.
+#[cfg(feature = "test-utils")]
 #[test]
 fn interactive_install_offers_user_or_system_and_system_is_refused_unprivileged() -> Result<()> {
     if is_root() {
