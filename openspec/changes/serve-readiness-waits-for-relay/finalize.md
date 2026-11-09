@@ -7,22 +7,22 @@
 
 **Change**: `serve-readiness-waits-for-relay`
 **Finalized at**: `2026-11-09T04:31Z`
-**Outcome**: `merge-locally`
+**Outcome**: `pr-created`
 
-> Deviation from the canonical `pr-updated` closeout: the project AGENTS.md forbids
-> push, merge or PR creation without the user's explicit approval in chat. The user
-> approved the code review but gave no push approval, so finalize stopped after the
-> local fast-forward of the feature branch (steps 9-12 push/PR not run). The worktree
-> branch was merged into the feature branch `issue-183`, not into `main`.
+> Deviation from the canonical `pr-updated` closeout: no spec pre-review PR existed,
+> and AGENTS.md requires explicit user approval before push or PR. The first finalize
+> pass stopped after the local fast-forward; after the user approved push and PR in
+> chat, steps 10-12 ran: `issue-183` pushed (HTTPS via `gh auth git-credential` after
+> switching gh to `naicoi92`, since SSH was refused) and PR #194 opened against `main`.
 
 ---
 
 ## Branch state
 
-- **Branch**: `issue-183` (fast-forwarded to `738ef49` from worktree branch `serve-readiness-waits-for-relay`; no upstream configured, not pushed)
+- **Branch**: `issue-183` (fast-forwarded to `738ef49` from worktree branch `serve-readiness-waits-for-relay`, pushed to `origin/issue-183`)
 - **Base branch**: `main`
-- **Final state**: `merged` (into the feature branch locally; not pushed)
-- **PR URL**: N/A (`gh pr view issue-183` → no pull requests found)
+- **Final state**: `pr-open`
+- **PR URL**: https://github.com/naicoi92/iroh-tunnel/pull/194
 
 ---
 
@@ -35,7 +35,7 @@
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/194#issuecomment-6732309725)
 
 ---
 
@@ -55,4 +55,4 @@
 
 ## Next step
 
-With user approval: push `issue-183` (`git push -u origin issue-183`, after checking `gh auth status` matches owner `naicoi92`) and open a PR against `main` (suggested title `feat(github-actions-integration): serve-readiness-waits-for-relay`), then re-run finalize steps 11-12 to post the code-reviewer comment and update this receipt to `pr-created`. Run `/opsx-archive` on `issue-183` before merging the PR. After merge, from the `main` worktree: `wt remove serve-readiness-waits-for-relay`.
+Wait for PR review. After approval, run `/opsx-archive` on this feature branch (commits land here), push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch` or GitHub UI) — that single merge lands both the implementation and the archive into main. Optionally run `gh workflow run e2e.yml --ref issue-183` first to exercise the Linux, Windows and `container:` Serve steps. After merge, from the `main` worktree: `wt remove serve-readiness-waits-for-relay`.
