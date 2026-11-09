@@ -410,7 +410,10 @@ mod tests {
 
         // The file on disk now carries the encoded key.
         let reloaded = load_role_config::<AccessConfig>(&p).unwrap();
-        assert_eq!(reloaded.node.secret_key, cfg.node.secret_key);
+        assert!(
+            reloaded.node.secret_key == cfg.node.secret_key,
+            "persisted key differs"
+        );
 
         // Re-resolving off the persisted value is a no-op (needs_save == false)
         // and yields the same public key.
@@ -436,7 +439,7 @@ mod tests {
         };
         let resolved = resolve_and_persist_key(&mut cfg, &p).unwrap();
         assert_eq!(resolved.public(), key.public());
-        assert_eq!(cfg.node.secret_key, enc, "value unchanged when already set");
+        assert!(cfg.node.secret_key == enc, "value changed when already set");
     }
 
     #[test]
@@ -454,8 +457,11 @@ mod tests {
 
         let key = resolve_and_persist_key(&mut cfg, &p).unwrap();
         assert_eq!(key.public(), other.public());
-        assert_eq!(cfg.node.secret_key, enc);
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), written);
+        assert!(cfg.node.secret_key == enc, "adopted key differs");
+        assert!(
+            std::fs::read_to_string(&p).unwrap() == written,
+            "adoption rewrote the config"
+        );
     }
 
     #[test]
@@ -487,7 +493,10 @@ mod tests {
                 )
             };
             assert!(!std::fs::read_to_string(&p).unwrap().contains("multiplex"));
-            assert_eq!(persisted, encode_secret_key(&key));
+            assert!(
+                persisted == encode_secret_key(&key),
+                "persisted key differs"
+            );
         }
     }
 }

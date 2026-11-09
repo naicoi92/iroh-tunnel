@@ -527,7 +527,7 @@ fn run_persists_a_generated_key_owner_only_and_reuses_it() {
     );
     assert!(std::fs::read_to_string(&cfg).unwrap().contains("# keep me"));
     let (second_id, second_key) = run_once(2);
-    assert_eq!(second_key, first_key, "restart changed the stored key");
+    assert!(second_key == first_key, "restart changed the stored key");
     assert_eq!(second_id, first_id, "restart changed the NodeId");
 }
 
