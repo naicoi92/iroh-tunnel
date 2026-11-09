@@ -31,6 +31,6 @@ Blocked by: 2
 
 Files owned: `.github/workflows/ci.yml`, `CONTRIBUTING.md`, `docs/agents/rust-coding-standards.md`. It is blocked by 2 because the gate must not land before the tree is warning-free. Scenarios: ci-cd-pipeline "Code change", "Broken rustdoc link"; workspace-boundaries "Doc gate fails on a member-only broken link", "Gates fail on a member-only defect" (unchanged).
 
-- [ ] 3.1 Add a step to `lint` in `.github/workflows/ci.yml` after clippy: `run: cargo doc --workspace --no-deps --locked` with `env: RUSTDOCFLAGS: -D warnings`; rename the job to `lint (fmt + clippy + doc)` and update the header comment.
-- [ ] 3.2 Add the doc command to the local gate lists in `CONTRIBUTING.md` and `docs/agents/rust-coding-standards.md` (RS-16 wording).
-- [ ] 3.3 Run `actionlint` on `ci.yml` (it is in the `scripts` job); check that `ci-ok` still lists `lint`.
+- [x] 3.1 Add a step to `lint` in `.github/workflows/ci.yml` after clippy: `run: cargo doc --workspace --no-deps --locked` with `env: RUSTDOCFLAGS: -D warnings`; rename the job to `lint (fmt + clippy + doc)` and update the header comment.
+- [x] 3.2 Add the doc command to the local gate lists in `CONTRIBUTING.md` and `docs/agents/rust-coding-standards.md` (RS-16 wording).
+- [x] 3.3 Run `actionlint` on `ci.yml` (it is in the `scripts` job); check that `ci-ok` still lists `lint`.
