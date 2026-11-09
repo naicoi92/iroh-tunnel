@@ -7,9 +7,9 @@
 
 **Change**: `status-owner-not-running`
 **Finalized at**: `2026-11-09 17:55` (UTC)
-**Outcome**: `pr-updated` (pending: push and PR wait for explicit user authorization)
+**Outcome**: `pr-created`
 
-Project policy deviation: the global `AGENTS.md` forbids push, merge or PR without explicit user permission in chat. Steps 10-12 (push, PR, PR comment) are therefore deferred until the user authorizes them. This receipt is updated when they run.
+Project policy deviation: the global `AGENTS.md` forbids push, merge or PR without explicit user permission. Steps 10-12 (push, PR, PR comment) ran only after the user authorized them in the Plannotator Inbox. SSH push was refused, so the branch was pushed over HTTPS with the `gh` credential helper, as `AGENTS.md` directs. No pre-review PR existed, so the outcome is `pr-created`.
 
 ---
 
@@ -17,8 +17,8 @@ Project policy deviation: the global `AGENTS.md` forbids push, merge or PR witho
 
 - **Branch**: `spec/status-owner-not-running`
 - **Base branch**: `main`
-- **Final state**: worktree branch fast-forward merged into the local feature branch; not pushed yet
-- **PR URL**: N/A (no PR yet)
+- **Final state**: `pr-open`
+- **PR URL**: https://github.com/naicoi92/iroh-tunnel/pull/197
 
 ---
 
@@ -31,7 +31,7 @@ Project policy deviation: the global `AGENTS.md` forbids push, merge or PR witho
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/197#issuecomment-6747455624); decision also recorded on issue #165 (https://github.com/naicoi92/iroh-tunnel/issues/165#issuecomment-6747456203)
 
 ---
 
@@ -51,4 +51,4 @@ Project policy deviation: the global `AGENTS.md` forbids push, merge or PR witho
 
 ## Next step
 
-With user authorization: push `spec/status-owner-not-running`, open a PR against `main`, and post the code-review orientation comment. After PR approval, run `/opsx-archive` on this feature branch, push the archive commits, then merge the PR so implementation and archive land in `main` together.
+Wait for PR review and for Windows CI on #197. After approval, run `/opsx-archive` on this feature branch, push the archive commits, then merge the PR so implementation and archive land in `main` together.
