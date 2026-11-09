@@ -59,6 +59,7 @@ Run these commands locally before pushing:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --all-features
 ```
 

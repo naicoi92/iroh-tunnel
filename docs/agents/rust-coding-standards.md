@@ -31,11 +31,12 @@ These rules apply to new and changed Rust code and its reviews; they do not requ
 
 - **RS-14 — Test from specification:** Derive cases from requirements and observable contracts, including success, invalid input, boundaries, failure and cancellation as applicable. Use descriptive behavior names and focused tests; multiple assertions are appropriate when they establish one behavior. Unit tests cover local logic, integration tests cover public boundaries, and rustdoc examples can test public usage. Keep tests deterministic and isolate temporary files and resources.
 - **RS-15 — Process and network coverage:** For CLI changes affecting arguments, exit codes, output, signals or lifecycle, exercise the actual binary in process-level end-to-end tests as appropriate, not only in-process functions. Cover cleanup and failure paths. Prefer isolated local-relay fixtures for real-process E2E. The ignored tests in `tests/serve_access_tunnel.rs` use public relays; run them only with certificate verification actually enabled. The current test-feature binary disables relay TLS verification, so do not run that binary against public relays; report coverage as blocked until a verified-TLS harness is available.
-- **RS-16 — Toolchain and gates:** Preserve MSRV Rust 1.91, including dependencies and APIs; do not use newer language or standard-library features without an approved MSRV change. Run the existing CI gates shown below. For reproducible dependency resolution, also use `--locked` for Clippy and tests; this is local validation, not a claim that CI currently passes `--locked`. Explain any lint suppression. No new lint gate is implied.
+- **RS-16 — Toolchain and gates:** Preserve MSRV Rust 1.91, including dependencies and APIs; do not use newer language or standard-library features without an approved MSRV change. Run the existing CI gates shown below. For reproducible dependency resolution, also use `--locked` for Clippy and tests; this is local validation, not a claim that CI currently passes `--locked`. Explain any lint suppression. The rustdoc gate denies broken and private intra-doc links.
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --all-features --locked
 ```
 
