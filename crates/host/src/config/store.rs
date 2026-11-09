@@ -21,9 +21,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use iroh::SecretKey;
 use toml_edit::DocumentMut;
 
 use super::dto::RoleDoc;
+use super::encode_secret_key::encode_secret_key;
 use super::resolve_secret_key::resolve_secret_key;
 use crate::error::CliError;
 
@@ -288,4 +290,204 @@ pub(crate) fn persist_generated_key<D: RoleDoc>(path: &Path, encoded: &str) -> R
         .map_err(|e| CliError::Config(format!("invalid config at {}: {e}", path.display())))?;
     write_atomic(&path, text.as_bytes())?;
     Ok(encoded.to_string())
+}
+
+/// Read, parse and validate a role config from a TOML file.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, is not valid TOML for `D`, or fails
+/// `D`'s validation.
+pub(crate) fn load_role_config<D: RoleDoc>(path: &Path) -> Result<D> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read config: {}", path.display()))?;
+    parse_role_config(&content, path)
+}
+
+/// Parse and validate config text already read from `path` (used when the
+/// bytes come from a verified handle rather than a path lookup).
+///
+/// # Errors
+///
+/// Fails when the text is not valid TOML for `D` (the message carries the
+/// path and line only, never the offending source line) or fails validation.
+pub(crate) fn parse_role_config<D: RoleDoc>(content: &str, path: &Path) -> Result<D> {
+    // `toml` errors quote the offending source line, which can hold a
+    // secret; report the message and line only (RS-10).
+    let cfg: D = toml::from_str(content).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse config: {}{}: {}",
+            path.display(),
+            describe_location(content, e.span()),
+            e.message()
+        )
+    })?;
+    cfg.validate()?;
+    Ok(cfg)
+}
+
+/// Resolve the node secret key; if it was just generated, persist it back
+/// into the config file. Returns the resolved key.
+///
+/// The key is stored by editing the file in place, owner-only, under the
+/// writer lock; if another process stored a key first, that key is adopted.
+/// The key value itself is never logged (NFR-05).
+///
+/// Pinned access identity: an empty access `secret_key` is generated once and
+/// persisted, so the access NodeId is stable across restarts (mirroring the
+/// serve role).
+///
+/// # Errors
+///
+/// Fails when the configured key cannot be decoded, or when persisting the
+/// generated key fails (see [`persist_generated_key`]).
+pub(crate) fn resolve_and_persist_key<D: RoleDoc>(cfg: &mut D, path: &Path) -> Result<SecretKey> {
+    let (key, needs_save) = resolve_secret_key(&cfg.node_mut().secret_key)?;
+    if !needs_save {
+        return Ok(key);
+    }
+    tracing::warn!("secret_key empty, generated new key, saving to config");
+    let stored = persist_generated_key::<D>(path, &encode_secret_key(&key))?;
+    cfg.node_mut().secret_key = stored;
+    Ok(resolve_secret_key(&cfg.node_mut().secret_key)?.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::fixtures::VALID_SERVE;
+    use crate::config::{AccessConfig, NodeConfig, ServeConfig};
+
+    #[test]
+    fn load_role_config_reads_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("serve.toml");
+        std::fs::write(&p, VALID_SERVE).unwrap();
+        let cfg = load_role_config::<ServeConfig>(&p).unwrap();
+        assert_eq!(cfg.services.len(), 1);
+    }
+
+    #[test]
+    fn load_role_config_missing_file_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("missing.toml");
+        let err = load_role_config::<ServeConfig>(&p).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            format!("failed to read config: {}", p.display())
+        );
+    }
+
+    #[test]
+    fn parse_role_config_reports_path_and_line_without_secret() {
+        let text = "[node]\nsecret_key = \"SECRET-XYZ\" oops\n";
+        let err = parse_role_config::<ServeConfig>(text, Path::new("serve.toml")).unwrap_err();
+        let msg = toml::from_str::<toml::Value>(text)
+            .unwrap_err()
+            .message()
+            .to_string();
+        assert_eq!(
+            format!("{err:#}"),
+            format!("failed to parse config: serve.toml (line 2): {msg}")
+        );
+        for shown in [format!("{err:#}"), format!("{err:?}")] {
+            assert!(!shown.contains("SECRET-XYZ"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn resolve_and_persist_key_generates_and_persists() {
+        // An empty access secret_key is generated once and written back, so the
+        // access NodeId is stable across restarts (mirrors serve behavior).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("access.toml");
+        std::fs::write(&p, "").unwrap();
+        let mut cfg = AccessConfig::default();
+        assert!(cfg.node.secret_key.is_empty());
+
+        let key = resolve_and_persist_key(&mut cfg, &p).unwrap();
+        assert!(!cfg.node.secret_key.is_empty(), "key should be persisted");
+
+        // The file on disk now carries the encoded key.
+        let reloaded = load_role_config::<AccessConfig>(&p).unwrap();
+        assert_eq!(reloaded.node.secret_key, cfg.node.secret_key);
+
+        // Re-resolving off the persisted value is a no-op (needs_save == false)
+        // and yields the same public key.
+        let (key2, needs_save) = resolve_secret_key(&reloaded.node.secret_key).unwrap();
+        assert!(!needs_save);
+        assert_eq!(key.public(), key2.public());
+    }
+
+    #[test]
+    fn resolve_and_persist_key_no_save_when_present() {
+        // A pre-existing secret_key is reused verbatim; the file is not rewritten.
+        let (key, _) = resolve_secret_key("").unwrap();
+        let enc = encode_secret_key(&key);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("access.toml");
+        std::fs::write(&p, "").unwrap();
+        let mut cfg = AccessConfig {
+            node: NodeConfig {
+                secret_key: enc.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = resolve_and_persist_key(&mut cfg, &p).unwrap();
+        assert_eq!(resolved.public(), key.public());
+        assert_eq!(cfg.node.secret_key, enc, "value unchanged when already set");
+    }
+
+    #[test]
+    fn resolve_and_persist_key_adopts_concurrently_persisted_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("access.toml");
+        std::fs::write(&p, "").unwrap();
+        let mut cfg = load_role_config::<AccessConfig>(&p).unwrap();
+
+        // Another process stores a key after this one loaded a keyless config.
+        let (other, _) = resolve_secret_key("").unwrap();
+        let enc = encode_secret_key(&other);
+        let written = format!("[node]\nsecret_key = \"{enc}\"\n");
+        std::fs::write(&p, &written).unwrap();
+
+        let key = resolve_and_persist_key(&mut cfg, &p).unwrap();
+        assert_eq!(key.public(), other.public());
+        assert_eq!(cfg.node.secret_key, enc);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), written);
+    }
+
+    #[test]
+    fn resolve_and_persist_key_drops_legacy_fields_for_both_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("role.toml");
+        let service = format!(
+            "[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 5432\nnode_id = {:?}\nmultiplex = false\n",
+            iroh::SecretKey::generate().public().to_string()
+        );
+        for access in [true, false] {
+            std::fs::write(&p, &service).unwrap();
+            let (key, persisted) = if access {
+                let mut cfg = load_role_config::<AccessConfig>(&p).unwrap();
+                let key = resolve_and_persist_key(&mut cfg, &p).unwrap();
+                (
+                    key,
+                    load_role_config::<AccessConfig>(&p)
+                        .unwrap()
+                        .node
+                        .secret_key,
+                )
+            } else {
+                let mut cfg = load_role_config::<ServeConfig>(&p).unwrap();
+                let key = resolve_and_persist_key(&mut cfg, &p).unwrap();
+                (
+                    key,
+                    load_role_config::<ServeConfig>(&p).unwrap().node.secret_key,
+                )
+            };
+            assert!(!std::fs::read_to_string(&p).unwrap().contains("multiplex"));
+            assert_eq!(persisted, encode_secret_key(&key));
+        }
+    }
 }

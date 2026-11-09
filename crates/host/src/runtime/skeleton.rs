@@ -173,7 +173,7 @@ where
     let path = config_path.to_path_buf();
     let cfg = tokio::task::spawn_blocking(move || -> Result<S::Config> {
         let mut cfg = crate::service::load_config::<S::Config>(&path)?;
-        cfg.resolve_and_save_key(&path)?;
+        crate::config::resolve_and_persist_key(&mut cfg, &path)?;
         Ok(cfg)
     })
     .await

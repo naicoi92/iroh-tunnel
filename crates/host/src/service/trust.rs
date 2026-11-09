@@ -398,13 +398,13 @@ pub(crate) fn load_config<C: RoleDoc>(path: &Path) -> Result<C> {
         if is_unpinned_service(root, |name| std::env::var_os(name).is_some()) {
             return Err(CliError::Permission(unpinned_refusal()).into());
         }
-        return C::load(path);
+        return crate::config::load_role_config::<C>(path);
     };
     if let Some(state) = std::env::var_os(ENV_STATE_DIR).filter(|d| !d.is_empty()) {
         verify_dir(Path::new(&state), uid)?;
     }
     let text = read_verified(path, uid)?;
-    let mut cfg = C::from_toml(&text, path)?;
+    let mut cfg = crate::config::parse_role_config::<C>(&text, path)?;
     if cfg.node_mut().secret_key.is_empty() {
         return Err(CliError::Config(format!(
             "{} has no secret_key, and a system service does not write into a user's file as \

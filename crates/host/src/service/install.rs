@@ -521,8 +521,12 @@ fn pinned_state_dir(state_dir_override: Option<&Path>) -> Result<PathBuf> {
 /// config must exist and be valid for the role.
 fn check_installable_config(role: Role, config: &Path) -> Result<()> {
     let loaded = match role {
-        Role::Serve => crate::config::ServeConfig::load(config).map(drop),
-        Role::Access => crate::config::AccessConfig::load(config).map(drop),
+        Role::Serve => {
+            crate::config::load_role_config::<crate::config::ServeConfig>(config).map(drop)
+        }
+        Role::Access => {
+            crate::config::load_role_config::<crate::config::AccessConfig>(config).map(drop)
+        }
     };
     installable(role, config, loaded)
 }
@@ -530,10 +534,13 @@ fn check_installable_config(role: Role, config: &Path) -> Result<()> {
 /// [`check_installable_config`] for text already read from a verified handle.
 #[cfg(any(unix, windows))]
 fn check_installable_text(role: Role, text: &str, config: &Path) -> Result<()> {
-    use crate::config::RoleDoc;
     let loaded = match role {
-        Role::Serve => crate::config::ServeConfig::from_toml(text, config).map(drop),
-        Role::Access => crate::config::AccessConfig::from_toml(text, config).map(drop),
+        Role::Serve => {
+            crate::config::parse_role_config::<crate::config::ServeConfig>(text, config).map(drop)
+        }
+        Role::Access => {
+            crate::config::parse_role_config::<crate::config::AccessConfig>(text, config).map(drop)
+        }
     };
     installable(role, config, loaded)
 }

@@ -87,8 +87,8 @@ impl RoleStrategy for AccessStrategy {
 /// `run_foreground` (via `run_skeleton`) so it has exactly one definition site.
 ///
 /// The associated type [`RoleStrategy::Config`] is the role's TOML document
-/// (`ServeConfig` / `AccessConfig`); it must load+validate+persist its own
-/// key via the [`crate::config::RoleDoc`] trait.
+/// (`ServeConfig` / `AccessConfig`); it validates via
+/// [`crate::config::RoleDoc`]; files are handled by the config store.
 pub(crate) trait RoleStrategy {
     /// The TOML config document this role loads.
     type Config: crate::config::RoleDoc + Send + 'static;
