@@ -7,7 +7,7 @@ const accessIn = { name: 'svc', 'node-id': NODE, listen: '127.0.0.1:15000' };
 const bound = 'INFO listening for local clients listen_addr=127.0.0.1:15000\n';
 
 function serveReady(w: World) {
-  w.status = { node_id: NODE, services: [] };
+  w.status = { node_id: NODE, home_relay: 'https://relay.example./', services: [] };
 }
 
 describe('happy paths', () => {
@@ -32,6 +32,16 @@ describe('happy paths', () => {
     expect(s.args).toEqual(['run', '-c', WS.configPath]);
     expect(s.env).toEqual({ IROH_TUNNEL_STATE_DIR: WS.stateDir, NO_COLOR: '1', HOME: WS.homeDir });
     expect(w.secrets).toEqual([]);
+  });
+
+  test('serve waits for the home relay before completing', async () => {
+    const w = newWorld(serveIn);
+    w.status = { node_id: NODE, home_relay: null, services: [] };
+    w.onSleep = (x, n) => n === 4 && serveReady(x);
+    await runMain('serve', startDeps(w));
+    expect(w.failed).toEqual([]);
+    expect(w.polls).toBe(5);
+    expect(w.outputs).toEqual({ 'node-id': NODE });
   });
 
   test('windows spawn env has no HOME', async () => {
@@ -160,9 +170,32 @@ describe('failures', () => {
     expect(m).toContain('not ready within 60 s');
     expect(m).toContain(NODE);
     expect(m).toContain('still waiting');
+    expect(m).not.toContain('No home relay');
     expect(w.outputs).toEqual({});
     expect(w.state['main-ok']).toBeUndefined();
     expect(w.state['pid']).toBe('4242');
+  });
+
+  test('serve timeout without a home relay names the relay inputs', async () => {
+    const w = newWorld(serveIn);
+    w.status = { node_id: NODE, home_relay: null, services: [] };
+    await runMain('serve', startDeps(w));
+    expect(w.polls).toBe(120);
+    const m = w.failed[0]!;
+    expect(m).toContain('not ready within 60 s');
+    expect(m).toContain('No home relay was registered');
+    expect(m).toContain('relay-url');
+    expect(m).toContain('relay-token');
+    expect(m).toContain('"home_relay":null');
+    expect(w.outputs).toEqual({});
+    expect(w.state['main-ok']).toBeUndefined();
+  });
+
+  test('serve timeout with no status file has no relay reason', async () => {
+    const w = newWorld(serveIn);
+    await runMain('serve', startDeps(w));
+    expect(w.failed[0]).toContain('not ready within 60 s');
+    expect(w.failed[0]).not.toContain('No home relay');
   });
 
   test('timeout is a real 60 s deadline, not only a poll count', async () => {
@@ -185,9 +218,11 @@ describe('failures', () => {
 
   test('child dies mid-poll', async () => {
     const w = newWorld(serveIn);
+    w.status = { node_id: NODE, home_relay: null, services: [] };
     w.onSleep = (x, n) => n === 3 && (x.exit = 1);
     await runMain('serve', startDeps(w));
     expect(w.failed[0]).toContain('exit code 1 (general)');
+    expect(w.failed[0]).not.toContain('No home relay');
   });
 
   test('installer failure is reported and workspace state exists', async () => {

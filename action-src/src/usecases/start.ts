@@ -1,8 +1,8 @@
 import { InputError } from '../domain/errors';
 import { renderConfig } from '../domain/config';
 import { parseAccess, parseServe } from '../domain/inputs';
-import { bindMessage, exitMessage, timeoutMessage } from './failure';
-import { isReady } from './readiness';
+import { bindMessage, exitMessage, NO_HOME_RELAY, timeoutMessage } from './failure';
+import { isReady, type Readiness } from './readiness';
 import type { ActionsIO } from '../adapters/io';
 import type { Installer } from '../adapters/release';
 import type { Launcher } from '../adapters/launcher';
@@ -67,6 +67,7 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
   const deadline = deps.clock.now() + DEADLINE_MS;
   let probed = false;
   let lastStatus: Awaited<ReturnType<StartDeps['readStatus']>>;
+  let lastReadiness: Readiness | undefined;
   for (let i = 0; i < MAX_POLLS && deps.clock.now() < deadline; i++) {
     const code = child.exitCode();
     if (code !== null) {
@@ -77,6 +78,7 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     lastStatus = await deps.readStatus(ws.stateDir, req.role);
     const log = await deps.readLog(ws.logPath);
     const r = isReady(req, lastStatus, log);
+    lastReadiness = r;
     if ('failed' in r) throw new StartFailure(bindMessage(r.failed, lastStatus, log, secrets));
     // The output is this node's own id, which only the status file knows.
     if (r.ready && lastStatus?.node_id) {
@@ -99,7 +101,10 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     }
     await deps.clock.sleep(POLL_MS);
   }
-  throw new StartFailure(timeoutMessage(req.role, lastStatus, await deps.readLog(ws.logPath), secrets));
+  const awaitingRelay = lastReadiness !== undefined && 'awaiting' in lastReadiness;
+  const reason = awaitingRelay ? NO_HOME_RELAY : undefined;
+  const log = await deps.readLog(ws.logPath);
+  throw new StartFailure(timeoutMessage(req.role, lastStatus, log, secrets, reason));
 }
 
 export async function start(req: TunnelRequest, deps: StartDeps): Promise<void> {

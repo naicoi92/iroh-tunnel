@@ -2,14 +2,20 @@ import type { StatusSnapshot } from '../adapters/status';
 import { scanLog } from '../adapters/logscan';
 import type { TunnelRequest } from '../domain/inputs';
 
-export type Readiness = { ready: true } | { ready: false; needsProbe?: boolean } | { failed: string };
+export type Readiness =
+  | { ready: true }
+  | { ready: false; needsProbe?: boolean; awaiting?: 'home_relay' }
+  | { failed: string };
 
 /**
- * Serve: the status file has a node id (home relay is not awaited, issue #177).
+ * Serve: the status file has a node id and a home relay.
  * Access: the local listener is bound; TCP also needs a transport in the status row.
  */
 export function isReady(req: TunnelRequest, status: StatusSnapshot | undefined, log: string): Readiness {
-  if (req.role === 'serve') return status?.node_id ? { ready: true } : { ready: false };
+  if (req.role === 'serve') {
+    if (!status?.node_id) return { ready: false };
+    return status.home_relay ? { ready: true } : { ready: false, awaiting: 'home_relay' };
+  }
 
   const sig = scanLog(log, req.listen);
   if (sig.bindError !== undefined) {

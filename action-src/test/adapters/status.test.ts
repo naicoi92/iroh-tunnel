@@ -29,6 +29,19 @@ test('reads serve and access snapshots', async () => {
   expect(a?.services[0]?.transports).toEqual([1]);
 });
 
+test('serve home_relay: string kept, null/empty/non-string normalized to null, absent omitted', async () => {
+  await ready;
+  const put = (o: object) => writeFile(join(dir, 'serve-status.json'), JSON.stringify({ node_id: 'n1', services: [], ...o }));
+  await put({ home_relay: 'https://r.example./' });
+  expect((await readStatus(dir, 'serve'))?.home_relay).toBe('https://r.example./');
+  for (const home_relay of [null, '', 42]) {
+    await put({ home_relay });
+    expect((await readStatus(dir, 'serve'))?.home_relay).toBeNull();
+  }
+  await put({});
+  expect(await readStatus(dir, 'serve')).not.toHaveProperty('home_relay');
+});
+
 test('JSON without node_id is not yet', async () => {
   await ready;
   await writeFile(join(dir, 'serve-status.json'), '{"services": []}');
