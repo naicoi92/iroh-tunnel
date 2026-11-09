@@ -7,12 +7,11 @@
 
 **Change**: `cleanup-config-dto-rustdoc`
 **Finalized at**: `2026-11-09 13:04 UTC`
-**Outcome**: `pr-updated`
+**Outcome**: `pr-created`
 
-> **Deviation (AGENTS.md "Git approval":** "no push, merge or PR without explicit user approval in chat"):
-> - Finalize steps 3–9 ran: fast-forward merge, re-test, worktree cleanup and this receipt commit on `issue-167`.
-> - Step 10 (push) and step 11 (open PR) are held until the user approves them explicitly. The branch currently has **no remote and no PR**.
-> - Once the push and PR are approved and done, update the PR URL and PR comment fields below.
+> **Deviations:**
+> - **AGENTS.md "Git approval":** step 10 (push) and step 11 (PR) ran only after explicit user approval in the Plannotator Inbox (reply `msg_01M706KVH3M8CACS0BAZ4D2SX5`: push and open the PR with the suggested title).
+> - **Push transport:** SSH push was refused, so per AGENTS.md the push went over HTTPS with `gh auth git-credential`, as account `naicoi92`.
 
 ---
 
@@ -20,8 +19,8 @@
 
 - **Branch**: `issue-167`
 - **Base branch**: `main`
-- **Final state**: `pr-updated` (pending push; see the deviation above)
-- **PR URL**: `N/A (not pushed yet)`
+- **Final state**: `pr-open`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/195`
 
 ---
 
@@ -34,7 +33,7 @@
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/195#issuecomment-6740788130)
 
 ---
 
@@ -56,9 +55,7 @@
 
 ## Next step
 
-1. With the user's approval, push `issue-167` and open a PR:
-   - Suggested title: `refactor(workspace-boundaries): cleanup-config-dto-rustdoc`, with "Closes #167".
-   - Post the finalize orientation comment, then update this receipt.
+1. Done: `issue-167` is pushed and PR #195 is open ("Closes #167"), with the orientation comment posted.
 2. Wait for code review on the PR. Confirm that CI `unit (windows)` and `lint (fmt + clippy + doc)` are green; both are open warnings in verify.md.
 3. After approval, run `/opsx-archive` on `issue-167` and push the archive commits.
 4. Merge the PR (`gh pr merge --squash --delete-branch`).
