@@ -78,7 +78,7 @@ pub struct UpdateContext<'a> {
     pub install_path: PathBuf,
     /// Checks the signature of the release checksums (skipped by `--insecure`).
     pub verifier: &'a dyn SignatureVerifier,
-    /// Who owns the installed file (decides delegation, see [`update_owner`]).
+    /// Who owns the installed file (decides delegation, see [`check_owner`](super::check_owner)).
     pub owner: Owner,
 }
 
@@ -107,7 +107,7 @@ pub struct UpdateRequest {
     pub to: Option<String>,
     /// Whether the release is verified.
     pub verification: Verification,
-    /// Ownership policy, consulted by [`check_owner`].
+    /// Ownership policy, consulted by [`super::check_owner`].
     pub overwrite: OverwritePolicy,
 }
 

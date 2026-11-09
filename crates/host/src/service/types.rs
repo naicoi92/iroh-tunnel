@@ -114,7 +114,7 @@ pub struct ServiceStatusReport {
 pub struct InstallRequest {
     /// The role to register.
     pub role: Role,
-    /// `None` lets [`scope::decide_install_scope`] decide.
+    /// `None` lets [`super::decide_install_scope`] decide.
     pub scope: Option<ServiceScope>,
     /// Config file; `None` selects the role default.
     pub config: Option<PathBuf>,

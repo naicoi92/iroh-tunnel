@@ -75,7 +75,9 @@ pub struct UdpDropCounts {
     pub cap: u64,
     /// Datagrams dropped because a Flow queue was full (count).
     pub queue_full: u64,
-    /// Datagrams dropped because the Datagram limit shrank (count).
+    /// Datagrams dropped because the Datagram limit shrank (count). Until #152
+    /// is resolved, a connection whose datagrams are never usable also counts
+    /// every datagram here; see `docs/udp-integration-contract.md`.
     pub limit_shrink: u64,
     /// Replies dropped for a Flow in Quarantine (count).
     pub quarantine_reply: u64,

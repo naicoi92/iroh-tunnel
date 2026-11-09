@@ -10,11 +10,11 @@ use crate::config::AccessConfig;
 use crate::role::Role;
 use iroh_tunnel_engine::{OnReady, RunContext};
 
-/// Access counterpart of [`run_quick_serve`].
+/// Access counterpart of [`super::run_quick_serve`].
 ///
 /// # Errors
 ///
-/// As [`run_quick_serve`], for the access role.
+/// As [`super::run_quick_serve`], for the access role.
 pub async fn run_quick_access(
     cfg: AccessConfig,
     ctx: RunContext,

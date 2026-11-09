@@ -23,7 +23,7 @@ pub enum RotationConsent {
     Given,
 }
 
-/// Result of [`keygen`].
+/// Result of [`crate::config::keygen`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeygenOutcome {
     /// A new key was written; `rotated` is true when it replaced an old one.

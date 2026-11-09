@@ -71,7 +71,9 @@ pub struct UdpDrops {
     pub cap: u64,
     /// A flow's queue was full; the newest datagram was dropped.
     pub queue_full: u64,
-    /// Datagrams became unusable on the connection mid-session.
+    /// Datagrams became unusable on the connection mid-session. Until #152 is
+    /// resolved, a connection whose datagrams are never usable also counts every
+    /// datagram here; see `docs/udp-integration-contract.md`.
     pub limit_shrink: u64,
     /// A late reply reached a quarantined socket.
     pub quarantine_reply: u64,
@@ -291,8 +293,8 @@ pub struct AccessServiceStatus {
 /// The typed snapshot a role saves — re-tying each schema to its role at
 /// the save boundary.
 ///
-/// [`StatusWriter`] is role-tagged and its save methods take this enum;
-/// [`StatusWriter::save_to`] rejects a mismatched writer/payload pair with
+/// `StatusWriter` is role-tagged and its save methods take this enum;
+/// `StatusWriter::save_to` rejects a mismatched writer/payload pair with
 /// a runtime role check that errors in every build profile, instead of
 /// silently writing the wrong schema under the right file name.
 #[derive(Debug, Clone, PartialEq)]
