@@ -27,5 +27,5 @@ Blocked by: 1
 
 Owns: no repo files (scratch only under `$TMPDIR`).
 
-- [ ] 3.1 Build `iroh-tunnel-serve` from this commit and run `serve/dist/main.js` locally with `IROH_TUNNEL_ACTION_BIN_DIR`, default relays: step completes, `node-id` set, `serve-status.json` has non-null `home_relay`
-- [ ] 3.2 Same with `relay-url: https://127.0.0.1:9/` (unreachable): step fails after 60 s with the no-home-relay reason, no `node-id` output; run the post step to stop the tunnel
+- [x] 3.1 Build `iroh-tunnel-serve` from this commit and run `serve/dist/main.js` locally with `IROH_TUNNEL_ACTION_BIN_DIR`, default relays: step completes, `node-id` set, `serve-status.json` has non-null `home_relay`
+- [x] 3.2 Same with `relay-url: https://127.0.0.1:9/` (unreachable): step fails after 60 s with the no-home-relay reason, no `node-id` output; run the post step to stop the tunnel
