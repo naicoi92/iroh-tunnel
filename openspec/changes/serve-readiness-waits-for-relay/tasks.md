@@ -16,10 +16,10 @@ Blocked by: 1
 
 Owns: `docs/github-actions.md`, `CHANGELOG.md`.
 
-- [ ] 2.1 `docs/github-actions.md` Behavior: Serve is ready once the status file reports a NodeId and a home relay; mention the timeout reason; remove the #177 retry note; covers "Docs describe Serve readiness"
-- [ ] 2.2 `docs/github-actions.md` Embedded clients: drop "retry the dial for a few seconds after Serve starts", keep "use the same relays"
-- [ ] 2.3 `CHANGELOG.md` Unreleased: note under the GitHub Actions entry that Serve waits for its home relay and fails after 60 s if none registers (not Breaking: actions unreleased)
-- [ ] 2.4 `bun run check-docs` passes
+- [x] 2.1 `docs/github-actions.md` Behavior: Serve is ready once the status file reports a NodeId and a home relay; mention the timeout reason; remove the #177 retry note; covers "Docs describe Serve readiness"
+- [x] 2.2 `docs/github-actions.md` Embedded clients: drop "retry the dial for a few seconds after Serve starts", keep "use the same relays"
+- [x] 2.3 `CHANGELOG.md` Unreleased: note under the GitHub Actions entry that Serve waits for its home relay and fails after 60 s if none registers (not Breaking: actions unreleased)
+- [x] 2.4 `bun run check-docs` passes
 
 ## 3. End-to-end verification
 
