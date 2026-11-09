@@ -299,19 +299,15 @@ pub(crate) fn restart(
 pub(crate) fn status(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
+    liveness_note: Option<&ServiceNote>,
     role: &str,
     _scope: ServiceScope,
 ) -> Result<NativeOutput> {
     require_installed(native, role)?;
-    // The role lock, not the localised task text, says whether it runs.
-    match crate::ownership::probe(status_role(role)?)? {
-        crate::ownership::Liveness::Running { owner, .. } => notes(&ServiceNote::RoleRunning {
-            role: role.to_owned(),
-            owner: crate::ownership::describe_owner(owner.as_ref()),
-        }),
-        crate::ownership::Liveness::NotRunning => notes(&ServiceNote::RoleNotRunning {
-            role: role.to_owned(),
-        }),
+    // The role lock, not the localised task text, says whether it runs. The
+    // caller probed it once and passes the note, so it matches the report.
+    if let Some(note) = liveness_note {
+        notes(note);
     }
     let name = task_name(role);
     let query = ["/Query", "/TN", &name, "/FO", "LIST", "/V"];

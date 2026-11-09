@@ -38,6 +38,17 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// The `native` field of a `{:#?}` status report, whitespace removed:
+/// `NativeOutput{program:"...",status:Some(0,),...` (pretty `Debug` adds
+/// the trailing commas).
+fn captured_native(report: &str) -> String {
+    let compact: String = report.split_whitespace().collect();
+    let start = compact
+        .find("native:Some(NativeOutput{")
+        .unwrap_or_else(|| panic!("no captured native output in: {report}"));
+    compact[start + "native:Some(".len()..].to_owned()
+}
+
 /// An isolated user: `HOME`, a config file and a state directory.
 struct Fixture {
     root: tempfile::TempDir,
@@ -569,9 +580,14 @@ async fn captured_systemctl_status_is_returned() -> Result<()> {
     } else {
         "systemctl"
     };
+    // The service runs, so the status query exits 0; `status` is the exit
+    // code the backend captured, not a parsed manager state.
+    let native = captured_native(&report);
     assert!(
-        report.contains(&format!("program: {manager:?}")),
-        "no captured {manager} output in: {report}"
+        native.starts_with(&format!(
+            "NativeOutput{{program:{manager:?},status:Some(0,),"
+        )),
+        "captured {manager} output lacks its exit status: {report}"
     );
     Ok(())
 }

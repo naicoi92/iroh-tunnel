@@ -61,8 +61,21 @@ pub(crate) fn status_via(
     } else {
         None
     };
+    // The Windows backends print the role's liveness as a note. It comes from
+    // the probe above, so the note and the report cannot disagree; a failed
+    // probe gives no note and stays an unavailable fact in the report.
+    #[cfg(windows)]
+    let liveness_note = liveness.as_ref().ok().map(|seen| role_note(role, seen));
+    #[cfg(not(windows))]
+    let liveness_note: Option<ServiceNote> = None;
     let mut native = Native::new(call.output, runner);
-    let output = backend_status(&mut native, &mut *call.notes, role, scope);
+    let output = backend_status(
+        &mut native,
+        &mut *call.notes,
+        liveness_note.as_ref(),
+        role,
+        scope,
+    );
     let (applied, outputs) = native.finish();
     let output = output.map_err(|error| ServiceFailure {
         applied,
@@ -112,10 +125,25 @@ fn registration_of(role: &str, scope: ServiceScope) -> Result<Registration> {
     })
 }
 
+/// The note telling whether `role` runs, from one liveness probe.
+#[cfg(any(windows, test))]
+fn role_note(role: Role, liveness: &crate::ownership::Liveness) -> ServiceNote {
+    match liveness {
+        crate::ownership::Liveness::Running { owner, .. } => ServiceNote::RoleRunning {
+            role: role.name().to_owned(),
+            owner: crate::ownership::describe_owner(owner.as_ref()),
+        },
+        crate::ownership::Liveness::NotRunning => ServiceNote::RoleNotRunning {
+            role: role.name().to_owned(),
+        },
+    }
+}
+
 #[allow(unused_variables)] // unused on targets without a service backend
 fn backend_status(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
+    liveness_note: Option<&ServiceNote>,
     role_id: Role,
     scope: ServiceScope,
 ) -> Result<NativeOutput> {
@@ -135,10 +163,12 @@ fn backend_status(
     #[cfg(windows)]
     {
         if scope == ServiceScope::System {
-            super::system_verb::system_status_notes(role_id, notes)?;
+            if let Some(note) = liveness_note {
+                notes(note);
+            }
             return Ok(NativeOutput::none());
         }
-        super::backend::windows::status(native, notes, role, scope)
+        super::backend::windows::status(native, notes, liveness_note, role, scope)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -150,8 +180,38 @@ fn backend_status(
 mod tests {
     #[cfg(unix)]
     use super::super::fixtures::{in_isolated_home, run_status};
-    #[cfg(unix)]
     use super::*;
+    use crate::ownership::{Liveness, OwnerRecord, Tier};
+
+    #[test]
+    fn role_note_describes_the_probed_owner() {
+        let liveness = Liveness::Running {
+            tier: Tier::User,
+            owner: Some(OwnerRecord {
+                role: "serve".to_owned(),
+                pid: 42,
+                node_id: None,
+                started_at: 0,
+            }),
+        };
+        assert_eq!(
+            role_note(Role::Serve, &liveness),
+            ServiceNote::RoleRunning {
+                role: "serve".to_owned(),
+                owner: "pid 42".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn role_note_reports_a_free_lock_as_not_running() {
+        assert_eq!(
+            role_note(Role::Access, &Liveness::NotRunning),
+            ServiceNote::RoleNotRunning {
+                role: "access".to_owned(),
+            }
+        );
+    }
 
     #[cfg(unix)]
     #[test]

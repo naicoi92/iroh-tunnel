@@ -1,7 +1,9 @@
 # Signed fixtures are verified byte for byte; never convert line endings.
 tests/fixtures/sigstore/* -text
 # CLI goldens pin exact bytes, LF included; a CRLF checkout breaks them.
-tests/fixtures/golden/* -text
+# Table goldens keep trailing padding spaces on purpose: `-whitespace` stops
+# `git diff --check` from flagging them (see also .editorconfig).
+tests/fixtures/golden/* -text -whitespace
 # Generated GitHub Action bundles.
 access/dist/** linguist-generated=true
 serve/dist/** linguist-generated=true

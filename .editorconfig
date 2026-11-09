@@ -1,0 +1,8 @@
+root = true
+
+# Fixtures are compared byte for byte. CLI tables pad their last column with
+# trailing spaces, and several goldens are empty or lack a final newline, so an
+# editor must not trim or append anything here.
+[tests/fixtures/{golden,sigstore}/**]
+trim_trailing_whitespace = false
+insert_final_newline = false
