@@ -95,7 +95,7 @@ pub(crate) fn system_verb_with(
 }
 
 #[cfg(windows)]
-pub(crate) use glue::{system_registration, system_status_notes, system_verb};
+pub(crate) use glue::{system_registration, system_verb};
 
 #[cfg(windows)]
 mod glue {
@@ -139,28 +139,6 @@ mod glue {
                 location: format!("Windows service {} ({state})", service_name(id)),
             }),
         }
-    }
-
-    /// Report from the role lock whether the role runs; the SCM state alone
-    /// does not cover a foreground run.
-    pub(crate) fn system_status_notes(
-        role: Role,
-        notes: &mut dyn FnMut(&ServiceNote),
-    ) -> Result<()> {
-        match crate::ownership::probe(role)? {
-            crate::ownership::Liveness::Running { owner, .. } => {
-                notes(&ServiceNote::RoleRunning {
-                    role: role.name().to_owned(),
-                    owner: crate::ownership::describe_owner(owner.as_ref()),
-                });
-            }
-            crate::ownership::Liveness::NotRunning => {
-                notes(&ServiceNote::RoleNotRunning {
-                    role: role.name().to_owned(),
-                });
-            }
-        }
-        Ok(())
     }
 }
 

@@ -38,6 +38,17 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// The `native` field of a `{:#?}` status report, whitespace removed:
+/// `NativeOutput{program:"...",status:Some(0,),...` (pretty `Debug` adds
+/// the trailing commas).
+fn captured_native(report: &str) -> String {
+    let compact: String = report.split_whitespace().collect();
+    let start = compact
+        .find("native:Some(NativeOutput{")
+        .unwrap_or_else(|| panic!("no captured native output in: {report}"));
+    compact[start + "native:Some(".len()..].to_owned()
+}
+
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
@@ -458,9 +469,12 @@ async fn captured_schtasks_status_is_returned() -> Result<()> {
     fx.wait_for_own_status(&status_file, &node_id)?;
     // `caller` pins an empty stderr: the native text comes back in the report.
     let report = fx.caller(&["--action", "status"])?;
+    // The task exists, so `/Query` exits 0; `status` is the captured exit
+    // code, not the localised task text.
+    let native = captured_native(&report);
     assert!(
-        report.contains("program: \"schtasks"),
-        "no captured schtasks output in: {report}"
+        native.starts_with("NativeOutput{program:\"schtasks\",status:Some(0,),"),
+        "captured schtasks output lacks its exit status: {report}"
     );
     Ok(())
 }
