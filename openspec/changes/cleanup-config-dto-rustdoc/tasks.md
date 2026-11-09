@@ -20,10 +20,10 @@ Blocked by: 1
 
 Files owned: `crates/host/src/{lib.rs,config/require_present.rs,config/types.rs,paths/default_config_path.rs,paths/default_state_dir.rs,runtime/run_quick_access.rs,runtime/run_quick_serve.rs,service/restart.rs,service/start.rs,service/stop.rs,service/uninstall.rs,service/types.rs,status/schema.rs,update/types.rs,update/update.rs}`, `crates/engine/src/{lib.rs,observation/types.rs}`; `dto.rs` only if a doc link remains there after group 1. It is blocked by 1 because group 1 rewrites the `RoleDoc` links in `dto.rs`, and the doc build must be measured after it. Scenarios: "Clean doc build", "Broken link is rejected", "Deviation visible in API docs".
 
-- [ ] 2.1 Add `#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]` to `crates/host/src/lib.rs` and `crates/engine/src/lib.rs`; confirm `cargo +1.91 doc --workspace --no-deps --locked` now fails on the existing links (red).
-- [ ] 2.2 Fix every unresolved link with a crate path. `update_owner` does not exist: reword to the real owner-decision item. Reword links to crate-private `StatusWriter`/`RoleDoc` from public docs as code spans.
-- [ ] 2.3 Extend the `limit_shrink` rustdoc in `crates/engine/src/observation/types.rs` and `crates/host/src/status/schema.rs` with the #152 never-usable clause.
-- [ ] 2.4 Verify that `RUSTDOCFLAGS="-D warnings" cargo +1.91 doc --workspace --no-deps --locked` exits 0 with no warnings; confirm a deliberately broken scratch link fails, then revert it. Re-run clippy and fmt.
+- [x] 2.1 Add `#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]` to `crates/host/src/lib.rs` and `crates/engine/src/lib.rs`; confirm `cargo +1.91 doc --workspace --no-deps --locked` now fails on the existing links (red).
+- [x] 2.2 Fix every unresolved link with a crate path. `update_owner` does not exist: reword to the real owner-decision item. Reword links to crate-private `StatusWriter`/`RoleDoc` from public docs as code spans.
+- [x] 2.3 Extend the `limit_shrink` rustdoc in `crates/engine/src/observation/types.rs` and `crates/host/src/status/schema.rs` with the #152 never-usable clause.
+- [x] 2.4 Verify that `RUSTDOCFLAGS="-D warnings" cargo +1.91 doc --workspace --no-deps --locked` exits 0 with no warnings; confirm a deliberately broken scratch link fails, then revert it. Re-run clippy and fmt.
 
 ## 3. CI doc gate and contributor docs
 
