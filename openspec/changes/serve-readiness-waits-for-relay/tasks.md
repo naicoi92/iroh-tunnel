@@ -4,11 +4,11 @@ Blocked by: none
 
 Owns: `action-src/src/adapters/status.ts`, `action-src/src/usecases/readiness.ts`, `action-src/src/usecases/start.ts`, `action-src/src/usecases/failure.ts`, `action-src/test/adapters/status.test.ts`, `action-src/test/usecases/readiness.test.ts`, `action-src/test/usecases/start.test.ts`, `serve/dist/main.js`, `access/dist/main.js` (regenerated). Platform-neutral TypeScript; Linux, macOS and Windows runners share this code path.
 
-- [ ] 1.1 `readStatus` exposes `home_relay` (non-empty string or `null`) in `StatusSnapshot` (design D1); test in `adapters/status.test.ts`
-- [ ] 1.2 `isReady` serve branch requires `node_id` and `home_relay`, returning `awaiting: 'home_relay'` while only `node_id` is present (design D2); covers scenarios "Home relay not yet reported", "Home relay reported"
-- [ ] 1.3 Serve timeout message adds the no-home-relay reason naming `relay-url` and `relay-token` (design D3); covers "Serve times out without a home relay", keeps "Readiness timeout", "Tunnel exits during start"
-- [ ] 1.4 Update existing serve fixtures in `start.test.ts` to report a home relay; covers "Serve ready"
-- [ ] 1.5 Regenerate `dist` (`bun run build`) and pass `bun run typecheck`, `bun test`, `bun run check-dist`
+- [x] 1.1 `readStatus` exposes `home_relay` (non-empty string or `null`) in `StatusSnapshot` (design D1); test in `adapters/status.test.ts`
+- [x] 1.2 `isReady` serve branch requires `node_id` and `home_relay`, returning `awaiting: 'home_relay'` while only `node_id` is present (design D2); covers scenarios "Home relay not yet reported", "Home relay reported"
+- [x] 1.3 Serve timeout message adds the no-home-relay reason naming `relay-url` and `relay-token` (design D3); covers "Serve times out without a home relay", keeps "Readiness timeout", "Tunnel exits during start"
+- [x] 1.4 Update existing serve fixtures in `start.test.ts` to report a home relay; covers "Serve ready"
+- [x] 1.5 Regenerate `dist` (`bun run build`) and pass `bun run typecheck`, `bun test`, `bun run check-dist`
 
 ## 2. Docs and changelog
 
