@@ -14,7 +14,7 @@ use super::types::{UpdateContext, UpdateOutcome, UpdateRequest, Verification};
 mod release_server;
 
 /// Core of `update`, with the environment injected. Does not check ownership
-/// (see [`check_owner`]) and prints nothing.
+/// (see [`super::check_owner`]) and prints nothing.
 ///
 /// # Errors
 /// Fails on network or verification errors and replacement errors; the

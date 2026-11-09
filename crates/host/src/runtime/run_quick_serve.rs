@@ -12,12 +12,12 @@ use iroh_tunnel_engine::{OnReady, RunContext};
 
 /// Run an in-memory quick serve configuration without persisting its
 /// identity, until `shutdown` resolves. Claims the serve role like
-/// [`run_foreground`]; never writes a config.
+/// [`super::run_foreground`]; never writes a config.
 ///
 /// # Errors
 ///
 /// [`crate::error::CliError::Config`] when `cfg` is invalid, plus the
-/// failures of [`run_foreground`].
+/// failures of [`super::run_foreground`].
 pub async fn run_quick_serve(
     cfg: ServeConfig,
     ctx: RunContext,

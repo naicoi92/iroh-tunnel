@@ -161,7 +161,7 @@ struct Roles {
     access_tx: oneshot::Sender<()>,
     access_handle: tokio::task::JoinHandle<Result<()>>,
     /// Keeps the configs' tempdir alive for as long as the roles run —
-    /// `resolve_and_save_key` writes back into it.
+    /// `resolve_and_persist_key` writes back into it.
     _tmp: tempfile::TempDir,
 }
 

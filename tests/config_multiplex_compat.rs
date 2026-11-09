@@ -1,63 +1,8 @@
 //! #83 / CFG-03: legacy multiplex has no configuration effect and disappears
-//! on app-owned saves. Exercise public config boundaries and real commands.
+//! on app-owned saves. Exercise real commands; serialization rules are host unit tests.
 
 use anyhow::Result;
-use iroh_tunnel_host::config::{encode_secret_key, AccessConfig, ServeConfig};
-
-#[test]
-fn legacy_multiplex_values_are_ignored_and_removed_on_save() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("access.toml");
-    let key = encode_secret_key(&iroh::SecretKey::generate());
-    let peer = iroh::SecretKey::generate().public();
-    let base = format!(
-        r#"[node]
-secret_key = "{key}"
-relay_urls = ["https://relay.example"]
-relay_token = "fixture-token"
-max_concurrent_streams = 8
-
-[[services]]
-name = "echo"
-node_id = "{peer}"
-protocol = "tcp"
-host = "127.0.0.1"
-port = 5432
-relay_urls = ["https://override.example"]
-"#
-    );
-    std::fs::write(&path, &base)?;
-    let expected = AccessConfig::load(&path)?;
-
-    // CFG-03 says ignore the legacy field, not validate its old boolean type.
-    for legacy in [
-        "",
-        "multiplex = true",
-        "multiplex = false",
-        "multiplex = \"auto\"",
-        "multiplex = 0",
-        "multiplex = 1.5",
-        "multiplex = 2026-10-29",
-        "multiplex = [false, true]",
-        "multiplex = { enabled = false }",
-        "[services.multiplex]\nenabled = false",
-    ] {
-        std::fs::write(&path, format!("{base}{legacy}\n"))?;
-        let config = AccessConfig::load(&path)?;
-        assert!(config == expected, "legacy field changed config: {legacy}");
-        config.save(&path)?;
-        let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
-        assert!(
-            saved["services"][0].get("multiplex").is_none(),
-            "save retained legacy field: {legacy}"
-        );
-        assert!(
-            AccessConfig::load(&path)? == expected,
-            "save changed config"
-        );
-    }
-    Ok(())
-}
+use iroh_tunnel_host::config::{encode_secret_key, AccessConfig};
 
 #[test]
 fn config_commands_drop_legacy_multiplex_without_changing_other_settings() -> Result<()> {
@@ -118,7 +63,7 @@ multiplex = false
         }
         assert!(saved.contains("# operator comment"));
         assert!(saved.contains("# keep comment"));
-        let config = AccessConfig::load(&path)?;
+        let config = toml::from_str::<AccessConfig>(&std::fs::read_to_string(&path)?)?;
         assert_eq!(config.node.relay_urls, ["https://relay.example"]);
         assert_eq!(config.node.max_concurrent_streams, Some(8));
         assert_eq!(config.services[0].name, "echo");
@@ -149,7 +94,10 @@ fn keygen_drops_multiplex_from_inline_services() -> Result<()> {
     let saved = std::fs::read_to_string(&path)?;
     assert!(!saved.contains("multiplex"));
     assert!(saved.contains("# inline services"));
-    assert_eq!(AccessConfig::load(&path)?.services[0].port, 5432);
+    assert_eq!(
+        toml::from_str::<AccessConfig>(&std::fs::read_to_string(&path)?)?.services[0].port,
+        5432
+    );
     Ok(())
 }
 
@@ -236,32 +184,6 @@ fn config_write_error_is_reported_and_readonly_file_preserved() -> Result<()> {
         std::fs::read_to_string(&path)? == source,
         "write failure changed config"
     );
-    Ok(())
-}
-
-#[test]
-fn generated_identity_save_drops_legacy_fields_for_both_roles() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("role.toml");
-    let service = format!(
-        "[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 5432\nnode_id = {:?}\nmultiplex = false\n",
-        iroh::SecretKey::generate().public().to_string()
-    );
-    for access in [true, false] {
-        std::fs::write(&path, &service)?;
-        let key = if access {
-            AccessConfig::load(&path)?.resolve_and_save_key(&path)?
-        } else {
-            ServeConfig::load(&path)?.resolve_and_save_key(&path)?
-        };
-        assert!(!std::fs::read_to_string(&path)?.contains("multiplex"));
-        let persisted_key = if access {
-            AccessConfig::load(&path)?.node.secret_key
-        } else {
-            ServeConfig::load(&path)?.node.secret_key
-        };
-        assert!(persisted_key == encode_secret_key(&key));
-    }
     Ok(())
 }
 

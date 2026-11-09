@@ -3,7 +3,7 @@
 //! verification: never use this artifact with public relays or real secrets.
 
 use anyhow::{Context, Result};
-use iroh_tunnel_host::config::{encode_secret_key, AccessConfig};
+use iroh_tunnel_host::config::encode_secret_key;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -77,9 +77,20 @@ async fn start_access_with_env(
     envs: &[(&str, &str)],
 ) -> Result<(RoleProcess, std::net::SocketAddr)> {
     for attempt in 0..8 {
-        let cfg = AccessConfig::load(config)?;
-        anyhow::ensure!(cfg.services.len() == 1, "fixture expects one service");
-        let listen = format!("{}:{}", cfg.services[0].host, cfg.services[0].port).parse()?;
+        let cfg: toml::Value = toml::from_str(&std::fs::read_to_string(config)?)?;
+        anyhow::ensure!(
+            cfg["services"].as_array().map(Vec::len) == Some(1),
+            "fixture expects one service"
+        );
+        let listen = format!(
+            "{}:{}",
+            cfg["services"][0]
+                .get("host")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("127.0.0.1"),
+            cfg["services"][0]["port"]
+        )
+        .parse()?;
         let mut access = start_with_env("access", home, config, round * 8 + attempt, envs)?;
         let ready = format!("listening for local clients listen_addr={listen}");
         match wait_log(&mut access, &ready).await {
@@ -115,7 +126,14 @@ async fn start_access_with_env(
                 drop(access);
                 // Preserve legacy fields and file semantics under test. A
                 // config save here would silently remove `multiplex`.
-                let reservation = TcpListener::bind((cfg.services[0].host.as_str(), 0)).await?;
+                let reservation = TcpListener::bind((
+                    cfg["services"][0]
+                        .get("host")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("127.0.0.1"),
+                    0,
+                ))
+                .await?;
                 let mut document: toml_edit::DocumentMut =
                     std::fs::read_to_string(config)?.parse()?;
                 document["services"]
@@ -239,9 +257,9 @@ async fn configured_variant(legacy: &str) -> Result<()> {
             );
             std::fs::write(&access_path, &access_source)?;
         } else {
-            let mut cfg = AccessConfig::load(&access_path)?;
-            cfg.services[0].port = listen.port();
-            cfg.save(&access_path)?;
+            let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&access_path)?.parse()?;
+            doc["services"][0]["port"] = toml_edit::value(i64::from(listen.port()));
+            std::fs::write(&access_path, doc.to_string())?;
         }
         let (mut access, listen) = start_access(&access_home, &access_path, round).await?;
         if round == 0 {
@@ -309,10 +327,12 @@ async fn configured_variant(legacy: &str) -> Result<()> {
             anyhow::ensure!(output.status.success(), "config rm failed");
             let saved = std::fs::read_to_string(&access_path)?;
             assert!(!saved.contains("multiplex"));
-            let cfg = AccessConfig::load(&access_path)?;
-            assert!(cfg.node.secret_key == encode_secret_key(&access_key));
-            assert_eq!(cfg.services.len(), 1);
-            assert_eq!(cfg.services[0].name, "echo");
+            let cfg: toml::Value = toml::from_str(&saved)?;
+            assert!(
+                cfg["node"]["secret_key"].as_str() == Some(encode_secret_key(&access_key).as_str())
+            );
+            assert_eq!(cfg["services"].as_array().map(Vec::len), Some(1));
+            assert_eq!(cfg["services"][0]["name"].as_str(), Some("echo"));
         }
     }
     Ok(())
@@ -809,11 +829,12 @@ async fn shutdown_drain_scenario(role: &str) -> Result<()> {
             let reservation = TcpListener::bind("127.0.0.1:0").await?;
             let peer_listen = reservation.local_addr()?;
             drop(reservation);
-            let mut cfg = AccessConfig::load(&access_path)?;
-            cfg.node.secret_key = encode_secret_key(&iroh::SecretKey::generate());
-            cfg.services[0].port = peer_listen.port();
+            let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&access_path)?.parse()?;
+            doc["node"]["secret_key"] =
+                toml_edit::value(encode_secret_key(&iroh::SecretKey::generate()));
+            doc["services"][0]["port"] = toml_edit::value(i64::from(peer_listen.port()));
             let config = peer_home.join("access.toml");
-            cfg.save(&config)?;
+            std::fs::write(&config, doc.to_string())?;
             let (process, peer_listen) = start_access(&peer_home, &config, 0).await?;
             new_peer = Some(process);
             let mut pending_peer = TcpStream::connect(peer_listen).await?;

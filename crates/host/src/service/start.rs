@@ -10,7 +10,7 @@ use crate::role::Role;
 ///
 /// # Errors
 ///
-/// A [`ServiceFailure`]; [`CliError::Conflict`] when the role runs.
+/// A [`ServiceFailure`]; [`crate::error::CliError::Conflict`] when the role runs.
 pub fn start(
     role: Role,
     scope: ServiceScope,

@@ -1,17 +1,13 @@
-//! TOML config schema (`ServeConfig`, `AccessConfig`, ...), load/save and
-//! validation (T-02.1, T-02.2, T-02.4; Page 05 v3 §2–§4).
+//! TOML config schema (`ServeConfig`, `AccessConfig`, ...) and validation
+//! (T-02.1, T-02.2, T-02.4; Page 05 v3 §2–§4). File effects live in `store`.
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
-use iroh::SecretKey;
+use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use super::encode_secret_key::encode_secret_key;
-use super::resolve_secret_key::resolve_secret_key;
 pub use iroh_tunnel_engine::settings::{Protocol, UdpLimits};
 
 // Service names are lowercased dns-label-like identifiers (ALPN-safe).
@@ -301,85 +297,24 @@ mod protocol_serde {
     }
 }
 
-/// A role's TOML config document: schema + validation + the bits every role
-/// shares (load, save, secret-key resolution).
+/// A role's TOML config document: schema plus validation.
 ///
-/// [`ServeConfig`] and [`AccessConfig`] both `impl RoleDoc`. The default
-/// methods below collapse what used to be three byte-identical method pairs
-/// (`load`, `save`, `resolve_and_save_key`) into a single definition — only
-/// [`RoleDoc::validate`] differs per role, so that stays the one required
-/// method.
+/// [`ServeConfig`] and [`AccessConfig`] both `impl RoleDoc`. Only
+/// [`RoleDoc::validate`] and [`RoleDoc::node_mut`] differ per role; reading,
+/// parsing and key persistence are handled by the config store, generic over
+/// this trait.
 ///
 /// The trait is sealed to this crate (`pub(crate)` boundary) because it's an
 /// internal abstraction over two known implementers, not a public extension
 /// point.
 pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
-    /// Validate the parsed document; called automatically at the end of
-    /// [`RoleDoc::load`]. Each role implements its own checks.
+    /// Validate the parsed document; the config store calls it after parsing.
+    /// Each role implements its own checks.
     fn validate(&self) -> Result<()>;
 
-    /// The node-level section that carries `secret_key` + `relay_urls`. Used
-    /// by [`RoleDoc::resolve_and_save_key`] to read and persist the key.
+    /// The node-level section that carries `secret_key` + `relay_urls`. The
+    /// config store reads and updates the key through it.
     fn node_mut(&mut self) -> &mut NodeConfig;
-
-    /// Load and validate a role config from a TOML file.
-    fn load(path: &Path) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read config: {}", path.display()))?;
-        Self::from_toml(&content, path)
-    }
-
-    /// Parse and validate config text already read from `path` (used when the
-    /// bytes come from a verified handle rather than a path lookup).
-    fn from_toml(content: &str, path: &Path) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        // `toml` errors quote the offending source line, which can hold a
-        // secret; report the message and line only (RS-10).
-        let cfg: Self = toml::from_str(content).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to parse config: {}{}: {}",
-                path.display(),
-                super::store::describe_location(content, e.span()),
-                e.message()
-            )
-        })?;
-        cfg.validate()?;
-        Ok(cfg)
-    }
-
-    /// Serialize and write the config to disk: under the writer lock,
-    /// atomically and owner-only (CFG-04).
-    fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self).context("failed to serialize config")?;
-        let path = super::store::resolve_target(path);
-        let _lock = super::store::ConfigLock::acquire(&path)?;
-        super::store::write_atomic(&path, content.as_bytes())
-    }
-
-    /// Resolve the node secret key; if it was just generated, persist it back
-    /// into the config file. Returns the resolved key.
-    ///
-    /// The key is stored by editing the file in place, owner-only, under the
-    /// writer lock; if another process stored a key first, that key is
-    /// adopted. The key value itself is never logged (NFR-05).
-    fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey>
-    where
-        Self: Sized,
-    {
-        let (key, needs_save) = resolve_secret_key(&self.node_mut().secret_key)?;
-        if !needs_save {
-            return Ok(key);
-        }
-        tracing::warn!("secret_key empty, generated new key, saving to config");
-        let stored = super::store::persist_generated_key::<Self>(path, &encode_secret_key(&key))?;
-        self.node_mut().secret_key = stored;
-        Ok(resolve_secret_key(&self.node_mut().secret_key)?.0)
-    }
 }
 
 impl NodeConfig {
@@ -400,50 +335,6 @@ impl NodeConfig {
             }
         }
         Ok(())
-    }
-}
-
-impl ServeConfig {
-    /// Load and validate a serve config from a TOML file.
-    ///
-    /// Thin delegate to the [`RoleDoc`] default — kept as an inherent method
-    /// so existing call sites (`ServeConfig::load(path)`) read naturally.
-    pub fn load(path: &Path) -> Result<Self> {
-        RoleDoc::load(path)
-    }
-
-    /// Serialize and write the config to disk.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        RoleDoc::save(self, path)
-    }
-
-    /// Resolve the node secret key; if it was just generated, persist it back
-    /// into the config file. Returns the resolved key.
-    pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
-        RoleDoc::resolve_and_save_key(self, path)
-    }
-}
-
-impl AccessConfig {
-    /// Load and validate an access config from a TOML file.
-    ///
-    /// Thin delegate to the [`RoleDoc`] default.
-    pub fn load(path: &Path) -> Result<Self> {
-        RoleDoc::load(path)
-    }
-
-    /// Serialize and write the config to disk.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        RoleDoc::save(self, path)
-    }
-
-    /// Resolve the node secret key; if it was just generated, persist it back
-    /// into the config file. Returns the resolved key.
-    ///
-    /// Pinned access identity: an empty `secret_key` is generated once and
-    /// persisted, so the access NodeId is stable across restarts.
-    pub fn resolve_and_save_key(&mut self, path: &Path) -> Result<SecretKey> {
-        RoleDoc::resolve_and_save_key(self, path)
     }
 }
 
@@ -548,7 +439,9 @@ impl RoleDoc for AccessConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{load_role_config, parse_role_config};
     use std::io::Write;
+    use std::path::Path;
 
     fn tmpfile(_name: &str, content: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().expect("tmp");
@@ -584,7 +477,7 @@ mod tests {
     #[test]
     fn udp_limits_default_to_the_documented_values_when_absent() {
         let f = tmpfile("serve.toml", UDP_SERVE);
-        let cfg = ServeConfig::load(f.path()).unwrap();
+        let cfg = load_role_config::<ServeConfig>(f.path()).unwrap();
         let limits = cfg.services[0].udp.resolve();
         assert_eq!(limits.idle_timeout, std::time::Duration::from_secs(60));
         assert_eq!(limits.max_flows, 256);
@@ -600,7 +493,7 @@ mod tests {
                 "{UDP_SERVE}idle_timeout = 30\nmax_flows = 10\nmax_flows_per_peer = 4\nqueue_depth = 8\n"
             ),
         );
-        let limits = ServeConfig::load(f.path()).unwrap().services[0]
+        let limits = load_role_config::<ServeConfig>(f.path()).unwrap().services[0]
             .udp
             .resolve();
         assert_eq!(limits.idle_timeout, std::time::Duration::from_secs(30));
@@ -618,7 +511,10 @@ mod tests {
             "queue_depth",
         ] {
             let f = tmpfile("serve.toml", &format!("{UDP_SERVE}{field} = 0\n"));
-            let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+            let err = format!(
+                "{:#}",
+                load_role_config::<ServeConfig>(f.path()).unwrap_err()
+            );
             assert!(err.contains(field), "{field}: {err}");
         }
     }
@@ -629,7 +525,10 @@ mod tests {
             "serve.toml",
             &format!("{UDP_SERVE}max_flows = 4\nmax_flows_per_peer = 5\n"),
         );
-        let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+        let err = format!(
+            "{:#}",
+            load_role_config::<ServeConfig>(f.path()).unwrap_err()
+        );
         assert!(err.contains("max_flows_per_peer"), "{err}");
     }
 
@@ -642,12 +541,15 @@ mod tests {
             ("idle_timeout", "86401"),
         ] {
             let f = tmpfile("serve.toml", &format!("{UDP_SERVE}{field} = {value}\n"));
-            let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+            let err = format!(
+                "{:#}",
+                load_role_config::<ServeConfig>(f.path()).unwrap_err()
+            );
             assert!(err.contains(field), "{field}={value}: {err}");
         }
         let f = tmpfile("serve.toml", &format!("{UDP_SERVE}queue_depth = 65536\n"));
         assert_eq!(
-            ServeConfig::load(f.path()).unwrap().services[0]
+            load_role_config::<ServeConfig>(f.path()).unwrap().services[0]
                 .udp
                 .resolve()
                 .queue_depth,
@@ -658,7 +560,7 @@ mod tests {
     #[test]
     fn a_small_service_cap_alone_clamps_the_default_per_peer_cap() {
         let f = tmpfile("serve.toml", &format!("{UDP_SERVE}max_flows = 10\n"));
-        let limits = ServeConfig::load(f.path()).unwrap().services[0]
+        let limits = load_role_config::<ServeConfig>(f.path()).unwrap().services[0]
             .udp
             .resolve();
         assert_eq!((limits.max_flows, limits.max_flows_per_peer), (10, 10));
@@ -670,7 +572,10 @@ mod tests {
             "serve.toml",
             "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nport = 5432\nmax_flows = 5\n",
         );
-        let err = format!("{:#}", ServeConfig::load(f.path()).unwrap_err());
+        let err = format!(
+            "{:#}",
+            load_role_config::<ServeConfig>(f.path()).unwrap_err()
+        );
         assert!(err.contains("udp"), "{err}");
     }
 
@@ -681,24 +586,32 @@ mod tests {
             "[[services]]\nname = \"dns\"\nnode_id = \"{node}\"\nprotocol = \"udp\"\nport = 53\n"
         );
         let ok = tmpfile("access.toml", &format!("{base}max_flows = 7\n"));
-        let limits = AccessConfig::load(ok.path()).unwrap().services[0]
+        let limits = load_role_config::<AccessConfig>(ok.path())
+            .unwrap()
+            .services[0]
             .udp
             .resolve();
         assert_eq!(limits.max_flows, 7);
 
         let queue = tmpfile("access.toml", &format!("{base}queue_depth = 3\n"));
-        let err = format!("{:#}", AccessConfig::load(queue.path()).unwrap_err());
+        let err = format!(
+            "{:#}",
+            load_role_config::<AccessConfig>(queue.path()).unwrap_err()
+        );
         assert!(err.contains("queue_depth"), "{err}");
 
         let bad = tmpfile("access.toml", &format!("{base}max_flows_per_peer = 2\n"));
-        let err = format!("{:#}", AccessConfig::load(bad.path()).unwrap_err());
+        let err = format!(
+            "{:#}",
+            load_role_config::<AccessConfig>(bad.path()).unwrap_err()
+        );
         assert!(err.contains("max_flows_per_peer"), "{err}");
     }
 
     #[test]
     fn a_config_without_udp_limits_serializes_without_them() {
         let f = tmpfile("serve.toml", UDP_SERVE);
-        let cfg = ServeConfig::load(f.path()).unwrap();
+        let cfg = load_role_config::<ServeConfig>(f.path()).unwrap();
         let out = toml::to_string(&cfg).unwrap();
         for field in ["idle_timeout", "max_flows", "queue_depth"] {
             assert!(!out.contains(field), "{field} leaked into {out}");
@@ -711,7 +624,7 @@ mod tests {
             "serve.toml",
             "[node]\nfoo = 1\n\n[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nport = 5432\n",
         );
-        assert!(ServeConfig::load(serve.path()).is_ok());
+        assert!(load_role_config::<ServeConfig>(serve.path()).is_ok());
 
         let node = "0".repeat(64);
         let access = tmpfile(
@@ -720,7 +633,7 @@ mod tests {
                 "[[services]]\nname = \"db\"\nnode_id = \"{node}\"\nprotocol = \"tcp\"\nport = 5432\nmultiplex = true\n"
             ),
         );
-        assert!(AccessConfig::load(access.path()).is_ok());
+        assert!(load_role_config::<AccessConfig>(access.path()).is_ok());
     }
 
     #[test]
@@ -729,7 +642,7 @@ mod tests {
             "serve.toml",
             "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nhost = \"example.internal\"\nport = 5432\n",
         );
-        let cfg = ServeConfig::load(f.path()).unwrap();
+        let cfg = load_role_config::<ServeConfig>(f.path()).unwrap();
         assert_eq!(cfg.services[0].host, "example.internal");
     }
 
@@ -745,12 +658,12 @@ mod tests {
         };
         // Right length but not a parseable key: load only checks the length.
         let non_hex = "z".repeat(64);
-        assert!(AccessConfig::load(access(&non_hex).path()).is_ok());
+        assert!(load_role_config::<AccessConfig>(access(&non_hex).path()).is_ok());
 
         let short = "0".repeat(10);
         let err = format!(
             "{:#}",
-            AccessConfig::load(access(&short).path()).unwrap_err()
+            load_role_config::<AccessConfig>(access(&short).path()).unwrap_err()
         );
         assert!(
             err.contains("must be 52 (base32) or 64 (hex) chars"),
@@ -764,7 +677,7 @@ mod tests {
             "serve.toml",
             "[node]\nsecret_key = \"\"\n\n[[services]]\nname = \"postgres\"\nprotocol = \"tcp\"\nport = 5432\n",
         );
-        let cfg = ServeConfig::load(f.path()).unwrap();
+        let cfg = load_role_config::<ServeConfig>(f.path()).unwrap();
         assert_eq!(cfg.services.len(), 1);
         assert_eq!(cfg.services[0].name, "postgres");
         assert_eq!(cfg.services[0].host, "127.0.0.1"); // default
@@ -772,19 +685,20 @@ mod tests {
 
     #[test]
     fn serve_load_missing_file_errors() {
-        let err = ServeConfig::load(Path::new("/nonexistent/serve.toml")).unwrap_err();
+        let err =
+            load_role_config::<ServeConfig>(Path::new("/nonexistent/serve.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("failed to read config"));
     }
 
     #[test]
     fn serve_load_bad_toml_errors() {
         let f = tmpfile("serve.toml", "this is = not = valid toml = =");
-        let err = ServeConfig::load(f.path()).unwrap_err();
+        let err = load_role_config::<ServeConfig>(f.path()).unwrap_err();
         assert!(format!("{err:#}").contains("failed to parse config"));
     }
 
     #[test]
-    fn save_roundtrip_writes_file() {
+    fn serialized_config_roundtrips() {
         let cfg = ServeConfig {
             node: NodeConfig::default(),
             services: vec![ServeService {
@@ -795,50 +709,61 @@ mod tests {
                 udp: Default::default(),
             }],
         };
-        let f = tmpfile("serve.toml", "");
-        cfg.save(f.path()).unwrap();
-        let reloaded = ServeConfig::load(f.path()).unwrap();
-        assert_eq!(reloaded, cfg);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed = parse_role_config::<ServeConfig>(&text, Path::new("serve.toml")).unwrap();
+        assert_eq!(reparsed, cfg);
     }
 
     #[test]
-    fn access_resolve_and_save_key_generates_and_persists() {
-        // An empty access secret_key is generated once and written back, so the
-        // access NodeId is stable across restarts (mirrors serve behavior).
-        let f = tmpfile("access.toml", "");
-        let mut cfg = AccessConfig::default();
-        assert!(cfg.node.secret_key.is_empty());
+    fn legacy_multiplex_values_are_ignored_and_dropped_on_serialize() {
+        let key = crate::config::encode_secret_key(&iroh::SecretKey::generate());
+        let peer = iroh::SecretKey::generate().public();
+        let base = format!(
+            r#"[node]
+secret_key = "{key}"
+relay_urls = ["https://relay.example"]
+relay_token = "fixture-token"
+max_concurrent_streams = 8
 
-        let key = cfg.resolve_and_save_key(f.path()).unwrap();
-        assert!(!cfg.node.secret_key.is_empty(), "key should be persisted");
+[[services]]
+name = "echo"
+node_id = "{peer}"
+protocol = "tcp"
+host = "127.0.0.1"
+port = 5432
+relay_urls = ["https://override.example"]
+"#
+        );
+        let path = Path::new("access.toml");
+        let expected = parse_role_config::<AccessConfig>(&base, path).unwrap();
 
-        // The file on disk now carries the encoded key.
-        let reloaded = AccessConfig::load(f.path()).unwrap();
-        assert_eq!(reloaded.node.secret_key, cfg.node.secret_key);
-
-        // Re-resolving off the persisted value is a no-op (needs_save == false)
-        // and yields the same public key.
-        let (key2, needs_save) = resolve_secret_key(&reloaded.node.secret_key).unwrap();
-        assert!(!needs_save);
-        assert_eq!(key.public(), key2.public());
-    }
-
-    #[test]
-    fn access_resolve_and_save_key_no_save_when_present() {
-        // A pre-existing secret_key is reused verbatim; the file is not rewritten.
-        let (key, _) = resolve_secret_key("").unwrap();
-        let enc = encode_secret_key(&key);
-        let f = tmpfile("access.toml", "");
-        let mut cfg = AccessConfig {
-            node: NodeConfig {
-                secret_key: enc.clone(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let resolved = cfg.resolve_and_save_key(f.path()).unwrap();
-        assert_eq!(resolved.public(), key.public());
-        assert_eq!(cfg.node.secret_key, enc, "value unchanged when already set");
+        // CFG-03 says ignore the legacy field, not validate its old boolean type.
+        for legacy in [
+            "",
+            "multiplex = true",
+            "multiplex = false",
+            "multiplex = \"auto\"",
+            "multiplex = 0",
+            "multiplex = 1.5",
+            "multiplex = 2026-10-29",
+            "multiplex = [false, true]",
+            "multiplex = { enabled = false }",
+            "[services.multiplex]\nenabled = false",
+        ] {
+            let text = format!("{base}{legacy}\n");
+            let config = parse_role_config::<AccessConfig>(&text, path).unwrap();
+            assert!(config == expected, "legacy field changed config: {legacy}");
+            let out = toml::to_string_pretty(&config).unwrap();
+            let value: toml::Value = toml::from_str(&out).unwrap();
+            assert!(
+                value["services"][0].get("multiplex").is_none(),
+                "serialize retained legacy field: {legacy}"
+            );
+            assert!(
+                parse_role_config::<AccessConfig>(&out, path).unwrap() == expected,
+                "re-parse changed config"
+            );
+        }
     }
 
     #[test]
@@ -1047,7 +972,7 @@ max_concurrent_streams = 0
                 "[node]\nsecret_key = \"{SECRET_KEY_TEXT}\"\nrelay_urls = [\"https://relay.example\"]\nrelay_token = \"{RELAY_TOKEN_TEXT}\"\nmax_concurrent_streams = 7\n"
             ),
         );
-        let cfg = ServeConfig::load(f.path()).unwrap();
+        let cfg = load_role_config::<ServeConfig>(f.path()).unwrap();
         let shown = format!("{cfg:?}");
         assert!(!shown.contains(SECRET_KEY_TEXT), "{shown}");
         assert!(!shown.contains(RELAY_TOKEN_TEXT), "{shown}");
@@ -1071,7 +996,7 @@ max_concurrent_streams = 0
             "serve.toml",
             &format!("[node]\nsecret_key = \"{SECRET_KEY_TEXT}\" oops\n"),
         );
-        let e = ServeConfig::load(f.path()).unwrap_err();
+        let e = load_role_config::<ServeConfig>(f.path()).unwrap_err();
         for text in [format!("{e:#}"), format!("{e:?}")] {
             assert!(!text.contains(SECRET_KEY_TEXT), "{text}");
         }

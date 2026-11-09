@@ -15,7 +15,7 @@ use super::set_migration_notice::notify_migrated;
 ///
 /// # Errors
 ///
-/// [`CliError::Config`] when the home directory is unusable, or when the
+/// [`crate::error::CliError::Config`] when the home directory is unusable, or when the
 /// macOS migration fails (no replacement identity is created).
 pub fn default_config_path(role: &str) -> Result<PathBuf> {
     let path = default_config_dir()?.join(format!("{role}.toml"));

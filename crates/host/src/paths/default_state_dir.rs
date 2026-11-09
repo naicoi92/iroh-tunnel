@@ -13,7 +13,7 @@ use super::locations::{local_app_data, windows_state_dir};
 ///
 /// # Errors
 ///
-/// [`CliError::Config`] when the home directory (or LocalAppData on Windows)
+/// [`crate::error::CliError::Config`] when the home directory (or LocalAppData on Windows)
 /// is missing or not absolute.
 pub fn default_state_dir() -> Result<PathBuf> {
     #[cfg(windows)]

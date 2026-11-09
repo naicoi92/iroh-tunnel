@@ -516,9 +516,18 @@ fn run_persists_a_generated_key_owner_only_and_reuses_it() {
 
     let (first_id, first_key) = run_once(1);
     assert_eq!(mode(&cfg), 0o600);
+    assert_eq!(
+        iroh_tunnel_host::config::resolve_secret_key(&first_key)
+            .unwrap()
+            .0
+            .public()
+            .to_string(),
+        first_id,
+        "persisted key does not match the printed NodeId"
+    );
     assert!(std::fs::read_to_string(&cfg).unwrap().contains("# keep me"));
     let (second_id, second_key) = run_once(2);
-    assert_eq!(second_key, first_key, "restart changed the stored key");
+    assert!(second_key == first_key, "restart changed the stored key");
     assert_eq!(second_id, first_id, "restart changed the NodeId");
 }
 

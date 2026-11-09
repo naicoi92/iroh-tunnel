@@ -10,7 +10,7 @@ use crate::role::Role;
 ///
 /// # Errors
 ///
-/// A [`ServiceFailure`]; see [`install`].
+/// A [`ServiceFailure`]; see [`super::install`].
 pub fn stop(
     role: Role,
     scope: ServiceScope,

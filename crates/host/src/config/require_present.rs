@@ -13,7 +13,7 @@ use crate::role::Role;
 ///
 /// # Errors
 ///
-/// The same [`CliError::Config`] as [`require_existing`].
+/// The same [`crate::error::CliError::Config`] as [`require_existing`].
 pub fn require_present(role: Role, path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(()),

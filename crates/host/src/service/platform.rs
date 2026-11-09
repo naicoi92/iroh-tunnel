@@ -25,14 +25,14 @@ pub(crate) fn load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        C::load(path)
+        crate::config::load_role_config::<C>(path)
     }
 }
 
 /// Windows twin of `trust::load_config`: under a system service the state
 /// directory and the config are verified and the config is parsed only from
 /// the verified handle. The service never writes into the user's file, so a
-/// missing key is an error; with a non-empty key `resolve_and_save_key` has
+/// missing key is an error; with a non-empty key `resolve_and_persist_key` has
 /// nothing to persist.
 #[cfg(windows)]
 fn windows_load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
@@ -52,14 +52,14 @@ fn windows_load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
             )
             .into());
         }
-        return C::load(path);
+        return crate::config::load_role_config::<C>(path);
     };
     let trusted = TrustedSet::for_user_files(&sid);
     if let Some(state) = std::env::var_os(ENV_STATE_DIR).filter(|d| !d.is_empty()) {
         verify_dir(Path::new(&state), &trusted)?;
     }
     let text = read_verified(path, &trusted)?;
-    let mut cfg = C::from_toml(&text, path)?;
+    let mut cfg = crate::config::parse_role_config::<C>(&text, path)?;
     if cfg.node_mut().secret_key.is_empty() {
         return Err(CliError::Config(empty_key_text(path)).into());
     }

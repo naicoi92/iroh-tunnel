@@ -1,4 +1,5 @@
 #![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 //! Runtime engine: endpoint binding, role loops, tunnels and their typed
 //! settings/observations. Everything here is host-agnostic: the engine never
 //! touches files, OS services, signals, `process::exit` or stdout/stderr.

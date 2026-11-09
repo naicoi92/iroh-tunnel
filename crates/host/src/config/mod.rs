@@ -50,6 +50,7 @@ pub use resolve_secret_key::resolve_secret_key;
 pub use resolve_write_target::resolve_write_target;
 pub use set_service::set_service;
 pub use show_config::show_config;
+pub(crate) use store::{load_role_config, parse_role_config, resolve_and_persist_key};
 pub use to_settings::{access_settings, serve_settings};
 pub use types::{
     Disclosure, EditAttempt, EditOutcome, EditRejection, GeneratedIdentity, IdentityState,

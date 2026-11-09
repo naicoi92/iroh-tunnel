@@ -1,4 +1,5 @@
 #![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 //! Host operations: everything file-, OS- and process-bound that a frontend
 //! (the CLI today) drives — config editing, status files, role ownership,
 //! service management, updating and the role runtime.
