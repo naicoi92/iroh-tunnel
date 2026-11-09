@@ -31,12 +31,13 @@ Confidence: inferred
 
 ### Requirement: Pull-request test gate
 The system SHALL run, for every pull request and in parallel, only the checks its changed paths need: `lint` and the unit jobs for code paths, `scripts` for script and workflow paths, and `action` for GitHub Action paths. Pull requests SHALL NOT run end-to-end tests or build release artifacts. Unit job names SHALL identify the operating system (`unit (linux)`, `unit (macos)`, `unit (windows)`), and a failing unit job SHALL NOT cancel the others. A single `ci-ok` check SHALL always report and SHALL fail when any check failed or was cancelled.
-Evidence: .github/workflows/ci.yml (changes, lint, unit, scripts, ci-ok), design.md D1; this change's design.md D10
+`lint` SHALL run the rustfmt check, clippy with warnings denied, and `cargo doc --workspace --no-deps --locked` with `RUSTDOCFLAGS=-D warnings`.
+Evidence: .github/workflows/ci.yml (changes, lint, unit, scripts, ci-ok), design.md D1; optimize-ci-cd design.md D10; cleanup-config-dto-rustdoc design.md D5
 Confidence: inferred
 
 #### Scenario: Code change
 - **WHEN** a pull request changes a code path: `src/**`, `crates/**`, `tests/**`, `examples/**`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.github/actions/**` or `.github/workflows/ci.yml`
-- **THEN** `lint` (rustfmt check, clippy with warnings denied) and the unit jobs on Linux, macOS and Windows run in parallel, no e2e test runs, and `ci-ok` reflects their results
+- **THEN** `lint` (rustfmt check, clippy with warnings denied, workspace rustdoc build with warnings denied) and the unit jobs on Linux, macOS and Windows run in parallel, no e2e test runs, and `ci-ok` reflects their results
 
 #### Scenario: Installer script change only
 - **WHEN** a pull request changes only `install.sh` or `install.ps1`
@@ -69,6 +70,10 @@ Confidence: inferred
 #### Scenario: Superseded push
 - **WHEN** a new commit is pushed to a pull request whose run is still in progress
 - **THEN** the older run is cancelled
+
+#### Scenario: Broken rustdoc link
+- **WHEN** a pull request changes a code path and introduces an intra-doc link that does not resolve on an item documented for the Linux `lint` target
+- **THEN** `lint` fails and `ci-ok` fails
 
 ### Requirement: Tests cover the application only
 The system SHALL keep only tests of application behaviour in the Rust test suite. The suite SHALL NOT contain tests whose subject is the installer scripts, workflow or Dockerfile contents, the GitHub Actions, or release-artifact sets. Installer scripts and workflows SHALL be checked by static linting only. The GitHub Actions SHALL be tested by their own unit tests under `action-src/` and by running them in the end-to-end stage, never from the Rust suite.
