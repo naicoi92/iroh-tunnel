@@ -47,6 +47,17 @@ export function bindMessage(reason: string, status: unknown, log: string, secret
   return withLog(`${reason} Last status: ${statusText(status)}.`, log, secrets);
 }
 
-export function timeoutMessage(role: Role, status: unknown, log: string, secrets: readonly string[] = []): string {
-  return withLog(`iroh-tunnel-${role} was not ready within 60 s. Last status: ${statusText(status)}.`, log, secrets);
+export const NO_HOME_RELAY =
+  'No home relay was registered; check the relay-url and relay-token inputs and outbound HTTPS access to the relay.';
+
+export function timeoutMessage(
+  role: Role,
+  status: unknown,
+  log: string,
+  secrets: readonly string[] = [],
+  reason?: string,
+): string {
+  const why = reason ? ` ${reason}` : '';
+  const head = `iroh-tunnel-${role} was not ready within 60 s.${why} Last status: ${statusText(status)}.`;
+  return withLog(head, log, secrets);
 }

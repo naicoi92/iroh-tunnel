@@ -22108,7 +22108,13 @@ async function readStatus(stateDir, role) {
     const j = JSON.parse(text);
     if (!j || typeof j.node_id !== "string" || j.node_id === "")
       return;
-    return { node_id: j.node_id, services: Array.isArray(j.services) ? j.services : [] };
+    const services = Array.isArray(j.services) ? j.services : [];
+    const snapshot = { node_id: j.node_id, services };
+    if ("home_relay" in j) {
+      const relay = j.home_relay;
+      snapshot.home_relay = typeof relay === "string" && relay !== "" ? relay : null;
+    }
+    return snapshot;
   } catch {
     return;
   }

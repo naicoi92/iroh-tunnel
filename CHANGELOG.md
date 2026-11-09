@@ -41,7 +41,7 @@ Windows service scope changes:
   #67.
 - `install.ps1` run elevated protects the install directory it creates, so
   the binary passes the system service check.
-- GitHub Actions: Access (naicoi92/iroh-tunnel) and Serve (naicoi92/iroh-tunnel/serve) for CI/CD.
+- GitHub Actions: Access (naicoi92/iroh-tunnel) and Serve (naicoi92/iroh-tunnel/serve) for CI/CD. The Serve action completes once its node has a home relay, and fails after 60 s if no relay registers.
 - `config check` validates a config file without changing it.
 - Usage errors print `error: ...` and the help of the failing subcommand, and
   exit `2`; bare `it`, `its`, `ita`, role, `config` and `service` print help.

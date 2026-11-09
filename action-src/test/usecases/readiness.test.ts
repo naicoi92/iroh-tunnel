@@ -9,10 +9,18 @@ const access = (protocol: string) =>
 const bound = 'INFO listening for local clients listen_addr=127.0.0.1:15000\n';
 const boundUdp = 'INFO listening for local udp clients listen_addr=127.0.0.1:15000\n';
 
-test('serve is ready iff node_id is present; home_relay null does not block', () => {
+test('serve: not ready without a status file', () => {
   expect(isReady(serve, undefined, '')).toEqual({ ready: false });
-  const s = { node_id: N, services: [], home_relay: null } as never;
-  expect(isReady(serve, s, '')).toEqual({ ready: true });
+});
+
+test('serve: node_id without home relay awaits the relay', () => {
+  for (const home_relay of [null, undefined, '']) {
+    expect(isReady(serve, { node_id: N, services: [], home_relay }, '')).toEqual({ ready: false, awaiting: 'home_relay' });
+  }
+});
+
+test('serve: node_id and home relay -> ready', () => {
+  expect(isReady(serve, { node_id: N, services: [], home_relay: 'https://r.example./' }, '')).toEqual({ ready: true });
 });
 
 test('access tcp: not bound -> not ready', () => {

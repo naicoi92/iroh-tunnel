@@ -187,12 +187,12 @@ steps:
 ## Behavior
 
 - **Readiness (60 s limit).** Serve is ready when its status file has a
-  `node_id`. It does not wait for relay registration, so an embedded client
-  should retry dials for a few seconds
-  ([#177](https://github.com/naicoi92/iroh-tunnel/issues/177)). There is no
-  `home-relay` output.
+  `node_id` and a `home_relay`, so a client using the same relays can dial
+  it as soon as the step completes. There is no `home-relay` output.
 - **Timeout.** If the 60 s limit is reached, the step fails and prints the
-  last status and the end of the log.
+  last status and the end of the log. When Serve had a NodeId but no home
+  relay, the message says so: check `relay-url`, `relay-token` and outbound
+  HTTPS access to the relay.
 - **Access, TCP.** The step binds the listener, opens and closes one probe
   connection to trigger the dial, then waits for an active transport.
 - **Access, UDP.** Ready means the listener is bound.
@@ -230,5 +230,4 @@ directly with an iroh endpoint:
 - TCP: open one bidirectional QUIC stream per TCP connection and carry raw
   bytes with no framing (`crates/engine/src/tcp.rs`, `crates/engine/src/proto.rs`).
 - UDP framing is in the [UDP integration contract](udp-integration-contract.md).
-- Use the same relays as the Serve step, and retry the dial for a few seconds
-  after Serve starts.
+- Use the same relays as the Serve step.

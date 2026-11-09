@@ -22272,8 +22272,11 @@ function exitMessage(role, code, status, log, platform, secrets = []) {
 function bindMessage(reason, status, log, secrets = []) {
   return withLog(`${reason} Last status: ${statusText(status)}.`, log, secrets);
 }
-function timeoutMessage(role, status, log, secrets = []) {
-  return withLog(`iroh-tunnel-${role} was not ready within 60 s. Last status: ${statusText(status)}.`, log, secrets);
+var NO_HOME_RELAY = "No home relay was registered; check the relay-url and relay-token inputs and outbound HTTPS access to the relay.";
+function timeoutMessage(role, status, log, secrets = [], reason) {
+  const why = reason ? ` ${reason}` : "";
+  const head = `iroh-tunnel-${role} was not ready within 60 s.${why} Last status: ${statusText(status)}.`;
+  return withLog(head, log, secrets);
 }
 
 // src/adapters/logscan.ts
@@ -22296,8 +22299,11 @@ function scanLog(text, listen) {
 
 // src/usecases/readiness.ts
 function isReady(req, status, log) {
-  if (req.role === "serve")
-    return status?.node_id ? { ready: true } : { ready: false };
+  if (req.role === "serve") {
+    if (!status?.node_id)
+      return { ready: false };
+    return status.home_relay ? { ready: true } : { ready: false, awaiting: "home_relay" };
+  }
   const sig = scanLog(log, req.listen);
   if (sig.bindError !== undefined) {
     return { failed: `input \`listen\` (${req.listen.host}:${req.listen.port}): cannot bind: ${sig.bindError}.` };
@@ -22346,6 +22352,7 @@ async function run(req, deps) {
   const deadline = deps.clock.now() + DEADLINE_MS;
   let probed = false;
   let lastStatus;
+  let lastReadiness;
   for (let i = 0;i < MAX_POLLS && deps.clock.now() < deadline; i++) {
     const code = child.exitCode();
     if (code !== null) {
@@ -22357,6 +22364,7 @@ async function run(req, deps) {
     lastStatus = await deps.readStatus(ws.stateDir, req.role);
     const log = await deps.readLog(ws.logPath);
     const r = isReady(req, lastStatus, log);
+    lastReadiness = r;
     if ("failed" in r)
       throw new StartFailure(bindMessage(r.failed, lastStatus, log, secrets));
     if (r.ready && lastStatus?.node_id) {
@@ -22379,7 +22387,10 @@ async function run(req, deps) {
     }
     await deps.clock.sleep(POLL_MS);
   }
-  throw new StartFailure(timeoutMessage(req.role, lastStatus, await deps.readLog(ws.logPath), secrets));
+  const awaitingRelay = lastReadiness !== undefined && "awaiting" in lastReadiness;
+  const reason = awaitingRelay ? NO_HOME_RELAY : undefined;
+  const log = await deps.readLog(ws.logPath);
+  throw new StartFailure(timeoutMessage(req.role, lastStatus, log, secrets, reason));
 }
 async function start(req, deps) {
   if (req.relayToken !== undefined)
@@ -23371,7 +23382,13 @@ async function readStatus(stateDir, role) {
     const j = JSON.parse(text);
     if (!j || typeof j.node_id !== "string" || j.node_id === "")
       return;
-    return { node_id: j.node_id, services: Array.isArray(j.services) ? j.services : [] };
+    const services = Array.isArray(j.services) ? j.services : [];
+    const snapshot = { node_id: j.node_id, services };
+    if ("home_relay" in j) {
+      const relay = j.home_relay;
+      snapshot.home_relay = typeof relay === "string" && relay !== "" ? relay : null;
+    }
+    return snapshot;
   } catch {
     return;
   }
