@@ -27,10 +27,10 @@ Blocked by: 1
 
 Owner: one writer for `crates/engine/src/serve/run_serve.rs`. Platforms: shared code; covered by group 6 on all CI platforms.
 
-- [ ] 3.1 At the top of `handle_udp_connection`, classify `conn.max_datagram_size()`; when unusable, log an error naming the service and peer, close the connection with the dedicated code and reason, and return before any flow table, sweep or reader task exists (scenario "Access peer does not allow datagrams", design D3)
-- [ ] 3.2 When the datagram loop ends on a `read_datagram` error that matches the close predicate, log an error naming the service and the Access peer instead of the debug line (scenario "Serve receives the close")
-- [ ] 3.3 Route the per-reply decision in `relay_upstream_replies` through the group 1 send decision, keeping the `limit_shrink` and `oversize` counters, warning and `set_datagram_limit` behavior
-- [ ] 3.4 Run `cargo test -p iroh-tunnel-engine --all-features --locked` and `cargo test --test udp_tunnel --all-features --locked` (clippy runs in 4.5, after the back-off has its consumer)
+- [x] 3.1 At the top of `handle_udp_connection`, classify `conn.max_datagram_size()`; when unusable, log an error naming the service and peer, close the connection with the dedicated code and reason, and return before any flow table, sweep or reader task exists (scenario "Access peer does not allow datagrams", design D3)
+- [x] 3.2 When the datagram loop ends on a `read_datagram` error that matches the close predicate, log an error naming the service and the Access peer instead of the debug line (scenario "Serve receives the close")
+- [x] 3.3 Route the per-reply decision in `relay_upstream_replies` through the group 1 send decision, keeping the `limit_shrink` and `oversize` counters, warning and `set_datagram_limit` behavior
+- [x] 3.4 Run `cargo test -p iroh-tunnel-engine --all-features --locked` and `cargo test --test udp_tunnel --all-features --locked` (clippy runs in 4.5, after the back-off has its consumer)
 
 ## 4. Access setup check, close reporting and back-off
 
