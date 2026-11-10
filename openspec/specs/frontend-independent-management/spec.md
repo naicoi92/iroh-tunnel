@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the non-terminal Rust management boundary through which a frontend other than the CLI performs configuration, service, role-status and update operations, receiving structured outcomes instead of terminal output. Command-line behaviour is owned by `cli-entrypoints` and `config-management-commands`, and the package layout by `workspace-boundaries`.
 
 ## Requirements
 

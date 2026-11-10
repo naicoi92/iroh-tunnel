@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the per-role status files that Serve and Access publish (location, schema, atomic writes, flush cadence, removal) and how the `status` command and connection logs render peer connection paths and transports. Ownership of the running role is covered by `role-ownership-shutdown`.
 
 ## Requirements
 

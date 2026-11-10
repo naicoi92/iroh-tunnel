@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the behaviour of the `config` subcommands that resolve, inspect, create, change and validate a role configuration file and its node identity key: edits are validated, serialized, atomic and secret-safe. The command surface and exit codes are owned by `cli-entrypoints`, and the configuration schema by `tunnel-configuration`.
 
 ## Requirements
 

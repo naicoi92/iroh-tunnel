@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the command surface of the three executables (combined, Serve-only and Access-only): top-level options, help, quick mode, role and service commands, logging verbosity and exit status. The behaviour of the `config` subcommands themselves belongs to `config-management-commands`, and service registration internals to `system-service-management`.
 
 ## Requirements
 
