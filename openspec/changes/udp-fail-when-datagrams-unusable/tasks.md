@@ -17,9 +17,9 @@ Blocked by: none
 
 Owner: one writer for `crates/engine/src/testing.rs`, `crates/engine/src/endpoint/create.rs` and `tests/workspace_layout.rs`. Platforms: shared code; the source check runs on every CI platform.
 
-- [ ] 2.1 Add a `test-utils`-only reader of `IROH_TUNNEL_TEST_DISABLE_DATAGRAMS` in `crates/engine/src/testing.rs`, and in `transport_config` set `datagram_receive_buffer_size(None)` when it returns true, inside `#[cfg(feature = "test-utils")]` only (design D7)
-- [ ] 2.2 Add a source check to `tests/workspace_layout.rs` for scenario "Production build ignores the variable": the variable name appears in engine sources only inside the `test-utils`-gated reader in `testing.rs`
-- [ ] 2.3 Run `cargo build -p iroh-tunnel-engine --locked` (no `test-utils`) and `cargo test --test workspace_layout --all-features --locked`
+- [x] 2.1 Add a `test-utils`-only reader of `IROH_TUNNEL_TEST_DISABLE_DATAGRAMS` in `crates/engine/src/testing.rs`, and in `transport_config` set `datagram_receive_buffer_size(None)` when it returns true, inside `#[cfg(feature = "test-utils")]` only (design D7)
+- [x] 2.2 Add a source check to `tests/workspace_layout.rs` for scenario "Production build ignores the variable": the variable name appears in engine sources only inside the `test-utils`-gated reader in `testing.rs`
+- [x] 2.3 Run `cargo build -p iroh-tunnel-engine --locked` (no `test-utils`) and `cargo test --test workspace_layout --all-features --locked`
 
 ## 3. Serve setup check and close reporting
 
