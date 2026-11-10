@@ -1402,11 +1402,9 @@ mod tests {
         // returns right after the close, and dropping the last endpoint would tear
         // down before the close frame reaches the client.
         let server = ep.clone();
-        let (server_conn_tx, server_conn_rx) = tokio::sync::oneshot::channel::<Connection>();
-        let _serve = tokio::spawn(async move {
+        let serve = tokio::spawn(async move {
             let incoming = ep.accept().await.expect("incoming connection");
             let conn = incoming.await.expect("handshake");
-            let _ = server_conn_tx.send(conn.clone());
             handle_udp_connection(&conn, target, &sinks, stop).await;
         });
 
@@ -1414,10 +1412,15 @@ mod tests {
             .await
             .expect("connect within timeout")
             .expect("connect");
+        // Serve's task ends right after it closes the connection; awaiting it
+        // mirrors the production lifetime before the client reads the close.
+        tokio::time::timeout(Duration::from_secs(10), serve)
+            .await
+            .expect("serve task must finish")
+            .expect("serve task must not panic");
         let reason = tokio::time::timeout(Duration::from_secs(10), conn.closed())
             .await
             .expect("serve must close the connection");
-        let _server_conn = server_conn_rx.await.expect("server connection");
         match reason {
             ConnectionError::ApplicationClosed(close) => {
                 assert_eq!(
