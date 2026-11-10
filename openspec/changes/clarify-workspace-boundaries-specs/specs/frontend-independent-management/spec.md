@@ -77,11 +77,11 @@ Source: refactor-codebase design.md Decision 4
 - **THEN** status reports owner metadata as unavailable and succeeds
 
 ### Requirement: Raw status JSON stays byte-identical
-CLI `status --json` SHALL forward the validated original status-file bytes followed by one newline, rather than re-serializing the typed value.
+CLI `<role> status --json` SHALL forward the validated original status-file bytes followed by one newline, rather than re-serializing the typed value.
 Source: refactor-codebase design.md Decision 7; openspec/specs/connection-path-status (Status command output)
 
 #### Scenario: Raw JSON passthrough
-- **WHEN** `iroh-tunnel status --json` runs while a role publishes a status file
+- **WHEN** `iroh-tunnel serve status --json` runs while a Serve role publishes a status file
 - **THEN** its output equals the validated file bytes followed by one newline
 
 ### Requirement: Updater is a host operation with explicit inputs
