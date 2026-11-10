@@ -653,6 +653,32 @@ struct UdpTestHooks {
     /// Bumped when the back-off check dropped a datagram: proof the loop
     /// processed it (and did not dial) rather than merely received it.
     waiting_dropped: tokio::sync::watch::Sender<u64>,
+    /// Number of live `relay_peer_replies` readers (up on start, down on drop,
+    /// including when the reader is aborted).
+    readers_alive: tokio::sync::watch::Sender<u64>,
+}
+
+/// Counts a reader in `UdpTestHooks::readers_alive` for as long as it lives.
+#[cfg(test)]
+struct ReaderAlive(Option<Arc<UdpTestHooks>>);
+
+#[cfg(test)]
+impl ReaderAlive {
+    fn new(hooks: Option<Arc<UdpTestHooks>>) -> Self {
+        if let Some(hooks) = &hooks {
+            hooks.readers_alive.send_modify(|n| *n += 1);
+        }
+        Self(hooks)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReaderAlive {
+    fn drop(&mut self) {
+        if let Some(hooks) = &self.0 {
+            hooks.readers_alive.send_modify(|n| *n -= 1);
+        }
+    }
 }
 
 impl UdpForwardCtx {
@@ -996,6 +1022,8 @@ async fn relay_peer_replies(
     ctx: UdpForwardCtx,
 ) {
     use crate::udp::DropReason;
+    #[cfg(test)]
+    let _alive = ReaderAlive::new(ctx.hooks.clone());
     let stats = &ctx.dialer.udp_stats;
     loop {
         let datagram = match conn.read_datagram().await {
@@ -1461,13 +1489,17 @@ mod tests {
     /// when the supervisor had to be aborted.
     type PeerChildren = Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>;
 
-    /// Abort and join every child task.
+    /// Abort every child task, then join them one at a time. A handle stays
+    /// in the registry until it has been joined, so an interrupted drain
+    /// leaves the rest for the next caller. Only the harness (never the
+    /// supervisor) drains, so the supervisor's cancellation cannot lose it.
     async fn drain_children(children: &PeerChildren) {
-        let handles = std::mem::take(&mut *children.lock().unwrap_or_else(|p| p.into_inner()));
-        for handle in &handles {
+        for handle in children.lock().unwrap_or_else(|p| p.into_inner()).iter() {
             handle.abort();
         }
-        for handle in handles {
+        loop {
+            let next = children.lock().unwrap_or_else(|p| p.into_inner()).pop();
+            let Some(handle) = next else { break };
             let _ = handle.await;
         }
     }
@@ -1540,7 +1572,8 @@ mod tests {
     }
 
     /// Accept until stopped; each connection's handshake, hand-off and echo
-    /// run as owned children, aborted and joined before the supervisor ends.
+    /// run as children registered in `children`, which the harness owner
+    /// aborts and joins after the supervisor has stopped.
     async fn peer_supervisor(
         ep: iroh::Endpoint,
         accepted: tokio::sync::mpsc::UnboundedSender<Connection>,
@@ -1565,7 +1598,9 @@ mod tests {
                 }
             }
         }
-        drain_children(&children).await;
+        // Descendants are aborted and joined by the owner of `children`
+        // (`TestPeer::shutdown`), which the supervisor's cancellation cannot
+        // reach; the supervisor only stops accepting.
     }
 
     impl TestPeer {
@@ -1588,7 +1623,7 @@ mod tests {
             let mut failures = Vec::new();
             let _ = self.stop.send(());
             join_or_abort(self.task, POLL_LIMIT, "peer supervisor", &mut failures).await;
-            // Also covers an aborted supervisor: its children are drained here.
+            // The owner drains the children after the supervisor is gone.
             drain_children(&self.children).await;
             finish_within(
                 POLL_LIMIT,
@@ -1785,6 +1820,14 @@ mod tests {
             self.stop.send_replace(Some(tokio::time::Instant::now()));
             join_or_abort(self.task, loop_bound, "forward loop", &mut failures).await;
             let dialer = &self.dialer;
+            // The loop's reader JoinSet is aborted when the loop ends (or is
+            // aborted: dropping a JoinSet aborts its tasks); wait until they
+            // are really gone.
+            let mut readers = self.hooks.readers_alive.subscribe();
+            let gone = tokio::time::timeout(POLL_LIMIT, readers.wait_for(|n| *n == 0)).await;
+            if !matches!(gone, Ok(Ok(_))) {
+                failures.push("forward readers still alive after the loop ended".into());
+            }
             finish_within(
                 POLL_LIMIT,
                 "dialer auxiliary tasks",
@@ -1905,22 +1948,42 @@ mod tests {
 
         close_unsupported(&a);
         let closed_at = std::time::Instant::now();
+        let observe = Duration::from_millis(300);
+        // A stall long enough to let the (erroneous) window expire would let
+        // traffic erase the evidence, so every step is held to this budget.
+        let budget = TEST_WINDOW - Duration::from_millis(100);
         let mut rounds = 0u32;
-        // At least one round-trip after the close, and keep going until the
-        // full 300 ms interval has elapsed: an empty loop can never pass.
-        while rounds == 0 || closed_at.elapsed() < Duration::from_millis(300) {
-            h.round_trip(b"through-b").await;
-            rounds += 1;
+        while rounds == 0 || closed_at.elapsed() < observe {
+            // Check the window right before sending, and the budget before that.
+            let before = closed_at.elapsed();
+            assert!(
+                before < budget,
+                "timing: {before:?} since the close before round {} exceeds the {budget:?} budget",
+                rounds + 1
+            );
             assert_eq!(
                 h.waiting_until(),
                 None,
-                "stale close must not open a window (round {rounds})"
+                "stale close must not open a window (before round {})",
+                rounds + 1
+            );
+            h.round_trip(b"through-b").await;
+            rounds += 1;
+            let after = closed_at.elapsed();
+            assert!(
+                after < budget,
+                "timing: round {rounds} ended {after:?} after the close, over the {budget:?} budget"
+            );
+            assert_eq!(
+                h.waiting_until(),
+                None,
+                "stale close must not open a window (after round {rounds})"
             );
         }
+        let total = closed_at.elapsed();
         assert!(
-            rounds >= 1 && closed_at.elapsed() >= Duration::from_millis(300),
-            "timing: {rounds} rounds in {:?}",
-            closed_at.elapsed()
+            rounds >= 1 && total >= observe,
+            "timing: {rounds} rounds in {total:?}, need >= {observe:?}"
         );
 
         h.shutdown().await;
