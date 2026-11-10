@@ -19,8 +19,8 @@ Blocked by: none
 
 Blocked by: none
 
-- [ ] 3.1 In `CONTRIBUTING.md` § "Workspace layout and Rust API migration", remove the paragraph that links `openspec/changes/archive/2026-11-05-refactor-codebase/migration-map.md`, and rename the heading to "Workspace layout"; keep the layout bullets (brainstorm decision 4).
-- [ ] 3.2 Check that no Markdown link to the old anchor `#workspace-layout-and-rust-api-migration` remains outside `openspec/changes/archive/`, and that no living doc links `migration-map.md` (commands in plan Task 3 Step 2).
+- [x] 3.1 In `CONTRIBUTING.md` § "Workspace layout and Rust API migration", remove the paragraph that links `openspec/changes/archive/2026-11-05-refactor-codebase/migration-map.md`, and rename the heading to "Workspace layout"; keep the layout bullets (brainstorm decision 4).
+- [x] 3.2 Check that no Markdown link to the old anchor `#workspace-layout-and-rust-api-migration` remains outside `openspec/changes/archive/`, and that no living doc links `migration-map.md` (commands in plan Task 3 Step 2).
 
 ## 4. Change-level verification
 
