@@ -41,8 +41,8 @@
 
 ## Tasks
 
-- **Completed**: `12 of 13` checkboxes in tasks.md flipped to `- [x]`
-- **Remaining**: `4.4`. Opening the D6 follow-up issue needs the user's approval in chat, because it is a side effect outside the worktree. The draft is below and in `.superpowers/sdd/plan/issue-draft.md`.
+- **Completed**: `13 of 13` checkboxes in tasks.md flipped to `- [x]`
+- **Remaining**: none. The user approved 4.4 through the Plannotator Inbox, and the D6 follow-up was filed as naicoi92/iroh-tunnel#198.
 
 ---
 
@@ -89,14 +89,14 @@
 
 ---
 
-## Follow-up issue draft (task 4.4)
+## Follow-up issue (task 4.4): filed as #198
 
 Title: `serve run --config` exits 1 on configuration errors and omits the path on validation errors.
 
-`iroh-tunnel <role> run --config <file>` exits 1 instead of 2 for a malformed TOML file or a schema violation such as `port = 0`. The validation message also does not name the file. This contradicts `cli-entrypoints` "Exit status mapping" and `tunnel-configuration` "Role configuration documents are loaded from TOML and validated". `serve config check` and `serve config list` handle the same files correctly, with exit 2 and the path. The full reproduction is in `.superpowers/sdd/plan/issue-draft.md`.
+`iroh-tunnel <role> run --config <file>` exits 1 instead of 2 for a malformed TOML file or a schema violation such as `port = 0`. The validation message also does not name the file. This contradicts `cli-entrypoints` "Exit status mapping" and `tunnel-configuration` "Role configuration documents are loaded from TOML and validated". `serve config check` and `serve config list` handle the same files correctly, with exit 2 and the path. The full reproduction is in https://github.com/naicoi92/iroh-tunnel/issues/198.
 
 ---
 
 ## Next step
 
-Run `/opsx-verify clarify-workspace-boundaries-specs`. Before that, decide whether task 4.4 opens the follow-up issue.
+Run `/opsx-verify clarify-workspace-boundaries-specs`.

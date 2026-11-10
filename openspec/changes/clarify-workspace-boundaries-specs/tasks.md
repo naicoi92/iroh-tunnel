@@ -35,4 +35,4 @@ Blocked by: 1, 2, 3
   - `iroh-tunnel serve run --config <file with secret_key = "%%%">` fails with `invalid secret_key` and not with `failed to parse config`.
 
   Record the commands and their output.
-- [ ] 4.4 Open a GitHub issue in `naicoi92/iroh-tunnel`, after user approval in chat, for the defect found in design D6: `serve run --config` exits 1 on a config error, and a validation error does not name the path.
+- [x] 4.4 Open a GitHub issue in `naicoi92/iroh-tunnel`, after user approval in chat, for the defect found in design D6: `serve run --config` exits 1 on a config error, and a validation error does not name the path.
