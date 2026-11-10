@@ -2,9 +2,9 @@
 
 Blocked by: none
 
-- [ ] 1.1 Add `engine_dependencies_are_inherited_from_the_workspace` to `tests/workspace_layout.rs`. It parses `crates/engine/Cargo.toml` with `toml` and checks every entry of `dependencies`, `dev-dependencies` and `build-dependencies`, top level and under each `target.<cfg>`, for a table with `workspace = true`, as design D2 specifies. A failure names each offending table and entry (scenario "Engine manifest inherits every dependency").
-- [ ] 1.2 Prove the negative case: a unit-level helper test feeds an in-memory manifest with `foo = "1"` and `bar = { path = "../bar" }`, including one under `[target.'cfg(unix)'.dependencies]`, and asserts that both are reported (scenario "Directly versioned engine dependency is rejected").
-- [ ] 1.3 Run `cargo +1.91 test --locked --all-features --test workspace_layout` and `cargo +1.91 clippy --workspace --all-targets --all-features --locked -- -D warnings`.
+- [x] 1.1 Add `engine_dependencies_are_inherited_from_the_workspace` to `tests/workspace_layout.rs`. It parses `crates/engine/Cargo.toml` with `toml` and checks every entry of `dependencies`, `dev-dependencies` and `build-dependencies`, top level and under each `target.<cfg>`, for a table with `workspace = true`, as design D2 specifies. A failure names each offending table and entry (scenario "Engine manifest inherits every dependency").
+- [x] 1.2 Prove the negative case: a unit-level helper test feeds an in-memory manifest with `foo = "1"` and `bar = { path = "../bar" }`, including one under `[target.'cfg(unix)'.dependencies]`, and asserts that both are reported (scenario "Directly versioned engine dependency is rejected").
+- [x] 1.3 Run `cargo +1.91 test --locked --all-features --test workspace_layout` and `cargo +1.91 clippy --workspace --all-targets --all-features --locked -- -D warnings`.
 
 ## 2. Purpose for the 14 placeholder specs
 
