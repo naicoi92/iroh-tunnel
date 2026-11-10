@@ -485,8 +485,9 @@ baz = { version = "1" }
     );
 }
 
-/// Direct dependency entries of `manifest` that do not inherit from the
-/// workspace, as `kind.name` (`target.'<cfg>'.kind.name` under `target.*`).
+/// Requirement `workspace-boundaries`: "Engine dependencies are inherited from
+/// the workspace". Direct dependency entries of `manifest` that do not inherit
+/// from the workspace, as `kind.name` (`target.'<cfg>'.kind.name` under `target.*`).
 /// An entry passes only when it is a table with `workspace = true`; Cargo
 /// itself rejects `workspace = true` combined with `version`, `path` or `git`,
 /// so that combination is not checked here.
