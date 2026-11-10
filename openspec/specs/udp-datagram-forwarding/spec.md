@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define UDP forwarding between Access and Serve: datagram framing and size limit, Flows with per-client assignment and monotonic admission, caps, idle expiry, Quarantine of expired upstream sockets, and the rule that no Flow survives reconnect. TCP forwarding is owned by `tcp-tunnel-forwarding`.
 
 ## Requirements
 

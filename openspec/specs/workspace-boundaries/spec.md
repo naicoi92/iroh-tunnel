@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the three-package workspace (root, host, engine) with a one-way dependency graph from root to host to engine, and which package owns tunnel execution, persistence and platform policy, and terminal interaction. It also fixes runtime task and drain ownership, and the validation gates every member must pass.
 
 ## Requirements
 

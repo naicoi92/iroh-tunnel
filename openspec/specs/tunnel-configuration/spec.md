@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the TOML role configuration documents (services, peers, relays, secret key, UDP flow settings) and their validation, atomic saving, and default or overridden configuration and state locations per platform. The `config` subcommands that edit these files are owned by `config-management-commands`.
 
 ## Requirements
 

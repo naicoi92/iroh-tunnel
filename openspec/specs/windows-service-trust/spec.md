@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the trust checks a Windows system service applies to the configuration and state paths it uses: trusted principals, owner and DACL of every path component, refused write and replacement rights, and verified handles only. Service registration itself is owned by `system-service-management`.
 
 ## Requirements
 
