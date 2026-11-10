@@ -75,6 +75,10 @@ fn transport_config(max_streams: Option<u32>) -> QuicTransportConfig {
     if let Some(max_streams) = max_streams {
         builder = builder.max_concurrent_bidi_streams(VarInt::from_u32(max_streams));
     }
+    #[cfg(feature = "test-utils")]
+    if crate::testing::datagrams_disabled() {
+        builder = builder.datagram_receive_buffer_size(None);
+    }
     builder.build()
 }
 
