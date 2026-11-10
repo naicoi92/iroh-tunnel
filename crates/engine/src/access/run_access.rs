@@ -650,6 +650,9 @@ struct UdpTestHooks {
     admitted: tokio::sync::watch::Sender<u64>,
     /// Bumped when a reader matched the dedicated close, before the gate.
     reader_failed: tokio::sync::watch::Sender<u64>,
+    /// Bumped when the back-off check dropped a datagram: proof the loop
+    /// processed it (and did not dial) rather than merely received it.
+    waiting_dropped: tokio::sync::watch::Sender<u64>,
 }
 
 impl UdpForwardCtx {
@@ -771,6 +774,8 @@ impl UdpSession {
         ctx.bump_hook(|hooks| &hooks.gate_waiting);
         let _gate = ctx.gate.lock().await;
         if !ctx.dial_allowed() {
+            #[cfg(test)]
+            ctx.bump_hook(|hooks| &hooks.waiting_dropped);
             return None;
         }
         #[cfg(test)]
@@ -1419,11 +1424,14 @@ mod tests {
 
     use iroh::endpoint::{Connection, ConnectionError, VarInt};
 
-    const TEST_WINDOW: Duration = Duration::from_millis(500);
+    const TEST_WINDOW: Duration = Duration::from_millis(800);
     const POLL_STEP: Duration = Duration::from_millis(10);
     const POLL_LIMIT: Duration = Duration::from_secs(5);
     const SEND_STEP: Duration = Duration::from_millis(50);
-    const MIN_WINDOW_LEFT: Duration = Duration::from_millis(200);
+    /// Window left when it is captured; leaves room for a >= 200 ms observation.
+    const MIN_WINDOW_LEFT: Duration = Duration::from_millis(350);
+    /// The shortest negative observation that counts as suppression coverage.
+    const MIN_OBSERVED: Duration = Duration::from_millis(200);
 
     /// Dialable loopback address of a relay-less endpoint.
     fn loopback_addr(ep: &iroh::Endpoint) -> iroh::EndpointAddr {
@@ -1446,6 +1454,57 @@ mod tests {
         accepted: tokio::sync::mpsc::UnboundedReceiver<Connection>,
         stop: tokio::sync::oneshot::Sender<()>,
         task: tokio::task::JoinHandle<()>,
+        children: PeerChildren,
+    }
+
+    /// Per-connection child tasks, shared so a fallback can still drain them
+    /// when the supervisor had to be aborted.
+    type PeerChildren = Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>;
+
+    /// Abort and join every child task.
+    async fn drain_children(children: &PeerChildren) {
+        let handles = std::mem::take(&mut *children.lock().unwrap_or_else(|p| p.into_inner()));
+        for handle in &handles {
+            handle.abort();
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
+    /// Join `task` within `bound`; on expiry abort and await it, then
+    /// report the failure so the caller still finishes its cleanup.
+    async fn join_or_abort(
+        mut task: tokio::task::JoinHandle<()>,
+        bound: Duration,
+        what: &str,
+        failures: &mut Vec<String>,
+    ) {
+        match tokio::time::timeout(bound, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => failures.push(format!("{what} failed: {error}")),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                failures.push(format!("{what} did not stop within {bound:?} (aborted)"));
+            }
+        }
+    }
+
+    /// Await `fut` within `bound`, recording a failure instead of panicking.
+    async fn finish_within(
+        bound: Duration,
+        what: &str,
+        failures: &mut Vec<String>,
+        fut: impl Future<Output = ()>,
+    ) {
+        if tokio::time::timeout(bound, fut).await.is_err() {
+            failures.push(format!("{what} did not finish within {bound:?}"));
+        }
+    }
+
+    fn assert_cleanup(failures: Vec<String>) {
+        assert!(failures.is_empty(), "cleanup failures: {failures:?}");
     }
 
     async fn test_peer(datagrams: bool) -> TestPeer {
@@ -1464,12 +1523,19 @@ mod tests {
         let ep = builder.bind().await.expect("bind test peer");
         let (accepted_tx, accepted) = tokio::sync::mpsc::unbounded_channel();
         let (stop, stop_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(peer_supervisor(ep.clone(), accepted_tx, stop_rx));
+        let children = PeerChildren::default();
+        let task = tokio::spawn(peer_supervisor(
+            ep.clone(),
+            accepted_tx,
+            stop_rx,
+            children.clone(),
+        ));
         TestPeer {
             ep,
             accepted,
             stop,
             task,
+            children,
         }
     }
 
@@ -1479,28 +1545,27 @@ mod tests {
         ep: iroh::Endpoint,
         accepted: tokio::sync::mpsc::UnboundedSender<Connection>,
         mut stop: tokio::sync::oneshot::Receiver<()>,
+        children: PeerChildren,
     ) {
-        let mut echoes = JoinSet::new();
         loop {
             tokio::select! {
                 biased;
                 _ = &mut stop => break,
-                Some(_) = echoes.join_next(), if !echoes.is_empty() => {}
                 incoming = ep.accept() => {
                     let Some(incoming) = incoming else { break };
                     let accepted = accepted.clone();
-                    echoes.spawn(async move {
+                    let child = tokio::spawn(async move {
                         let Ok(conn) = incoming.await else { return };
                         let _ = accepted.send(conn.clone());
                         while let Ok(datagram) = conn.read_datagram().await {
                             let _ = conn.send_datagram(datagram);
                         }
                     });
+                    children.lock().unwrap_or_else(|p| p.into_inner()).push(child);
                 }
             }
         }
-        echoes.abort_all();
-        while echoes.join_next().await.is_some() {}
+        drain_children(&children).await;
     }
 
     impl TestPeer {
@@ -1520,14 +1585,19 @@ mod tests {
         }
 
         async fn shutdown(self) {
+            let mut failures = Vec::new();
             let _ = self.stop.send(());
-            tokio::time::timeout(Duration::from_secs(5), self.task)
-                .await
-                .expect("peer supervisor joins within 5 s")
-                .expect("peer supervisor must not panic");
-            tokio::time::timeout(Duration::from_secs(5), self.ep.close())
-                .await
-                .expect("peer endpoint closes within 5 s");
+            join_or_abort(self.task, POLL_LIMIT, "peer supervisor", &mut failures).await;
+            // Also covers an aborted supervisor: its children are drained here.
+            drain_children(&self.children).await;
+            finish_within(
+                POLL_LIMIT,
+                "peer endpoint close",
+                &mut failures,
+                self.ep.close(),
+            )
+            .await;
+            assert_cleanup(failures);
         }
     }
 
@@ -1646,15 +1716,51 @@ mod tests {
             end
         }
 
-        /// Keep a client sending until just before `end`; no dial may happen.
+        /// Observe the window from a baseline: keep sending until just before
+        /// `end`, require the loop to have processed (dropped) every datagram
+        /// inside the window, and require that no dial was admitted. The
+        /// observation must span at least `MIN_OBSERVED`.
         async fn send_through_window(&self, peer: &mut TestPeer, end: std::time::Instant) {
+            let started = std::time::Instant::now();
+            let budget = end.saturating_duration_since(started);
+            assert!(
+                budget >= MIN_OBSERVED + SEND_STEP,
+                "timing: only {budget:?} of the window left at the start of the observation"
+            );
+            let admitted = *self.hooks.admitted.subscribe().borrow();
+            let dropped = *self.hooks.waiting_dropped.subscribe().borrow();
             let stop_at = end - SEND_STEP;
-            let mut sent = 0;
+            let mut sent = 0u64;
             while sent == 0 || std::time::Instant::now() < stop_at {
                 self.send(b"during-window").await;
                 sent += 1;
                 tokio::time::sleep(SEND_STEP).await;
             }
+            // Every datagram sent must be processed before the window expires.
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let processed = tokio::time::timeout(
+                left,
+                wait_past(
+                    &self.hooks.waiting_dropped,
+                    dropped + sent - 1,
+                    "window datagrams processed",
+                ),
+            )
+            .await;
+            let observed = started.elapsed();
+            assert!(
+                processed.is_ok() && std::time::Instant::now() < end,
+                "timing: {sent} datagrams not all processed before expiry (observed {observed:?}, window {budget:?})"
+            );
+            assert!(
+                observed >= MIN_OBSERVED,
+                "timing: observed only {observed:?}, need {MIN_OBSERVED:?}"
+            );
+            assert_eq!(
+                *self.hooks.admitted.subscribe().borrow(),
+                admitted,
+                "a datagram was admitted to dial during the window ({sent} sent, observed {observed:?})"
+            );
             peer.assert_no_conn(&format!("no redial during the window ({sent} sent)"));
         }
 
@@ -1675,17 +1781,25 @@ mod tests {
         }
 
         async fn shutdown_within(self, loop_bound: Duration) {
+            let mut failures = Vec::new();
             self.stop.send_replace(Some(tokio::time::Instant::now()));
-            tokio::time::timeout(loop_bound, self.task)
-                .await
-                .unwrap_or_else(|_| panic!("forward loop must stop within {loop_bound:?}"))
-                .expect("forward loop must not panic");
-            tokio::time::timeout(POLL_LIMIT, self.dialer.stop_auxiliary_tasks())
-                .await
-                .expect("dialer auxiliary tasks stop within 5 s");
-            tokio::time::timeout(POLL_LIMIT, self.dialer.ep.close())
-                .await
-                .expect("access endpoint closes within 5 s");
+            join_or_abort(self.task, loop_bound, "forward loop", &mut failures).await;
+            let dialer = &self.dialer;
+            finish_within(
+                POLL_LIMIT,
+                "dialer auxiliary tasks",
+                &mut failures,
+                dialer.stop_auxiliary_tasks(),
+            )
+            .await;
+            finish_within(
+                POLL_LIMIT,
+                "access endpoint close",
+                &mut failures,
+                dialer.ep.close(),
+            )
+            .await;
+            assert_cleanup(failures);
         }
     }
 
@@ -1790,15 +1904,24 @@ mod tests {
         let _b = peer.next_conn(POLL_LIMIT, "second dial").await;
 
         close_unsupported(&a);
-        let until = tokio::time::Instant::now() + Duration::from_millis(300);
-        while tokio::time::Instant::now() < until {
+        let closed_at = std::time::Instant::now();
+        let mut rounds = 0u32;
+        // At least one round-trip after the close, and keep going until the
+        // full 300 ms interval has elapsed: an empty loop can never pass.
+        while rounds == 0 || closed_at.elapsed() < Duration::from_millis(300) {
             h.round_trip(b"through-b").await;
+            rounds += 1;
             assert_eq!(
                 h.waiting_until(),
                 None,
-                "stale close must not open a window"
+                "stale close must not open a window (round {rounds})"
             );
         }
+        assert!(
+            rounds >= 1 && closed_at.elapsed() >= Duration::from_millis(300),
+            "timing: {rounds} rounds in {:?}",
+            closed_at.elapsed()
+        );
 
         h.shutdown().await;
         peer.shutdown().await;
