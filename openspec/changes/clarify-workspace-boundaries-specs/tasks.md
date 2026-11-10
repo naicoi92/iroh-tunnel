@@ -26,9 +26,9 @@ Blocked by: none
 
 Blocked by: 1, 2, 3
 
-- [ ] 4.1 Run `openspec validate clarify-workspace-boundaries-specs --strict` and `openspec validate --specs`.
-- [ ] 4.2 Run the workspace gates on Rust 1.91: `cargo +1.91 fmt --all -- --check`, clippy as in 1.3, `cargo +1.91 test --workspace --all-features --locked`, and `RUSTDOCFLAGS="-D warnings" cargo +1.91 doc --workspace --no-deps --locked`.
-- [ ] 4.3 E2E check for the restated exit-code scenarios through the real CLI, as a user runs it:
+- [x] 4.1 Run `openspec validate clarify-workspace-boundaries-specs --strict` and `openspec validate --specs`.
+- [x] 4.2 Run the workspace gates on Rust 1.91: `cargo +1.91 fmt --all -- --check`, clippy as in 1.3, `cargo +1.91 test --workspace --all-features --locked`, and `RUSTDOCFLAGS="-D warnings" cargo +1.91 doc --workspace --no-deps --locked`.
+- [x] 4.3 E2E check for the restated exit-code scenarios through the real CLI, as a user runs it:
   - `iroh-tunnel serve config check --config <file with port = 0>` exits 2 and names the path and `invalid port`;
   - `iroh-tunnel serve config list` on malformed TOML exits 2.
 
