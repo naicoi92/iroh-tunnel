@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define how Serve and Access create their Iroh endpoints (NodeId identity, ALPNs, keep-alive and stream budget) and use relays: default and custom relay sets, relay token, per-service override and dial addresses. It also covers the self-hosted relay installer.
 
 ## Requirements
 

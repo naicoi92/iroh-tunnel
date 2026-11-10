@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define the `update` command, which replaces only the invoked executable with a verified release: version selection, signature and checksum verification, atomic replacement, and refusal for managed installs and container images. Installer behaviour is owned by `install-release-packaging`.
 
 ## Requirements
 
