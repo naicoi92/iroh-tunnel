@@ -53,6 +53,7 @@ use crate::runtime::{AccessReady, ReadyReport, ReadyServices};
 use crate::runtime::{RoleHooks, RunCompletion, RunContext, StatusSink};
 use crate::settings::{AccessServiceSettings, AccessSettings, Protocol, UdpLimits};
 use crate::shutdown;
+use crate::udp::{Incarnation, RedialBackoff};
 
 /// Run the access role on a bound endpoint until `shutdown` resolves.
 ///
@@ -524,6 +525,17 @@ impl ServiceDialer {
         }
     }
 
+    /// Identity of the cached connection, for tests that observe eviction.
+    #[cfg(test)]
+    async fn cached_conn_id(&self) -> Option<usize> {
+        self.state
+            .lock()
+            .await
+            .conn
+            .as_ref()
+            .map(|conn| conn.stable_id())
+    }
+
     /// Fresh connection-path report for the cached multiplexed connection,
     /// or `None` while the service has no live one (issue #59).
     ///
@@ -595,17 +607,10 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 
 /// Serve UDP clients of one service over QUIC DATAGRAMs (#88).
 ///
-/// Each client address is a flow (UDP-04). All flows share the service's one
-/// connection; when that connection is replaced the flows end with it
-/// (session incarnation). Idle flows expire after the service's idle timeout.
-/// New clients are refused at `max_flows`, and spent flow identifiers end the
-/// incarnation by evicting the connection.
+/// Binds the service's listen address and runs [`udp_forward_loop`] on it
+/// with the production redial back-off.
 /// Contract: `docs/udp-integration-contract.md`.
-async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
-    use crate::udp::DropReason;
-    let stats = dialer.udp_stats.clone();
-    let limits = dialer.udp_limits;
-    let idle = limits.idle_timeout;
+async fn udp_listen_loop(dialer: Arc<ServiceDialer>, stop: shutdown::Stop) {
     let listen_addr = dialer.listen_addr.clone();
     let socket = match UdpSocket::bind(&listen_addr).await {
         Ok(socket) => Arc::new(socket),
@@ -615,9 +620,76 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
         }
     };
     tracing::info!(%listen_addr, "listening for local udp clients");
-    let flows = Arc::new(std::sync::Mutex::new(crate::udp::ClientFlows::default()));
-    let mut readers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-    let mut current: Option<usize> = None;
+    udp_forward_loop(UdpForwardCtx::new(dialer), socket, stop).await;
+}
+
+/// Serializes dial admission with failure recording and eviction for one
+/// UDP service: the forwarding loop holds it from the back-off check through
+/// `get_or_dial` and the setup check, a reader from `record` through
+/// `invalidate`.
+type UdpDialGate = Arc<tokio::sync::Mutex<()>>;
+
+/// Shared state of one UDP service's forwarding loop and its reply readers.
+#[derive(Clone)]
+struct UdpForwardCtx {
+    dialer: Arc<ServiceDialer>,
+    /// Never held across an `.await`.
+    backoff: Arc<std::sync::Mutex<RedialBackoff>>,
+    gate: UdpDialGate,
+    #[cfg(test)]
+    hooks: Option<Arc<UdpTestHooks>>,
+}
+
+/// Sequence counters tests wait on to order the loop against a reader.
+#[cfg(test)]
+#[derive(Default)]
+struct UdpTestHooks {
+    /// Bumped right before the loop awaits the dial gate.
+    gate_waiting: tokio::sync::watch::Sender<u64>,
+    /// Bumped right after a clear back-off check, before `get_or_dial`.
+    admitted: tokio::sync::watch::Sender<u64>,
+    /// Bumped when a reader matched the dedicated close, before the gate.
+    reader_failed: tokio::sync::watch::Sender<u64>,
+}
+
+impl UdpForwardCtx {
+    fn new(dialer: Arc<ServiceDialer>) -> Self {
+        Self {
+            dialer,
+            backoff: Arc::default(),
+            gate: UdpDialGate::default(),
+            #[cfg(test)]
+            hooks: None,
+        }
+    }
+}
+
+/// The adopted session incarnation of one UDP service: its flows, its reply
+/// readers and the connection they belong to.
+struct UdpSession {
+    flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
+    readers: JoinSet<()>,
+    /// Holding the adopted connection keeps its allocation alive, so its
+    /// `stable_id()` cannot be reused by a later connection while compared.
+    current: Option<(iroh::endpoint::Connection, Incarnation)>,
+}
+
+/// Forward datagrams from local clients on `socket` to the service's Serve
+/// peer until `stop`.
+///
+/// Each client address is a flow (UDP-04). All flows share the service's one
+/// connection; when that connection is replaced the flows end with it
+/// (session incarnation). Idle flows expire after the service's idle timeout.
+/// New clients are refused at `max_flows`, and spent flow identifiers end the
+/// incarnation by evicting the connection.
+async fn udp_forward_loop(ctx: UdpForwardCtx, socket: Arc<UdpSocket>, mut stop: shutdown::Stop) {
+    let idle = ctx.dialer.udp_limits.idle_timeout;
+    let listen_addr = ctx.dialer.listen_addr.clone();
+    let mut session = UdpSession {
+        flows: Arc::default(),
+        readers: JoinSet::new(),
+        current: None,
+    };
     let mut buf = vec![0u8; 65535];
     let mut sweep = tokio::time::interval(crate::udp::sweep_interval(idle));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -626,17 +698,10 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
             _ = sweep.tick() => {
-                let ended = flows
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .expire(std::time::Instant::now(), idle);
-                stats.set_active_flows(flows.lock().unwrap_or_else(|p| p.into_inner()).len());
-                if ended > 0 {
-                    tracing::debug!(svc = %dialer.svc_name, ended, "udp flows expired");
-                }
+                session.expire_idle(&ctx);
                 continue;
             }
-            Some(result) = readers.join_next(), if !readers.is_empty() => {
+            Some(result) = session.readers.join_next(), if !session.readers.is_empty() => {
                 shutdown::observe(result);
                 continue;
             }
@@ -660,49 +725,146 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
             }
         };
         let deadline = tokio::time::Instant::now() + CLIENT_CONNECT_DEADLINE;
-        // Dialing can take up to the client deadline; shutdown must not wait.
-        let dialed = tokio::select! {
+        // Gate wait, dialing and the setup check can take up to the client
+        // deadline; shutdown must not wait for any of them.
+        let admitted = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
-            dialed = dialer.get_or_dial(deadline) => dialed,
+            admitted = session.admit(&ctx, &socket, deadline) => admitted,
         };
-        let conn = match dialed {
+        let Some((conn, incarnation)) = admitted else {
+            continue;
+        };
+        session
+            .forward(&ctx, &conn, incarnation, client, &buf[..n])
+            .await;
+    }
+    session.readers.abort_all();
+    shutdown::join(&mut session.readers).await;
+}
+
+impl UdpSession {
+    fn expire_idle(&self, ctx: &UdpForwardCtx) {
+        let mut flows = self.flows.lock().unwrap_or_else(|p| p.into_inner());
+        let ended = flows.expire(
+            std::time::Instant::now(),
+            ctx.dialer.udp_limits.idle_timeout,
+        );
+        ctx.dialer.udp_stats.set_active_flows(flows.len());
+        if ended > 0 {
+            tracing::debug!(svc = %ctx.dialer.svc_name, ended, "udp flows expired");
+        }
+    }
+
+    /// The connection a client datagram goes out on, or `None` to drop it.
+    ///
+    /// Holds the dial gate from the back-off check through the setup check,
+    /// so a reader cannot record a failure between them; it is released
+    /// before the datagram is sent.
+    async fn admit(
+        &mut self,
+        ctx: &UdpForwardCtx,
+        socket: &Arc<UdpSocket>,
+        deadline: tokio::time::Instant,
+    ) -> Option<(iroh::endpoint::Connection, Incarnation)> {
+        #[cfg(test)]
+        ctx.bump_hook(|hooks| &hooks.gate_waiting);
+        let _gate = ctx.gate.lock().await;
+        if !ctx.dial_allowed() {
+            return None;
+        }
+        #[cfg(test)]
+        ctx.bump_hook(|hooks| &hooks.admitted);
+        let conn = match ctx.dialer.get_or_dial(deadline).await {
             Ok(conn) => conn,
             Err(error) => {
-                tracing::warn!(svc = %dialer.svc_name, "udp datagram dropped, no connection: {error}");
-                continue;
+                tracing::warn!(svc = %ctx.dialer.svc_name, "udp datagram dropped, no connection: {error}");
+                return None;
             }
         };
-        if current != Some(conn.stable_id()) {
-            // A new connection is a new incarnation: no flow survives it.
-            readers.abort_all();
-            while readers.join_next().await.is_some() {}
-            *flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
-            stats.set_active_flows(0);
-            readers.spawn(relay_peer_replies(
-                conn.clone(),
-                socket.clone(),
-                flows.clone(),
-                stats.clone(),
-            ));
-            current = Some(conn.stable_id());
+        self.adopt(ctx, socket, conn).await
+    }
+
+    /// Keep the current incarnation, or start a new one for a newly dialed
+    /// connection.
+    async fn adopt(
+        &mut self,
+        ctx: &UdpForwardCtx,
+        socket: &Arc<UdpSocket>,
+        conn: iroh::endpoint::Connection,
+    ) -> Option<(iroh::endpoint::Connection, Incarnation)> {
+        if let Some((current, incarnation)) = &self.current {
+            if current.stable_id() == conn.stable_id() {
+                return Some((conn, *incarnation));
+            }
         }
-        let limit = crate::udp::payload_limit(conn.max_datagram_size());
+        self.retire().await;
+        ctx.dialer.udp_stats.set_active_flows(0);
+        // Begun after retiring, so a late record from an old reader is stale.
+        let incarnation = ctx.lock_backoff().begin();
+        if !crate::udp::carries_datagrams(conn.max_datagram_size()) {
+            reject_unusable(ctx, &conn, incarnation).await;
+            return None;
+        }
+        self.readers.spawn(relay_peer_replies(
+            conn.clone(),
+            incarnation,
+            socket.clone(),
+            self.flows.clone(),
+            ctx.clone(),
+        ));
+        self.current = Some((conn.clone(), incarnation));
+        Some((conn, incarnation))
+    }
+
+    /// End the current incarnation: no flow or reader survives it.
+    async fn retire(&mut self) {
+        self.readers.abort_all();
+        while self.readers.join_next().await.is_some() {}
+        *self.flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
+        self.current = None;
+    }
+
+    /// Send one client payload on `conn`, applying the datagram limit and
+    /// the flow cap.
+    async fn forward(
+        &mut self,
+        ctx: &UdpForwardCtx,
+        conn: &iroh::endpoint::Connection,
+        incarnation: Incarnation,
+        client: std::net::SocketAddr,
+        payload: &[u8],
+    ) {
+        use crate::udp::{send_decision, DropReason, SendDecision};
+        let dialer = &ctx.dialer;
+        let stats = &dialer.udp_stats;
+        let max = conn.max_datagram_size();
+        let limit = crate::udp::payload_limit(max);
         stats.set_datagram_limit(limit);
-        let Some(limit) = limit else {
-            stats.record_drop(DropReason::LimitShrink);
-            tracing::warn!(svc = %dialer.svc_name, "datagrams unusable on this connection, dropping");
-            continue;
-        };
-        if n > limit {
-            stats.record_drop(DropReason::Oversize);
-            tracing::warn!(svc = %dialer.svc_name, size = n, limit, "dropping oversize udp datagram");
-            continue;
+        let n = payload.len();
+        match send_decision(max, n) {
+            SendDecision::Send => {}
+            SendDecision::Drop(DropReason::LimitShrink) => {
+                stats.record_drop(DropReason::LimitShrink);
+                tracing::warn!(svc = %dialer.svc_name, "datagrams unusable on this connection, dropping");
+                return;
+            }
+            SendDecision::Drop(reason) => {
+                // Only an oversize decision reaches here, which needs a usable limit.
+                stats.record_drop(reason);
+                tracing::warn!(
+                    svc = %dialer.svc_name,
+                    size = n,
+                    limit = limit.unwrap_or_default(),
+                    "dropping oversize udp datagram"
+                );
+                return;
+            }
         }
-        let flow = flows.lock().unwrap_or_else(|p| p.into_inner()).touch(
+        let flow = self.flows.lock().unwrap_or_else(|p| p.into_inner()).touch(
             client,
             std::time::Instant::now(),
-            limits.max_flows,
+            dialer.udp_limits.max_flows,
         );
         let flow = match flow {
             Ok(flow) => flow,
@@ -710,7 +872,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
                 // Over the Access cap: drop before it costs Serve anything.
                 stats.record_drop(DropReason::Cap);
                 tracing::debug!(svc = %dialer.svc_name, %client, "udp flow refused: access flow cap reached");
-                continue;
+                return;
             }
             Err(crate::udp::Refused::Exhausted) => {
                 // Identifiers are never reused within an incarnation, so the
@@ -721,34 +883,132 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
                     svc = %dialer.svc_name,
                     "udp flow identifiers exhausted, ending the session incarnation"
                 );
-                dialer.invalidate(&conn).await;
-                continue;
+                dialer.invalidate(conn).await;
+                return;
             }
         };
-        stats.set_active_flows(flows.lock().unwrap_or_else(|p| p.into_inner()).len());
-        if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
+        stats.set_active_flows(self.flows.lock().unwrap_or_else(|p| p.into_inner()).len());
+        if let Err(error) = conn.send_datagram(crate::udp::encode(flow, payload)) {
             tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
             // A lost connection never recovers. Evict it so the next datagram
             // dials a fresh one and starts a new incarnation (UDP-04); the
             // cached dead connection would otherwise swallow traffic forever.
             if matches!(error, iroh::endpoint::SendDatagramError::ConnectionLost(_)) {
-                dialer.invalidate(&conn).await;
+                // The reader logs this close; here it only races to record
+                // it, and recording the same incarnation twice is a no-op.
+                if conn
+                    .close_reason()
+                    .is_some_and(|reason| crate::udp::closed_for_unsupported_datagrams(&reason))
+                {
+                    ctx.lock_backoff()
+                        .record(incarnation, std::time::Instant::now());
+                }
+                dialer.invalidate(conn).await;
             }
         }
     }
-    readers.abort_all();
-    shutdown::join(&mut readers).await;
+}
+
+/// Close a newly dialed connection that cannot carry datagrams and start the
+/// redial back-off for it.
+async fn reject_unusable(
+    ctx: &UdpForwardCtx,
+    conn: &iroh::endpoint::Connection,
+    incarnation: Incarnation,
+) {
+    tracing::error!(
+        peer = %conn.remote_id(),
+        svc = %ctx.dialer.svc_name,
+        "udp datagrams unsupported by serve peer, closing the connection"
+    );
+    conn.close(
+        iroh::endpoint::VarInt::from_u32(crate::udp::DATAGRAMS_UNSUPPORTED_CODE),
+        crate::udp::DATAGRAMS_UNSUPPORTED_REASON,
+    );
+    ctx.lock_backoff()
+        .record(incarnation, std::time::Instant::now());
+    ctx.dialer.invalidate(conn).await;
+}
+
+impl UdpForwardCtx {
+    fn lock_backoff(&self) -> std::sync::MutexGuard<'_, RedialBackoff> {
+        self.backoff.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Whether the back-off lets this datagram dial; logs the drop if not.
+    /// Drops during the back-off record no drop counter.
+    fn dial_allowed(&self) -> bool {
+        let check = self.lock_backoff().check(std::time::Instant::now());
+        let svc = &self.dialer.svc_name;
+        match check {
+            crate::udp::BackoffCheck::Clear => true,
+            crate::udp::BackoffCheck::Waiting {
+                first: true,
+                resumes_in,
+            } => {
+                tracing::warn!(
+                    svc = %svc,
+                    "udp datagram dropped: serve peer cannot carry datagrams, dialing resumes in {}s",
+                    resumes_in.as_secs()
+                );
+                false
+            }
+            crate::udp::BackoffCheck::Waiting { resumes_in, .. } => {
+                tracing::debug!(
+                    svc = %svc,
+                    resumes_in_ms = resumes_in.as_millis(),
+                    "udp datagram dropped during the redial back-off"
+                );
+                false
+            }
+        }
+    }
+
+    /// Record the failure of `conn`'s incarnation and evict it, under the
+    /// dial gate so no datagram is admitted between the two.
+    async fn fail_incarnation(&self, conn: &iroh::endpoint::Connection, incarnation: Incarnation) {
+        let _gate = self.gate.lock().await;
+        self.lock_backoff()
+            .record(incarnation, std::time::Instant::now());
+        self.dialer.invalidate(conn).await;
+    }
+
+    /// Advance a test hook counter; compiled out of production builds.
+    #[cfg(test)]
+    fn bump_hook(&self, counter: impl FnOnce(&UdpTestHooks) -> &tokio::sync::watch::Sender<u64>) {
+        if let Some(hooks) = &self.hooks {
+            counter(hooks).send_modify(|n| *n += 1);
+        }
+    }
 }
 
 /// Deliver each datagram from the peer to the client of its flow.
 async fn relay_peer_replies(
     conn: iroh::endpoint::Connection,
+    incarnation: Incarnation,
     socket: Arc<UdpSocket>,
     flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
-    stats: Arc<crate::udp::UdpStats>,
+    ctx: UdpForwardCtx,
 ) {
     use crate::udp::DropReason;
-    while let Ok(datagram) = conn.read_datagram().await {
+    let stats = &ctx.dialer.udp_stats;
+    loop {
+        let datagram = match conn.read_datagram().await {
+            Ok(datagram) => datagram,
+            Err(error) => {
+                if crate::udp::closed_for_unsupported_datagrams(&error) {
+                    tracing::error!(
+                        peer = %conn.remote_id(),
+                        svc = %ctx.dialer.svc_name,
+                        "serve peer closed the udp connection: datagrams unsupported"
+                    );
+                    #[cfg(test)]
+                    ctx.bump_hook(|hooks| &hooks.reader_failed);
+                    ctx.fail_incarnation(&conn, incarnation).await;
+                }
+                return;
+            }
+        };
         let Ok((flow, payload)) = crate::udp::decode(&datagram) else {
             stats.record_drop(DropReason::Malformed);
             tracing::debug!("dropping malformed udp datagram from peer");
@@ -1151,5 +1411,456 @@ mod tests {
             .await
             .expect("path_report must not wait for the dial lock");
         assert!(report.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // UDP forwarding orchestration (#152): setup check, close report, back-off
+    // -----------------------------------------------------------------------
+
+    use iroh::endpoint::{Connection, ConnectionError, VarInt};
+
+    const TEST_WINDOW: Duration = Duration::from_millis(500);
+    const POLL_STEP: Duration = Duration::from_millis(10);
+    const POLL_LIMIT: Duration = Duration::from_secs(5);
+    const SEND_STEP: Duration = Duration::from_millis(50);
+    const MIN_WINDOW_LEFT: Duration = Duration::from_millis(200);
+
+    /// Dialable loopback address of a relay-less endpoint.
+    fn loopback_addr(ep: &iroh::Endpoint) -> iroh::EndpointAddr {
+        let mut addr = iroh::EndpointAddr::new(ep.id());
+        for sock in ep.bound_sockets() {
+            let ip = if sock.ip().is_unspecified() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                sock.ip()
+            };
+            addr = addr.with_ip_addr((ip, sock.port()).into());
+        }
+        addr
+    }
+
+    /// A loopback Serve-like peer for the service `t` that hands every
+    /// accepted connection to the test and echoes its datagrams.
+    struct TestPeer {
+        ep: iroh::Endpoint,
+        accepted: tokio::sync::mpsc::UnboundedReceiver<Connection>,
+        stop: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn test_peer(datagrams: bool) -> TestPeer {
+        use iroh::endpoint::presets::Minimal;
+        use iroh::endpoint::QuicTransportConfig;
+        let mut builder = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .alpns(vec![proto::alpn_for("t")]);
+        if !datagrams {
+            builder = builder.transport_config(
+                QuicTransportConfig::builder()
+                    .datagram_receive_buffer_size(None)
+                    .build(),
+            );
+        }
+        let ep = builder.bind().await.expect("bind test peer");
+        let (accepted_tx, accepted) = tokio::sync::mpsc::unbounded_channel();
+        let (stop, stop_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(peer_supervisor(ep.clone(), accepted_tx, stop_rx));
+        TestPeer {
+            ep,
+            accepted,
+            stop,
+            task,
+        }
+    }
+
+    /// Accept until stopped; each connection's handshake, hand-off and echo
+    /// run as owned children, aborted and joined before the supervisor ends.
+    async fn peer_supervisor(
+        ep: iroh::Endpoint,
+        accepted: tokio::sync::mpsc::UnboundedSender<Connection>,
+        mut stop: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut echoes = JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut stop => break,
+                Some(_) = echoes.join_next(), if !echoes.is_empty() => {}
+                incoming = ep.accept() => {
+                    let Some(incoming) = incoming else { break };
+                    let accepted = accepted.clone();
+                    echoes.spawn(async move {
+                        let Ok(conn) = incoming.await else { return };
+                        let _ = accepted.send(conn.clone());
+                        while let Ok(datagram) = conn.read_datagram().await {
+                            let _ = conn.send_datagram(datagram);
+                        }
+                    });
+                }
+            }
+        }
+        echoes.abort_all();
+        while echoes.join_next().await.is_some() {}
+    }
+
+    impl TestPeer {
+        async fn next_conn(&mut self, within: Duration, what: &str) -> Connection {
+            tokio::time::timeout(within, self.accepted.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{what}: no connection within {within:?}"))
+                .expect("peer supervisor alive")
+        }
+
+        fn assert_no_conn(&mut self, what: &str) {
+            match self.accepted.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Ok(conn) => panic!("{what}: unexpected connection {}", conn.stable_id()),
+                Err(error) => panic!("{what}: peer channel {error:?}"),
+            }
+        }
+
+        async fn shutdown(self) {
+            let _ = self.stop.send(());
+            tokio::time::timeout(Duration::from_secs(5), self.task)
+                .await
+                .expect("peer supervisor joins within 5 s")
+                .expect("peer supervisor must not panic");
+            tokio::time::timeout(Duration::from_secs(5), self.ep.close())
+                .await
+                .expect("peer endpoint closes within 5 s");
+        }
+    }
+
+    fn close_unsupported(conn: &Connection) {
+        conn.close(
+            VarInt::from_u32(crate::udp::DATAGRAMS_UNSUPPORTED_CODE),
+            crate::udp::DATAGRAMS_UNSUPPORTED_REASON,
+        );
+    }
+
+    /// A UDP-service dialer pointed at `peer` (no accept task of its own).
+    async fn udp_dialer(peer: &TestPeer) -> Arc<ServiceDialer> {
+        use iroh::endpoint::presets::Minimal;
+        let client = iroh::Endpoint::builder(Minimal)
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind access endpoint");
+        Arc::new(ServiceDialer {
+            ep: client,
+            addr: loopback_addr(&peer.ep),
+            alpn: proto::alpn_for("t"),
+            svc_name: "t".to_string(),
+            protocol: Protocol::Udp,
+            udp_limits: UdpLimits::default(),
+            udp_stats: Arc::default(),
+            listen_addr: "127.0.0.1:0".to_string(),
+            state: Mutex::new(ConnState {
+                conn: None,
+                tasks: JoinSet::new(),
+            }),
+            dial: Mutex::new(()),
+        })
+    }
+
+    /// `udp_forward_loop` on a known socket, with a short back-off window
+    /// and the test hooks on.
+    struct ForwardHarness {
+        client: UdpSocket,
+        access_addr: std::net::SocketAddr,
+        dialer: Arc<ServiceDialer>,
+        backoff: Arc<std::sync::Mutex<RedialBackoff>>,
+        gate: UdpDialGate,
+        hooks: Arc<UdpTestHooks>,
+        stop: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn forward(dialer: Arc<ServiceDialer>, window: Duration) -> ForwardHarness {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind access"));
+        let access_addr = socket.local_addr().expect("access addr");
+        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind client");
+        let hooks = Arc::new(UdpTestHooks::default());
+        let ctx = UdpForwardCtx {
+            dialer: dialer.clone(),
+            backoff: Arc::new(std::sync::Mutex::new(RedialBackoff::with_window(window))),
+            gate: UdpDialGate::default(),
+            hooks: Some(hooks.clone()),
+        };
+        let (backoff, gate) = (ctx.backoff.clone(), ctx.gate.clone());
+        let (stop, stop_rx) = shutdown::channel();
+        let task = tokio::spawn(udp_forward_loop(ctx, socket, stop_rx));
+        ForwardHarness {
+            client,
+            access_addr,
+            dialer,
+            backoff,
+            gate,
+            hooks,
+            stop,
+            task,
+        }
+    }
+
+    impl ForwardHarness {
+        async fn send(&self, payload: &[u8]) {
+            self.client
+                .send_to(payload, self.access_addr)
+                .await
+                .expect("client send");
+        }
+
+        async fn expect_echo(&self, payload: &[u8]) {
+            let mut buf = [0u8; 1500];
+            let (n, _) = tokio::time::timeout(POLL_LIMIT, self.client.recv_from(&mut buf))
+                .await
+                .expect("echo within 5 s")
+                .expect("client recv");
+            assert_eq!(&buf[..n], payload, "echoed payload");
+        }
+
+        async fn round_trip(&self, payload: &[u8]) {
+            self.send(payload).await;
+            self.expect_echo(payload).await;
+        }
+
+        fn waiting_until(&self) -> Option<std::time::Instant> {
+            self.backoff
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .waiting_until()
+        }
+
+        /// The open window's end, asserting enough of it is left to observe.
+        async fn window_end(&self) -> std::time::Instant {
+            eventually("back-off window opens", || async {
+                self.waiting_until().is_some()
+            })
+            .await;
+            let end = self.waiting_until().expect("window open");
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                left >= MIN_WINDOW_LEFT,
+                "timing: only {left:?} of the window left, need {MIN_WINDOW_LEFT:?}"
+            );
+            end
+        }
+
+        /// Keep a client sending until just before `end`; no dial may happen.
+        async fn send_through_window(&self, peer: &mut TestPeer, end: std::time::Instant) {
+            let stop_at = end - SEND_STEP;
+            let mut sent = 0;
+            while sent == 0 || std::time::Instant::now() < stop_at {
+                self.send(b"during-window").await;
+                sent += 1;
+                tokio::time::sleep(SEND_STEP).await;
+            }
+            peer.assert_no_conn(&format!("no redial during the window ({sent} sent)"));
+        }
+
+        /// After `end`, one datagram dials exactly one new connection.
+        async fn resume_after(&self, peer: &mut TestPeer, end: std::time::Instant) -> Connection {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(end)).await;
+            self.send(b"after-window").await;
+            let conn = peer
+                .next_conn(Duration::from_secs(1), "redial after the window")
+                .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            peer.assert_no_conn("exactly one redial after the window");
+            conn
+        }
+
+        async fn shutdown(self) {
+            self.shutdown_within(POLL_LIMIT).await;
+        }
+
+        async fn shutdown_within(self, loop_bound: Duration) {
+            self.stop.send_replace(Some(tokio::time::Instant::now()));
+            tokio::time::timeout(loop_bound, self.task)
+                .await
+                .unwrap_or_else(|_| panic!("forward loop must stop within {loop_bound:?}"))
+                .expect("forward loop must not panic");
+            tokio::time::timeout(POLL_LIMIT, self.dialer.stop_auxiliary_tasks())
+                .await
+                .expect("dialer auxiliary tasks stop within 5 s");
+            tokio::time::timeout(POLL_LIMIT, self.dialer.ep.close())
+                .await
+                .expect("access endpoint closes within 5 s");
+        }
+    }
+
+    /// Poll `condition` every 10 ms for up to 5 s.
+    async fn eventually<F, Fut>(what: &str, mut condition: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let polled = tokio::time::timeout(POLL_LIMIT, async {
+            while !condition().await {
+                tokio::time::sleep(POLL_STEP).await;
+            }
+        })
+        .await;
+        assert!(polled.is_ok(), "{what}: not within {POLL_LIMIT:?}");
+    }
+
+    /// Wait until a hook counter passes `base`.
+    async fn wait_past(counter: &tokio::sync::watch::Sender<u64>, base: u64, what: &str) {
+        let mut rx = counter.subscribe();
+        let passed = tokio::time::timeout(POLL_LIMIT, rx.wait_for(|n| *n > base))
+            .await
+            .map(|seen| seen.map(|_| ()));
+        assert!(
+            matches!(passed, Ok(Ok(()))),
+            "{what}: counter did not pass {base}"
+        );
+    }
+
+    fn assert_closed_unsupported(reason: ConnectionError) {
+        match reason {
+            ConnectionError::ApplicationClosed(close) => assert_eq!(
+                close.error_code,
+                VarInt::from_u32(crate::udp::DATAGRAMS_UNSUPPORTED_CODE),
+                "close code"
+            ),
+            other => panic!("expected the dedicated application close, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn adoption_check_closes_and_backs_off() {
+        let mut peer = test_peer(false).await;
+        let h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        h.send(b"first").await;
+        let a = peer.next_conn(POLL_LIMIT, "first dial").await;
+        let reason = tokio::time::timeout(POLL_LIMIT, a.closed())
+            .await
+            .expect("access closes the unusable connection");
+        assert_closed_unsupported(reason);
+
+        let end = h.window_end().await;
+        h.send_through_window(&mut peer, end).await;
+        assert_eq!(
+            h.dialer.udp_stats.snapshot().drops,
+            crate::observation::UdpDropCounts::default(),
+            "neither the setup failure nor drops during the window are counted"
+        );
+        h.resume_after(&mut peer, end).await;
+
+        h.shutdown().await;
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reader_close_evicts_and_resumes_after_one_window() {
+        let mut peer = test_peer(true).await;
+        let h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        h.round_trip(b"a").await;
+        let a = peer.next_conn(POLL_LIMIT, "first dial").await;
+
+        close_unsupported(&a);
+        // No client traffic since the close: only the reader can record and evict.
+        eventually("reader records and evicts", || async {
+            h.waiting_until().is_some() && h.dialer.cached_conn_id().await.is_none()
+        })
+        .await;
+        let end = h.window_end().await;
+        h.send_through_window(&mut peer, end).await;
+        let b = h.resume_after(&mut peer, end).await;
+        h.expect_echo(b"after-window").await;
+
+        h.shutdown().await;
+        drop(b);
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stale_incarnation_close_does_not_start_a_window() {
+        let mut peer = test_peer(true).await;
+        let h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        h.round_trip(b"a").await;
+        let a = peer.next_conn(POLL_LIMIT, "first dial").await;
+        let cached = h
+            .dialer
+            .get_or_dial(far_deadline())
+            .await
+            .expect("cached connection");
+        h.dialer.invalidate(&cached).await;
+        h.round_trip(b"b").await;
+        let _b = peer.next_conn(POLL_LIMIT, "second dial").await;
+
+        close_unsupported(&a);
+        let until = tokio::time::Instant::now() + Duration::from_millis(300);
+        while tokio::time::Instant::now() < until {
+            h.round_trip(b"through-b").await;
+            assert_eq!(
+                h.waiting_until(),
+                None,
+                "stale close must not open a window"
+            );
+        }
+
+        h.shutdown().await;
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reader_close_racing_a_send_cannot_redial() {
+        let mut peer = test_peer(true).await;
+        let h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        h.round_trip(b"a").await;
+        let a = peer.next_conn(POLL_LIMIT, "first dial").await;
+
+        let dialing = h.dialer.dial.lock().await;
+        let admitted = *h.hooks.admitted.subscribe().borrow();
+        h.send(b"racing").await;
+        wait_past(&h.hooks.admitted, admitted, "datagram admitted").await;
+        let failed = *h.hooks.reader_failed.subscribe().borrow();
+        close_unsupported(&a);
+        wait_past(&h.hooks.reader_failed, failed, "reader matched the close").await;
+        drop(dialing);
+
+        let end = h.window_end().await;
+        h.send_through_window(&mut peer, end).await;
+        h.resume_after(&mut peer, end).await;
+
+        h.shutdown().await;
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reader_close_before_admission_cannot_redial() {
+        let mut peer = test_peer(true).await;
+        let h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        h.round_trip(b"a").await;
+        let a = peer.next_conn(POLL_LIMIT, "first dial").await;
+
+        let failed = *h.hooks.reader_failed.subscribe().borrow();
+        close_unsupported(&a);
+        wait_past(&h.hooks.reader_failed, failed, "reader matched the close").await;
+        eventually("reader records the failure", || async {
+            h.waiting_until().is_some()
+        })
+        .await;
+
+        let end = h.window_end().await;
+        h.send_through_window(&mut peer, end).await;
+        h.resume_after(&mut peer, end).await;
+
+        h.shutdown().await;
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_while_gate_held_is_prompt() {
+        let peer = test_peer(true).await;
+        let h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        let _held = h.gate.clone().lock_owned().await;
+        let waiting = *h.hooks.gate_waiting.subscribe().borrow();
+        h.send(b"blocked").await;
+        wait_past(&h.hooks.gate_waiting, waiting, "loop waits on the gate").await;
+
+        h.shutdown_within(Duration::from_secs(1)).await;
+        peer.shutdown().await;
     }
 }
