@@ -296,8 +296,8 @@ pub(crate) fn persist_generated_key<D: RoleDoc>(path: &Path, encoded: &str) -> R
 ///
 /// # Errors
 ///
-/// Fails when the file cannot be read, is not valid TOML for `D`, or fails
-/// `D`'s validation.
+/// Fails when the file cannot be read; otherwise the errors of
+/// [`parse_role_config`].
 pub(crate) fn load_role_config<D: RoleDoc>(path: &Path) -> Result<D> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config: {}", path.display()))?;
@@ -309,20 +309,22 @@ pub(crate) fn load_role_config<D: RoleDoc>(path: &Path) -> Result<D> {
 ///
 /// # Errors
 ///
-/// Fails when the text is not valid TOML for `D` (the message carries the
-/// path and line only, never the offending source line) or fails validation.
+/// [`CliError::Config`] naming `path` when the text is not valid TOML for `D`
+/// (the message carries the path and line only, never the offending source
+/// line) or fails validation.
 pub(crate) fn parse_role_config<D: RoleDoc>(content: &str, path: &Path) -> Result<D> {
     // `toml` errors quote the offending source line, which can hold a
     // secret; report the message and line only (RS-10).
     let cfg: D = toml::from_str(content).map_err(|e| {
-        anyhow::anyhow!(
+        CliError::Config(format!(
             "failed to parse config: {}{}: {}",
             path.display(),
             describe_location(content, e.span()),
             e.message()
-        )
+        ))
     })?;
-    cfg.validate()?;
+    cfg.validate()
+        .map_err(|e| CliError::Config(format!("invalid config at {}: {e:#}", path.display())))?;
     Ok(cfg)
 }
 
@@ -378,6 +380,13 @@ mod tests {
         );
     }
 
+    fn config_error_message(err: &anyhow::Error) -> &str {
+        match err.downcast_ref::<CliError>() {
+            Some(CliError::Config(m)) => m,
+            _ => panic!("expected CliError::Config, got {err:?}"),
+        }
+    }
+
     #[test]
     fn parse_role_config_reports_path_and_line_without_secret() {
         let text = "[node]\nsecret_key = \"SECRET-XYZ\" oops\n";
@@ -387,12 +396,22 @@ mod tests {
             .message()
             .to_string();
         assert_eq!(
-            format!("{err:#}"),
+            config_error_message(&err),
             format!("failed to parse config: serve.toml (line 2): {msg}")
         );
         for shown in [format!("{err:#}"), format!("{err:?}")] {
             assert!(!shown.contains("SECRET-XYZ"), "{shown}");
         }
+    }
+
+    #[test]
+    fn parse_role_config_validation_failure_is_a_config_error_naming_the_path() {
+        let text = "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nport = 0\n";
+        let err = parse_role_config::<ServeConfig>(text, Path::new("serve.toml")).unwrap_err();
+        assert_eq!(
+            config_error_message(&err),
+            "invalid config at serve.toml: invalid port: must be 1-65535"
+        );
     }
 
     #[test]

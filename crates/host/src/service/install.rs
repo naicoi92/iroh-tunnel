@@ -547,8 +547,14 @@ fn check_installable_text(role: Role, text: &str, config: &Path) -> Result<()> {
 
 fn installable(role: Role, config: &Path, loaded: Result<()>) -> Result<()> {
     loaded.map_err(|e| {
+        // Re-wrap a config error by its message so the category prefix is
+        // not repeated; other failures (I/O) keep their full chain.
+        let cause = match e.downcast_ref::<CliError>() {
+            Some(CliError::Config(msg)) => msg.clone(),
+            _ => format!("{e:#}"),
+        };
         CliError::Config(format!(
-            "cannot install the service: {e:#}. Create or fix the config first \
+            "cannot install the service: {cause}. Create or fix the config first \
              (`iroh-tunnel {role} config keygen --config {path}`), or pass --config",
             role = role.name(),
             path = config.display()
@@ -993,6 +999,21 @@ mod tests {
             };
             assert_eq!(decide_install_scope(request(None).scope, env), expected);
         }
+    }
+
+    #[test]
+    fn uninstallable_config_names_the_cause_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("serve.toml");
+        std::fs::write(&config, "not = [valid").unwrap();
+        let err = check_installable_config(Role::Serve, &config).unwrap_err();
+        let Some(CliError::Config(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("expected CliError::Config, got {err:?}");
+        };
+        assert!(
+            msg.starts_with("cannot install the service: failed to parse config: "),
+            "{msg}"
+        );
     }
 
     #[test]

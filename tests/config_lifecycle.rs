@@ -476,6 +476,33 @@ fn read_commands_without_config_share_one_guidance_error_and_create_nothing() {
     assert!(!path.parent().unwrap().exists(), "directory was created");
 }
 
+#[test]
+fn run_rejects_an_unparseable_or_invalid_config_with_config_error_exit() {
+    let world = World::new();
+    let cases = [
+        ("bad.toml", "not = [valid", "failed to parse config"),
+        (
+            "zero.toml",
+            "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nport = 0\n",
+            "invalid port",
+        ),
+    ];
+    for (name, text, expected) in cases {
+        let cfg = world.file(name);
+        std::fs::write(&cfg, text).unwrap();
+        for role in ["serve", "access"] {
+            let output = world.run(&[role, "run", "--config", p(&cfg)]);
+            let stderr = err(&output);
+            assert_eq!(output.status.code(), Some(2), "{role} {name}: {stderr}");
+            assert!(stderr.contains(p(&cfg)), "{role} {name}: {stderr}");
+            if role == "serve" {
+                assert!(stderr.contains(expected), "{role} {name}: {stderr}");
+            }
+            assert_eq!(std::fs::read_to_string(&cfg).unwrap(), text);
+        }
+    }
+}
+
 // --- AC-CFG-09 -------------------------------------------------------------
 
 #[test]
