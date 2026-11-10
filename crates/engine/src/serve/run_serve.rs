@@ -19,7 +19,7 @@
 //! earlier draft the spec was written against — see the API notes inline.
 
 use anyhow::{Context, Result};
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, VarInt};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -699,7 +699,29 @@ async fn handle_udp_connection(
     sinks: &shutdown::QuarantineSinks,
     mut stop: shutdown::Stop,
 ) {
-    use crate::udp::{Admission, DropReason};
+    use crate::udp::{
+        carries_datagrams, closed_for_unsupported_datagrams, Admission, DropReason,
+        DATAGRAMS_UNSUPPORTED_CODE, DATAGRAMS_UNSUPPORTED_REASON,
+    };
+    let peer = conn.remote_id();
+    let alpn = conn.alpn();
+    let service = proto::name_from_alpn(alpn)
+        .map(String::from)
+        .unwrap_or_else(|| format!("{alpn:02x?}"));
+    // A connection that cannot carry datagrams never gets a flow table,
+    // sweep or reader: close it with the dedicated code and stop.
+    if !carries_datagrams(conn.max_datagram_size()) {
+        tracing::error!(
+            peer = %peer,
+            service = %service,
+            "udp datagrams unsupported by access peer, closing the connection"
+        );
+        conn.close(
+            VarInt::from_u32(DATAGRAMS_UNSUPPORTED_CODE),
+            DATAGRAMS_UNSUPPORTED_REASON,
+        );
+        return;
+    }
     let stats = target.udp_stats.clone();
     let limits = target.udp_limits;
     let idle = limits.idle_timeout;
@@ -731,7 +753,15 @@ async fn handle_udp_connection(
             result = conn.read_datagram() => match result {
                 Ok(datagram) => datagram,
                 Err(error) => {
-                    tracing::debug!("udp connection closed: {error}");
+                    if closed_for_unsupported_datagrams(&error) {
+                        tracing::error!(
+                            peer = %peer,
+                            service = %service,
+                            "access peer closed the udp connection: datagrams unsupported"
+                        );
+                    } else {
+                        tracing::debug!("udp connection closed: {error}");
+                    }
                     break;
                 }
             }
@@ -950,7 +980,7 @@ async fn relay_upstream_replies(
     flows: UdpFlowTable,
     stats: Arc<crate::udp::UdpStats>,
 ) {
-    use crate::udp::DropReason;
+    use crate::udp::{send_decision, DropReason, SendDecision};
     let mut buf = vec![0u8; 65535];
     loop {
         let n = match upstream.recv(&mut buf).await {
@@ -971,22 +1001,27 @@ async fn relay_upstream_replies(
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .refresh(flow, std::time::Instant::now());
-        let limit = crate::udp::payload_limit(conn.max_datagram_size());
+        let max = conn.max_datagram_size();
+        let limit = crate::udp::payload_limit(max);
         stats.set_datagram_limit(limit);
-        let Some(limit) = limit else {
-            stats.record_drop(DropReason::LimitShrink);
-            tracing::warn!(flow = flow.0, "datagrams unusable, dropping reply");
-            continue;
-        };
-        if n > limit {
-            stats.record_drop(DropReason::Oversize);
-            tracing::warn!(
-                flow = flow.0,
-                size = n,
-                limit,
-                "dropping oversize udp reply"
-            );
-            continue;
+        match send_decision(max, n) {
+            SendDecision::Send => {}
+            SendDecision::Drop(DropReason::LimitShrink) => {
+                stats.record_drop(DropReason::LimitShrink);
+                tracing::warn!(flow = flow.0, "datagrams unusable, dropping reply");
+                continue;
+            }
+            SendDecision::Drop(reason) => {
+                // Only an oversize decision reaches here, which needs a usable limit.
+                stats.record_drop(reason);
+                tracing::warn!(
+                    flow = flow.0,
+                    size = n,
+                    limit = limit.unwrap_or_default(),
+                    "dropping oversize udp reply"
+                );
+                continue;
+            }
         }
         if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
             tracing::debug!(flow = flow.0, "udp reply not sent: {error}");
@@ -1316,6 +1351,88 @@ mod tests {
         completion.result.expect("role result");
         assert!(completion.status_quiesced);
         client.close().await;
+    }
+
+    /// Serve closes a UDP connection whose access peer cannot carry
+    /// datagrams: the peer sees the dedicated close code and reason, and
+    /// no flow state is created.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_closes_udp_connection_when_access_peer_cannot_carry_datagrams() {
+        use iroh::endpoint::presets::Minimal;
+        use iroh::endpoint::{ConnectionError, QuicTransportConfig, RelayMode, VarInt};
+        let service = ServeServiceSettings {
+            name: "udp-echo".to_string(),
+            protocol: Protocol::Udp,
+            host: "127.0.0.1".to_string(),
+            port: 9,
+            udp: UdpLimits::default(),
+        };
+        let alpn = proto::alpn_for("udp-echo");
+        let settings = unreachable_relay_settings(vec![service]);
+        let ep = bind_serve(&settings).await.expect("bind serve endpoint");
+        let mut addr = iroh::EndpointAddr::new(ep.id());
+        for sock in ep.bound_sockets() {
+            let ip = if sock.ip().is_unspecified() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                sock.ip()
+            };
+            addr = addr.with_ip_addr((ip, sock.port()).into());
+        }
+        // The access peer disables datagrams, so Serve sees no datagram size.
+        let client = iroh::Endpoint::builder(Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .transport_config(
+                QuicTransportConfig::builder()
+                    .datagram_receive_buffer_size(None)
+                    .build(),
+            )
+            .bind()
+            .await
+            .expect("bind client");
+
+        let target = ServiceTarget::new(
+            "127.0.0.1:9".to_string(),
+            Protocol::Udp,
+            UdpLimits::default(),
+        );
+        let (_stop_tx, stop) = shutdown::channel();
+        let sinks = shutdown::QuarantineSinks::default();
+        // Keep an endpoint handle alive past the Serve task: handle_udp_connection
+        // returns right after the close, and dropping the last endpoint would tear
+        // down before the close frame reaches the client.
+        let server = ep.clone();
+        let (server_conn_tx, server_conn_rx) = tokio::sync::oneshot::channel::<Connection>();
+        let _serve = tokio::spawn(async move {
+            let incoming = ep.accept().await.expect("incoming connection");
+            let conn = incoming.await.expect("handshake");
+            let _ = server_conn_tx.send(conn.clone());
+            handle_udp_connection(&conn, target, &sinks, stop).await;
+        });
+
+        let conn = tokio::time::timeout(Duration::from_secs(10), client.connect(addr, &alpn))
+            .await
+            .expect("connect within timeout")
+            .expect("connect");
+        let reason = tokio::time::timeout(Duration::from_secs(10), conn.closed())
+            .await
+            .expect("serve must close the connection");
+        let _server_conn = server_conn_rx.await.expect("server connection");
+        match reason {
+            ConnectionError::ApplicationClosed(close) => {
+                assert_eq!(
+                    close.error_code,
+                    VarInt::from_u32(crate::udp::DATAGRAMS_UNSUPPORTED_CODE)
+                );
+                assert_eq!(
+                    close.reason.as_ref(),
+                    crate::udp::DATAGRAMS_UNSUPPORTED_REASON
+                );
+            }
+            other => panic!("expected dedicated application close, got {other:?}"),
+        }
+        client.close().await;
+        server.close().await;
     }
 
     async fn quarantined_upstream(
