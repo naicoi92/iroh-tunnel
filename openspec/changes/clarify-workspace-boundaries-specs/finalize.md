@@ -7,7 +7,7 @@
 
 **Change**: `clarify-workspace-boundaries-specs`
 **Finalized at**: `2026-11-10 04:47` (UTC)
-**Outcome**: `pr-updated`. No spec pre-review PR existed, so the push creates the remote branch. Whether a PR is created is recorded under "PR comment" below.
+**Outcome**: `pr-updated`. No spec pre-review PR existed. The push created the remote branch, and the user approved creating PR #199 at finalize step 11.
 
 ---
 
@@ -15,8 +15,8 @@
 
 - **Branch**: `spec/clarify-workspace-boundaries-specs`
 - **Base branch**: `main`
-- **Final state**: `pr-updated`. The feature branch was fast-forwarded to `a321af7`, and the push follows this receipt commit.
-- **PR URL**: N/A at receipt time. If a PR is opened, it is recorded in a follow-up commit.
+- **Final state**: `pr-updated`. The feature branch was fast-forwarded to `a321af7`; the receipt is `18d6007`, then pushed.
+- **PR URL**: https://github.com/naicoi92/iroh-tunnel/pull/199
 
 `main` advanced by #197 (`9046682`, status-owner-not-running) after the feature branch was cut. Merging it is conflict-free: `git merge-tree` against `main` succeeds. #197 changes "Service status separates facts without inventing truth" in `frontend-independent-management`, which none of this change's deltas touch.
 
@@ -31,13 +31,14 @@ Deviations from the schema, following the project AGENTS.md:
 - The worktree was removed with `wt remove` (Worktrunk), not `git worktree remove`.
 - Steps 3–5 ran in the feature-branch worktree `../iroh-tunnel.spec-clarify-workspace-boundaries-specs`, not in the main checkout, which stays on `main`.
 - `git pull` was skipped because the feature branch had no upstream yet.
+- SSH push was refused (default key `naicoi92`), so the branch was pushed over HTTPS with `gh auth git-credential`, as the AGENTS.md rule directs.
 - The worktree branch was deleted with `git branch -d` after the fast-forward.
 
 ---
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)` at receipt time. This is updated after the PR-creation prompt.
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/199#issuecomment-6759358455)
 
 ---
 
