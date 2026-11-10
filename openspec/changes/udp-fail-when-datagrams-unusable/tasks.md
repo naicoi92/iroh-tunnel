@@ -50,9 +50,9 @@ Blocked by: none
 
 Owner: one writer for `docs/udp-integration-contract.md`, `crates/engine/src/observation/types.rs` (rustdoc of `limit_shrink` only), `crates/host/src/status/schema.rs` (rustdoc of `limit_shrink` only) and `crates/engine/src/udp/types.rs` (rustdoc of `DropReason::LimitShrink` only, the engine-internal twin of the same counter). Platforms: docs only.
 
-- [ ] 5.1 Rewrite the failure-table row "Datagrams unusable on the connection" to the implemented behavior: connection closed at setup with the dedicated code, error logs on both sides, Access waits 30 s, no counter; keep "Limit shrinks mid-session" as the `limit_shrink` row and state that a smaller usable limit counts as `oversize`
-- [ ] 5.2 Rewrite the `limit_shrink` rustdoc in both crates for scenario "Mid-session meaning visible in API docs": drops because the limit became unusable mid-session, no #152 reference
-- [ ] 5.3 Run `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` and `grep -rn "#152" crates docs` (expect no hit in the `limit_shrink` docs or the contract row)
+- [x] 5.1 Rewrite the failure-table row "Datagrams unusable on the connection" to the implemented behavior: connection closed at setup with the dedicated code, error logs on both sides, Access waits 30 s, no counter; keep "Limit shrinks mid-session" as the `limit_shrink` row and state that a smaller usable limit counts as `oversize`
+- [x] 5.2 Rewrite the `limit_shrink` rustdoc in both crates for scenario "Mid-session meaning visible in API docs": drops because the limit became unusable mid-session, no #152 reference
+- [x] 5.3 Run `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` and `grep -rn "#152" crates docs` (expect no hit in the `limit_shrink` docs or the contract row)
 
 ## 6. Real-binary end-to-end coverage
 
