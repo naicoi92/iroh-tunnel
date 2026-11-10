@@ -86,7 +86,7 @@ Purpose edits (design D1): `git diff --stat f9807db..HEAD -- openspec/specs` sho
 - [x] The project test command was run fresh in this step
 
 **Test command**: `cargo +1.91 test --workspace --all-features --locked` (cwd: the worktree; run 04:18:35–04:22:15 UTC; exit 0)
-**Result**: 778 passed, 0 failed, 4 ignored, across 37 test binaries. The ignored tests need the Internet and the n0 relay network (`multiplex_false_still_reuses_connection`, `multiplex_two_streams_share_one_connection`, `serve_access_tunnel_roundtrips_bytes` and one more); none of them is mapped to a scenario in this change.
+**Result**: 778 passed, 0 failed, 4 ignored, across 37 test binaries. The ignored tests need the Internet and the n0 relay network (`multiplex_false_still_reuses_connection`, `multiplex_survives_idle_beyond_timeout`, `multiplex_two_streams_share_one_connection`, `serve_access_tunnel_roundtrips_bytes`); none of them is mapped to a scenario in this change.
 
 **E2E (real debug binary, `cargo +1.91 build --locked --bin iroh-tunnel`)**:
 
