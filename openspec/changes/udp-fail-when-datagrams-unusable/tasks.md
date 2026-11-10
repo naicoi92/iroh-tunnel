@@ -4,12 +4,12 @@ Blocked by: none
 
 Owner: one writer for new files under `crates/engine/src/udp/` and `crates/engine/src/udp/mod.rs`. Platforms: pure code, unit tests run on Linux, macOS and Windows CI.
 
-- [ ] 1.1 Write failing unit tests for the usability classifier for scenario "Usability boundary": absent, 4 and 5 byte maxima classify as unable, unable, able; the classifier is defined through `payload_limit`
-- [ ] 1.2 Add the classifier, the dedicated application close code and the reason `udp datagrams unsupported` as one module (design D2, D5); make 1.1 pass
-- [ ] 1.3 Write failing unit tests for the close predicate: an application close with the dedicated code matches; another application code, a locally closed connection and a transport-level close do not; then implement the predicate over `iroh::endpoint::ConnectionError`
-- [ ] 1.4 Write failing unit tests for the per-datagram send decision for scenarios "Limit lost mid-session" and "Smaller usable limit counts as oversize": unusable observation gives drop as `limit_shrink` with no close requested, payload over a usable limit gives drop as `oversize`, payload within the limit gives send; then implement it (design D8)
-- [ ] 1.5 Write failing unit tests for the redial back-off type for scenarios "No immediate redial", "One warning per wait" and "Dialing resumes after the wait", driven by explicit instants: waiting before 30 s, eligible at exactly 30 s, only the first drop of a window asks for a warning, a new failure starts a new window; then implement it (design D4, D8)
-- [ ] 1.6 Confirm the existing absent-limit snapshot test in `crates/engine/src/udp/types.rs` still passes (scenario "Limit reported as absent"); run `cargo test -p iroh-tunnel-engine --all-features --locked udp::`, `cargo fmt --all -- --check` and the workspace layout test. Clippy with `-D warnings` runs in 4.5, once every crate-private item has its consumer
+- [x] 1.1 Write failing unit tests for the usability classifier for scenario "Usability boundary": absent, 4 and 5 byte maxima classify as unable, unable, able; the classifier is defined through `payload_limit`
+- [x] 1.2 Add the classifier, the dedicated application close code and the reason `udp datagrams unsupported` as one module (design D2, D5); make 1.1 pass
+- [x] 1.3 Write failing unit tests for the close predicate: an application close with the dedicated code matches; another application code, a locally closed connection and a transport-level close do not; then implement the predicate over `iroh::endpoint::ConnectionError`
+- [x] 1.4 Write failing unit tests for the per-datagram send decision for scenarios "Limit lost mid-session" and "Smaller usable limit counts as oversize": unusable observation gives drop as `limit_shrink` with no close requested, payload over a usable limit gives drop as `oversize`, payload within the limit gives send; then implement it (design D8)
+- [x] 1.5 Write failing unit tests for the redial back-off type for scenarios "No immediate redial", "One warning per wait" and "Dialing resumes after the wait", driven by explicit instants: waiting before 30 s, eligible at exactly 30 s, only the first drop of a window asks for a warning, a new failure starts a new window; then implement it (design D4, D8)
+- [x] 1.6 Confirm the existing absent-limit snapshot test in `crates/engine/src/udp/types.rs` still passes (scenario "Limit reported as absent"); run `cargo test -p iroh-tunnel-engine --all-features --locked udp::`, `cargo fmt --all -- --check` and the workspace layout test. Clippy with `-D warnings` runs in 4.5, once every crate-private item has its consumer
 
 ## 2. Datagram-disable test seam
 
