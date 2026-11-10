@@ -437,3 +437,92 @@ fn host_files_export_at_most_one_operation() {
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
+
+/// Engine dependencies are inherited from the workspace
+/// (`workspace-boundaries`): every direct entry must be `workspace = true`.
+#[test]
+fn engine_dependencies_are_inherited_from_the_workspace() {
+    let text = read_source(&Path::new(ROOT).join("crates/engine/Cargo.toml"));
+    let manifest: toml::Table = toml::from_str(&text).expect("engine manifest parses");
+    let offenders = direct_engine_dependencies(&manifest);
+    assert!(
+        offenders.is_empty(),
+        "engine declares dependencies without `workspace = true`:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn direct_engine_dependencies_reports_every_offender() {
+    let manifest: toml::Table = toml::from_str(
+        r#"
+[dependencies]
+foo = "1"
+off = { workspace = false }
+ok = { workspace = true, features = ["x"] }
+
+[dev-dependencies]
+bar = { path = "../bar" }
+
+[target.'cfg(unix)'.dependencies]
+baz = { version = "1" }
+"#,
+    )
+    .expect("inline manifest parses");
+    let mut offenders = direct_engine_dependencies(&manifest);
+    offenders.sort();
+    // target_tables_are_checked: `baz` under `target.*` is reported.
+    // workspace_entry_with_features_passes: `ok` is absent from the output.
+    // workspace_false_is_rejected: `off` is reported.
+    assert_eq!(
+        offenders,
+        [
+            "dependencies.foo",
+            "dependencies.off",
+            "dev-dependencies.bar",
+            "target.'cfg(unix)'.dependencies.baz",
+        ]
+    );
+}
+
+/// Direct dependency entries of `manifest` that do not inherit from the
+/// workspace, as `kind.name` (`target.'<cfg>'.kind.name` under `target.*`).
+/// An entry passes only when it is a table with `workspace = true`; Cargo
+/// itself rejects `workspace = true` combined with `version`, `path` or `git`,
+/// so that combination is not checked here.
+fn direct_engine_dependencies(manifest: &toml::Table) -> Vec<String> {
+    const KINDS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+    fn collect(table: &toml::Table, prefix: &str, offenders: &mut Vec<String>) {
+        for (name, value) in table {
+            let inherited = matches!(
+                value,
+                toml::Value::Table(entry)
+                    if entry.get("workspace") == Some(&toml::Value::Boolean(true))
+            );
+            if !inherited {
+                offenders.push(format!("{prefix}.{name}"));
+            }
+        }
+    }
+
+    let mut offenders = Vec::new();
+    for kind in KINDS {
+        if let Some(toml::Value::Table(deps)) = manifest.get(kind) {
+            collect(deps, kind, &mut offenders);
+        }
+    }
+    if let Some(toml::Value::Table(targets)) = manifest.get("target") {
+        for (cfg, target) in targets {
+            let toml::Value::Table(target) = target else {
+                continue;
+            };
+            for kind in KINDS {
+                if let Some(toml::Value::Table(deps)) = target.get(kind) {
+                    collect(deps, &format!("target.'{cfg}'.{kind}"), &mut offenders);
+                }
+            }
+        }
+    }
+    offenders
+}
