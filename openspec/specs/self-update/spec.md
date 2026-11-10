@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the `update` command, which replaces only the invoked executable with a verified release: version selection, signature and checksum verification, atomic replacement, and refusal for managed installs and container images. Installer behaviour is owned by `install-release-packaging`.
+Define the `update` command, which replaces only the invoked executable with a release verified by signature and checksum by default, with an explicit insecure mode that bypasses verification. Managed installs are directed to their owner unless explicitly overridden, and container images are never updated in place. Installer behaviour is owned by `install-release-packaging`.
 
 ## Requirements
 
