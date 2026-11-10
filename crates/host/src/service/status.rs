@@ -38,18 +38,7 @@ pub(crate) fn status_via(
 ) -> Result<ServiceStatusReport, ServiceFailure> {
     check_verb_policy("status", role, scope, env).map_err(ServiceFailure::before_effects)?;
     let liveness = crate::ownership::probe(role);
-    let owner = match &liveness {
-        Ok(crate::ownership::Liveness::Running {
-            owner: Some(owner), ..
-        }) => Fact::Known(owner.clone()),
-        Ok(crate::ownership::Liveness::Running { owner: None, .. }) => {
-            Fact::Unavailable("the owner record is missing or unreadable".to_owned())
-        }
-        Ok(crate::ownership::Liveness::NotRunning) => {
-            Fact::Unavailable(format!("{} is not running", role.name()))
-        }
-        Err(error) => Fact::Unavailable(error.to_string()),
-    };
+    let owner = owner_fact(&liveness);
     // Queried once: the absent-service refusal and the registration fact share
     // the answer. An absent service is exit 5.
     #[cfg(windows)]
@@ -100,6 +89,24 @@ pub(crate) fn status_via(
         owner,
         native: Some(output),
     })
+}
+
+/// The owner fact for a liveness probe: a stopped role has a known absent
+/// owner; a running role without a readable record, or a failed probe, is
+/// unavailable.
+fn owner_fact(
+    liveness: &anyhow::Result<crate::ownership::Liveness>,
+) -> Fact<Option<crate::ownership::OwnerRecord>> {
+    match liveness {
+        Ok(crate::ownership::Liveness::Running {
+            owner: Some(owner), ..
+        }) => Fact::Known(Some(owner.clone())),
+        Ok(crate::ownership::Liveness::Running { owner: None, .. }) => {
+            Fact::Unavailable("the owner record is missing or unreadable".to_owned())
+        }
+        Ok(crate::ownership::Liveness::NotRunning) => Fact::Known(None),
+        Err(error) => Fact::Unavailable(error.to_string()),
+    }
 }
 
 /// Whether the platform's registration file exists (Unix backends).
@@ -229,6 +236,66 @@ mod tests {
                 report.liveness,
                 Fact::Known(crate::ownership::Liveness::Running { .. })
             ));
+        });
+    }
+
+    fn record() -> OwnerRecord {
+        OwnerRecord {
+            role: "serve".to_owned(),
+            pid: 42,
+            node_id: None,
+            started_at: 0,
+        }
+    }
+
+    #[test]
+    fn owner_fact_is_known_absent_when_not_running() {
+        let fact = owner_fact(&Ok(Liveness::NotRunning));
+        assert!(matches!(&fact, Fact::Known(None)), "{fact:?}");
+    }
+
+    #[test]
+    fn owner_fact_is_the_record_when_running() {
+        let fact = owner_fact(&Ok(Liveness::Running {
+            tier: Tier::User,
+            owner: Some(record()),
+        }));
+        assert!(
+            matches!(&fact, Fact::Known(Some(r)) if r.pid == 42),
+            "{fact:?}"
+        );
+    }
+
+    #[test]
+    fn owner_fact_is_unavailable_when_running_without_a_record() {
+        let fact = owner_fact(&Ok(Liveness::Running {
+            tier: Tier::User,
+            owner: None,
+        }));
+        assert!(matches!(&fact, Fact::Unavailable(_)), "{fact:?}");
+    }
+
+    #[test]
+    fn owner_fact_is_unavailable_when_the_probe_fails() {
+        let fact = owner_fact(&Err(anyhow::anyhow!("lock probe boom")));
+        assert!(
+            matches!(&fact, Fact::Unavailable(m) if m == "lock probe boom"),
+            "{fact:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_not_running_owner_as_known_absent() {
+        const NAME: &str =
+            "service::status::tests::status_reports_not_running_owner_as_known_absent";
+        in_isolated_home(NAME, |_| {
+            let report = run_status(vec![]).expect("a stopped role is not a failure");
+            assert!(
+                matches!(report.liveness, Fact::Known(Liveness::NotRunning)),
+                "{report:?}"
+            );
+            assert!(matches!(report.owner, Fact::Known(None)), "{report:?}");
         });
     }
 

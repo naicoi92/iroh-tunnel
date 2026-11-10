@@ -103,8 +103,10 @@ pub struct ServiceStatusReport {
     pub registration: Fact<Registration>,
     /// Whether the role runs, from the role lock.
     pub liveness: Fact<crate::ownership::Liveness>,
-    /// The running owner, from the owner record.
-    pub owner: Fact<crate::ownership::OwnerRecord>,
+    /// The role's owner, from the owner record: `Known(None)` when the role is
+    /// not running; `Unavailable` when it runs but the record is missing or
+    /// unreadable, or liveness could not be probed.
+    pub owner: Fact<Option<crate::ownership::OwnerRecord>>,
     /// Native tool output, carried verbatim (never parsed).
     pub native: Option<NativeOutput>,
 }
