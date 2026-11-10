@@ -10,10 +10,10 @@ Blocked by: none
 
 Blocked by: none
 
-- [ ] 2.1 Replace `TBD` with a one-to-three-sentence Purpose, derived only from that spec's own requirements (design D1), in `openspec/specs/<capability>/spec.md` for `cli-entrypoints`, `config-management-commands`, `connection-path-status` and `frontend-independent-management`.
-- [ ] 2.2 Do the same for `install-release-packaging`, `iroh-endpoint-relay`, `role-ownership-shutdown`, `self-update` and `system-service-management`.
-- [ ] 2.3 Do the same for `tcp-tunnel-forwarding`, `tunnel-configuration`, `udp-datagram-forwarding`, `windows-service-trust` and `workspace-boundaries`.
-- [ ] 2.4 Run `openspec validate --specs` and confirm that no Purpose warning remains and every spec passes.
+- [x] 2.1 Replace `TBD` with a one-to-three-sentence Purpose, derived only from that spec's own requirements (design D1), in `openspec/specs/<capability>/spec.md` for `cli-entrypoints`, `config-management-commands`, `connection-path-status` and `frontend-independent-management`.
+- [x] 2.2 Do the same for `install-release-packaging`, `iroh-endpoint-relay`, `role-ownership-shutdown`, `self-update` and `system-service-management`.
+- [x] 2.3 Do the same for `tcp-tunnel-forwarding`, `tunnel-configuration`, `udp-datagram-forwarding`, `windows-service-trust` and `workspace-boundaries`.
+- [x] 2.4 Run `openspec validate --specs` and confirm that no Purpose warning remains and every spec passes.
 
 ## 3. CONTRIBUTING migration-map link
 
