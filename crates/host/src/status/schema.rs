@@ -71,9 +71,8 @@ pub struct UdpDrops {
     pub cap: u64,
     /// A flow's queue was full; the newest datagram was dropped.
     pub queue_full: u64,
-    /// Datagrams became unusable on the connection mid-session. Until #152 is
-    /// resolved, a connection whose datagrams are never usable also counts every
-    /// datagram here; see `docs/udp-integration-contract.md`.
+    /// Datagrams dropped because the datagram limit
+    /// became unusable during the session incarnation.
     pub limit_shrink: u64,
     /// A late reply reached a quarantined socket.
     pub quarantine_reply: u64,
