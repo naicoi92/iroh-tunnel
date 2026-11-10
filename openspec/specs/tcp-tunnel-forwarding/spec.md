@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define TCP forwarding between Access and Serve: service ALPN addressing, one stream per local TCP client over a shared connection, byte-transparent copy with half-close, dial retry, deadlines and failure handling. UDP forwarding is owned by `udp-datagram-forwarding`.
 
 ## Requirements
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define how a single running process owns each role (Serve or Access) through lock and owner records, including the machine-tier lock for system services. Stop requests begin a graceful drain, and a repeated signal after the grace period or the stuck-shutdown watchdog forces exit. Status file contents are owned by `connection-path-status`.
 
 ## Requirements
 

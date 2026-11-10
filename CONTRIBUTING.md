@@ -185,7 +185,7 @@ and (stable tags only) the Homebrew cask.
 - Any change to `release.yml` ships first as an `-rc` tag.
 - Known gap: `main` moving between a PR's CI and its merge is not re-tested.
 
-## Workspace layout and Rust API migration
+## Workspace layout
 
 The repository is a Cargo workspace of three packages; dependencies point one
 way, root → host → engine:
@@ -196,9 +196,6 @@ way, root → host → engine:
   management, updating and the foreground runtime. Never prints or exits.
 - `iroh-tunnel-engine` (`crates/engine`): endpoints, role loops, tunnels, UDP
   and typed observations. Knows nothing about files, services or signals.
-
-Old `iroh_tunnel::<module>::<item>` paths and the old-to-new source layout are
-mapped in [openspec/changes/archive/2026-11-05-refactor-codebase/migration-map.md](openspec/changes/archive/2026-11-05-refactor-codebase/migration-map.md).
 
 ## Compatibility rules
 

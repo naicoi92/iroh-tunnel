@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define how the `service` commands register, start, stop and remove a role as a user or system service on Linux (systemd, BusyBox), macOS (launchd) and Windows, including scope selection, privilege and path-pinning rules. The command surface is owned by `cli-entrypoints`, and Windows path trust checks by `windows-service-trust`.
 
 ## Requirements
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define how releases are built, signed and delivered: the Unix and Windows installers, build version derivation, release archives, Linux packages, container images and the Homebrew cask. Updating an installed executable in place is owned by `self-update`.
 
 ## Requirements
 
