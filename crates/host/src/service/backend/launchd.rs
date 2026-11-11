@@ -255,7 +255,8 @@ struct UnloadPoll {
     interval: Duration,
 }
 
-/// Production wait: 100 ms between probes, at most 5 s in total.
+/// Production wait: up to 50 probes, 100 ms apart (about 5 s of sleeping plus
+/// the probes themselves).
 const UNLOAD_POLL: UnloadPoll = UnloadPoll {
     checks: 50,
     interval: Duration::from_millis(100),
@@ -264,7 +265,8 @@ const UNLOAD_POLL: UnloadPoll = UnloadPoll {
 /// Boot out `target` and wait for launchd to drop it, returning whether the
 /// `bootout` itself succeeded. The wait runs only after a successful `bootout`
 /// and is not an error: on timeout or an unexpected probe failure the caller
-/// proceeds and the managed copy stays (fail-safe).
+/// proceeds, and the release step re-checks every reference before removing
+/// the managed copy.
 fn bootout_job(native: &mut Native, target: &str, poll: UnloadPoll) -> bool {
     if run_launchctl(native, &["bootout", target]).is_err() {
         return false;
@@ -298,8 +300,8 @@ pub(crate) fn uninstall(
     scope: ServiceScope,
 ) -> Result<()> {
     let path = plist_path(role, scope)?;
-    // Best-effort bootout: the job may not be loaded. Returns only after
-    // launchd has dropped the job, so the release step sees the final state.
+    // Best-effort bootout: the job may not be loaded. A bounded wait follows a
+    // successful bootout so the release step usually sees the job gone.
     if bootout_job(native, &service_target(role, scope), UNLOAD_POLL) {
         native.applied(AppliedEffect::Stopped);
         native.applied(AppliedEffect::Disabled);
