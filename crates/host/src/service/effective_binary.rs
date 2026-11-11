@@ -45,13 +45,15 @@ pub(crate) fn parse_systemd_show(stdout: &str) -> EffectiveBinary {
     let [exec] = commands.as_slice() else {
         return unknown("the unit does not have exactly one ExecStart command");
     };
-    if exec.matches("{ path=").count() != 1 || !exec.trim_end().ends_with('}') {
+    let block = exec.trim();
+    let single_block = block.starts_with("{ path=")
+        && block.ends_with(" }")
+        && block.matches('{').count() == 1
+        && block.matches('}').count() == 1;
+    if !single_block {
         return unknown("the unit does not have exactly one well-formed ExecStart command");
     }
-    let Some((_, rest)) = exec.split_once("{ path=") else {
-        return unknown("unrecognized ExecStart format");
-    };
-    match rest.split_once(" ;") {
+    match block["{ path=".len()..].split_once(" ;") {
         Some((path, _)) if !path.is_empty() => EffectiveBinary::Binary(PathBuf::from(path)),
         _ => unknown("unrecognized ExecStart format"),
     }
@@ -186,9 +188,24 @@ mod tests {
     #[test]
     fn systemd_truncated_exec_start_is_unknown() {
         assert!(matches!(
-            parse_systemd_show("LoadState=loaded\nExecStart={ path=/a\n"),
+            parse_systemd_show("LoadState=loaded\nExecStart={ path=/x ; argv[]=/x\n"),
             EffectiveBinary::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn systemd_exec_start_with_stray_text_is_unknown() {
+        for exec in [
+            "garbage { path=/trusted ; argv[]=/trusted ; status=0/0 }",
+            "{ path=/trusted ; argv[]=/trusted ; status=0/0 } { argv[]=/other ; status=0/0 }",
+            "{ path=/trusted ; argv[]=/trusted ; status=0/0 } trailing }",
+        ] {
+            let text = format!("LoadState=loaded\nExecStart={exec}\n");
+            assert!(
+                matches!(parse_systemd_show(&text), EffectiveBinary::Unknown(_)),
+                "{exec}"
+            );
+        }
     }
 
     #[test]
