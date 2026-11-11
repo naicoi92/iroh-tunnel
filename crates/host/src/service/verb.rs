@@ -698,6 +698,114 @@ mod guard_tests {
         assert!(restarted.is_empty(), "{restarted:?}");
     }
 
+    /// Drive `verb` as root-run System scope through [`verb_via`] against a
+    /// manager that reports an effective binary owned by the (non-root) test
+    /// user, which `RootOnly` refuses. Returns the failure and the lines of
+    /// every command issued.
+    fn root_run_refused(name: &str, verb: Verb) -> Option<(ServiceFailure, Vec<String>, PathBuf)> {
+        #[cfg(target_os = "linux")]
+        if !super::super::platform::linux_is_systemd() {
+            // BusyBox reads the init script from disk; no query to fake.
+            return None;
+        }
+        if me() == 0 {
+            // Root owns the file, so RootOnly would accept it.
+            return None;
+        }
+        let out = std::cell::RefCell::new(None);
+        super::super::fixtures::in_isolated_home(name, |home| {
+            let path = home.canonicalize().unwrap().join("iroh-tunnel");
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            let events = Events::default();
+            let mut fake = FakeRunner::new(&events, vec![output(0, &loaded(&path), "")]);
+            let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+            let mut notes = |_: &ServiceNote| {};
+            let mut call = super::super::native::ServiceCall::capture(&mut notes);
+            let env = Environment {
+                elevated: true,
+                can_answer: false,
+            };
+            let failure = verb_via(
+                verb,
+                Role::Serve,
+                ServiceScope::System,
+                env,
+                &mut call,
+                &mut runner,
+            )
+            .expect_err("an unsafe effective binary must be refused");
+            let lines = events
+                .borrow()
+                .iter()
+                .filter_map(|e| match e {
+                    super::super::native::fake::Event::Call { program, args, .. } => Some(
+                        std::iter::once(program.clone())
+                            .chain(args.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
+                    super::super::native::fake::Event::Note(_) => None,
+                })
+                .collect::<Vec<_>>();
+            *out.borrow_mut() = Some((failure, lines, path));
+        });
+        out.into_inner()
+    }
+
+    fn assert_refused_before_lifecycle(verb: Verb, name: &str) {
+        let Some((failure, lines, path)) = root_run_refused(name, verb) else {
+            return;
+        };
+        let msg = permission_text(&failure.error);
+        // RootOnly refuses the first untrusted component, here an ancestor of
+        // the file, so the message names the path up to that directory.
+        let ancestor = path.parent().unwrap().parent().unwrap();
+        assert!(
+            msg.contains(path.to_str().unwrap()) || msg.contains(ancestor.to_str().unwrap()),
+            "{msg}"
+        );
+        assert!(msg.contains("service install --system"), "{msg}");
+        assert!(failure.applied.is_empty(), "{:?}", failure.applied);
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the read-only query may run: {lines:?}"
+        );
+        assert!(
+            lines[0].contains(" show ") || lines[0].contains(" print "),
+            "{lines:?}"
+        );
+        for word in [
+            "start",
+            "restart",
+            "kickstart",
+            "stop",
+            "bootstrap",
+            "bootout",
+        ] {
+            assert!(
+                !lines[0].split(' ').any(|w| w == word),
+                "lifecycle command `{word}` issued: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_run_start_through_verb_via_is_refused_before_lifecycle() {
+        assert_refused_before_lifecycle(
+            Verb::Start,
+            "service::verb::guard_tests::root_run_start_through_verb_via_is_refused_before_lifecycle",
+        );
+    }
+
+    #[test]
+    fn root_run_restart_through_verb_via_is_refused_before_lifecycle() {
+        assert_refused_before_lifecycle(
+            Verb::Restart,
+            "service::verb::guard_tests::root_run_restart_through_verb_via_is_refused_before_lifecycle",
+        );
+    }
+
     #[test]
     fn trusted_effective_binary_is_started() {
         let path = PathBuf::from("/usr/local/bin/iroh-tunnel");
@@ -831,9 +939,15 @@ mod guard_tests {
             let mut fake = FakeRunner::new(&events, vec![output(0, &loaded(&copy), "")]);
             let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
             let mut native = Native::new(OutputMode::Capture, &mut runner);
-            // The result depends on the host's backend (BusyBox needs root);
-            // only the copy matters here.
-            let _ = verb_steps(
+            // BusyBox needs root to restart and the guard reads its script
+            // from disk, so only the systemd and launchd hosts run this.
+            #[cfg(target_os = "linux")]
+            if !super::super::platform::linux_is_systemd() {
+                return;
+            }
+            // The running binary is upgraded after the copy was made.
+            std::fs::write(home.join("running"), b"upgraded bytes").unwrap();
+            let result = verb_steps(
                 &mut native,
                 &mut |_: &ServiceNote| {},
                 Verb::Restart,
@@ -849,8 +963,17 @@ mod guard_tests {
                 },
                 |_| panic!("restart releases nothing"),
             );
+            result.expect("restart of a trusted copy succeeds");
             let (applied, _) = native.finish();
 
+            assert_eq!(
+                applied
+                    .iter()
+                    .filter(|e| matches!(e, AppliedEffect::Started))
+                    .count(),
+                1,
+                "{applied:?}"
+            );
             assert!(
                 !applied.iter().any(|e| matches!(
                     e,
