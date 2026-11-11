@@ -16,6 +16,7 @@ mod account_name;
 mod backend;
 mod decide_install_scope;
 mod default_scope;
+mod effective_binary;
 mod execute;
 #[cfg(test)]
 mod fixtures;

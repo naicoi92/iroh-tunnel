@@ -20,6 +20,7 @@
 //! `5: Input/output error`. `systemctl enable` holds the same position in the
 //! systemd backend.
 
+use super::super::effective_binary::{parse_launchctl_print, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::{instance_suffix, write_registration};
@@ -317,6 +318,23 @@ pub(crate) fn stop(
     )
 }
 
+/// What launchd will run for the role's system job, from the loaded job.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+)]
+pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBinary {
+    let target = service_target(role, ServiceScope::System);
+    match native.output(std::process::Command::new("launchctl").args(["print", &target])) {
+        Ok(out) => parse_launchctl_print(
+            out.success(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        ),
+        Err(e) => EffectiveBinary::Unknown(format!("failed to run launchctl print {target}: {e}")),
+    }
+}
+
 /// Whether a job is currently registered in launchd for `target` (regardless
 /// of whether it has a running process). Used to distinguish "already
 /// stopped" from "never installed" when interpreting a `kill` failure.
@@ -383,6 +401,27 @@ mod tests {
     use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
     use crate::service::native::{Native, OutputMode};
     use crate::service::ServiceNote;
+
+    #[test]
+    fn effective_binary_prints_the_system_target() {
+        let events = Events::default();
+        let printed = "system/x = {\n\tprogram = /opt/x\n";
+        let mut fake = FakeRunner::new(&events, vec![output(0, printed, "")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        assert_eq!(
+            effective_binary(&mut native, "serve"),
+            EffectiveBinary::Binary(PathBuf::from("/opt/x"))
+        );
+        assert_eq!(
+            *events.borrow(),
+            vec![call(
+                "launchctl",
+                &["print", "system/dev.iroh-tunnel.serve"],
+                OutputMode::Capture
+            )]
+        );
+    }
 
     #[test]
     fn plist_declares_apples_property_list_doctype() {

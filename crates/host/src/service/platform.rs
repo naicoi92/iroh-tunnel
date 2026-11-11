@@ -1,10 +1,13 @@
 //! Platform selection helpers of the service backends (private).
 
 use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::PathBuf;
 
 use anyhow::Result;
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::effective_binary::EffectiveBinary;
 use super::types::ServiceScope;
 
 /// Load a role config for `run`, enforcing the privileged trust policy when a
@@ -101,6 +104,127 @@ pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<S
     }
 }
 
+/// Whether the service of `scope` runs as root: a system service always, and
+/// a user-scope request on a host whose only registrations are system-wide
+/// (BusyBox init).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+)]
+pub(crate) fn root_run(scope: ServiceScope, system_wide_only: bool) -> bool {
+    scope == ServiceScope::System || system_wide_only
+}
+
+/// What the service manager of this host will run for the role's root-run
+/// service, from the loaded definition.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+)]
+pub(crate) fn effective_binary(native: &mut super::native::Native, role: &str) -> EffectiveBinary {
+    #[cfg(target_os = "linux")]
+    {
+        if linux_is_systemd() {
+            super::backend::systemd::effective_binary(native, role)
+        } else {
+            let _ = native;
+            super::backend::busybox::effective_binary(role)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        super::backend::launchd::effective_binary(native, role)
+    }
+}
+
+/// Files and directories whose text may name a service binary.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+)]
+pub(crate) struct RegistrationSources {
+    /// Registration files (unit, init script, plist).
+    pub files: Vec<PathBuf>,
+    /// Drop-in directories whose entries are all read.
+    pub drop_in_dirs: Vec<PathBuf>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl RegistrationSources {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+    )]
+    /// Every system registration location of `role` on any Unix backend.
+    pub(crate) fn for_role(role: &str) -> Self {
+        let suffix = super::registration::instance_suffix();
+        let unit = format!("iroh-tunnel-{role}{suffix}.service");
+        Self {
+            files: vec![
+                PathBuf::from("/etc/systemd/system").join(&unit),
+                PathBuf::from(format!("/etc/init.d/S96iroh-tunnel-{role}")),
+                PathBuf::from(format!(
+                    "/Library/LaunchDaemons/dev.iroh-tunnel.{role}{suffix}.plist"
+                )),
+            ],
+            drop_in_dirs: vec![
+                PathBuf::from(format!("/etc/systemd/system/{unit}.d")),
+                PathBuf::from(format!("/run/systemd/system/{unit}.d")),
+            ],
+        }
+    }
+
+    /// Whether any source text contains `needle`. A missing file or directory
+    /// is no reference; any other read error counts as one.
+    fn mentions(&self, needle: &str) -> bool {
+        let file_mentions = |path: &Path| match std::fs::read(path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).contains(needle),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        if self.files.iter().any(|f| file_mentions(f)) {
+            return true;
+        }
+        self.drop_in_dirs
+            .iter()
+            .any(|dir| match std::fs::read_dir(dir) {
+                Ok(entries) => entries
+                    .map(|entry| entry.map(|e| e.path()))
+                    .any(|entry| entry.map_or(true, |p| file_mentions(&p))),
+                Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+            })
+    }
+}
+
+/// Whether a managed binary copy (`needle` is its path) is still referenced by
+/// a registration. True on any match and on any read or query failure.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+)]
+pub(crate) fn managed_copy_referenced(
+    native: &mut super::native::Native,
+    role: &str,
+    sources: &RegistrationSources,
+    needle: &str,
+) -> bool {
+    referenced_by(&effective_binary(native, role), sources, needle)
+}
+
+/// [`managed_copy_referenced`] over an already-run loaded-definition query.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn referenced_by(loaded: &EffectiveBinary, sources: &RegistrationSources, needle: &str) -> bool {
+    let loaded_hit = match loaded {
+        EffectiveBinary::NotLoaded => false,
+        EffectiveBinary::Binary(p) => p.to_string_lossy().contains(needle),
+        EffectiveBinary::Unknown(_) => true,
+    };
+    loaded_hit || sources.mentions(needle)
+}
+
 /// True when systemd is the running init (PID 1). Used to pick the systemd vs
 /// BusyBox/SysV backend at runtime.
 ///
@@ -161,6 +285,139 @@ mod tests {
     #[test]
     fn linux_is_systemd_is_bool() {
         let _ = linux_is_systemd();
+    }
+
+    #[test]
+    fn root_run_covers_system_scope_and_system_wide_only_hosts() {
+        assert!(root_run(ServiceScope::System, false));
+        assert!(!root_run(ServiceScope::User, false));
+        assert!(root_run(ServiceScope::User, true));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod referenced {
+        use super::super::*;
+        #[cfg(target_os = "macos")]
+        use crate::service::native::fake::{call, output, Events, FakeRunner};
+        #[cfg(target_os = "macos")]
+        use crate::service::native::{Native, OutputMode};
+
+        const NEEDLE: &str = "/var/lib/iroh-tunnel/bin/serve/iroh-tunnel";
+
+        fn sources(dir: &Path) -> RegistrationSources {
+            RegistrationSources {
+                files: vec![dir.join("unit")],
+                drop_in_dirs: vec![dir.join("unit.d")],
+            }
+        }
+
+        #[test]
+        fn for_role_lists_every_registration_location() {
+            let sources = RegistrationSources::for_role("serve");
+            assert!(sources
+                .files
+                .contains(&PathBuf::from("/etc/init.d/S96iroh-tunnel-serve")));
+            assert!(sources.drop_in_dirs.contains(&PathBuf::from(
+                "/run/systemd/system/iroh-tunnel-serve.service.d"
+            )));
+        }
+
+        #[test]
+        fn managed_copy_referenced_by_file() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("unit"), format!("ExecStart={NEEDLE} run")).unwrap();
+            assert!(referenced_by(
+                &EffectiveBinary::NotLoaded,
+                &sources(tmp.path()),
+                NEEDLE
+            ));
+        }
+
+        #[test]
+        fn managed_copy_referenced_by_drop_in() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(tmp.path().join("unit.d")).unwrap();
+            std::fs::write(tmp.path().join("unit.d/override.conf"), NEEDLE).unwrap();
+            assert!(referenced_by(
+                &EffectiveBinary::NotLoaded,
+                &sources(tmp.path()),
+                NEEDLE
+            ));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn managed_copy_referenced_when_a_file_is_unreadable() {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let file = tmp.path().join("unit");
+            std::fs::write(&file, "nothing").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Root can read mode 000, so the case does not arise there.
+            if std::fs::read(&file).is_err() {
+                assert!(referenced_by(
+                    &EffectiveBinary::NotLoaded,
+                    &sources(tmp.path()),
+                    NEEDLE
+                ));
+            }
+        }
+
+        #[test]
+        fn managed_copy_not_referenced_when_nothing_names_it() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("unit"), "ExecStart=/other").unwrap();
+            assert!(!referenced_by(
+                &EffectiveBinary::NotLoaded,
+                &sources(tmp.path()),
+                NEEDLE
+            ));
+            let other = EffectiveBinary::Binary(PathBuf::from("/other"));
+            assert!(!referenced_by(&other, &sources(tmp.path()), NEEDLE));
+        }
+
+        #[test]
+        fn managed_copy_referenced_by_loaded_definition_or_unknown() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loaded = EffectiveBinary::Binary(PathBuf::from(NEEDLE));
+            assert!(referenced_by(&loaded, &sources(tmp.path()), NEEDLE));
+            assert!(referenced_by(
+                &EffectiveBinary::Unknown("x".into()),
+                &sources(tmp.path()),
+                NEEDLE
+            ));
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn managed_copy_referenced_queries_the_host_backend() {
+            let tmp = tempfile::tempdir().unwrap();
+            let events = Events::default();
+            let mut fake = FakeRunner::new(
+                &events,
+                vec![output(
+                    113,
+                    "",
+                    "Could not find service \"x\" in domain for system",
+                )],
+            );
+            let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+            let mut native = Native::new(OutputMode::Inherit, &mut runner);
+            assert!(!managed_copy_referenced(
+                &mut native,
+                "serve",
+                &sources(tmp.path()),
+                NEEDLE
+            ));
+            assert_eq!(
+                *events.borrow(),
+                vec![call(
+                    "launchctl",
+                    &["print", "system/dev.iroh-tunnel.serve"],
+                    OutputMode::Capture
+                )]
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

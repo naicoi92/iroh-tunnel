@@ -4,6 +4,7 @@
 //! `~/.config/systemd/user` (user scope). Each action delegates to `systemctl`
 //! with `--user` added automatically for the per-user domain.
 
+use super::super::effective_binary::{parse_systemd_show, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::{instance_suffix, write_registration};
@@ -142,6 +143,25 @@ fn systemctl(
 /// Where the unit file is (or would be).
 pub(crate) fn registration_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
     unit_path(role, scope)
+}
+
+/// What systemd will run for the role's system unit, from the loaded unit.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+)]
+pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBinary {
+    let unit = unit_name(role);
+    let mut cmd = std::process::Command::new("systemctl");
+    cmd.args(["show", "-p", "LoadState", "-p", "ExecStart", &unit]);
+    match native.output(&mut cmd) {
+        Ok(out) if out.success() => parse_systemd_show(&String::from_utf8_lossy(&out.stdout)),
+        Ok(out) => EffectiveBinary::Unknown(format!(
+            "systemctl show {unit} failed with {}",
+            out.status_text()
+        )),
+        Err(e) => EffectiveBinary::Unknown(format!("failed to run systemctl show {unit}: {e}")),
+    }
 }
 
 /// The installed unit's text, if any (to read its pin).
@@ -283,6 +303,50 @@ mod tests {
                 OutputMode::Capture
             )]
         );
+    }
+
+    #[test]
+    fn effective_binary_runs_show_for_the_system_unit() {
+        let events = Events::default();
+        let loaded =
+            "LoadState=loaded\nExecStart={ path=/usr/bin/x ; argv[]=/usr/bin/x ; status=0/0 }\n";
+        let mut fake = FakeRunner::new(&events, vec![output(0, loaded, "")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        assert_eq!(
+            effective_binary(&mut native, "serve"),
+            EffectiveBinary::Binary(PathBuf::from("/usr/bin/x"))
+        );
+        assert_eq!(
+            *events.borrow(),
+            vec![call(
+                "systemctl",
+                &[
+                    "show",
+                    "-p",
+                    "LoadState",
+                    "-p",
+                    "ExecStart",
+                    "iroh-tunnel-serve.service"
+                ],
+                OutputMode::Capture
+            )]
+        );
+    }
+
+    #[test]
+    fn effective_binary_command_failure_is_unknown() {
+        let mut runner = |_: &mut std::process::Command, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no systemctl",
+            ))
+        };
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        assert!(matches!(
+            effective_binary(&mut native, "serve"),
+            EffectiveBinary::Unknown(_)
+        ));
     }
 
     #[test]

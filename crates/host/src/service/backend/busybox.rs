@@ -20,6 +20,7 @@
 //! both scopes manage the one `/etc/init.d` script — User scope prints a
 //! note rather than failing. Requires root.
 
+use super::super::effective_binary::{parse_busybox_script, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::write_registration;
@@ -194,6 +195,15 @@ pub(crate) fn registration_path(role: &str) -> PathBuf {
     script_path(role)
 }
 
+/// What the init script will run, read from the installed script.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
+)]
+pub(crate) fn effective_binary(role: &str) -> EffectiveBinary {
+    parse_busybox_script(existing_registration(role).as_deref())
+}
+
 /// The installed script's text, if any (to read its pin).
 pub(crate) fn existing_registration(role: &str) -> Option<String> {
     super::super::registration::read_registration(&script_path(role))
@@ -316,6 +326,21 @@ mod tests {
             })
         );
         assert_eq!(busybox_scope_note("serve", ServiceScope::System), None);
+    }
+
+    #[test]
+    fn effective_binary_round_trips_the_generated_script() {
+        let script = format_script(
+            "serve",
+            Path::new("/a b/iroh-tunnel"),
+            Path::new("/c"),
+            Path::new("/s"),
+            None,
+        );
+        assert_eq!(
+            parse_busybox_script(Some(&script)),
+            EffectiveBinary::Binary(PathBuf::from("/a b/iroh-tunnel"))
+        );
     }
 
     #[test]
