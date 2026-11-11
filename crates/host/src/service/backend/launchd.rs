@@ -28,6 +28,7 @@ use super::super::types::AppliedEffect;
 use super::super::types::{RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Real user id of the calling process.
 fn uid() -> u32 {
@@ -245,6 +246,51 @@ fn load(
     Ok(())
 }
 
+/// Bounded poll for a job to disappear after `bootout`.
+#[derive(Clone, Copy)]
+struct UnloadPoll {
+    /// Maximum number of `launchctl print` probes.
+    checks: u32,
+    /// Pause between probes.
+    interval: Duration,
+}
+
+/// Production wait: 100 ms between probes, at most 5 s in total.
+const UNLOAD_POLL: UnloadPoll = UnloadPoll {
+    checks: 50,
+    interval: Duration::from_millis(100),
+};
+
+/// Boot out `target` and wait for launchd to drop it, returning whether the
+/// `bootout` itself succeeded. The wait runs only after a successful `bootout`
+/// and is not an error: on timeout or an unexpected probe failure the caller
+/// proceeds and the managed copy stays (fail-safe).
+fn bootout_job(native: &mut Native, target: &str, poll: UnloadPoll) -> bool {
+    if run_launchctl(native, &["bootout", target]).is_err() {
+        return false;
+    }
+    wait_until_unloaded(native, target, poll);
+    true
+}
+
+/// Probe `target` until launchd reports it gone, at most `poll.checks` times.
+///
+/// Returns true only on "Could not find service". Any other probe failure stops
+/// the wait at once, so it never loops on an unknown state.
+fn wait_until_unloaded(native: &mut Native, target: &str, poll: UnloadPoll) -> bool {
+    for attempt in 1..=poll.checks {
+        match print_definition(native, target) {
+            EffectiveBinary::NotLoaded => return true,
+            EffectiveBinary::Binary(_) if attempt < poll.checks => {
+                std::thread::sleep(poll.interval);
+            }
+            EffectiveBinary::Binary(_) => {}
+            EffectiveBinary::Unknown(_) => return false,
+        }
+    }
+    false
+}
+
 pub(crate) fn uninstall(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
@@ -252,8 +298,9 @@ pub(crate) fn uninstall(
     scope: ServiceScope,
 ) -> Result<()> {
     let path = plist_path(role, scope)?;
-    // Best-effort bootout: the job may not be loaded.
-    if run_launchctl(native, &["bootout", &service_target(role, scope)]).is_ok() {
+    // Best-effort bootout: the job may not be loaded. Returns only after
+    // launchd has dropped the job, so the release step sees the final state.
+    if bootout_job(native, &service_target(role, scope), UNLOAD_POLL) {
         native.applied(AppliedEffect::Stopped);
         native.applied(AppliedEffect::Disabled);
     }
@@ -320,8 +367,12 @@ pub(crate) fn stop(
 
 /// What launchd will run for the role's system job, from the loaded job.
 pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBinary {
-    let target = service_target(role, ServiceScope::System);
-    match native.output(std::process::Command::new("launchctl").args(["print", &target])) {
+    print_definition(native, &service_target(role, ServiceScope::System))
+}
+
+/// Classify `launchctl print <target>` into the definition launchd holds.
+fn print_definition(native: &mut Native, target: &str) -> EffectiveBinary {
+    match native.output(std::process::Command::new("launchctl").args(["print", target])) {
         Ok(out) => parse_launchctl_print(
             out.success(),
             &String::from_utf8_lossy(&out.stdout),
@@ -397,6 +448,110 @@ mod tests {
     use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
     use crate::service::native::{Native, OutputMode};
     use crate::service::ServiceNote;
+
+    fn loaded_print() -> NativeOutput {
+        output(
+            0,
+            "system/dev.iroh-tunnel.serve = {\n\tstate = SIGTERMed\n\tprogram = /Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel\n}\n",
+            "",
+        )
+    }
+
+    fn not_found_print() -> NativeOutput {
+        output(
+            113,
+            "",
+            "Could not find service \"dev.iroh-tunnel.serve\" in domain for system\n",
+        )
+    }
+
+    fn fast_poll(checks: u32) -> UnloadPoll {
+        UnloadPoll {
+            checks,
+            interval: Duration::ZERO,
+        }
+    }
+
+    fn print_call(target: &str) -> Event {
+        call("launchctl", &["print", target], OutputMode::Capture)
+    }
+
+    #[test]
+    fn bootout_waits_until_launchd_reports_the_job_gone() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(
+            &events,
+            vec![output(0, "", ""), loaded_print(), not_found_print()],
+        );
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let target = service_target("serve", ServiceScope::System);
+        assert!(bootout_job(&mut native, &target, fast_poll(5)));
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                call(
+                    "launchctl",
+                    &["bootout", "system/dev.iroh-tunnel.serve"],
+                    OutputMode::Inherit
+                ),
+                print_call("system/dev.iroh-tunnel.serve"),
+                print_call("system/dev.iroh-tunnel.serve"),
+            ],
+            "polling stops at the first not-found print"
+        );
+    }
+
+    #[test]
+    fn failed_bootout_skips_the_wait() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(
+            &events,
+            vec![output(3, "", "Boot-out failed: 3: No such process")],
+        );
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let target = service_target("serve", ServiceScope::System);
+        assert!(!bootout_job(&mut native, &target, fast_poll(5)));
+        assert_eq!(events.borrow().len(), 1, "no print after a failed bootout");
+    }
+
+    #[test]
+    fn wait_stops_at_the_check_limit_and_reports_still_loaded() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(
+            &events,
+            vec![
+                loaded_print(),
+                loaded_print(),
+                loaded_print(),
+                loaded_print(),
+            ],
+        );
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let target = service_target("serve", ServiceScope::System);
+        assert!(!wait_until_unloaded(&mut native, &target, fast_poll(3)));
+        assert_eq!(events.borrow().len(), 3, "exactly the check limit");
+    }
+
+    #[test]
+    fn wait_stops_at_an_unexpected_print_failure() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(
+            &events,
+            vec![output(1, "", "Operation not permitted\n"), loaded_print()],
+        );
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        let target = service_target("serve", ServiceScope::System);
+        assert!(!wait_until_unloaded(&mut native, &target, fast_poll(5)));
+        assert_eq!(
+            events.borrow().len(),
+            1,
+            "no retry on an unexpected failure"
+        );
+    }
 
     #[test]
     fn effective_binary_prints_the_system_target() {
