@@ -4,10 +4,10 @@ Blocked by: none
 
 Owns: `crates/host/src/service/trust.rs`, `crates/host/src/status/writer.rs` (call sites). Linux and macOS (`cfg(unix)` module); Windows untouched.
 
-- [ ] 1.1 Introduce `TrustedOwners { RootOnly, RootAnd(u32) }` and a pure `check_entry(owner, mode, kind, owners)` predicate at the `walk`/`check_parent`/`check_final` boundary; existing helpers keep their behaviour through `RootAnd(uid)` (design D1); existing trust tests stay green
-- [ ] 1.2 Add `verify_binary(path, owners)` (regular file; owner and parents trusted; no group/other write; sticky rule; no symlink; canonical absolute path) with refusal text naming path, owner and mode; covers "Binary in a root-owned directory", "Binary owned by the pinned user", "Binary below a user-owned directory", "Group-writable binary", "Symbolic link in the checked path", "Sticky directory with a root-owned child", "Sticky directory with a user-owned child"
-- [ ] 1.3 Add `ensure_dir(path, owners, mode)` creating missing components with `mkdirat` + `fchmod` on the new descriptor through verified parent handles, never chmodding an existing one (design D4); covers "Managed directory pre-created by a user"
-- [ ] 1.4 Extend `publish` (owner set, `Read` source, exact mode via `fchmod`, temp unlinked on any failure before `renameat`) and add `remove_entry(dir, owners, name)` (no-follow, absent role dir and `ENOENT` are absent, `rmdir` of empty dir); covers "Planted link at the copy name", "Copy fails before rename", "Link planted at the copy name before uninstall"
+- [x] 1.1 Introduce `TrustedOwners { RootOnly, RootAnd(u32) }` and a pure `check_entry(owner, mode, kind, owners)` predicate at the `walk`/`check_parent`/`check_final` boundary; existing helpers keep their behaviour through `RootAnd(uid)` (design D1); existing trust tests stay green
+- [x] 1.2 Add `verify_binary(path, owners)` (regular file; owner and parents trusted; no group/other write; sticky rule; no symlink; canonical absolute path) with refusal text naming path, owner and mode; covers "Binary in a root-owned directory", "Binary owned by the pinned user", "Binary below a user-owned directory", "Group-writable binary", "Symbolic link in the checked path", "Sticky directory with a root-owned child", "Sticky directory with a user-owned child"
+- [x] 1.3 Add `ensure_dir(path, owners, mode)` creating missing components with `mkdirat` + `fchmod` on the new descriptor through verified parent handles, never chmodding an existing one (design D4); covers "Managed directory pre-created by a user"
+- [x] 1.4 Extend `publish` (owner set, `Read` source, exact mode via `fchmod`, temp unlinked on any failure before `renameat`) and add `remove_entry(dir, owners, name)` (no-follow, absent role dir and `ENOENT` are absent, `rmdir` of empty dir); covers "Planted link at the copy name", "Copy fails before rename", "Link planted at the copy name before uninstall"
 
 ## 2. Effective binary and reference queries per backend
 
