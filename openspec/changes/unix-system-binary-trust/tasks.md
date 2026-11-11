@@ -57,9 +57,9 @@ Blocked by: 4, 5
 
 Owns: `docs/services.md`, `docs/troubleshooting.md`, `CHANGELOG.md`.
 
-- [ ] 6.1 `docs/services.md` System services: binary check, managed copy location, re-install after upgrade, start/restart refusal, boot starts not checked
-- [ ] 6.2 `docs/troubleshooting.md`: exit 3 on start/restart with an unsafe binary → re-install
-- [ ] 6.3 `CHANGELOG.md` Unreleased: **Breaking** CLI start/restart refusal for legacy unsafe binaries; Added managed copy for Homebrew/cargo system installs
+- [x] 6.1 `docs/services.md` System services: binary check, managed copy location, re-install after upgrade, start/restart refusal, boot starts not checked
+- [x] 6.2 `docs/troubleshooting.md`: exit 3 on start/restart with an unsafe binary → re-install
+- [x] 6.3 `CHANGELOG.md` Unreleased: **Breaking** CLI start/restart refusal for legacy unsafe binaries; Added managed copy for Homebrew/cargo system installs
 
 ## 7. End-to-end verification
 
