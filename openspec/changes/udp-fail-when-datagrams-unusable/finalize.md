@@ -6,10 +6,10 @@
 > from "keep as-is" to PR later).
 
 **Change**: `udp-fail-when-datagrams-unusable`
-**Finalized at**: `2026-11-11 05:22` (UTC)
-**Outcome**: `kept-as-is` (local; to be rewritten to `pr-created` once push and PR are authorized)
+**Finalized at**: `2026-11-11 05:35` (UTC)
+**Outcome**: `pr-created`
 
-Project policy deviation: the global `AGENTS.md` forbids push, merge or opening a PR without explicit user permission in chat. Steps 3–9 of the git-side closeout ran: fast-forward merge into the feature branch, fresh tests, worktree removal, and this receipt. Steps 10–12 (push, PR, PR comment) have not run; they wait for the user's authorization. Once authorized, re-enter finalize at step 10 and rewrite Outcome, Final state, PR URL and PR comment status.
+Project policy deviation: the global `AGENTS.md` forbids push, merge or opening a PR without explicit user permission. Steps 3–9 (fast-forward merge into the feature branch, fresh tests, worktree removal, receipt) ran after the user approved the code review gate. Steps 10–12 (push, PR, PR comment) ran only after the user authorized them in the Plannotator Inbox. SSH push was refused (key `ttdua`), so the branch was pushed over HTTPS with the `gh` credential helper as `naicoi92`, as `AGENTS.md` directs. No spec pre-review PR existed, so the outcome is `pr-created`, not `pr-updated`.
 
 ---
 
@@ -17,8 +17,8 @@ Project policy deviation: the global `AGENTS.md` forbids push, merge or opening 
 
 - **Branch**: `spec/udp-fail-when-datagrams-unusable`
 - **Base branch**: `main`
-- **Final state**: `kept-open` (local feature branch; not pushed; no remote tracking branch yet)
-- **PR URL**: N/A (no PR yet)
+- **Final state**: `pr-open`
+- **PR URL**: https://github.com/naicoi92/iroh-tunnel/pull/202
 
 ---
 
@@ -31,7 +31,7 @@ Project policy deviation: the global `AGENTS.md` forbids push, merge or opening 
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/202#issuecomment-6788016905)
 
 ---
 
@@ -53,4 +53,4 @@ Project policy deviation: the global `AGENTS.md` forbids push, merge or opening 
 
 ## Next step
 
-Waiting for the user's authorization to push `spec/udp-fail-when-datagrams-unusable` and open a PR (suggested title `feat(udp-datagram-forwarding): udp-fail-when-datagrams-unusable`). After the PR is open, rewrite this receipt as `pr-created` and post the code-reviewer orientation comment. After PR approval, run `/opsx-archive` on this feature branch, push the archive commits, then merge the PR.
+Wait for PR code review on #202. After approval, run `/opsx-archive` on this feature branch (commits land here), push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch` or the GitHub UI). That single merge lands both the implementation and the archive into `main`. Merging also needs explicit user permission.
