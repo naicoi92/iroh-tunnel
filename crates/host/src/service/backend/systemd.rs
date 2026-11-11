@@ -492,4 +492,26 @@ mod tests {
             PathBuf::from("/etc/systemd/system/iroh-tunnel-serve.service")
         );
     }
+
+    #[test]
+    fn managed_path_renders_as_one_argument_in_each_backend() {
+        let copy = "/Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel";
+        let body = format_unit("serve", Path::new(copy), Path::new("/c"), Path::new("/s"));
+        let exec = body
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .expect("the unit has an ExecStart line");
+        // The space is quoted, so systemd splits no word out of the path.
+        assert_eq!(exec, format!("\"{copy}\" serve run --config /c"));
+        // How systemd reports that unit once loaded.
+        let shown = format!(
+            "LoadState=loaded\nExecStart={{ path={copy} ; argv[]={copy} serve run --config /c ; \
+             ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; \
+             status=0/0 }}\n"
+        );
+        assert_eq!(
+            parse_systemd_show(&shown),
+            EffectiveBinary::Binary(PathBuf::from(copy))
+        );
+    }
 }

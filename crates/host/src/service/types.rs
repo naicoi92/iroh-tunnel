@@ -140,6 +140,9 @@ pub struct InstallRequest {
     pub config: Option<PathBuf>,
     /// The `iroh-tunnel` executable the registration runs. Must be absolute.
     pub tunnel_executable: PathBuf,
+    /// The executable running this install: the source of a managed copy
+    /// when a root-run registration cannot trust `tunnel_executable`.
+    pub running_executable: RunningExecutable,
     /// `SUDO_USER`: an input to choosing whose files a system service uses.
     pub sudo_user: Option<String>,
     /// The user a person named when asked ([`InstallNeed::InvokingUser`]).

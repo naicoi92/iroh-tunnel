@@ -11,7 +11,8 @@ use crate::render::print_service_note;
 use iroh_tunnel_host::error::CliError;
 use iroh_tunnel_host::service::Environment;
 use iroh_tunnel_host::service::{
-    self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, ServiceCall, ServiceScope,
+    self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, RunningExecutable, ServiceCall,
+    ServiceScope,
 };
 use iroh_tunnel_host::Role;
 
@@ -27,6 +28,25 @@ pub(crate) fn resolve_tunnel_executable() -> anyhow::Result<PathBuf> {
         || which::which("iroh-tunnel").ok(),
         || std::env::current_exe().context("failed to resolve current executable"),
     )
+}
+
+/// The executable running this command, the source of a managed copy.
+///
+/// On Linux the bytes are read from `/proc/self/exe`, which opens the
+/// executing file itself even if its path was replaced after exec; it is
+/// never resolved with `read_link`.
+///
+/// # Errors
+///
+/// When the running executable cannot be resolved.
+fn running_executable() -> anyhow::Result<RunningExecutable> {
+    let display = std::env::current_exe().context("failed to resolve current executable")?;
+    let read_from = if cfg!(target_os = "linux") {
+        PathBuf::from("/proc/self/exe")
+    } else {
+        display.clone()
+    };
+    Ok(RunningExecutable { display, read_from })
 }
 
 /// Probe the running process for the install-time scope decision.
@@ -128,6 +148,7 @@ fn install(
         scope,
         config,
         tunnel_executable: resolve_tunnel_executable()?,
+        running_executable: running_executable()?,
         sudo_user: std::env::var("SUDO_USER").ok(),
         invoking_user: None,
         state_dir_override: std::env::var_os("IROH_TUNNEL_STATE_DIR")
@@ -258,6 +279,18 @@ fn confirm_retarget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_executable_reads_the_executing_file() {
+        let running = running_executable().unwrap();
+        assert_eq!(running.display, std::env::current_exe().unwrap());
+        let expected = if cfg!(target_os = "linux") {
+            PathBuf::from("/proc/self/exe")
+        } else {
+            running.display.clone()
+        };
+        assert_eq!(running.read_from, expected);
+    }
 
     #[test]
     fn cli_resolves_tunnel_binary_from_path_first() {

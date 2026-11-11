@@ -14,8 +14,20 @@ use std::process::ExitCode;
 use anyhow::{bail, Context, Result};
 use iroh_tunnel_host::role::Role;
 use iroh_tunnel_host::service::{
-    self, Environment, InstallRequest, ServiceCall, ServiceNote, ServiceScope,
+    self, Environment, InstallRequest, RunningExecutable, ServiceCall, ServiceNote, ServiceScope,
 };
+
+/// This process's executable, read through `/proc/self/exe` on Linux like the
+/// CLI does.
+fn running_executable() -> Result<RunningExecutable> {
+    let display = std::env::current_exe().context("cannot resolve the current executable")?;
+    let read_from = if cfg!(target_os = "linux") {
+        PathBuf::from("/proc/self/exe")
+    } else {
+        display.clone()
+    };
+    Ok(RunningExecutable { display, read_from })
+}
 
 struct Args {
     role: Role,
@@ -79,6 +91,7 @@ fn run() -> Result<String> {
                 scope: Some(args.scope),
                 config: args.config,
                 tunnel_executable: args.exe.context("--exe is required for install")?,
+                running_executable: running_executable()?,
                 sudo_user: None,
                 invoking_user: None,
                 state_dir_override: std::env::var_os("IROH_TUNNEL_STATE_DIR")

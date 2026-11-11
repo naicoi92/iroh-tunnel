@@ -107,10 +107,6 @@ pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<S
 /// Whether the service of `scope` runs as root: a system service always, and
 /// a user-scope request on a host whose only registrations are system-wide
 /// (BusyBox init).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-)]
 pub(crate) fn root_run(scope: ServiceScope, system_wide_only: bool) -> bool {
     scope == ServiceScope::System || system_wide_only
 }
@@ -146,10 +142,6 @@ pub(crate) struct RegistrationSources {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl RegistrationSources {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-    )]
     /// Every system registration location of `role` on any Unix backend.
     pub(crate) fn for_role(role: &str) -> Self {
         let suffix = super::registration::instance_suffix();
@@ -198,10 +190,6 @@ impl RegistrationSources {
 /// Whether a managed binary copy (`needle` is its path) is still referenced by
 /// a registration. True on any match and on any read or query failure.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-)]
 pub(crate) fn managed_copy_referenced(
     native: &mut super::native::Native,
     role: &str,

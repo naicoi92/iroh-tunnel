@@ -743,4 +743,25 @@ mod tests {
         // RunAtLoad is orthogonal and should still be present.
         assert!(body.contains("<key>RunAtLoad</key>"));
     }
+
+    #[test]
+    fn managed_path_renders_as_one_argument_in_each_backend() {
+        let copy = "/Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel";
+        let body = format_plist("serve", Path::new(copy), Path::new("/c"), Path::new("/s"));
+        // One `<string>` element is one argument, spaces included.
+        assert!(
+            body.contains(&format!(
+                "<array>\n\t\t<string>{copy}</string>\n\t\t<string>serve</string>"
+            )),
+            "{body}"
+        );
+        // How launchd prints that job once loaded.
+        let printed = format!(
+            "system/dev.iroh-tunnel.serve = {{\n\tprogram = {copy}\n\targuments = {{\n\t\t{copy}\n\t\tserve\n\t}}\n}}\n"
+        );
+        assert_eq!(
+            parse_launchctl_print(true, &printed, ""),
+            EffectiveBinary::Binary(PathBuf::from(copy))
+        );
+    }
 }

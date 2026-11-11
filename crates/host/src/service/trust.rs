@@ -54,13 +54,6 @@ fn refuse(msg: String) -> anyhow::Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrustedOwners {
     /// Only root (uid 0).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by the managed service binary (unix-system-binary-trust task 3)"
-        )
-    )]
     RootOnly,
     /// Root and the given uid.
     RootAnd(u32),

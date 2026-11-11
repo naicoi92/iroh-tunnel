@@ -8,10 +8,10 @@
 //! The OS-touching functions exist on Linux and macOS only; other targets
 //! always register the resolved binary.
 #![cfg_attr(
-    not(test),
+    not(any(target_os = "linux", target_os = "macos")),
     allow(
         dead_code,
-        reason = "wired into install and the verbs by unix-system-binary-trust tasks 4 and 5"
+        reason = "other targets always register the resolved binary, never a managed copy"
     )
 )]
 
@@ -59,13 +59,6 @@ fn base_for(os: &str) -> &'static str {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[cfg_attr(
-    not(test),
-    allow(
-        unused_imports,
-        reason = "wired into install and the verbs by unix-system-binary-trust tasks 4 and 5"
-    )
-)]
 pub(crate) use unix::{choose, managed_copy_path, materialize, release};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

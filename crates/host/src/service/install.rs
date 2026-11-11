@@ -15,10 +15,12 @@ use super::native::InstalledAt;
 use super::native::OutputMode;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
 use super::pin::Pin;
+use super::platform;
 use super::policy::{ensure_privilege, ensure_supported};
+use super::service_binary::ServiceBinary;
 use super::types::{
-    Environment, InstallNeed, InstallOutcome, InstallRequest, ScopeDecision, ServiceFailure,
-    ServiceScope,
+    AppliedEffect, Environment, InstallNeed, InstallOutcome, InstallRequest, ScopeDecision,
+    ServiceFailure, ServiceScope,
 };
 use crate::error::CliError;
 use crate::ownership::{self, Liveness, LockDirs, LockResolver, Tier};
@@ -74,19 +76,157 @@ pub(crate) fn install_via(
         Planned::Ready(plan) => plan,
     };
     let role = req.role.name();
+    let root_run = platform::root_run(plan.scope, platform::system_wide_only());
     let report = execute(call, runner, |native, notes| {
-        backend_install(
+        install_steps(
             native,
             notes,
             role,
-            plan.scope,
-            &req.tunnel_executable,
-            &plan.config,
-            &plan.state,
-            plan.pin.as_ref(),
+            &plan.binary,
+            materialize_root_only,
+            |native, notes, binary| {
+                backend_install(
+                    native,
+                    notes,
+                    role,
+                    plan.scope,
+                    binary,
+                    &plan.config,
+                    &plan.state,
+                    plan.pin.as_ref(),
+                )
+            },
+            |native| release_unreferenced_copy(native, role, root_run),
         )
     })?;
     Ok(InstallOutcome::Installed(report))
+}
+
+/// The binary the registration of `scope` runs.
+///
+/// A root-run registration on Linux or macOS runs the canonical resolved
+/// binary when `verify` (the root-only binary check) accepts it, otherwise a
+/// managed copy of the running executable. Every other registration runs the
+/// resolved binary as given. Writes nothing.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the resolved binary of a root-run registration
+/// cannot be canonicalized.
+fn plan_binary(
+    req: &InstallRequest,
+    scope: ServiceScope,
+    system_wide_only: bool,
+    verify: &dyn Fn(&Path) -> Result<()>,
+) -> Result<ServiceBinary> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if platform::root_run(scope, system_wide_only) {
+        return super::service_binary::choose(
+            &req.tunnel_executable,
+            &req.running_executable,
+            super::service_binary::managed_copy_path(req.role.name()),
+            verify,
+        );
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (scope, system_wide_only, verify);
+    Ok(ServiceBinary::Direct(req.tunnel_executable.clone()))
+}
+
+/// Write the binary, then the registration that runs it.
+///
+/// The managed copy (if any) is written and recorded first, announced with a
+/// [`ServiceNote::ManagedBinary`], and then `register` runs with the path of
+/// `binary`. After a [`ServiceBinary::Direct`] registration succeeds,
+/// `release_after_direct` removes a managed copy nothing references any more.
+///
+/// # Errors
+///
+/// The first failing step's error; effects already recorded stay in
+/// `native`'s applied list.
+fn install_steps(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    binary: &ServiceBinary,
+    materialize: impl FnOnce(&ServiceBinary) -> Result<Option<AppliedEffect>>,
+    register: impl FnOnce(&mut Native, &mut dyn FnMut(&ServiceNote), &Path) -> Result<()>,
+    release_after_direct: impl FnOnce(&mut Native) -> Result<Option<AppliedEffect>>,
+) -> Result<()> {
+    if let Some(effect) = materialize(binary)? {
+        native.applied(effect);
+    }
+    if let ServiceBinary::Managed { source, copy } = binary {
+        notes(&ServiceNote::ManagedBinary {
+            role: role.to_owned(),
+            source: source.display.clone(),
+            copy: copy.clone(),
+        });
+    }
+    register(native, notes, binary.path())?;
+    if matches!(binary, ServiceBinary::Direct(_)) {
+        if let Some(effect) = release_after_direct(native)? {
+            native.applied(effect);
+        }
+    }
+    Ok(())
+}
+
+/// Publish the managed copy of `binary`, trusting root only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn materialize_root_only(binary: &ServiceBinary) -> Result<Option<AppliedEffect>> {
+    super::service_binary::materialize(binary, super::trust::TrustedOwners::RootOnly)
+}
+
+/// No managed copy exists off Linux and macOS.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn materialize_root_only(_binary: &ServiceBinary) -> Result<Option<AppliedEffect>> {
+    Ok(None)
+}
+
+/// Remove `role`'s managed copy after a root-run registration stopped
+/// naming it, unless any registration source or the loaded definition still
+/// does. A registration that is not root-run never touches the copy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn release_unreferenced_copy(
+    native: &mut Native,
+    role: &str,
+    root_run: bool,
+) -> Result<Option<AppliedEffect>> {
+    use super::service_binary::{managed_copy_path, managed_needle, release};
+
+    if !root_run {
+        return Ok(None);
+    }
+    let sources = platform::RegistrationSources::for_role(role);
+    release(
+        &managed_copy_path(role),
+        super::trust::TrustedOwners::RootOnly,
+        || platform::managed_copy_referenced(native, role, &sources, &managed_needle(role)),
+    )
+}
+
+/// No managed copy exists off Linux and macOS.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn release_unreferenced_copy(
+    _native: &mut Native,
+    _role: &str,
+    _root_run: bool,
+) -> Result<Option<AppliedEffect>> {
+    Ok(None)
+}
+
+/// The root-only binary check of a root-run registration.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn verify_root_only(path: &Path) -> Result<()> {
+    super::trust::verify_binary(path, super::trust::TrustedOwners::RootOnly)
+}
+
+/// Never consulted off Linux and macOS: [`plan_binary`] registers the
+/// resolved binary there.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn verify_root_only(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Asks whether `role` is registered in the scope *other* than the requested
@@ -170,6 +310,8 @@ struct InstallPlan {
     state: PathBuf,
     /// Recorded in a system registration; `None` for a user service.
     pin: Option<Pin>,
+    /// What the registration runs.
+    binary: ServiceBinary,
 }
 
 /// Every check that precedes the write, in the order the CLI always ran them:
@@ -212,11 +354,14 @@ fn plan_install(
     let registering = effective_scope_for(scope, super::platform::system_wide_only());
     ensure_no_cross_scope_conflict(role, registering, None, lock_dirs)?;
     check_installable_config(role, &config)?;
+    // Last: a BusyBox registration is root-run even for `--user`.
+    let binary = plan_binary(req, scope, platform::system_wide_only(), &verify_root_only)?;
     Ok(Planned::Ready(InstallPlan {
         scope,
         config,
         state,
         pin: None,
+        binary,
     }))
 }
 
@@ -229,6 +374,25 @@ fn plan_system_install(
     env: Environment,
     _probe: &mut OtherScopeProbe<'_>,
     lock_dirs: LockResolver<'_>,
+) -> Result<Planned> {
+    plan_system_install_with(
+        req,
+        env,
+        lock_dirs,
+        &|role| platform::existing_registration(role, ServiceScope::System),
+        &verify_root_only,
+    )
+}
+
+/// [`plan_system_install`] over the `existing` registration of a role and
+/// the root-only binary check `verify`.
+#[cfg(unix)]
+fn plan_system_install_with(
+    req: &InstallRequest,
+    env: Environment,
+    lock_dirs: LockResolver<'_>,
+    existing: &dyn Fn(&str) -> Option<String>,
+    verify: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<Planned> {
     use super::{system, trust};
 
@@ -273,17 +437,20 @@ fn plan_system_install(
     check_installable_text(role, &text, &target.config)?;
     // Read the registration last, right before the write, so a consent given
     // for an earlier look at it is checked against the current one.
-    let existing = super::platform::existing_registration(role.name(), ServiceScope::System);
+    let existing = existing(role.name());
     if let system::RetargetDecision::Needs { previous, proposed } =
         system::retarget_decision(existing.as_deref(), &target, req.retarget.as_ref())
     {
         return Ok(Planned::Needs(InstallNeed::Retarget { previous, proposed }));
     }
+    // Last: only a plan nothing is pending on decides the binary.
+    let binary = plan_binary(req, ServiceScope::System, false, verify)?;
     Ok(Planned::Ready(InstallPlan {
         scope: ServiceScope::System,
         pin: Some(target.pin()),
         config: target.config,
         state: target.state,
+        binary,
     }))
 }
 
@@ -380,6 +547,8 @@ fn plan_system_install(
         pin: Some(target.pin()),
         config: target.config,
         state: target.state,
+        // Windows trusts the binary through `verify_binary` above.
+        binary: plan_binary(req, ServiceScope::System, false, &verify_root_only)?,
     }))
 }
 
@@ -1016,6 +1185,178 @@ mod tests {
         );
     }
 
+    /// A `verify` that must never run.
+    fn no_verify(path: &Path) -> Result<()> {
+        panic!("the binary check must not run for {}", path.display())
+    }
+
+    #[test]
+    fn plan_binary_user_scope_is_resolved_path() {
+        let req = request(Some(ServiceScope::User));
+        let planned = plan_binary(&req, ServiceScope::User, false, &no_verify).unwrap();
+        assert_eq!(
+            planned,
+            ServiceBinary::Direct(req.tunnel_executable.clone())
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn plan_binary_non_unix_is_direct() {
+        let req = request(Some(ServiceScope::System));
+        for (scope, system_wide_only) in [
+            (ServiceScope::System, false),
+            (ServiceScope::User, true),
+            (ServiceScope::User, false),
+        ] {
+            let planned = plan_binary(&req, scope, system_wide_only, &no_verify).unwrap();
+            assert_eq!(
+                planned,
+                ServiceBinary::Direct(req.tunnel_executable.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn install_steps_writes_copy_then_note_then_registers_copy() {
+        let copy = PathBuf::from("/m/iroh-tunnel/bin/serve/iroh-tunnel");
+        let binary = ServiceBinary::Managed {
+            source: request(None).running_executable,
+            copy: copy.clone(),
+        };
+        let run = run_steps(&binary, Ok(()));
+        run.result.unwrap();
+        assert_eq!(
+            run.order,
+            vec![
+                "materialize".to_owned(),
+                format!("note {}", copy.display()),
+                format!("register {}", copy.display()),
+            ]
+        );
+        assert_eq!(
+            run.applied,
+            vec![AppliedEffect::ManagedBinaryWritten(copy.clone())]
+        );
+        assert_eq!(
+            run.notes,
+            vec![ServiceNote::ManagedBinary {
+                role: "serve".into(),
+                source: request(None).running_executable.display,
+                copy,
+            }]
+        );
+    }
+
+    #[test]
+    fn install_steps_register_failure_keeps_copy_in_applied() {
+        let copy = PathBuf::from("/m/iroh-tunnel/bin/serve/iroh-tunnel");
+        let binary = ServiceBinary::Managed {
+            source: request(None).running_executable,
+            copy: copy.clone(),
+        };
+        let run = run_steps(&binary, Err("unit write failed"));
+        assert_eq!(run.result.unwrap_err().to_string(), "unit write failed");
+        assert_eq!(run.applied, vec![AppliedEffect::ManagedBinaryWritten(copy)]);
+        assert!(
+            !run.order.iter().any(|step| step == "release"),
+            "{:?}",
+            run.order
+        );
+    }
+
+    #[test]
+    fn install_steps_direct_releases_copy() {
+        let direct = PathBuf::from("/usr/local/bin/iroh-tunnel");
+        let run = run_steps(&ServiceBinary::Direct(direct.clone()), Ok(()));
+        run.result.unwrap();
+        assert_eq!(
+            run.order,
+            vec![
+                "materialize".to_owned(),
+                format!("register {}", direct.display()),
+                "release".to_owned(),
+            ]
+        );
+        assert!(run.notes.is_empty(), "{:?}", run.notes);
+        assert_eq!(
+            run.applied,
+            vec![AppliedEffect::ManagedBinaryRemoved(PathBuf::from(
+                "/m/iroh-tunnel/bin/serve/iroh-tunnel"
+            ))]
+        );
+
+        // A failed registration releases nothing.
+        let run = run_steps(&ServiceBinary::Direct(direct), Err("boom"));
+        assert!(run.result.is_err());
+        assert!(!run.order.iter().any(|step| step == "release"));
+        assert!(run.applied.is_empty(), "{:?}", run.applied);
+    }
+
+    /// What one [`install_steps`] run did.
+    struct StepsRun {
+        result: Result<()>,
+        order: Vec<String>,
+        notes: Vec<ServiceNote>,
+        applied: Vec<AppliedEffect>,
+    }
+
+    /// Run [`install_steps`] with recording effects: `materialize` writes the
+    /// managed copy of a `Managed` binary, `register` returns `registered`
+    /// and `release_after_direct` removes a fixed copy.
+    fn run_steps(binary: &ServiceBinary, registered: Result<(), &str>) -> StepsRun {
+        use super::super::native::fake::{Events, FakeRunner};
+        use super::super::native::OutputMode;
+        use std::cell::RefCell;
+
+        let order = RefCell::new(Vec::new());
+        let mut notes_seen = Vec::new();
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, Vec::new());
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        let mut notes = |note: &ServiceNote| {
+            if let ServiceNote::ManagedBinary { copy, .. } = note {
+                order.borrow_mut().push(format!("note {}", copy.display()));
+            }
+            notes_seen.push(note.clone());
+        };
+        let result = install_steps(
+            &mut native,
+            &mut notes,
+            "serve",
+            binary,
+            |binary| {
+                order.borrow_mut().push("materialize".into());
+                Ok(match binary {
+                    ServiceBinary::Direct(_) => None,
+                    ServiceBinary::Managed { copy, .. } => {
+                        Some(AppliedEffect::ManagedBinaryWritten(copy.clone()))
+                    }
+                })
+            },
+            |_, _, path| {
+                order
+                    .borrow_mut()
+                    .push(format!("register {}", path.display()));
+                registered.map_err(|why| anyhow::anyhow!("{why}"))
+            },
+            |_| {
+                order.borrow_mut().push("release".into());
+                Ok(Some(AppliedEffect::ManagedBinaryRemoved(PathBuf::from(
+                    "/m/iroh-tunnel/bin/serve/iroh-tunnel",
+                ))))
+            },
+        );
+        let (applied, _) = native.finish();
+        StepsRun {
+            result,
+            order: order.into_inner(),
+            notes: notes_seen,
+            applied,
+        }
+    }
+
     #[test]
     fn verbatim_prefix_is_stripped_but_not_for_unc() {
         let strip = |p: &str| strip_verbatim_prefix(PathBuf::from(p));
@@ -1025,6 +1366,119 @@ mod tests {
             strip(r"\\?\UNC\srv\share\b.toml"),
             PathBuf::from(r"\\?\UNC\srv\share\b.toml")
         );
+    }
+}
+
+/// The binary decision of root-run registrations on Linux and macOS.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod unix_binary_tests {
+    use super::super::fixtures::{in_isolated_home, request, write_valid_config};
+    use super::super::pin::{Pin, PinOwner};
+    use super::super::service_binary::managed_copy_path;
+    use super::*;
+
+    fn refuse(path: &Path) -> Result<()> {
+        Err(CliError::Permission(format!("{} is not root-only", path.display())).into())
+    }
+
+    /// A request whose resolved binary exists, so it can be canonicalized.
+    fn request_with_binary(scope: ServiceScope) -> (tempfile::TempDir, InstallRequest) {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("iroh-tunnel");
+        std::fs::write(&binary, "bin").unwrap();
+        let mut req = request(Some(scope));
+        req.tunnel_executable = binary;
+        (dir, req)
+    }
+
+    #[test]
+    fn plan_binary_system_scope_managed_when_refused() {
+        let (_dir, req) = request_with_binary(ServiceScope::System);
+        let planned = plan_binary(&req, ServiceScope::System, false, &refuse).unwrap();
+        assert_eq!(
+            planned,
+            ServiceBinary::Managed {
+                source: req.running_executable.clone(),
+                copy: managed_copy_path("serve"),
+            }
+        );
+
+        let canonical = req.tunnel_executable.canonicalize().unwrap();
+        let planned = plan_binary(&req, ServiceScope::System, false, &|path| {
+            assert_eq!(path, canonical, "the canonical path is checked");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(planned, ServiceBinary::Direct(canonical));
+    }
+
+    #[test]
+    fn plan_binary_busybox_user_scope_is_root_run() {
+        let (_dir, req) = request_with_binary(ServiceScope::User);
+        let planned = plan_binary(&req, ServiceScope::User, true, &refuse).unwrap();
+        assert_eq!(
+            planned,
+            ServiceBinary::Managed {
+                source: req.running_executable.clone(),
+                copy: managed_copy_path("serve"),
+            }
+        );
+        let planned = plan_binary(&req, ServiceScope::User, true, &|_| Ok(())).unwrap();
+        assert_eq!(
+            planned,
+            ServiceBinary::Direct(req.tunnel_executable.canonicalize().unwrap())
+        );
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn declined_retarget_writes_no_copy() {
+        const NAME: &str = "service::install::unix_binary_tests::declined_retarget_writes_no_copy";
+        in_isolated_home(NAME, |home| {
+            let managed = tempfile::tempdir().unwrap();
+            std::env::set_var("IROH_TUNNEL_TEST_MANAGED_BIN_DIR", managed.path());
+            let config = write_valid_config(home);
+            let state = home.join("state");
+            std::fs::create_dir(&state).unwrap();
+            let (_bin, mut req) = request_with_binary(ServiceScope::System);
+            req.config = Some(config);
+            req.state_dir_override = Some(state);
+            // SAFETY: geteuid(2) has no preconditions and cannot fail.
+            let me = unsafe { libc::geteuid() };
+            let other = Pin {
+                config: PathBuf::from("/home/other/serve.toml"),
+                owner: PinOwner::Uid(me.wrapping_add(1)),
+            };
+            let body = format!("# {}\n", other.record());
+            let (user, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let resolve = |_: Option<&Path>| {
+                Ok(LockDirs {
+                    user: user.path().into(),
+                    machine: Some(machine.path().into()),
+                })
+            };
+            let env = Environment {
+                elevated: true,
+                can_answer: true,
+            };
+            let planned =
+                plan_system_install_with(&req, env, &resolve, &|_| Some(body.clone()), &|path| {
+                    panic!("no binary decision while a retarget is pending: {path:?}")
+                })
+                .unwrap_or_else(|e| panic!("plan failed: {e:#}"));
+            assert!(
+                matches!(
+                    planned,
+                    Planned::Needs(InstallNeed::Retarget {
+                        previous: Some(_),
+                        ..
+                    })
+                ),
+                "a retarget must be asked first"
+            );
+            let entries: Vec<_> = std::fs::read_dir(managed.path()).unwrap().collect();
+            assert!(entries.is_empty(), "{entries:?}");
+        });
     }
 }
 

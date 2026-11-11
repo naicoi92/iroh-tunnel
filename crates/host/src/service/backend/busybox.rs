@@ -390,4 +390,26 @@ mod tests {
             assert!(s.contains(arm), "missing case arm `{arm}`:\n{s}");
         }
     }
+
+    #[test]
+    fn managed_path_renders_as_one_argument_in_each_backend() {
+        let copy = "/Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel";
+        let script = format_script(
+            "serve",
+            Path::new(copy),
+            Path::new("/c"),
+            Path::new("/s"),
+            None,
+        );
+        // Assigned in double quotes and expanded quoted: one shell word.
+        assert!(script.contains(&format!("DAEMON=\"{copy}\"\n")), "{script}");
+        assert!(
+            script.contains("\"$DAEMON\" \"$ROLE\" run --config \"$CONFIG\""),
+            "{script}"
+        );
+        assert_eq!(
+            parse_busybox_script(Some(&script)),
+            EffectiveBinary::Binary(PathBuf::from(copy))
+        );
+    }
 }

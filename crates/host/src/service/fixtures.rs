@@ -9,7 +9,9 @@ use super::native::{NativeOutput, ServiceCall};
 use super::status::status_via;
 #[cfg(unix)]
 use super::types::ServiceStatusReport;
-use super::types::{Environment, InstallOutcome, InstallRequest, ServiceFailure, ServiceScope};
+use super::types::{
+    Environment, InstallOutcome, InstallRequest, RunningExecutable, ServiceFailure, ServiceScope,
+};
 use crate::ownership::{LockDirs, LockResolver};
 use crate::role::Role;
 
@@ -27,6 +29,10 @@ pub(crate) fn request(scope: Option<ServiceScope>) -> InstallRequest {
         scope,
         config: None,
         tunnel_executable: tunnel_exe(),
+        running_executable: RunningExecutable {
+            display: tunnel_exe(),
+            read_from: tunnel_exe(),
+        },
         sudo_user: None,
         invoking_user: None,
         state_dir_override: None,
