@@ -108,31 +108,35 @@ sudo iroh-tunnel serve service install --system
   fails with a message to run `config keygen` as the owner.
 - Reinstalling over a service owned by another user asks for confirmation;
   without it the command exits with code `5` and changes nothing.
-- Binary trust (Linux and macOS): the registered binary and every directory
-  above it must be owned by root and not writable by group or others. If they
-  are not (Homebrew, `cargo install`, a binary under your home), install
-  registers a root-owned copy of the running executable instead, at
+- Binary trust (Linux and macOS): install resolves the binary to its canonical
+  path and checks it. The file and every directory above it must be owned by
+  root and not writable by group or others; a sticky directory such as `/tmp`
+  is accepted only when the entry below it is root-owned. If the check fails
+  (Homebrew, `cargo install`, a binary under your home), install registers a
+  root-owned copy of the running executable instead, at
   `/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` on Linux or
   `/Library/Application Support/iroh-tunnel/bin/<role>/iroh-tunnel` on macOS,
-  and prints a note. Each role has its own copy. A binary already in a
-  root-owned location such as `/usr/local/bin` is registered as is, with no
-  copy.
+  and prints a note. Each role has its own copy. A binary that passes the check,
+  such as a root-owned `0755` file in `/usr/local/bin`, is registered as is,
+  with no copy.
 - After upgrading iroh-tunnel, re-run `sudo iroh-tunnel <role> service install
   --system` to refresh the copy. Until then the service keeps running the old
   copy: `brew upgrade` and `cargo install` do not change it.
 - `service start --system` and `service restart --system` check the binary the
   service manager will run, read from its loaded definition. If a non-root user
-  could change it, the command exits with code `3`, naming the path, owner and
-  mode, and issues no start, stop or restart, so a running service keeps
+  could change it, or the manager's definition cannot be read, the command
+  exits with code `3`, naming the unsafe path and its owner and mode where
+  known, and issues no start, stop or restart, so a running service keeps
   running. Re-run the `service install --system` command the message prints.
   Starts by systemd, launchd or the init script at boot, on failure, or run
   directly are not checked.
-- Install exits with code `3`, naming the directory, owner and mode, when an
-  existing managed directory is owned by a non-root user or is group- or
-  world-writable. Install never repairs it; fix it as root, then install again.
+- When install needs a managed copy, it exits with code `3`, naming the
+  directory, owner and mode, if an existing managed directory is owned by a
+  non-root user or is group- or world-writable. Install never repairs it; fix it as root, then install again.
 - `service uninstall --system` removes the role's copy and its empty directory,
   unless another root-run registration of that role (a unit file, drop-in, init
-  script or loaded definition) still names it. A role installed from a trusted
+  script or loaded definition) still names it. If a registration source or the
+  loaded definition cannot be read, the copy is kept. A role installed from a trusted
   binary has no copy to remove, and uninstall succeeds.
 
 ## BusyBox and SysV init

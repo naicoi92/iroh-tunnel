@@ -54,7 +54,8 @@ command there.
 **`service start --system` or `restart --system` exits with code 3 and names a binary.**
 On Linux and macOS the service manager would run a binary that a non-root user
 can change (for example one under your home directory, or a directory above it
-that is group- or world-writable). The message names the path, owner and mode.
+that is group- or world-writable), or its definition cannot be read. The
+message names the unsafe path, and its owner and mode where known.
 Nothing was started, stopped or restarted, so a running service keeps running.
 Re-run the install as root, then start again:
 
@@ -63,8 +64,9 @@ sudo iroh-tunnel <role> service install --system
 sudo iroh-tunnel <role> service start --system
 ```
 
-Install registers the binary directly if it is root-owned, or otherwise a
-root-owned copy at `/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
+Install registers the binary directly if it passes the root-only check (the
+file and every directory above it root-owned and not group- or
+world-writable), or otherwise a root-owned copy at `/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
 `/Library/Application Support/iroh-tunnel/bin/<role>/iroh-tunnel` (macOS). See
 [System services](services.md#system-services).
 

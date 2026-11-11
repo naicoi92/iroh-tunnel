@@ -35,10 +35,10 @@ Linux and macOS system service changes:
 - **Breaking:** on Linux and macOS, `service start --system` and `service
   restart --system` refuse a legacy system registration whose binary a non-root
   user can change (for example `~/.cargo/bin/iroh-tunnel`). They exit with code
-  `3`, naming the path, owner and mode, and issue no start, stop or restart. Run
-  `sudo iroh-tunnel <role> service install --system` once to re-register.
-  Services already running keep running, and starts by the service manager at
-  boot are not checked.
+  `3`, naming the path, and its owner and mode where known, and issue no start,
+  stop or restart. Run `sudo iroh-tunnel <role> service install --system` once
+  to re-register. A refused start or restart leaves a running service running,
+  and starts by the service manager at boot are not checked.
 
 ### Added
 
@@ -48,8 +48,9 @@ Linux and macOS system service changes:
   `/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
   `/Library/Application Support/iroh-tunnel/bin/<role>/iroh-tunnel` (macOS), and
   prints a note. Re-run `sudo iroh-tunnel <role> service install --system` after
-  upgrading to refresh it. Uninstall removes the copy. The original binary is
-  never changed.
+  upgrading to refresh it. Uninstall removes the copy once no registration
+  references it, and keeps it when references cannot be ruled out. The original
+  binary is never changed.
 - **Windows system services:** `service install --system` registers a
   LocalSystem Windows Service that starts at boot, trusts one pinned user's
   config and state, checks their ownership and access (no junctions or links)
