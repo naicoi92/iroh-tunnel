@@ -15,9 +15,9 @@ Blocked by: none
 
 Owns: `crates/host/src/service/effective_binary.rs` (new, portable parsers), `crates/host/src/service/backend/systemd.rs`, `crates/host/src/service/backend/launchd.rs`, `crates/host/src/service/backend/busybox.rs`, `crates/host/src/service/platform.rs`, `crates/host/src/service/mod.rs` (module declaration). Parsers tested on every OS; adapters through `Native` + `FakeRunner`.
 
-- [ ] 2.1 `EffectiveBinary { NotLoaded, Binary, Unknown }` and pure parsers for `systemctl show -p LoadState -p ExecStart`, `launchctl print` (+ "Could not find service"), and BusyBox `DAEMON` against captured fixtures (design D6); covers "Effective definition per backend", "Unreadable binary in the registration"
-- [ ] 2.2 Backend adapters `effective_binary(native, role)` for systemd (system manager), launchd (`system/<label>`) and BusyBox; a failing query is `Unknown`; covers "Loaded definition differs from the file"
-- [ ] 2.3 `platform::effective_binary(native, role)`, `platform::root_run(scope, system_wide_only)`, `RegistrationSources::for_role(role)` and `platform::managed_copy_referenced(native, sources, needle)` (files, drop-ins in `/etc` and `/run`, loaded definition; unreadable/unknown counts as referenced) (design D7); covers "Another registration still names the copy", "Drop-in still references the copy"
+- [x] 2.1 `EffectiveBinary { NotLoaded, Binary, Unknown }` and pure parsers for `systemctl show -p LoadState -p ExecStart`, `launchctl print` (+ "Could not find service"), and BusyBox `DAEMON` against captured fixtures (design D6); covers "Effective definition per backend", "Unreadable binary in the registration"
+- [x] 2.2 Backend adapters `effective_binary(native, role)` for systemd (system manager), launchd (`system/<label>`) and BusyBox; a failing query is `Unknown`; covers "Loaded definition differs from the file"
+- [x] 2.3 `platform::effective_binary(native, role)`, `platform::root_run(scope, system_wide_only)`, `RegistrationSources::for_role(role)` and `platform::managed_copy_referenced(native, sources, needle)` (files, drop-ins in `/etc` and `/run`, loaded definition; unreadable/unknown counts as referenced) (design D7); covers "Another registration still names the copy", "Drop-in still references the copy"
 
 ## 3. Managed binary use cases
 
