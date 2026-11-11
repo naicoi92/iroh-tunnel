@@ -299,7 +299,6 @@ fn plan_install(
         ))
         .into());
     }
-    let role = req.role;
     let scope = match decide_install_scope(req.scope, env) {
         ScopeDecision::Chosen(scope) => scope,
         ScopeDecision::NeedsChoice => return Ok(Planned::Needs(InstallNeed::ScopeChoice)),

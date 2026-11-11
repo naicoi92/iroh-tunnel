@@ -70,7 +70,7 @@
 - `service_binary::release_unreferenced_copy(native, role, root_run) -> Result<Option<AppliedEffect>>` (new, not in the table): the one cleanup policy shared by install (`Direct`) and uninstall, moved out of `install.rs` in Task 5.
 - `verb::check_effective(loaded, role, verify)` (new, private): pure refusal formatting behind `guard_effective_binary`; prefixes the registered binary path when the trust message does not already name it.
 - `install::plan_user_install(req, env, probe, lock_dirs, system_wide_only)` (new, private) and `policy::ensure_root_run_privilege(root_run, elevated)` (new): the final review found an unprivileged BusyBox `--user` install reaching `materialize` (exit 1); the privilege check now runs during planning with the existing BusyBox text.
-- `Native::output` is compiled on Linux too (it was macOS-only), for the systemd `effective_binary` query.
+- `Native::output` is compiled on Linux too (previously macOS, Windows and tests only), for the systemd `effective_binary` query.
 - `platform::effective_binary`, `RegistrationSources` and `managed_copy_referenced` exist only on Linux and macOS, as Global Constraints scope the behaviour.
 
 ---
