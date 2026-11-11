@@ -32,7 +32,7 @@ Single reference for the UDP wire framing and admission-refusal behavior. UDP is
 | Idle expiry | Flow ends; upstream socket stays open as a sink for the quarantine period, then closes | Late replies counted as `quarantine_reply` |
 | Peer lost or reconnect | All flows end with the incarnation; quarantined sockets remain as sinks only | No flow survives |
 | Flow identifiers exhausted | Access evicts the connection; the next datagram dials afresh with an empty flow table, so all flows end | Counter `cap` (shared with the cap rows; the warning log says identifiers ran out) |
-| Connection lost | Access evicts the dead connection on the first send error; the next datagram dials afresh | None; forwarding resumes |
+| Connection lost | Access evicts the dead connection on the first send error; the next datagram dials afresh, except during the 30 s datagram setup-failure back-off | None; forwarding resumes |
 | Bind or descriptor exhaustion | Flow refused, process keeps running | Counter `cap` (shared with the cap rows; the log line names the cause) |
 | Access cap reached | Access drops the new client's datagram before it reaches Serve; known clients and running flows are untouched | Counter `cap` on the Access status |
 

@@ -5,7 +5,7 @@
 
 use super::payload_limit::payload_limit;
 
-/// Application close code Serve sends when a peer cannot carry datagrams.
+/// Application close code either role sends when its peer cannot carry datagrams.
 pub(crate) const DATAGRAMS_UNSUPPORTED_CODE: u32 = 0x1d47;
 
 /// Application close reason paired with [`DATAGRAMS_UNSUPPORTED_CODE`].

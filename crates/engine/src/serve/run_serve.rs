@@ -1423,14 +1423,9 @@ mod tests {
             .expect("serve must close the connection");
         match reason {
             ConnectionError::ApplicationClosed(close) => {
-                assert_eq!(
-                    close.error_code,
-                    VarInt::from_u32(crate::udp::DATAGRAMS_UNSUPPORTED_CODE)
-                );
-                assert_eq!(
-                    close.reason.as_ref(),
-                    crate::udp::DATAGRAMS_UNSUPPORTED_REASON
-                );
+                // Wire-contract literals, independent of the production constants.
+                assert_eq!(close.error_code, VarInt::from_u32(0x1d47));
+                assert_eq!(close.reason.as_ref(), b"udp datagrams unsupported");
             }
             other => panic!("expected dedicated application close, got {other:?}"),
         }

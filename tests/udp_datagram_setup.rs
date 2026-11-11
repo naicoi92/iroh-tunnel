@@ -36,6 +36,8 @@ const ACCESS_CLOSED_BY_SERVE: &str = "serve peer closed the udp connection: data
 const ACCESS_FAIL_ON_SERVE: &str = "udp datagrams unsupported by access peer";
 const SERVE_CLOSED_BY_ACCESS: &str = "access peer closed the udp connection: datagrams unsupported";
 const BACKOFF_WARNING: &str = "dialing resumes in";
+const UDP_LISTENING: &str = "listening for local udp clients";
+const TCP_LISTENING: &str = "listening for local clients";
 const CONNECTED: &str = "connected to serve peer";
 const CONNECT_ATTEMPT: &str = "connect attempt";
 
@@ -301,38 +303,99 @@ fn backoff_match(service: &str) -> LineMatch<'_> {
     }
 }
 
-/// Wait until every expected address appears in a "listening for local udp
-/// clients" line (`listen_addr=ADDR`).
-async fn udp_listeners_ready(role: &mut Role, addrs: &[SocketAddr]) -> Result<()> {
-    wait_for("access udp listeners", role, |r| {
-        let log = r.log();
-        addrs
-            .iter()
-            .all(|addr| {
-                let want = format!("listen_addr={addr}");
-                log.lines().any(|l| {
-                    l.contains("listening for local udp clients")
-                        && l.split_whitespace().any(|t| t == want)
-                })
-            })
-            .then_some(())
-    })
-    .await
+/// Fixture-owned background tasks: aborted on drop (so an assertion panic
+/// cannot leak them) and aborted and joined by `shutdown` on the normal path.
+#[derive(Default)]
+struct Tasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl Tasks {
+    fn spawn(&mut self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.0.push(tokio::spawn(task));
+    }
+
+    async fn shutdown(mut self) {
+        for handle in std::mem::take(&mut self.0) {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
 }
 
-/// A free local UDP/TCP-agnostic port: reserve, release, let the role rebind.
-async fn free_udp_addr() -> Result<SocketAddr> {
-    let probe = UdpSocket::bind("127.0.0.1:0").await?;
-    Ok(probe.local_addr()?)
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
+}
+
+/// How many times a role is respawned on fresh ports when its listener could
+/// not come up (another process took a released port).
+const PORT_ATTEMPTS: usize = 5;
+
+/// Reserve `count` distinct free loopback ports (all held until every one is
+/// chosen), then release them for a role to rebind.
+async fn reserve_addrs(count: usize, udp: bool) -> Result<Vec<SocketAddr>> {
+    let mut held: Vec<Box<dyn std::any::Any>> = Vec::new();
+    let mut addrs = Vec::new();
+    for _ in 0..count {
+        if udp {
+            let socket = UdpSocket::bind("127.0.0.1:0").await?;
+            addrs.push(socket.local_addr()?);
+            held.push(Box::new(socket));
+        } else {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            addrs.push(listener.local_addr()?);
+            held.push(Box::new(listener));
+        }
+    }
+    drop(held);
+    Ok(addrs)
+}
+
+/// Spawn a role on `count` reserved ports and wait until `ready` holds. When
+/// the listener never appears (or the role exits) the child is reaped and the
+/// role is respawned on fresh ports, up to `PORT_ATTEMPTS` times.
+async fn spawn_listening(
+    what: &str,
+    count: usize,
+    udp: bool,
+    start: impl Fn(&[SocketAddr], usize) -> Result<Role>,
+    ready: impl Fn(&Role, &[SocketAddr]) -> bool,
+) -> Result<(Role, Vec<SocketAddr>)> {
+    let mut last = None;
+    for attempt in 0..PORT_ATTEMPTS {
+        let addrs = reserve_addrs(count, udp).await?;
+        let mut role = start(&addrs, attempt)?;
+        match wait_for(what, &mut role, |r| ready(r, &addrs).then_some(())).await {
+            Ok(()) => return Ok((role, addrs)),
+            Err(err) => {
+                eprintln!("{what}: attempt {attempt} failed on {addrs:?}: {err}");
+                drop(role); // kills and reaps the child before the retry
+                last = Some(err);
+            }
+        }
+    }
+    Err(last.expect("PORT_ATTEMPTS > 0")).context(format!("{what}: no usable port"))
+}
+
+/// A line of `role`'s log announcing a listener on every `addrs` entry.
+fn listening(role: &Role, marker: &str, addrs: &[SocketAddr]) -> bool {
+    let log = role.log();
+    addrs.iter().all(|addr| {
+        let want = format!("listen_addr={addr}");
+        log.lines()
+            .any(|l| l.contains(marker) && l.split_whitespace().any(|t| t == want))
+    })
 }
 
 /// A UDP echo target that counts the datagrams it receives.
-async fn udp_target() -> Result<(SocketAddr, Arc<AtomicUsize>)> {
+async fn udp_target(tasks: &mut Tasks) -> Result<(SocketAddr, Arc<AtomicUsize>)> {
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
     let addr = socket.local_addr()?;
     let received = Arc::new(AtomicUsize::new(0));
     let counter = received.clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut buf = vec![0u8; 65535];
         while let Ok((n, from)) = socket.recv_from(&mut buf).await {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -342,13 +405,15 @@ async fn udp_target() -> Result<(SocketAddr, Arc<AtomicUsize>)> {
     Ok((addr, received))
 }
 
-/// A TCP echo target (one connection at a time is enough here).
-async fn tcp_echo_target() -> Result<SocketAddr> {
+/// A TCP echo target; per-connection tasks live in a `JoinSet` owned by the
+/// listener task, so aborting that task aborts them too.
+async fn tcp_echo_target(tasks: &mut Tasks) -> Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    tokio::spawn(async move {
+    tasks.spawn(async move {
+        let mut conns = tokio::task::JoinSet::new();
         while let Ok((mut stream, _)) = listener.accept().await {
-            tokio::spawn(async move {
+            conns.spawn(async move {
                 let mut buf = [0u8; 1024];
                 while let Ok(n) = stream.read(&mut buf).await {
                     if n == 0 || stream.write_all(&buf[..n]).await.is_err() {
@@ -395,8 +460,8 @@ async fn serve_without_datagrams_fails_access_setup() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
         let relay = relay.to_string();
-        let (target, received) = udp_target().await?;
-        let listen = free_udp_addr().await?;
+        let mut tasks = Tasks::default();
+        let (target, received) = udp_target(&mut tasks).await?;
 
         let mut serve = spawn(
             root.path(),
@@ -406,15 +471,24 @@ async fn serve_without_datagrams_fails_access_setup() -> Result<()> {
             true,
         )?;
         let serve_id = node_id(&mut serve, "serve").await?;
-        let mut access = spawn(
-            root.path(),
-            "access",
-            "access",
-            quick_access("dns", listen, &serve_id, "udp", &relay),
-            false,
-        )?;
+        let (mut access, addrs) = spawn_listening(
+            "access udp listener",
+            1,
+            true,
+            |addrs, n| {
+                spawn(
+                    root.path(),
+                    &format!("access-{n}"),
+                    "access",
+                    quick_access("dns", addrs[0], &serve_id, "udp", &relay),
+                    false,
+                )
+            },
+            |r, addrs| listening(r, UDP_LISTENING, addrs),
+        )
+        .await?;
+        let listen = addrs[0];
         let access_id = node_id(&mut access, "access").await?;
-        udp_listeners_ready(&mut access, &[listen]).await?;
 
         let access_fail = error_match(SERVE_FAIL_ON_ACCESS, "svc", "dns", &serve_id);
         let serve_closed = error_match(SERVE_CLOSED_BY_ACCESS, "service", "dns", &access_id);
@@ -444,6 +518,7 @@ async fn serve_without_datagrams_fails_access_setup() -> Result<()> {
         assert_single_attempt(&log, access_fail.position(&log).unwrap(), "dns");
         access.stop();
         serve.stop();
+        tasks.shutdown().await;
         Ok(())
     })
     .await?
@@ -455,10 +530,10 @@ async fn access_without_datagrams_is_closed_by_serve() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
         let relay = relay.to_string();
-        let (udp, received) = udp_target().await?;
-        let tcp = tcp_echo_target().await?;
+        let mut tasks = Tasks::default();
+        let (udp, received) = udp_target(&mut tasks).await?;
+        let tcp = tcp_echo_target(&mut tasks).await?;
         let serve_key = SecretKey::generate();
-        let (dns_listen, web_listen) = (free_udp_addr().await?, free_tcp_addr().await?);
 
         // Two services: multi-service role, so `run --config`.
         let serve_cfg = write_config(
@@ -489,33 +564,41 @@ async fn access_without_datagrams_is_closed_by_serve() -> Result<()> {
             false,
         )?;
         let serve_id = node_id(&mut serve, "serve").await?;
-        let mut access = spawn(
-            root.path(),
-            "access",
-            "access",
-            quick_access("dns", dns_listen, &serve_id, "udp", &relay),
+        let (mut access, addrs) = spawn_listening(
+            "access udp listener",
+            1,
             true,
-        )?;
-        let access_id = node_id(&mut access, "access").await?;
-        udp_listeners_ready(&mut access, &[dns_listen]).await?;
-        let mut web = spawn(
-            root.path(),
-            "web",
-            "access",
-            quick_access("web", web_listen, &serve_id, "tcp", &relay),
-            false,
-        )?;
-        wait_for("web listener", &mut web, |r| {
-            let want = format!("listen_addr={web_listen}");
-            r.log()
-                .lines()
-                .any(|l| {
-                    l.contains("listening for local clients")
-                        && l.split_whitespace().any(|t| t == want)
-                })
-                .then_some(())
-        })
+            |addrs, n| {
+                spawn(
+                    root.path(),
+                    &format!("access-{n}"),
+                    "access",
+                    quick_access("dns", addrs[0], &serve_id, "udp", &relay),
+                    true,
+                )
+            },
+            |r, addrs| listening(r, UDP_LISTENING, addrs),
+        )
         .await?;
+        let dns_listen = addrs[0];
+        let access_id = node_id(&mut access, "access").await?;
+        let (mut web, addrs) = spawn_listening(
+            "web listener",
+            1,
+            false,
+            |addrs, n| {
+                spawn(
+                    root.path(),
+                    &format!("web-{n}"),
+                    "access",
+                    quick_access("web", addrs[0], &serve_id, "tcp", &relay),
+                    false,
+                )
+            },
+            |r, addrs| listening(r, TCP_LISTENING, addrs),
+        )
+        .await?;
+        let web_listen = addrs[0];
 
         let serve_fail = error_match(ACCESS_FAIL_ON_SERVE, "service", "dns", &access_id);
         let access_closed = error_match(ACCESS_CLOSED_BY_SERVE, "svc", "dns", &serve_id);
@@ -561,14 +644,10 @@ async fn access_without_datagrams_is_closed_by_serve() -> Result<()> {
         web.stop();
         access.stop();
         serve.stop();
+        tasks.shutdown().await;
         Ok(())
     })
     .await?
-}
-
-async fn free_tcp_addr() -> Result<SocketAddr> {
-    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    Ok(probe.local_addr()?)
 }
 
 /// One echo round trip through `listen`, retrying while the tunnel connects.
@@ -599,10 +678,10 @@ async fn one_failing_udp_service_does_not_stop_another() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
         let relay = relay.to_string();
-        let (bad_target, bad_received) = udp_target().await?;
-        let (good_target, _) = udp_target().await?;
+        let mut tasks = Tasks::default();
+        let (bad_target, bad_received) = udp_target(&mut tasks).await?;
+        let (good_target, _) = udp_target(&mut tasks).await?;
         let access_key = SecretKey::generate();
-        let (bad_listen, good_listen) = (free_udp_addr().await?, free_udp_addr().await?);
 
         let mut serve_a = spawn(
             root.path(),
@@ -620,34 +699,43 @@ async fn one_failing_udp_service_does_not_stop_another() -> Result<()> {
         )?;
         let a_id = node_id(&mut serve_a, "serve").await?;
         let b_id = node_id(&mut serve_b, "serve").await?;
-        let access_cfg = write_config(
-            root.path(),
-            "access.toml",
-            &access_key,
-            &relay,
-            &[
-                Service {
-                    name: "bad",
-                    protocol: "udp",
-                    addr: bad_listen,
-                    node_id: Some(a_id.clone()),
-                },
-                Service {
-                    name: "good",
-                    protocol: "udp",
-                    addr: good_listen,
-                    node_id: Some(b_id),
-                },
-            ],
-        )?;
-        let mut access = spawn(
-            root.path(),
-            "access",
-            "access",
-            Launch::Config(&access_cfg),
-            false,
-        )?;
-        udp_listeners_ready(&mut access, &[bad_listen, good_listen]).await?;
+        let (mut access, addrs) = spawn_listening(
+            "access udp listeners",
+            2,
+            true,
+            |addrs, n| {
+                let cfg = write_config(
+                    root.path(),
+                    &format!("access-{n}.toml"),
+                    &access_key,
+                    &relay,
+                    &[
+                        Service {
+                            name: "bad",
+                            protocol: "udp",
+                            addr: addrs[0],
+                            node_id: Some(a_id.clone()),
+                        },
+                        Service {
+                            name: "good",
+                            protocol: "udp",
+                            addr: addrs[1],
+                            node_id: Some(b_id.clone()),
+                        },
+                    ],
+                )?;
+                spawn(
+                    root.path(),
+                    &format!("access-{n}"),
+                    "access",
+                    Launch::Config(&cfg),
+                    false,
+                )
+            },
+            |r, addrs| listening(r, UDP_LISTENING, addrs),
+        )
+        .await?;
+        let (bad_listen, good_listen) = (addrs[0], addrs[1]);
 
         let client = UdpSocket::bind("127.0.0.1:0").await?;
         let failure = error_match(SERVE_FAIL_ON_ACCESS, "svc", "bad", &a_id);
@@ -664,15 +752,13 @@ async fn one_failing_udp_service_does_not_stop_another() -> Result<()> {
         }
 
         // Keep hitting `bad` while `good` round-trips.
-        let noise = {
-            let socket = UdpSocket::bind("127.0.0.1:0").await?;
-            tokio::spawn(async move {
-                loop {
-                    let _ = socket.send_to(b"ping", bad_listen).await;
-                    tokio::time::sleep(SEND_EVERY).await;
-                }
-            })
-        };
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        tasks.spawn(async move {
+            loop {
+                let _ = socket.send_to(b"ping", bad_listen).await;
+                tokio::time::sleep(SEND_EVERY).await;
+            }
+        });
         let result = async {
             for i in 0..3 {
                 round_trip(&client, good_listen, format!("good-{i}").as_bytes()).await?;
@@ -680,7 +766,6 @@ async fn one_failing_udp_service_does_not_stop_another() -> Result<()> {
             Ok::<_, anyhow::Error>(())
         }
         .await;
-        noise.abort();
         result?;
 
         tokio::time::sleep(STATUS_WAIT).await;
@@ -702,6 +787,7 @@ async fn one_failing_udp_service_does_not_stop_another() -> Result<()> {
         access.stop();
         serve_a.stop();
         serve_b.stop();
+        tasks.shutdown().await;
         Ok(())
     })
     .await?

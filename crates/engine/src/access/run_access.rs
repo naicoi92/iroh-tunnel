@@ -1452,12 +1452,16 @@ mod tests {
 
     use iroh::endpoint::{Connection, ConnectionError, VarInt};
 
-    const TEST_WINDOW: Duration = Duration::from_millis(800);
+    const TEST_WINDOW: Duration = Duration::from_millis(1500);
     const POLL_STEP: Duration = Duration::from_millis(10);
     const POLL_LIMIT: Duration = Duration::from_secs(5);
     const SEND_STEP: Duration = Duration::from_millis(50);
-    /// Window left when it is captured; leaves room for a >= 200 ms observation.
-    const MIN_WINDOW_LEFT: Duration = Duration::from_millis(350);
+    /// Sending stops this long before expiry so the loop can process every
+    /// datagram on a loaded machine (RS-14: a wide, explicit margin).
+    const PROCESS_MARGIN: Duration = Duration::from_millis(350);
+    /// Window left when it is captured; leaves room for a >= 200 ms
+    /// observation plus the processing margin.
+    const MIN_WINDOW_LEFT: Duration = Duration::from_millis(600);
     /// The shortest negative observation that counts as suppression coverage.
     const MIN_OBSERVED: Duration = Duration::from_millis(200);
 
@@ -1481,17 +1485,48 @@ mod tests {
         ep: iroh::Endpoint,
         accepted: tokio::sync::mpsc::UnboundedReceiver<Connection>,
         stop: tokio::sync::oneshot::Sender<()>,
-        task: tokio::task::JoinHandle<()>,
-        children: PeerChildren,
+        task: OwnedTask,
+        children: ChildrenGuard,
+    }
+
+    /// A task owned by a fixture: aborted on drop so a panicking test cannot
+    /// leak it; `shutdown` takes it back to join.
+    struct OwnedTask(Option<tokio::task::JoinHandle<()>>);
+
+    impl OwnedTask {
+        fn take(&mut self) -> tokio::task::JoinHandle<()> {
+            self.0.take().expect("task already taken")
+        }
+    }
+
+    impl Drop for OwnedTask {
+        fn drop(&mut self) {
+            if let Some(task) = &self.0 {
+                task.abort();
+            }
+        }
+    }
+
+    /// Aborts every registered child on drop (panic path); the normal path
+    /// drains them through `drain_children`.
+    struct ChildrenGuard(PeerChildren);
+
+    impl Drop for ChildrenGuard {
+        fn drop(&mut self) {
+            for handle in self.0.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+                handle.abort();
+            }
+        }
     }
 
     /// Per-connection child tasks, shared so a fallback can still drain them
     /// when the supervisor had to be aborted.
     type PeerChildren = Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>;
 
-    /// Abort every child task, then join them one at a time. A handle stays
-    /// in the registry until it has been joined, so an interrupted drain
-    /// leaves the rest for the next caller. Only the harness (never the
+    /// Abort every child task, then join them one at a time. Handles are
+    /// popped before they are awaited: the remaining handles stay registered
+    /// while the current one is joined, so an interrupted drain leaves them
+    /// for the next caller. Only the harness (never the
     /// supervisor) drains, so the supervisor's cancellation cannot lose it.
     async fn drain_children(children: &PeerChildren) {
         for handle in children.lock().unwrap_or_else(|p| p.into_inner()).iter() {
@@ -1566,8 +1601,8 @@ mod tests {
             ep,
             accepted,
             stop,
-            task,
-            children,
+            task: OwnedTask(Some(task)),
+            children: ChildrenGuard(children),
         }
     }
 
@@ -1619,12 +1654,13 @@ mod tests {
             }
         }
 
-        async fn shutdown(self) {
+        async fn shutdown(mut self) {
             let mut failures = Vec::new();
             let _ = self.stop.send(());
-            join_or_abort(self.task, POLL_LIMIT, "peer supervisor", &mut failures).await;
+            let task = self.task.take();
+            join_or_abort(task, POLL_LIMIT, "peer supervisor", &mut failures).await;
             // The owner drains the children after the supervisor is gone.
-            drain_children(&self.children).await;
+            drain_children(&self.children.0).await;
             finish_within(
                 POLL_LIMIT,
                 "peer endpoint close",
@@ -1678,7 +1714,7 @@ mod tests {
         gate: UdpDialGate,
         hooks: Arc<UdpTestHooks>,
         stop: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
-        task: tokio::task::JoinHandle<()>,
+        task: OwnedTask,
     }
 
     async fn forward(dialer: Arc<ServiceDialer>, window: Duration) -> ForwardHarness {
@@ -1703,7 +1739,7 @@ mod tests {
             gate,
             hooks,
             stop,
-            task,
+            task: OwnedTask(Some(task)),
         }
     }
 
@@ -1759,12 +1795,12 @@ mod tests {
             let started = std::time::Instant::now();
             let budget = end.saturating_duration_since(started);
             assert!(
-                budget >= MIN_OBSERVED + SEND_STEP,
+                budget >= MIN_OBSERVED + PROCESS_MARGIN,
                 "timing: only {budget:?} of the window left at the start of the observation"
             );
             let admitted = *self.hooks.admitted.subscribe().borrow();
             let dropped = *self.hooks.waiting_dropped.subscribe().borrow();
-            let stop_at = end - SEND_STEP;
+            let stop_at = end - PROCESS_MARGIN;
             let mut sent = 0u64;
             while sent == 0 || std::time::Instant::now() < stop_at {
                 self.send(b"during-window").await;
@@ -1803,9 +1839,7 @@ mod tests {
         async fn resume_after(&self, peer: &mut TestPeer, end: std::time::Instant) -> Connection {
             tokio::time::sleep_until(tokio::time::Instant::from_std(end)).await;
             self.send(b"after-window").await;
-            let conn = peer
-                .next_conn(Duration::from_secs(1), "redial after the window")
-                .await;
+            let conn = peer.next_conn(POLL_LIMIT, "redial after the window").await;
             tokio::time::sleep(Duration::from_millis(100)).await;
             peer.assert_no_conn("exactly one redial after the window");
             conn
@@ -1815,10 +1849,11 @@ mod tests {
             self.shutdown_within(POLL_LIMIT).await;
         }
 
-        async fn shutdown_within(self, loop_bound: Duration) {
+        async fn shutdown_within(mut self, loop_bound: Duration) {
             let mut failures = Vec::new();
             self.stop.send_replace(Some(tokio::time::Instant::now()));
-            join_or_abort(self.task, loop_bound, "forward loop", &mut failures).await;
+            let task = self.task.take();
+            join_or_abort(task, loop_bound, "forward loop", &mut failures).await;
             let dialer = &self.dialer;
             // The loop's reader JoinSet is aborted when the loop ends (or is
             // aborted: dropping a JoinSet aborts its tasks); wait until they
@@ -1875,11 +1910,15 @@ mod tests {
 
     fn assert_closed_unsupported(reason: ConnectionError) {
         match reason {
-            ConnectionError::ApplicationClosed(close) => assert_eq!(
-                close.error_code,
-                VarInt::from_u32(crate::udp::DATAGRAMS_UNSUPPORTED_CODE),
-                "close code"
-            ),
+            ConnectionError::ApplicationClosed(close) => {
+                // Wire-contract literals, independent of the production constants.
+                assert_eq!(close.error_code, VarInt::from_u32(0x1d47), "close code");
+                assert_eq!(
+                    close.reason.as_ref(),
+                    b"udp datagrams unsupported",
+                    "close reason"
+                );
+            }
             other => panic!("expected the dedicated application close, got {other:?}"),
         }
     }
