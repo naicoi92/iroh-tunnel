@@ -48,8 +48,8 @@ Blocked by: 3
 
 Owns: `crates/host/src/service/verb.rs`.
 
-- [ ] 5.1 For Linux/macOS root-run `Start`/`Restart`: query the effective binary, `verify_binary(RootOnly)`, refuse with exit 3 + `service install --system` guidance before any lifecycle command; `NotLoaded` falls through; `Unknown` refuses; never copies (design D6); covers "Legacy registration with a user-writable binary", "Directory loosened after install", "Trusted registered binary", "Restart after an upgrade of a managed install", "Unreadable binary in the registration"
-- [ ] 5.2 `verb_steps` seam (guard → backend; backend → release on uninstall) and, after a successful root-run `Uninstall`, `release` the copy inside the same `execute` step; covers "Cleanup fails after the registration is removed"
+- [x] 5.1 For Linux/macOS root-run `Start`/`Restart`: query the effective binary, `verify_binary(RootOnly)`, refuse with exit 3 + `service install --system` guidance before any lifecycle command; `NotLoaded` falls through; `Unknown` refuses; never copies (design D6); covers "Legacy registration with a user-writable binary", "Directory loosened after install", "Trusted registered binary", "Restart after an upgrade of a managed install", "Unreadable binary in the registration"
+- [x] 5.2 `verb_steps` seam (guard → backend; backend → release on uninstall) and, after a successful root-run `Uninstall`, `release` the copy inside the same `execute` step; covers "Cleanup fails after the registration is removed"
 
 ## 6. Docs and changelog
 
