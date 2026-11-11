@@ -62,7 +62,16 @@
 | `IROH_TUNNEL_TEST_MANAGED_BIN_DIR` | new | env var, `test-utils` only: a root under which the fixed suffix `iroh-tunnel/bin/<role>/iroh-tunnel` is appended, so every managed path contains `managed_needle(role)` | no |
 | `install::existing_registration` seam | new | `plan_system_install` reads the existing registration through `existing: &dyn Fn(&str) -> Option<String>` (production: `platform::existing_registration(role, System)`) | no |
 | `verb::verb_steps` | new | `fn verb_steps(native: &mut Native, notes: &mut dyn FnMut(&ServiceNote), verb: Verb, guard: impl FnOnce(&mut Native) -> Result<()>, backend: impl FnOnce(&mut Native, &mut dyn FnMut(&ServiceNote)) -> Result<()>, release_after_uninstall: impl FnOnce(&mut Native) -> Result<Option<AppliedEffect>>) -> Result<()>`: `guard` runs before `backend` for Start/Restart; `release_after_uninstall` runs after a successful Uninstall backend. Deviation (Task 5): the planned `role: &str` parameter was dropped because the closures capture the role and the orchestration never reads it | no |
-| `trust::check_entry` | new | `pub(crate) fn check_entry(owner: u32, mode: u32, kind: EntryKind, owners: TrustedOwners) -> Result<(), String>` pure metadata predicate used by `check_parent`/`check_final` | no |
+| `trust::check_entry` | new | `pub(crate) fn check_entry(owner: u32, mode: u32, kind: EntryKind, owners: TrustedOwners) -> Result<(), String>` pure metadata predicate used by `check_parent`/`check_final`. Deviation (Task 1): `EntryKind` became `pub(crate)` because the predicate takes it | no |
+
+**Contract deviations recorded during apply (all internal):**
+
+- `install::existing_registration` seam: implemented as `plan_system_install_with(req, env, lock_dirs, existing, verify)` behind the `plan_system_install` wrapper, which also takes the `verify` seam so tests avoid the real root-only walk.
+- `service_binary::release_unreferenced_copy(native, role, root_run) -> Result<Option<AppliedEffect>>` (new, not in the table): the one cleanup policy shared by install (`Direct`) and uninstall, moved out of `install.rs` in Task 5.
+- `verb::check_effective(loaded, role, verify)` (new, private): pure refusal formatting behind `guard_effective_binary`; prefixes the registered binary path when the trust message does not already name it.
+- `install::plan_user_install(req, env, probe, lock_dirs, system_wide_only)` (new, private) and `policy::ensure_root_run_privilege(root_run, elevated)` (new): the final review found an unprivileged BusyBox `--user` install reaching `materialize` (exit 1); the privilege check now runs during planning with the existing BusyBox text.
+- `Native::output` is compiled on Linux too (it was macOS-only), for the systemd `effective_binary` query.
+- `platform::effective_binary`, `RegistrationSources` and `managed_copy_referenced` exist only on Linux and macOS, as Global Constraints scope the behaviour.
 
 ---
 

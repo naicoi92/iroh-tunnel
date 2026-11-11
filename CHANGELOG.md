@@ -37,8 +37,10 @@ Linux and macOS system service changes:
   user can change (for example `~/.cargo/bin/iroh-tunnel`). They exit with code
   `3`, naming the path, and its owner and mode where known, and issue no start,
   stop or restart. Run `sudo iroh-tunnel <role> service install --system` once
-  to re-register. A refused start or restart leaves a running service running,
-  and starts by the service manager at boot are not checked.
+  to re-register. On BusyBox init hosts, where every service runs as root,
+  `service start` and `service restart` are checked with or without `--system`.
+  A refused start or restart leaves a running service running, and starts by
+  the service manager at boot are not checked.
 
 ### Added
 

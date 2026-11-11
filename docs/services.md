@@ -126,18 +126,19 @@ sudo iroh-tunnel serve service install --system
   service manager will run, read from its loaded definition. If a non-root user
   could change it, or the manager's definition cannot be read, the command
   exits with code `3`, naming the unsafe path and its owner and mode where
-  known (or why the binary could not be determined), and issues no start, stop or restart, so a running service keeps
-  running. Re-run the `service install --system` command the message prints.
+  known (or why the binary could not be determined), and issues no start,
+  stop or restart, so a running service keeps running. Re-run the `service install --system` command the message prints.
   Starts by systemd, launchd or the init script at boot, on failure, or run
   directly are not checked.
 - When install needs a managed copy, it exits with code `3`, naming the
   directory, owner and mode, if an existing managed directory is owned by a
-  non-root user or is group- or world-writable. Install never repairs it; fix it as root, then install again.
+  non-root user or is group- or world-writable. Install never repairs it; fix
+  it as root, then install again.
 - `service uninstall --system` removes the role's copy and its empty directory,
   unless another root-run registration of that role (a unit file, drop-in, init
   script or loaded definition) still names it. If a registration source or the
-  loaded definition cannot be read, the copy is kept. A role installed from a trusted
-  binary has no copy to remove, and uninstall succeeds.
+  loaded definition cannot be read, the copy is kept. A role installed from a
+  trusted binary has no copy to remove, and uninstall succeeds.
 
 ## BusyBox and SysV init
 

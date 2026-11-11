@@ -66,7 +66,8 @@ sudo iroh-tunnel <role> service start --system
 ```
 
 Install registers the binary directly if it passes the root-only check, or
-otherwise a root-owned copy at `/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
+otherwise a root-owned copy at
+`/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
 `/Library/Application Support/iroh-tunnel/bin/<role>/iroh-tunnel` (macOS). See
 [System services](services.md#system-services).
 
