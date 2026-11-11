@@ -25,11 +25,11 @@ Blocked by: 1, 2
 
 Owns: `crates/host/src/service/service_binary.rs` (new), `crates/host/src/service/mod.rs`, `crates/host/src/service/types.rs`, `crates/host/src/service/native.rs`, `src/render.rs`.
 
-- [ ] 3.1 `RunningExecutable` (type only), `ServiceBinary { Direct, Managed { source, copy } }` and `managed_copy_path(role)` with per-OS base and the `test-utils`-only `IROH_TUNNEL_TEST_MANAGED_BIN_DIR` root override that keeps the fixed suffix (design D1, D3, D9)
-- [ ] 3.2 `choose(resolved, running, copy, verify)`: canonicalize, check, `Direct` or `Managed` (design D2); covers "Install from a root-owned location", "Install from a root-owned symbolic link", "Install from a Homebrew prefix", "Install from a cargo bin directory"
-- [ ] 3.3 `materialize(binary, owners)`: `ensure_dir`, publish copy 0755 from `read_from`, verify copy; covers "Re-install refreshes the copy", "Copy per role" (content of the other role unchanged)
-- [ ] 3.4 `release(copy, owners, referenced)`: conservative on reference errors, link-safe removal; covers "Uninstall with a managed copy", "Uninstall without a managed copy"
-- [ ] 3.5 `AppliedEffect::{ManagedBinaryWritten, ManagedBinaryRemoved}` and `ServiceNote::ManagedBinary { role, source, copy }` with its rendered stdout line; covers "Install note"
+- [x] 3.1 `RunningExecutable` (type only), `ServiceBinary { Direct, Managed { source, copy } }` and `managed_copy_path(role)` with per-OS base and the `test-utils`-only `IROH_TUNNEL_TEST_MANAGED_BIN_DIR` root override that keeps the fixed suffix (design D1, D3, D9)
+- [x] 3.2 `choose(resolved, running, copy, verify)`: canonicalize, check, `Direct` or `Managed` (design D2); covers "Install from a root-owned location", "Install from a root-owned symbolic link", "Install from a Homebrew prefix", "Install from a cargo bin directory"
+- [x] 3.3 `materialize(binary, owners)`: `ensure_dir`, publish copy 0755 from `read_from`, verify copy; covers "Re-install refreshes the copy", "Copy per role" (content of the other role unchanged)
+- [x] 3.4 `release(copy, owners, referenced)`: conservative on reference errors, link-safe removal; covers "Uninstall with a managed copy", "Uninstall without a managed copy"
+- [x] 3.5 `AppliedEffect::{ManagedBinaryWritten, ManagedBinaryRemoved}` and `ServiceNote::ManagedBinary { role, source, copy }` with its rendered stdout line; covers "Install note"
 
 ## 4. Install integration
 
