@@ -170,6 +170,11 @@ fn check_effective(
         EffectiveBinary::Binary(path) => match verify(&path) {
             Ok(()) => return Ok(()),
             Err(err) => match err.downcast_ref::<CliError>() {
+                // A final-file refusal already names the path; an ancestor
+                // refusal does not, so name the registered binary then.
+                Some(CliError::Permission(msg)) if msg.contains(&path.display().to_string()) => {
+                    msg.clone()
+                }
                 Some(CliError::Permission(msg)) => format!(
                     "the registered service binary {} is not safe to run as root: {msg}",
                     path.display()
@@ -803,6 +808,37 @@ mod guard_tests {
             Verb::Restart,
             "service::verb::guard_tests::root_run_restart_through_verb_via_is_refused_before_lifecycle",
         );
+    }
+
+    #[test]
+    fn final_file_refusal_names_the_binary_once() {
+        let path = PathBuf::from("/home/u/bin/iroh-tunnel");
+        let (result, started) = guarded(
+            Verb::Start,
+            EffectiveBinary::Binary(path.clone()),
+            &refuse_unsafe,
+        );
+        let msg = permission_text(&result.expect_err("an unsafe binary must refuse"));
+        assert_eq!(msg.matches(&path.display().to_string()).count(), 1, "{msg}");
+        assert!(msg.contains("owner uid 501"), "{msg}");
+        assert!(started.is_empty(), "{started:?}");
+    }
+
+    #[test]
+    fn ancestor_refusal_names_the_binary_once_via_prefix() {
+        let path = PathBuf::from("/home/u/bin/iroh-tunnel");
+        let (result, started) =
+            guarded(Verb::Start, EffectiveBinary::Binary(path.clone()), &|_| {
+                Err(CliError::Permission(
+                    "unsafe directory: /home/u/bin (owner uid 501, mode 0775)".into(),
+                )
+                .into())
+            });
+        let msg = permission_text(&result.expect_err("an unsafe ancestor must refuse"));
+        assert_eq!(msg.matches(&path.display().to_string()).count(), 1, "{msg}");
+        assert!(msg.contains("is not safe to run as root"), "{msg}");
+        assert!(msg.contains("unsafe directory: /home/u/bin"), "{msg}");
+        assert!(started.is_empty(), "{started:?}");
     }
 
     #[test]
