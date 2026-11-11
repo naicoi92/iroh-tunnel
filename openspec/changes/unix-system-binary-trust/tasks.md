@@ -37,10 +37,10 @@ Blocked by: 3
 
 Owns: `crates/host/src/service/install.rs`, `crates/host/src/service/types.rs` (`InstallRequest` field), `crates/host/src/service/fixtures.rs`, `src/cli_service.rs`, `crates/host/examples/manage_service.rs`.
 
-- [ ] 4.1 `InstallRequest.running_executable: RunningExecutable` filled by the CLI (`/proc/self/exe` read source on Linux, `current_exe()` on macOS and elsewhere) and the example
-- [ ] 4.2 Pure `plan_binary(req, scope, system_wide_only, verify)` called last in planning, after every check and prompt; nothing written (design D5); covers "Declined retarget writes no copy", "BusyBox user-scope install from a user-writable binary", "Not on PATH" (user scope unchanged)
-- [ ] 4.3 `install_steps` ordering: materialize → `ManagedBinaryWritten` → note → register `ServiceBinary::path()`; failure keeps the copy in `applied`; covers "Registration write fails after the copy", "Root-run registration from a user-writable binary" (delta)
-- [ ] 4.4 After a successful `Direct` root-run install, `release` the role's copy; covers "Re-install from a trusted location"
+- [x] 4.1 `InstallRequest.running_executable: RunningExecutable` filled by the CLI (`/proc/self/exe` read source on Linux, `current_exe()` on macOS and elsewhere) and the example
+- [x] 4.2 Pure `plan_binary(req, scope, system_wide_only, verify)` called last in planning, after every check and prompt; nothing written (design D5); covers "Declined retarget writes no copy", "BusyBox user-scope install from a user-writable binary", "Not on PATH" (user scope unchanged)
+- [x] 4.3 `install_steps` ordering: materialize → `ManagedBinaryWritten` → note → register `ServiceBinary::path()`; failure keeps the copy in `applied`; covers "Registration write fails after the copy", "Root-run registration from a user-writable binary" (delta)
+- [x] 4.4 After a successful `Direct` root-run install, `release` the role's copy; covers "Re-install from a trusted location"
 
 ## 5. Start, restart and uninstall
 
