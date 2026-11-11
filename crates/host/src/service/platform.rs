@@ -118,10 +118,6 @@ pub(crate) fn root_run(scope: ServiceScope, system_wide_only: bool) -> bool {
 /// What the service manager of this host will run for the role's root-run
 /// service, from the loaded definition.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-)]
 pub(crate) fn effective_binary(native: &mut super::native::Native, role: &str) -> EffectiveBinary {
     #[cfg(target_os = "linux")]
     {
@@ -141,10 +137,6 @@ pub(crate) fn effective_binary(native: &mut super::native::Native, role: &str) -
 /// Files and directories whose text may name a service binary.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-)]
 pub(crate) struct RegistrationSources {
     /// Registration files (unit, init script, plist).
     pub files: Vec<PathBuf>,
@@ -192,6 +184,11 @@ impl RegistrationSources {
             .any(|dir| match std::fs::read_dir(dir) {
                 Ok(entries) => entries
                     .map(|entry| entry.map(|e| e.path()))
+                    .filter(|entry| {
+                        entry
+                            .as_ref()
+                            .map_or(true, |p| p.extension().is_some_and(|x| x == "conf"))
+                    })
                     .any(|entry| entry.map_or(true, |p| file_mentions(&p))),
                 Err(e) => e.kind() != std::io::ErrorKind::NotFound,
             })
@@ -374,6 +371,54 @@ mod tests {
             ));
             let other = EffectiveBinary::Binary(PathBuf::from("/other"));
             assert!(!referenced_by(&other, &sources(tmp.path()), NEEDLE));
+        }
+
+        #[test]
+        fn managed_copy_referenced_by_conf_drop_in_only() {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("unit.d");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("override.conf.bak"), NEEDLE).unwrap();
+            assert!(!referenced_by(
+                &EffectiveBinary::NotLoaded,
+                &sources(tmp.path()),
+                NEEDLE
+            ));
+            std::fs::write(dir.join("override.conf"), NEEDLE).unwrap();
+            assert!(referenced_by(
+                &EffectiveBinary::NotLoaded,
+                &sources(tmp.path()),
+                NEEDLE
+            ));
+        }
+
+        #[test]
+        fn managed_copy_referenced_when_loaded_path_surrounds_the_needle() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loaded = EffectiveBinary::Binary(PathBuf::from(format!("/pre{NEEDLE}-post")));
+            assert!(referenced_by(&loaded, &sources(tmp.path()), NEEDLE));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn managed_copy_referenced_queries_the_host_backend() {
+            use crate::service::native::fake::{output, Events, FakeRunner};
+            use crate::service::native::{Native, OutputMode};
+            let tmp = tempfile::tempdir().unwrap();
+            let events = Events::default();
+            // Answers the systemd query; the BusyBox backend reads no command.
+            let mut fake = FakeRunner::new(
+                &events,
+                vec![output(0, "LoadState=not-found\nExecStart=\n", "")],
+            );
+            let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+            let mut native = Native::new(OutputMode::Inherit, &mut runner);
+            assert!(!managed_copy_referenced(
+                &mut native,
+                "zz-unit-test-role",
+                &sources(tmp.path()),
+                NEEDLE
+            ));
         }
 
         #[test]

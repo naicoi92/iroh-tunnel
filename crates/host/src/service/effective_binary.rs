@@ -38,11 +38,15 @@ pub(crate) fn parse_systemd_show(stdout: &str) -> EffectiveBinary {
         Some(other) => return EffectiveBinary::Unknown(format!("unit load state is {other}")),
         None => return unknown("systemctl reported no load state"),
     }
-    let Some(exec) = value("ExecStart") else {
-        return unknown("systemctl reported no ExecStart");
-    };
-    if exec.matches("{ path=").count() != 1 {
+    let commands: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("ExecStart="))
+        .collect();
+    let [exec] = commands.as_slice() else {
         return unknown("the unit does not have exactly one ExecStart command");
+    };
+    if exec.matches("{ path=").count() != 1 || !exec.trim_end().ends_with('}') {
+        return unknown("the unit does not have exactly one well-formed ExecStart command");
     }
     let Some((_, rest)) = exec.split_once("{ path=") else {
         return unknown("unrecognized ExecStart format");
@@ -54,6 +58,10 @@ pub(crate) fn parse_systemd_show(stdout: &str) -> EffectiveBinary {
 }
 
 /// Parse `launchctl print <target>` output.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS backend parses this")
+)]
 pub(crate) fn parse_launchctl_print(success: bool, stdout: &str, stderr: &str) -> EffectiveBinary {
     if !success {
         return if stderr.contains("Could not find service") {
@@ -160,6 +168,25 @@ mod tests {
     fn systemd_two_commands_are_unknown() {
         assert!(matches!(
             parse_systemd_show(TWO_EXEC),
+            EffectiveBinary::Unknown(_)
+        ));
+    }
+
+    // Source: systemd v255 systemctl-show.c prints each command on its own line.
+    const TWO_EXEC_LINES: &str = "LoadState=loaded\nExecStart={ path=/a ; argv[]=/a ; status=0/0 }\nExecStart={ path=/b ; argv[]=/b ; status=0/0 }\n";
+
+    #[test]
+    fn systemd_commands_on_separate_lines_are_unknown() {
+        assert!(matches!(
+            parse_systemd_show(TWO_EXEC_LINES),
+            EffectiveBinary::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn systemd_truncated_exec_start_is_unknown() {
+        assert!(matches!(
+            parse_systemd_show("LoadState=loaded\nExecStart={ path=/a\n"),
             EffectiveBinary::Unknown(_)
         ));
     }

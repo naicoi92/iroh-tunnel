@@ -196,10 +196,6 @@ pub(crate) fn registration_path(role: &str) -> PathBuf {
 }
 
 /// What the init script will run, read from the installed script.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-)]
 pub(crate) fn effective_binary(role: &str) -> EffectiveBinary {
     parse_busybox_script(existing_registration(role).as_deref())
 }

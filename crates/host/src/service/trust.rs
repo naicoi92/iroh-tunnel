@@ -368,9 +368,10 @@ pub(crate) fn ensure_dir(path: &Path, owners: TrustedOwners, mode: u32) -> Resul
 /// entry that appeared meanwhile is only opened and verified.
 #[cfg_attr(
     not(test),
-    expect(
+    allow(
         dead_code,
-        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+        reason = "only reachable from a not-yet-used entry point; rustc 1.91 reports just the \
+                  root, newer rustc every link (unix-system-binary-trust task 3 removes this)"
     )
 )]
 fn create_child_dir(
@@ -603,9 +604,10 @@ fn unlink_in(dir: &Entry, name: &str) -> Result<bool> {
 /// empty or already gone.
 #[cfg_attr(
     not(test),
-    expect(
+    allow(
         dead_code,
-        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+        reason = "only reachable from a not-yet-used entry point; rustc 1.91 reports just the \
+                  root, newer rustc every link (unix-system-binary-trust task 3 removes this)"
     )
 )]
 fn remove_dir_if_empty(parent: &Entry, name: &OsStr) -> Result<()> {

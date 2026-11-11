@@ -319,10 +319,6 @@ pub(crate) fn stop(
 }
 
 /// What launchd will run for the role's system job, from the loaded job.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-)]
 pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBinary {
     let target = service_target(role, ServiceScope::System);
     match native.output(std::process::Command::new("launchctl").args(["print", &target])) {

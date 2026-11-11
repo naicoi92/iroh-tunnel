@@ -146,10 +146,6 @@ pub(crate) fn registration_path(role: &str, scope: ServiceScope) -> Result<PathB
 }
 
 /// What systemd will run for the role's system unit, from the loaded unit.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by unix-system-binary-trust task 4")
-)]
 pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBinary {
     let unit = unit_name(role);
     let mut cmd = std::process::Command::new("systemctl");
