@@ -29,9 +29,24 @@ Windows service scope changes:
   user task.
 - **Breaking:** on Windows, `--system` without elevation now exits with code
   `3` (permission) with "Run as administrator" guidance, instead of `5`.
+- **Breaking:** on Linux and macOS, `service start --system` and `service
+  restart --system` refuse a legacy system registration whose binary a non-root
+  user can change (for example `~/.cargo/bin/iroh-tunnel`). They exit with code
+  `3`, naming the path, owner and mode, and issue no start, stop or restart. Run
+  `sudo iroh-tunnel <role> service install --system` once to re-register.
+  Services already running keep running, and starts by the service manager at
+  boot are not checked.
 
 ### Added
 
+- **Root-owned service binary on Linux and macOS:** `service install --system`
+  from a binary the root-only check rejects (Homebrew, `cargo install`, a binary
+  under your home) registers a root-owned copy at
+  `/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
+  `/Library/Application Support/iroh-tunnel/bin/<role>/iroh-tunnel` (macOS), and
+  prints a note. Re-run `sudo iroh-tunnel <role> service install --system` after
+  upgrading to refresh it. Uninstall removes the copy. The original binary is
+  never changed.
 - **Windows system services:** `service install --system` registers a
   LocalSystem Windows Service that starts at boot, trusts one pinned user's
   config and state, checks their ownership and access (no junctions or links)
