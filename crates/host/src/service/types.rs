@@ -23,6 +23,24 @@ pub enum AppliedEffect {
     Disabled,
     /// The registration at this path was removed.
     RegistrationRemoved(PathBuf),
+    /// A managed root-owned copy of the service binary was written here.
+    ManagedBinaryWritten(PathBuf),
+    /// The managed copy of the service binary at this path was removed.
+    ManagedBinaryRemoved(PathBuf),
+}
+
+/// The executable that is running this process, which a managed copy of the
+/// service binary is made from.
+///
+/// `display` is what messages name; `read_from` is what is opened to copy
+/// the bytes. On Linux `read_from` is `/proc/self/exe`, so the copy comes
+/// from the executing file even if its path was replaced after exec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningExecutable {
+    /// The path shown to the user (`std::env::current_exe()`).
+    pub display: PathBuf,
+    /// The path the bytes are read from.
+    pub read_from: PathBuf,
 }
 
 /// What a successful operation did and what the native tools printed.

@@ -322,13 +322,6 @@ fn check_final(entry: &Entry, owners: TrustedOwners, kind: EntryKind) -> Result<
 /// # Errors
 ///
 /// [`CliError::Permission`] naming the unsafe path, owner and mode.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
-    )
-)]
 pub(crate) fn verify_binary(path: &Path, owners: TrustedOwners) -> Result<()> {
     walk(path, owners, EntryKind::File).map(drop)
 }
@@ -344,13 +337,6 @@ pub(crate) fn verify_binary(path: &Path, owners: TrustedOwners) -> Result<()> {
 ///
 /// [`CliError::Permission`] when an existing component is unsafe (nothing
 /// below it is created), or the creation error.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
-    )
-)]
 pub(crate) fn ensure_dir(path: &Path, owners: TrustedOwners, mode: u32) -> Result<()> {
     let mut current = root_entry()?;
     for name in components(path)? {
@@ -366,14 +352,6 @@ pub(crate) fn ensure_dir(path: &Path, owners: TrustedOwners, mode: u32) -> Resul
 
 /// `mkdirat(parent, name, mode)` then `fchmod` the new handle to `mode`; an
 /// entry that appeared meanwhile is only opened and verified.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "only reachable from a not-yet-used entry point; rustc 1.91 reports just the \
-                  root, newer rustc every link (unix-system-binary-trust task 3 removes this)"
-    )
-)]
 fn create_child_dir(
     parent: &Entry,
     name: &OsStr,
@@ -556,13 +534,6 @@ pub(crate) fn remove_in(dir: &Path, owners: TrustedOwners, name: &str) -> Result
 ///
 /// [`CliError::Permission`] when `dir` or a directory above it is unsafe, or
 /// the unlink error.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
-    )
-)]
 pub(crate) fn remove_entry(dir: &Path, owners: TrustedOwners, name: &str) -> Result<bool> {
     match std::fs::symlink_metadata(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -602,14 +573,6 @@ fn unlink_in(dir: &Entry, name: &str) -> Result<bool> {
 
 /// `unlinkat(parent, name, AT_REMOVEDIR)`, ignoring a directory that is not
 /// empty or already gone.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "only reachable from a not-yet-used entry point; rustc 1.91 reports just the \
-                  root, newer rustc every link (unix-system-binary-trust task 3 removes this)"
-    )
-)]
 fn remove_dir_if_empty(parent: &Entry, name: &OsStr) -> Result<()> {
     let name_c = CString::new(name.as_bytes())
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
@@ -977,6 +940,11 @@ mod tests {
 
     #[test]
     fn binary_refuses_untrusted_parent_naming_it() {
+        if me() == 0 {
+            // Relies on uid 0 being untrusted, which never holds for root:
+            // `RootAnd(other)` always trusts root. Skipped when run as root.
+            return;
+        }
         let (tmp, file) = binary_fixture();
         let msg = perm_message(verify_binary(&file, TrustedOwners::RootAnd(other())));
         let root = tmp.path().canonicalize().unwrap();
@@ -1037,6 +1005,11 @@ mod tests {
 
     #[test]
     fn binary_sticky_parent_untrusted_child_fails() {
+        if me() == 0 {
+            // Relies on uid 0 being untrusted, which never holds for root:
+            // `RootAnd(other)` always trusts root. Skipped when run as root.
+            return;
+        }
         let (_tmp, file) = sticky_binary();
         assert!(verify_binary(&file, TrustedOwners::RootAnd(other())).is_err());
     }

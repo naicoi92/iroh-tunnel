@@ -103,6 +103,16 @@ pub enum ServiceNote {
         /// The listing text.
         text: String,
     },
+    /// A root-run registration runs a managed root-owned copy of the
+    /// executable, because the resolved one was writable by a non-root user.
+    ManagedBinary {
+        /// Role name.
+        role: String,
+        /// The executable the copy was made from.
+        source: PathBuf,
+        /// The managed copy the registration runs.
+        copy: PathBuf,
+    },
 }
 
 /// The result of one native command.
