@@ -657,8 +657,8 @@ fn reset_binary_state() {
         .unwrap_or_default()
         .trim()
         .to_owned();
-    // Identify the process by pid and start time, so a reused pid is never
-    // killed or waited on.
+    // Identify the process by pid and start time, to reduce the risk of
+    // killing or waiting on a reused pid.
     let started = start_time(&pid);
     let same_alive = || started.is_some() && start_time(&pid) == started && alive(&pid);
     if Path::new(SCRIPT).exists() {
