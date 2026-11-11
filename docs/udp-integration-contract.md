@@ -22,8 +22,9 @@ Single reference for the UDP wire framing and admission-refusal behavior. UDP is
 | Datagram shorter than the 4-byte header | Dropped by the receiver | Counter `malformed` |
 | Identifier not admittable or not live (see above), on either side | Dropped | Counter `unknown_flow` |
 | Upstream send error on Serve | Datagram dropped; the flow stays | Counter `upstream_error` |
-| Datagrams unusable on the connection | **Not implemented as specified.** The spec says the session fails at setup with a clear error. Today each datagram is dropped and counted as `limit_shrink`, so a peer that never supports datagrams drops everything with no error | Counter `limit_shrink`, warning log. Open work: a setup check |
-| Limit shrinks mid-session | Affected datagrams dropped individually | Counter `limit_shrink`, rate-limited log |
+| Datagrams unusable on the connection | Detected right after the handshake on either side; that connection is closed with application code `0x1d47` and reason `udp datagrams unsupported`; other connections and services continue. Access does not redial the service for 30 s and drops client datagrams meanwhile | Error log on both sides; one warning per wait on Access; no counter |
+| Limit becomes unusable mid-session | Affected datagrams dropped individually | Counter `limit_shrink`, rate-limited log |
+| Limit becomes smaller but usable mid-session | A smaller but usable limit makes larger payloads oversized (`oversize`) | Counter `oversize`, rate-limited log |
 | Service or per-peer cap reached | Serve refuses the flow and drops the datagram; no existing flow is evicted | Counter `cap` |
 | Serve refused a flow | Access keeps the flow until idle expiry. Later datagrams of that identifier are dropped as `unknown_flow`, never admitted mid-flow. No refusal signal is sent on the wire | Counter `unknown_flow` |
 | Per-flow queue full (Serve only; Access forwards straight to the connection) | Newest datagram dropped | Counter `queue_full` |
@@ -31,7 +32,7 @@ Single reference for the UDP wire framing and admission-refusal behavior. UDP is
 | Idle expiry | Flow ends; upstream socket stays open as a sink for the quarantine period, then closes | Late replies counted as `quarantine_reply` |
 | Peer lost or reconnect | All flows end with the incarnation; quarantined sockets remain as sinks only | No flow survives |
 | Flow identifiers exhausted | Access evicts the connection; the next datagram dials afresh with an empty flow table, so all flows end | Counter `cap` (shared with the cap rows; the warning log says identifiers ran out) |
-| Connection lost | Access evicts the dead connection on the first send error; the next datagram dials afresh | None; forwarding resumes |
+| Connection lost | Access evicts the dead connection on the first send error; the next datagram dials afresh, except during the 30 s datagram setup-failure back-off | None; forwarding resumes |
 | Bind or descriptor exhaustion | Flow refused, process keeps running | Counter `cap` (shared with the cap rows; the log line names the cause) |
 | Access cap reached | Access drops the new client's datagram before it reaches Serve; known clients and running flows are untouched | Counter `cap` on the Access status |
 

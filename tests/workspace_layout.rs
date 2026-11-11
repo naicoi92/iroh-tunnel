@@ -527,3 +527,62 @@ fn direct_engine_dependencies(manifest: &toml::Table) -> Vec<String> {
     }
     offenders
 }
+
+/// The datagram-disable seam must exist only under `test-utils`: its env var
+/// literal lives in `testing.rs` alone, the reader is cfg-gated, and every
+/// call site in `endpoint/create.rs` sits in a cfg-gated block.
+#[test]
+fn datagram_disable_seam_is_test_utils_only() {
+    const VAR: &str = "IROH_TUNNEL_TEST_DISABLE_DATAGRAMS";
+    const GATE: &str = "#[cfg(feature = \"test-utils\")]";
+
+    let holders: Vec<String> = engine_files()
+        .iter()
+        .filter(|p| read_source(p).contains(VAR))
+        .map(|p| file_name(p).to_string())
+        .collect();
+    assert_eq!(
+        holders,
+        ["testing.rs"],
+        "{VAR} must live only in testing.rs"
+    );
+
+    let testing = read_source(&Path::new(ROOT).join("crates/engine/src/testing.rs"));
+    let lines: Vec<&str> = testing.lines().collect();
+    let decl = lines
+        .iter()
+        .position(|l| l.contains("fn datagrams_disabled"))
+        .expect("datagrams_disabled missing");
+    assert_eq!(
+        lines[decl - 1].trim(),
+        GATE,
+        "datagrams_disabled must be cfg(test-utils)"
+    );
+
+    let create = read_source(&Path::new(ROOT).join("crates/engine/src/endpoint/create.rs"));
+    let lines: Vec<&str> = create.lines().collect();
+    let calls: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].contains("datagrams_disabled"))
+        .collect();
+    assert!(!calls.is_empty(), "transport_config must call the seam");
+    for call in calls {
+        // Walk up to the nearest line with smaller indent than the call's
+        // enclosing statement; that opener must be the gated item itself or
+        // directly follow the gate attribute.
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let stmt_indent = indent(lines[call]);
+        let opener = (0..call)
+            .rev()
+            .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) < stmt_indent)
+            .unwrap_or_else(|| panic!("no enclosing block for line {}", call + 1));
+        let gated = |i: usize| i > 0 && lines[i - 1].trim() == GATE;
+        // `#[cfg] if datagrams_disabled() {` (call on the gated line) or a
+        // gated `{` block containing the call.
+        let on_gated_stmt = gated(call);
+        assert!(
+            on_gated_stmt || gated(opener),
+            "datagrams_disabled call at create.rs:{} is not test-utils gated",
+            call + 1
+        );
+    }
+}

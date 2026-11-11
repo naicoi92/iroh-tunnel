@@ -30,3 +30,12 @@ pub async fn hang_point() {
 /// Production build: no hang seam.
 #[cfg(not(feature = "test-utils"))]
 pub async fn hang_point() {}
+
+/// True when `IROH_TUNNEL_TEST_DISABLE_DATAGRAMS=1`: the endpoint then
+/// refuses to receive QUIC datagrams, so the peer sees no datagram support.
+///
+/// Test seam: never in production builds.
+#[cfg(feature = "test-utils")]
+pub(crate) fn datagrams_disabled() -> bool {
+    std::env::var("IROH_TUNNEL_TEST_DISABLE_DATAGRAMS").is_ok_and(|v| v == "1")
+}

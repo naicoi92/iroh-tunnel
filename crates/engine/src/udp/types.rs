@@ -39,7 +39,8 @@ pub enum DropReason {
     Cap,
     /// The flow's queue was full.
     QueueFull,
-    /// Datagrams became unusable on the connection.
+    /// Datagrams dropped because the datagram limit
+    /// became unusable during the session incarnation.
     LimitShrink,
     /// A late reply reached a quarantined socket.
     QuarantineReply,
