@@ -373,15 +373,11 @@ fn create_child_dir(
     let child_path = parent.path.join(name);
     let name_c = CString::new(name.as_bytes())
         .with_context(|| format!("{} contains a NUL byte", child_path.display()))?;
+    // Created owner-only; the exact `mode` is applied below with `fchmod`, so
+    // the directory is never wider than intended, whatever the umask.
     // SAFETY: `parent.file` is an open, verified directory descriptor and
     // `name_c` is NUL-terminated; mkdirat(2) does not retain either.
-    let made = unsafe {
-        libc::mkdirat(
-            parent.file.as_raw_fd(),
-            name_c.as_ptr(),
-            mode as libc::mode_t,
-        )
-    };
+    let made = unsafe { libc::mkdirat(parent.file.as_raw_fd(), name_c.as_ptr(), 0o700) };
     if made != 0 {
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::AlreadyExists {
