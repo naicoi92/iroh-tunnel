@@ -17,7 +17,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::types::RunningExecutable;
+use super::native::Native;
+use super::types::{AppliedEffect, RunningExecutable};
 
 /// The binary a root-run registration will execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +192,36 @@ mod unix {
             )),
         }
     }
+}
+
+/// Remove `role`'s managed copy after a root-run registration stopped
+/// naming it, unless any registration source or the loaded definition still
+/// does. A registration that is not root-run never touches the copy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn release_unreferenced_copy(
+    native: &mut Native,
+    role: &str,
+    root_run: bool,
+) -> anyhow::Result<Option<AppliedEffect>> {
+    if !root_run {
+        return Ok(None);
+    }
+    let sources = super::platform::RegistrationSources::for_role(role);
+    release(
+        &managed_copy_path(role),
+        super::trust::TrustedOwners::RootOnly,
+        || super::platform::managed_copy_referenced(native, role, &sources, &managed_needle(role)),
+    )
+}
+
+/// No managed copy exists off Linux and macOS.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn release_unreferenced_copy(
+    _native: &mut Native,
+    _role: &str,
+    _root_run: bool,
+) -> anyhow::Result<Option<AppliedEffect>> {
+    Ok(None)
 }
 
 #[cfg(test)]

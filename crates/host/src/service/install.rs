@@ -96,7 +96,7 @@ pub(crate) fn install_via(
                     plan.pin.as_ref(),
                 )
             },
-            |native| release_unreferenced_copy(native, role, root_run),
+            |native| super::service_binary::release_unreferenced_copy(native, role, root_run),
         )
     })?;
     Ok(InstallOutcome::Installed(report))
@@ -181,38 +181,6 @@ fn materialize_root_only(binary: &ServiceBinary) -> Result<Option<AppliedEffect>
 /// No managed copy exists off Linux and macOS.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn materialize_root_only(_binary: &ServiceBinary) -> Result<Option<AppliedEffect>> {
-    Ok(None)
-}
-
-/// Remove `role`'s managed copy after a root-run registration stopped
-/// naming it, unless any registration source or the loaded definition still
-/// does. A registration that is not root-run never touches the copy.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn release_unreferenced_copy(
-    native: &mut Native,
-    role: &str,
-    root_run: bool,
-) -> Result<Option<AppliedEffect>> {
-    use super::service_binary::{managed_copy_path, managed_needle, release};
-
-    if !root_run {
-        return Ok(None);
-    }
-    let sources = platform::RegistrationSources::for_role(role);
-    release(
-        &managed_copy_path(role),
-        super::trust::TrustedOwners::RootOnly,
-        || platform::managed_copy_referenced(native, role, &sources, &managed_needle(role)),
-    )
-}
-
-/// No managed copy exists off Linux and macOS.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn release_unreferenced_copy(
-    _native: &mut Native,
-    _role: &str,
-    _root_run: bool,
-) -> Result<Option<AppliedEffect>> {
     Ok(None)
 }
 
