@@ -207,6 +207,19 @@ fn components(path: &Path) -> Result<Vec<&OsStr>> {
             path.display()
         )));
     }
+    // `Path::components` silently drops interior `.`, so check the raw bytes.
+    let dotted = path
+        .as_os_str()
+        .as_bytes()
+        .split(|byte| *byte == b'/')
+        .any(|segment| segment == b"." || segment == b"..");
+    if dotted {
+        return Err(refuse(format!(
+            "{} is not canonical (contains `.` or `..`); re-run the install to pin the \
+             resolved path",
+            path.display()
+        )));
+    }
     path.components()
         .filter(|component| !matches!(component, Component::RootDir))
         .map(|component| match component {
@@ -1026,6 +1039,55 @@ mod tests {
         assert!(verify_binary(&file, TrustedOwners::RootAnd(other())).is_err());
     }
 
+    #[test]
+    fn binary_refuses_interior_dot_segments() {
+        let (tmp, _file) = binary_fixture();
+        let root = tmp.path().canonicalize().unwrap();
+        for text in [
+            format!("{}/bin/./iroh-tunnel", root.display()),
+            format!("{}/./bin/iroh-tunnel", root.display()),
+            format!("{}/bin/iroh-tunnel/.", root.display()),
+        ] {
+            let msg = perm_message(verify_binary(Path::new(&text), mine()));
+            assert!(msg.contains("not canonical"), "{msg}");
+            assert!(msg.contains(&text), "{msg}");
+        }
+    }
+
+    fn entry_of(path: &Path, owner: u32, mode: u32) -> Entry {
+        let mut entry = Entry::new(File::open(path).unwrap(), path.to_path_buf()).unwrap();
+        entry.owner = owner;
+        entry.mode = mode;
+        entry
+    }
+
+    #[test]
+    fn check_parent_sticky_rule_depends_only_on_the_child_owner() {
+        let (tmp, file) = binary_fixture();
+        let dir = file.parent().unwrap();
+        let _ = tmp;
+        let parent = entry_of(dir, me(), 0o040_000 | 0o1777);
+        let trusted_child = entry_of(&file, me(), 0o100_755);
+        check_parent(&parent, &trusted_child, mine()).unwrap();
+
+        let untrusted_child = entry_of(&file, other(), 0o100_755);
+        let msg = check_parent(&parent, &untrusted_child, mine())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains(dir.to_str().unwrap()), "{msg}");
+        assert!(msg.contains("writable by group or others"), "{msg}");
+    }
+
+    #[test]
+    fn ensure_dir_creates_nothing_under_a_sticky_world_writable_parent() {
+        let (tmp, _file) = binary_fixture();
+        let sticky = tmp.path().canonicalize().unwrap().join("sticky");
+        std::fs::create_dir(&sticky).unwrap();
+        mode(&sticky, 0o1777);
+        let msg = perm_message(ensure_dir(&sticky.join("new/inner"), mine(), 0o755));
+        assert!(msg.contains(sticky.to_str().unwrap()), "{msg}");
+        assert_eq!(std::fs::read_dir(&sticky).unwrap().count(), 0);
+    }
     #[test]
     fn check_entry_refuses_other_owner() {
         let msg = check_entry(other(), 0o040_755, EntryKind::Dir, mine()).unwrap_err();
