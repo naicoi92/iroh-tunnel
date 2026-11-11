@@ -37,6 +37,25 @@ pub(crate) fn ensure_privilege(
     Err(CliError::Permission(privilege_text(cfg!(windows), rerun)).into())
 }
 
+/// Refuse a root-run registration without privilege. Covers BusyBox hosts,
+/// where even `--user` manages the one system-wide `/etc/init.d` script, so a
+/// user-scope request is never silently turned into a system install.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] with rerun guidance; nothing has been changed.
+pub(crate) fn ensure_root_run_privilege(root_run: bool, elevated: bool) -> Result<()> {
+    if !root_run || elevated {
+        return Ok(());
+    }
+    Err(CliError::Permission(
+        "this host runs BusyBox init, which has no per-user services; managing the \
+         /etc/init.d service requires root. Nothing was changed. Re-run with sudo."
+            .into(),
+    )
+    .into())
+}
+
 /// Guidance text for a refused system-scope operation (pure; platform passed in).
 fn privilege_text(windows: bool, argv: &[String]) -> String {
     if windows {
@@ -119,6 +138,23 @@ mod tests {
     fn privilege_is_not_required_for_user_scope_or_when_elevated() {
         assert!(ensure_privilege(ServiceScope::User, false, &[]).is_ok());
         assert!(ensure_privilege(ServiceScope::System, true, &[]).is_ok());
+    }
+
+    #[test]
+    fn root_run_without_privilege_is_a_permission_error_with_sudo_guidance() {
+        let err = ensure_root_run_privilege(true, false).unwrap_err();
+        let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("expected Permission, got {err:?}");
+        };
+        assert!(msg.contains("Re-run with sudo"), "{msg}");
+        assert!(msg.contains("Nothing was changed"), "{msg}");
+    }
+
+    #[test]
+    fn root_run_privilege_is_not_required_when_elevated_or_not_root_run() {
+        assert!(ensure_root_run_privilege(true, true).is_ok());
+        assert!(ensure_root_run_privilege(false, false).is_ok());
+        assert!(ensure_root_run_privilege(false, true).is_ok());
     }
 
     fn argv() -> Vec<String> {

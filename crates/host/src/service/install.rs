@@ -16,7 +16,7 @@ use super::native::OutputMode;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
 use super::pin::Pin;
 use super::platform;
-use super::policy::{ensure_privilege, ensure_supported};
+use super::policy::{ensure_privilege, ensure_root_run_privilege, ensure_supported};
 use super::service_binary::ServiceBinary;
 use super::types::{
     AppliedEffect, Environment, InstallNeed, InstallOutcome, InstallRequest, ScopeDecision,
@@ -308,6 +308,22 @@ fn plan_install(
     if scope == ServiceScope::System {
         return plan_system_install(req, env, probe, lock_dirs);
     }
+    plan_user_install(req, env, probe, lock_dirs, platform::system_wide_only())
+}
+
+/// The user-scope half of [`plan_install`]. `system_wide_only` hosts (BusyBox)
+/// register a root-run service even for `--user`, so an unprivileged caller is
+/// refused first, before any path, trust or binary decision.
+#[cfg_attr(not(windows), allow(unused_variables))] // the probe is Windows-only
+fn plan_user_install(
+    req: &InstallRequest,
+    env: Environment,
+    probe: &mut OtherScopeProbe<'_>,
+    lock_dirs: LockResolver<'_>,
+    system_wide_only: bool,
+) -> Result<Planned> {
+    let (role, scope) = (req.role, ServiceScope::User);
+    ensure_root_run_privilege(platform::root_run(scope, system_wide_only), env.elevated)?;
     // Persist absolute paths: the installed service runs with a different CWD
     // and home, so nothing may stay relative (SM-02).
     let config = absolutize_config_path(&crate::config::resolve_config_path(
@@ -319,11 +335,11 @@ fn plan_install(
     ensure_privilege(scope, env.elevated, &rerun)?;
     #[cfg(windows)]
     cross_scope_conflict(scope, probe(scope, role)?, role)?;
-    let registering = effective_scope_for(scope, super::platform::system_wide_only());
+    let registering = effective_scope_for(scope, system_wide_only);
     ensure_no_cross_scope_conflict(role, registering, None, lock_dirs)?;
     check_installable_config(role, &config)?;
     // Last: a BusyBox registration is root-run even for `--user`.
-    let binary = plan_binary(req, scope, platform::system_wide_only(), &verify_root_only)?;
+    let binary = plan_binary(req, scope, system_wide_only, &verify_root_only)?;
     Ok(Planned::Ready(InstallPlan {
         scope,
         config,
@@ -1378,6 +1394,29 @@ mod unix_binary_tests {
         })
         .unwrap();
         assert_eq!(planned, ServiceBinary::Direct(canonical));
+    }
+
+    #[test]
+    fn unprivileged_root_run_user_install_is_refused_before_any_decision() {
+        let (_dir, req) = request_with_binary(ServiceScope::User);
+        let env = Environment {
+            elevated: false,
+            can_answer: false,
+        };
+        let err = plan_user_install(
+            &req,
+            env,
+            &mut |_, _| panic!("no probe before the privilege refusal"),
+            &|_| panic!("no lock directories before the privilege refusal"),
+            true,
+        )
+        .err()
+        .expect("must be refused");
+        let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("expected Permission, got {err:?}");
+        };
+        assert!(msg.contains("Re-run with sudo"), "{msg}");
+        assert!(msg.contains("Nothing was changed"), "{msg}");
     }
 
     #[test]

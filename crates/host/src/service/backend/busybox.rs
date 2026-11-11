@@ -26,7 +26,6 @@ use super::super::pin::Pin;
 use super::super::registration::write_registration;
 use super::super::types::AppliedEffect;
 use super::super::types::ServiceScope;
-use crate::error::CliError;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -150,16 +149,12 @@ fn set_executable(path: &Path) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`CliError::Permission`] with rerun guidance.
+/// [`crate::error::CliError::Permission`] with rerun guidance.
 fn require_root() -> Result<()> {
-    if !super::super::is_elevated::is_elevated() {
-        return Err(CliError::Permission(
-            "this host runs BusyBox init, which has no per-user services; managing the \
-             /etc/init.d service requires root. Nothing was changed. Re-run with sudo."
-                .into(),
-        )
-        .into());
-    }
+    super::super::policy::ensure_root_run_privilege(
+        true,
+        super::super::is_elevated::is_elevated(),
+    )?;
     Ok(())
 }
 
