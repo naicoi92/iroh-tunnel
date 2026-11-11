@@ -22,7 +22,7 @@ use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -45,8 +45,93 @@ fn refuse(msg: String) -> anyhow::Error {
     CliError::Permission(msg).into()
 }
 
-fn trusted(owner: u32, trusted_uid: u32) -> bool {
-    owner == 0 || owner == trusted_uid
+/// The principals whose ownership the trust walk accepts.
+///
+/// The service binary is checked with [`TrustedOwners::RootOnly`]: the uid
+/// pinned for the config must never be able to change what root executes.
+/// The user's config, state directory and status files use
+/// [`TrustedOwners::RootAnd`] with that pinned uid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrustedOwners {
+    /// Only root (uid 0).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+        )
+    )]
+    RootOnly,
+    /// Root and the given uid.
+    RootAnd(u32),
+}
+
+impl TrustedOwners {
+    /// Whether a file or directory owned by `owner` is trusted.
+    pub(crate) fn trusts(self, owner: u32) -> bool {
+        owner == 0 || matches!(self, Self::RootAnd(uid) if uid == owner)
+    }
+
+    fn describe(self) -> String {
+        match self {
+            Self::RootOnly => "root".to_owned(),
+            Self::RootAnd(uid) => format!("root or the installing user (uid {uid})"),
+        }
+    }
+}
+
+/// The type a checked path must have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    File,
+    Dir,
+}
+
+impl EntryKind {
+    fn type_bits(self) -> u32 {
+        match self {
+            Self::File => S_IFREG,
+            Self::Dir => S_IFDIR,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Dir => "directory",
+        }
+    }
+}
+
+fn owner_and_mode(owner: u32, mode: u32) -> String {
+    format!("(owner uid {owner}, mode {:04o})", mode & 0o7777)
+}
+
+/// The policy for the final entry of a checked path, from its metadata only:
+/// it has the expected `kind`, a trusted owner and no group or other write
+/// bit. The reason names the owner and mode; the caller adds the path.
+///
+/// # Errors
+///
+/// The refusal reason, naming the owner uid and mode.
+pub(crate) fn check_entry(
+    owner: u32,
+    mode: u32,
+    kind: EntryKind,
+    owners: TrustedOwners,
+) -> std::result::Result<(), String> {
+    let described = owner_and_mode(owner, mode);
+    if mode & S_IFMT != kind.type_bits() {
+        return Err(format!("{described} is not a regular {}", kind.noun()));
+    }
+    if !owners.trusts(owner) || mode & WRITABLE_BY_OTHERS != 0 {
+        return Err(format!(
+            "{described} must be owned by {} and not writable by group or others; nothing was \
+             changed. Fix it (e.g. `chmod go-w`) and re-run",
+            owners.describe()
+        ));
+    }
+    Ok(())
 }
 
 /// `open("/")` as a directory handle.
@@ -114,57 +199,80 @@ impl Entry {
     }
 }
 
-/// Descend from `/` to `path`, verifying every handle, and return the handle
-/// of the final component.
-fn walk(path: &Path, trusted_uid: u32, want_dir: bool) -> Result<Entry> {
+/// The `Normal` components of an absolute, canonical `path`.
+fn components(path: &Path) -> Result<Vec<&OsStr>> {
     if !path.is_absolute() {
         return Err(refuse(format!(
             "{} is not absolute; the service pins an absolute path",
             path.display()
         )));
     }
-    let mut names = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => names.push(name),
-            _ => {
-                return Err(refuse(format!(
-                    "{} is not canonical (contains `.` or `..`); re-run the install to pin the \
-                     resolved path",
-                    path.display()
-                )))
-            }
-        }
-    }
-    let mut current = Entry::new(open_root()?, PathBuf::from("/"))?;
+    path.components()
+        .filter(|component| !matches!(component, Component::RootDir))
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name),
+            _ => Err(refuse(format!(
+                "{} is not canonical (contains `.` or `..`); re-run the install to pin the \
+                 resolved path",
+                path.display()
+            ))),
+        })
+        .collect()
+}
+
+fn root_entry() -> Result<Entry> {
+    Entry::new(open_root()?, PathBuf::from("/"))
+}
+
+/// Open `parent/name` without following a link and check that `parent` keeps
+/// it safe.
+fn descend(parent: &Entry, name: &OsStr, directory: bool, owners: TrustedOwners) -> Result<Entry> {
+    let opened = open_child(&parent.file, name, directory);
+    adopt_child(parent, name, directory, opened, owners)
+}
+
+/// Turn the result of opening `parent/name` into a verified child entry.
+fn adopt_child(
+    parent: &Entry,
+    name: &OsStr,
+    directory: bool,
+    opened: std::io::Result<File>,
+    owners: TrustedOwners,
+) -> Result<Entry> {
+    let child_path = parent.path.join(name);
+    let file = opened.map_err(|e| {
+        refuse(format!(
+            "{} is not a plain {} reachable without following a symlink ({e}); refusing to \
+             use it as root. Replace the link with the real path and re-run the install",
+            child_path.display(),
+            if directory { "directory" } else { "file" },
+        ))
+    })?;
+    let child = Entry::new(file, child_path)?;
+    check_parent(parent, &child, owners)?;
+    Ok(child)
+}
+
+/// Descend from `/` to `path`, verifying every handle, and return the handle
+/// of the final component.
+fn walk(path: &Path, owners: TrustedOwners, kind: EntryKind) -> Result<Entry> {
+    let names = components(path)?;
+    let mut current = root_entry()?;
     let last = names.len().saturating_sub(1);
     for (index, name) in names.iter().enumerate() {
-        let is_last = index == last;
-        let directory = !is_last || want_dir;
-        let child_path = current.path.join(name);
-        let file = open_child(&current.file, name, directory).map_err(|e| {
-            refuse(format!(
-                "{} is not a plain {} reachable without following a symlink ({e}); refusing to \
-                 use it as root. Replace the link with the real path and re-run the install",
-                child_path.display(),
-                if directory { "directory" } else { "file" },
-            ))
-        })?;
-        let child = Entry::new(file, child_path)?;
-        check_parent(&current, &child, trusted_uid)?;
-        current = child;
+        let directory = index != last || kind == EntryKind::Dir;
+        current = descend(&current, name, directory, owners)?;
     }
-    check_final(&current, trusted_uid, want_dir)?;
+    check_final(&current, owners, kind)?;
     Ok(current)
 }
 
 /// The directory above `child` must not let an untrusted principal replace or
 /// alter `child`.
-fn check_parent(parent: &Entry, child: &Entry, trusted_uid: u32) -> Result<()> {
-    let bad_owner = !trusted(parent.owner, trusted_uid);
+fn check_parent(parent: &Entry, child: &Entry, owners: TrustedOwners) -> Result<()> {
+    let bad_owner = !owners.trusts(parent.owner);
     let writable = parent.mode & WRITABLE_BY_OTHERS != 0;
-    let sticky_protects = parent.mode & S_ISVTX != 0 && trusted(child.owner, trusted_uid);
+    let sticky_protects = parent.mode & S_ISVTX != 0 && owners.trusts(child.owner);
     if bad_owner || (writable && !sticky_protects) {
         let why = if bad_owner {
             "is owned by an untrusted user"
@@ -173,34 +281,120 @@ fn check_parent(parent: &Entry, child: &Entry, trusted_uid: u32) -> Result<()> {
         };
         return Err(refuse(format!(
             "unsafe directory {} {why}, so another user could replace {} before the service \
-             (root) reads it. Make it owned by root or the installing user and not group- or \
-             world-writable (e.g. `chmod go-w`); nothing was changed",
+             (root) uses it. Make it owned by {} and not group- or world-writable (e.g. \
+             `chmod go-w`); nothing was changed",
             parent.describe(),
-            child.path.display()
+            child.path.display(),
+            owners.describe()
         )));
     }
     Ok(())
 }
 
-fn check_final(entry: &Entry, trusted_uid: u32, want_dir: bool) -> Result<()> {
-    let kind = entry.mode & S_IFMT;
-    if (want_dir && kind != S_IFDIR) || (!want_dir && kind != S_IFREG) {
-        return Err(refuse(format!(
-            "{} is not a regular {}",
-            entry.describe(),
-            if want_dir { "directory" } else { "file" }
-        )));
+fn check_final(entry: &Entry, owners: TrustedOwners, kind: EntryKind) -> Result<()> {
+    check_entry(entry.owner, entry.mode, kind, owners).map_err(|why| {
+        refuse(format!(
+            "unsafe {}: {} {why}",
+            kind.noun(),
+            entry.path.display()
+        ))
+    })
+}
+
+/// Verify that `path` is a regular file only `owners` can change: the file
+/// and every directory above it, reached without following a link (the
+/// sticky-directory rule applies). Production passes
+/// [`TrustedOwners::RootOnly`] for the binary a root service runs.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the unsafe path, owner and mode.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+    )
+)]
+pub(crate) fn verify_binary(path: &Path, owners: TrustedOwners) -> Result<()> {
+    walk(path, owners, EntryKind::File).map(drop)
+}
+
+/// Make sure the directory `path` exists and only `owners` can change it.
+///
+/// Existing components are verified and never modified. Each missing one is
+/// created with `mkdirat` through its verified parent handle, opened without
+/// following a link and `fchmod`ed to `mode` through that handle, so the
+/// umask cannot change it and no pathname `chmod` is issued.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] when an existing component is unsafe (nothing
+/// below it is created), or the creation error.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+    )
+)]
+pub(crate) fn ensure_dir(path: &Path, owners: TrustedOwners, mode: u32) -> Result<()> {
+    let mut current = root_entry()?;
+    for name in components(path)? {
+        current = match open_child(&current.file, name, true) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                create_child_dir(&current, name, owners, mode)?
+            }
+            opened => adopt_child(&current, name, true, opened, owners)?,
+        };
     }
-    if !trusted(entry.owner, trusted_uid) || entry.mode & WRITABLE_BY_OTHERS != 0 {
-        return Err(refuse(format!(
-            "unsafe {}: {} must be owned by root or the installing user (uid {trusted_uid}) and \
-             not writable by group or others; nothing was changed. Fix it (e.g. `chmod go-w`) \
-             and re-run",
-            if want_dir { "directory" } else { "file" },
-            entry.describe()
-        )));
+    check_final(&current, owners, EntryKind::Dir)
+}
+
+/// `mkdirat(parent, name, mode)` then `fchmod` the new handle to `mode`; an
+/// entry that appeared meanwhile is only opened and verified.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+    )
+)]
+fn create_child_dir(
+    parent: &Entry,
+    name: &OsStr,
+    owners: TrustedOwners,
+    mode: u32,
+) -> Result<Entry> {
+    // The new child does not exist yet, so `check_parent` cannot vouch for
+    // `parent`: it must itself pass the policy before anything is created in
+    // it (a sticky world-writable directory is not good enough here).
+    check_final(parent, owners, EntryKind::Dir)?;
+    let child_path = parent.path.join(name);
+    let name_c = CString::new(name.as_bytes())
+        .with_context(|| format!("{} contains a NUL byte", child_path.display()))?;
+    // SAFETY: `parent.file` is an open, verified directory descriptor and
+    // `name_c` is NUL-terminated; mkdirat(2) does not retain either.
+    let made = unsafe {
+        libc::mkdirat(
+            parent.file.as_raw_fd(),
+            name_c.as_ptr(),
+            mode as libc::mode_t,
+        )
+    };
+    if made != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return descend(parent, name, true, owners);
+        }
+        return Err(error).with_context(|| format!("cannot create {}", child_path.display()));
     }
-    Ok(())
+    let child = descend(parent, name, true, owners)?;
+    child
+        .file
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("cannot set the mode of {}", child_path.display()))?;
+    Entry::new(child.file, child.path)
 }
 
 /// Verify a directory (e.g. the state directory) the root service writes in.
@@ -217,7 +411,7 @@ pub fn verify_dir(path: &Path, trusted_uid: u32) -> Result<()> {
             path.display()
         )));
     }
-    walk(path, trusted_uid, true).map(drop)
+    walk(path, TrustedOwners::RootAnd(trusted_uid), EntryKind::Dir).map(drop)
 }
 
 /// Verify `path` and return its text read from the verified handle.
@@ -226,7 +420,7 @@ pub fn verify_dir(path: &Path, trusted_uid: u32) -> Result<()> {
 ///
 /// [`CliError::Permission`] when the path or any parent is unsafe.
 pub fn read_verified(path: &Path, trusted_uid: u32) -> Result<String> {
-    let mut entry = walk(path, trusted_uid, false)?;
+    let mut entry = walk(path, TrustedOwners::RootAnd(trusted_uid), EntryKind::File)?;
     let mut text = String::new();
     entry
         .file
@@ -251,24 +445,28 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
     })
 }
 
-/// Atomically publish `contents` as `dir/name` through a freshly verified
-/// directory handle: the temp file is created `O_EXCL|O_NOFOLLOW` and renamed
-/// with `renameat`, so a link planted by the directory's owner is never
-/// followed by root. The directory is re-verified on every call, which closes
-/// the swap-after-start race for the status snapshot (SM-04).
+/// Atomically publish `dir/name` with the bytes of `source` and exactly
+/// `mode`, through a freshly verified directory handle: the temp file is
+/// created `O_EXCL|O_NOFOLLOW`, streamed, `fchmod`ed (so the umask cannot
+/// change the mode), synced and renamed with `renameat`, so a link planted
+/// in the directory is never followed by root. The directory is re-verified
+/// on every call, which closes the swap-after-start race for the status
+/// snapshot (SM-04). On any failure the temp file is unlinked and an
+/// existing `dir/name` is left untouched.
 ///
 /// # Errors
 ///
-/// [`CliError::Permission`] when the directory is no longer safe.
+/// [`CliError::Permission`] when the directory is no longer safe, or the
+/// I/O error of creating, writing or renaming the file.
 pub(crate) fn publish(
     dir: &Path,
-    trusted_uid: u32,
+    owners: TrustedOwners,
     name: &str,
     temp: &str,
-    contents: &[u8],
+    source: &mut dyn Read,
+    mode: u32,
 ) -> Result<()> {
-    use std::io::Write;
-    let dir_entry = walk(dir, trusted_uid, true)?;
+    let dir_entry = walk(dir, owners, EntryKind::Dir)?;
     let fd = dir_entry.file.as_raw_fd();
     let temp_c = cstring(temp)?;
     let name_c = cstring(name)?;
@@ -279,7 +477,7 @@ pub(crate) fn publish(
             fd,
             temp_c.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o644 as libc::c_uint,
+            0o600 as libc::c_uint,
         )
     };
     if raw < 0 {
@@ -288,21 +486,19 @@ pub(crate) fn publish(
     }
     // SAFETY: `raw` is a freshly opened descriptor nobody else owns.
     let mut file = unsafe { File::from_raw_fd(raw) };
-    let written = file
-        .write_all(contents)
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("failed to write {temp} in {}", dir.display()));
-    let renamed = written.and_then(|()| {
-        // SAFETY: `fd` is the verified directory handle kept open by
-        // `dir_entry` for this whole function, and both names are
-        // NUL-terminated `CString`s that outlive the call.
-        if unsafe { libc::renameat(fd, temp_c.as_ptr(), fd, name_c.as_ptr()) } == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-                .with_context(|| format!("failed to finalize {name} in {}", dir.display()))
-        }
-    });
+    let renamed = fill(&mut file, source, mode)
+        .with_context(|| format!("failed to write {temp} in {}", dir.display()))
+        .and_then(|()| {
+            // SAFETY: `fd` is the verified directory handle kept open by
+            // `dir_entry` for this whole function, and both names are
+            // NUL-terminated `CString`s that outlive the call.
+            if unsafe { libc::renameat(fd, temp_c.as_ptr(), fd, name_c.as_ptr()) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("failed to finalize {name} in {}", dir.display()))
+            }
+        });
     if renamed.is_err() {
         // SAFETY: `fd` is still the open verified directory handle and
         // `temp_c` a live NUL-terminated name; this removes only our own temp
@@ -312,10 +508,17 @@ pub(crate) fn publish(
     renamed
 }
 
+/// Stream `source` into `file`, set its exact `mode` and sync it.
+fn fill(file: &mut File, source: &mut dyn Read, mode: u32) -> std::io::Result<()> {
+    std::io::copy(source, file)?;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    file.sync_all()
+}
+
 /// Read `dir/name` through a verified directory handle without following a
 /// link; `None` when absent or unreadable.
-pub(crate) fn read_in(dir: &Path, trusted_uid: u32, name: &str) -> Option<String> {
-    let dir_entry = walk(dir, trusted_uid, true)
+pub(crate) fn read_in(dir: &Path, owners: TrustedOwners, name: &str) -> Option<String> {
+    let dir_entry = walk(dir, owners, EntryKind::Dir)
         .inspect_err(|e| tracing::debug!("not reading {name}: {e:#}"))
         .ok()?;
     let mut file = open_child(&dir_entry.file, OsStr::new(name), false).ok()?;
@@ -324,20 +527,91 @@ pub(crate) fn read_in(dir: &Path, trusted_uid: u32, name: &str) -> Option<String
     Some(text)
 }
 
-/// Remove `dir/name` through a verified directory handle (never follows a link).
-pub(crate) fn remove_in(dir: &Path, trusted_uid: u32, name: &str) -> Result<()> {
-    let dir_entry = walk(dir, trusted_uid, true)?;
+/// Remove `dir/name` through a verified directory handle (never follows a
+/// link); an absent name is fine.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] when the directory is unsafe, or the unlink error.
+pub(crate) fn remove_in(dir: &Path, owners: TrustedOwners, name: &str) -> Result<()> {
+    let dir_entry = walk(dir, owners, EntryKind::Dir)?;
+    unlink_in(&dir_entry, name).map(drop)
+}
+
+/// Remove `dir/name` (a link is unlinked itself, never followed), then
+/// remove `dir` when it is left empty. Absence is checked without following
+/// a link: a missing `dir` or `name` is reported as `false`.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] when `dir` or a directory above it is unsafe, or
+/// the unlink error.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+    )
+)]
+pub(crate) fn remove_entry(dir: &Path, owners: TrustedOwners, name: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("cannot inspect {}", dir.display())),
+        Ok(_) => {}
+    }
+    let (Some(parent), Some(dir_name)) = (dir.parent(), dir.file_name()) else {
+        return Err(refuse(format!(
+            "{} has no parent directory; refusing to remove from it",
+            dir.display()
+        )));
+    };
+    let parent_entry = walk(parent, owners, EntryKind::Dir)?;
+    let dir_entry = descend(&parent_entry, dir_name, true, owners)?;
+    check_final(&dir_entry, owners, EntryKind::Dir)?;
+    let removed = unlink_in(&dir_entry, name)?;
+    remove_dir_if_empty(&parent_entry, dir_name)
+        .with_context(|| format!("failed to remove {}", dir.display()))?;
+    Ok(removed)
+}
+
+/// `unlinkat(dir, name, 0)`; `false` when `name` is absent.
+fn unlink_in(dir: &Entry, name: &str) -> Result<bool> {
     let name_c = cstring(name)?;
-    // SAFETY: `dir_entry` keeps the verified directory open; `name_c` is
-    // NUL-terminated.
-    if unsafe { libc::unlinkat(dir_entry.file.as_raw_fd(), name_c.as_ptr(), 0) } == 0 {
-        return Ok(());
+    // SAFETY: `dir` keeps the verified directory open; `name_c` is
+    // NUL-terminated and outlives the call.
+    if unsafe { libc::unlinkat(dir.file.as_raw_fd(), name_c.as_ptr(), 0) } == 0 {
+        return Ok(true);
     }
     let error = std::io::Error::last_os_error();
     if error.kind() == std::io::ErrorKind::NotFound {
-        Ok(())
+        Ok(false)
     } else {
-        Err(error).with_context(|| format!("failed to remove {name} in {}", dir.display()))
+        Err(error).with_context(|| format!("failed to remove {name} in {}", dir.path.display()))
+    }
+}
+
+/// `unlinkat(parent, name, AT_REMOVEDIR)`, ignoring a directory that is not
+/// empty or already gone.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by the managed service binary (unix-system-binary-trust task 3)"
+    )
+)]
+fn remove_dir_if_empty(parent: &Entry, name: &OsStr) -> Result<()> {
+    let name_c = CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: `parent` keeps the verified directory open; `name_c` is
+    // NUL-terminated and outlives the call.
+    if unsafe { libc::unlinkat(parent.file.as_raw_fd(), name_c.as_ptr(), libc::AT_REMOVEDIR) } == 0
+    {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOTEMPTY | libc::EEXIST | libc::ENOENT) => Ok(()),
+        _ => Err(error.into()),
     }
 }
 
@@ -438,7 +712,7 @@ mod tests {
         let msg = unpinned_refusal();
         assert!(msg.contains("service install --system"), "{msg}");
     }
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     fn me() -> u32 {
         // SAFETY: geteuid(2) has no preconditions and cannot fail.
@@ -581,28 +855,14 @@ mod tests {
     fn publish_replaces_atomically_and_never_follows_a_planted_link() {
         let (tmp, file) = fixture();
         let dir = file.parent().unwrap();
-        publish(
-            dir,
-            me(),
-            "serve-status.json",
-            "serve-status.json.tmp.1",
-            b"one",
-        )
-        .unwrap();
-        publish(
-            dir,
-            me(),
-            "serve-status.json",
-            "serve-status.json.tmp.2",
-            b"two",
-        )
-        .unwrap();
+        put(dir, "serve-status.json", "serve-status.json.tmp.1", b"one").unwrap();
+        put(dir, "serve-status.json", "serve-status.json.tmp.2", b"two").unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("serve-status.json")).unwrap(),
             "two"
         );
         assert_eq!(
-            read_in(dir, me(), "serve-status.json").as_deref(),
+            read_in(dir, mine(), "serve-status.json").as_deref(),
             Some("two")
         );
 
@@ -611,10 +871,9 @@ mod tests {
         std::fs::write(&victim, "keep").unwrap();
         std::fs::remove_file(dir.join("serve-status.json")).unwrap();
         symlink(&victim, dir.join("serve-status.json")).unwrap();
-        assert!(read_in(dir, me(), "serve-status.json").is_none());
-        publish(
+        assert!(read_in(dir, mine(), "serve-status.json").is_none());
+        put(
             dir,
-            me(),
             "serve-status.json",
             "serve-status.json.tmp.3",
             b"three",
@@ -628,12 +887,12 @@ mod tests {
 
         // A link planted at the temp name makes the create fail (O_EXCL).
         symlink(&victim, dir.join("t")).unwrap();
-        assert!(publish(dir, me(), "serve-status.json", "t", b"x").is_err());
+        assert!(put(dir, "serve-status.json", "t", b"x").is_err());
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
 
         // Removal unlinks a link itself, never its target; absent is fine.
-        remove_in(dir, me(), "t").unwrap();
-        remove_in(dir, me(), "t").unwrap();
+        remove_in(dir, mine(), "t").unwrap();
+        remove_in(dir, mine(), "t").unwrap();
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     }
 
@@ -642,8 +901,279 @@ mod tests {
         let (_tmp, file) = fixture();
         let dir = file.parent().unwrap();
         mode(dir, 0o777);
-        assert!(publish(dir, me(), "s", "s.tmp", b"x").is_err());
+        assert!(put(dir, "s", "s.tmp", b"x").is_err());
         assert!(!dir.join("s").exists());
+    }
+
+    // ---- Root-only trust mode (unix-system-binary-trust) ----
+
+    fn mine() -> TrustedOwners {
+        TrustedOwners::RootAnd(me())
+    }
+
+    fn other() -> u32 {
+        me() + 1
+    }
+
+    /// The status-writer shape of `publish`: bytes, mode 0644.
+    fn put(dir: &Path, name: &str, temp: &str, bytes: &[u8]) -> Result<()> {
+        publish(dir, mine(), name, temp, &mut &bytes[..], 0o644)
+    }
+
+    fn perm_message(result: Result<()>) -> String {
+        refusal(result.map(|()| String::new()))
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path).unwrap().mode() & 0o7777
+    }
+
+    /// `<tmp>/bin/<file>` with 0755 directories and a 0755 file.
+    fn binary_fixture() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let dir = root.join("bin");
+        std::fs::create_dir(&dir).unwrap();
+        mode(&dir, 0o755);
+        let file = dir.join("iroh-tunnel");
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        mode(&file, 0o755);
+        (tmp, file)
+    }
+
+    #[test]
+    fn root_only_accepts_a_system_binary() {
+        let sh = std::fs::canonicalize("/bin/sh").unwrap();
+        verify_binary(&sh, TrustedOwners::RootOnly).unwrap();
+    }
+
+    #[test]
+    fn root_only_refuses_a_file_owned_by_the_test_user() {
+        if me() == 0 {
+            return;
+        }
+        let (_tmp, file) = binary_fixture();
+        let msg = perm_message(verify_binary(&file, TrustedOwners::RootOnly));
+        // The walk refuses the first user-owned component (the tempdir or
+        // the fixture itself); either way the binary's path prefix is named.
+        assert!(msg.contains("owner uid"), "{msg}");
+        assert!(
+            file.ancestors()
+                .any(|p| p != Path::new("/") && msg.contains(p.to_str().unwrap())),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn binary_refuses_untrusted_parent_naming_it() {
+        let (tmp, file) = binary_fixture();
+        let msg = perm_message(verify_binary(&file, TrustedOwners::RootAnd(other())));
+        let root = tmp.path().canonicalize().unwrap();
+        let named = [root.clone(), root.join("bin")]
+            .into_iter()
+            .chain(root.ancestors().map(Path::to_path_buf))
+            .filter(|p| p != Path::new("/"))
+            .find(|p| msg.contains(&format!("{} (owner uid", p.display())));
+        let dir = named.unwrap_or_else(|| panic!("no fixture directory named: {msg}"));
+        assert!(
+            msg.contains(&format!("mode {:04o}", mode_of(&dir))),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn binary_refuses_0775_naming_the_mode() {
+        let (_tmp, file) = binary_fixture();
+        mode(&file, 0o775);
+        let msg = perm_message(verify_binary(&file, mine()));
+        assert!(msg.contains(file.to_str().unwrap()), "{msg}");
+        assert!(msg.contains("0775"), "{msg}");
+    }
+
+    #[test]
+    fn binary_refuses_a_symlink_and_a_directory() {
+        let (tmp, file) = binary_fixture();
+        let link = tmp.path().canonicalize().unwrap().join("bin/link");
+        symlink(&file, &link).unwrap();
+        let msg = perm_message(verify_binary(&link, mine()));
+        assert!(msg.contains("symlink"), "{msg}");
+
+        let dir = file.parent().unwrap();
+        let msg = perm_message(verify_binary(dir, mine()));
+        assert!(msg.contains(dir.to_str().unwrap()), "{msg}");
+    }
+
+    /// `<tmp>/sticky(1777)/inner(0755)/iroh-tunnel(0755)`.
+    fn sticky_binary() -> (tempfile::TempDir, PathBuf) {
+        let (tmp, _file) = binary_fixture();
+        let sticky = tmp.path().canonicalize().unwrap().join("sticky");
+        std::fs::create_dir(&sticky).unwrap();
+        mode(&sticky, 0o1777);
+        let inner = sticky.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        mode(&inner, 0o755);
+        let file = inner.join("iroh-tunnel");
+        std::fs::write(&file, "x").unwrap();
+        mode(&file, 0o755);
+        (tmp, file)
+    }
+
+    #[test]
+    fn binary_sticky_parent_trusted_child_passes() {
+        let (_tmp, file) = sticky_binary();
+        verify_binary(&file, mine()).unwrap();
+    }
+
+    #[test]
+    fn binary_sticky_parent_untrusted_child_fails() {
+        let (_tmp, file) = sticky_binary();
+        assert!(verify_binary(&file, TrustedOwners::RootAnd(other())).is_err());
+    }
+
+    #[test]
+    fn check_entry_refuses_other_owner() {
+        let msg = check_entry(other(), 0o040_755, EntryKind::Dir, mine()).unwrap_err();
+        assert!(msg.contains(&other().to_string()), "{msg}");
+        assert!(msg.contains("0755"), "{msg}");
+        check_entry(0, 0o040_755, EntryKind::Dir, TrustedOwners::RootOnly).unwrap();
+        // The test user is not root, so RootOnly never trusts it.
+        if me() != 0 {
+            assert!(
+                check_entry(me(), 0o100_755, EntryKind::File, TrustedOwners::RootOnly).is_err()
+            );
+        }
+        // Group write and the wrong kind are refused for a trusted owner.
+        assert!(check_entry(0, 0o100_775, EntryKind::File, TrustedOwners::RootOnly).is_err());
+        assert!(check_entry(0, 0o040_755, EntryKind::File, TrustedOwners::RootOnly).is_err());
+    }
+
+    #[test]
+    fn ensure_dir_creates_missing_components_0755() {
+        let (tmp, _file) = binary_fixture();
+        let base = tmp.path().canonicalize().unwrap().join("bin");
+        let target = base.join("managed/bin/serve");
+        ensure_dir(&target, mine(), 0o755).unwrap();
+        for dir in [
+            base.join("managed"),
+            base.join("managed/bin"),
+            target.clone(),
+        ] {
+            assert!(dir.is_dir(), "{}", dir.display());
+            assert_eq!(mode_of(&dir), 0o755, "{}", dir.display());
+        }
+        // Idempotent over existing, safe directories.
+        ensure_dir(&target, mine(), 0o755).unwrap();
+    }
+
+    #[test]
+    fn ensure_dir_refuses_existing_untrusted_and_leaves_mode() {
+        let (tmp, _file) = binary_fixture();
+        let open = tmp.path().canonicalize().unwrap().join("bin/open");
+        std::fs::create_dir(&open).unwrap();
+        mode(&open, 0o777);
+        let msg = perm_message(ensure_dir(&open.join("serve"), mine(), 0o755));
+        assert!(msg.contains(open.to_str().unwrap()), "{msg}");
+        assert!(msg.contains("0777"), "{msg}");
+        assert_eq!(mode_of(&open), 0o777);
+        assert!(!open.join("serve").exists());
+    }
+
+    #[test]
+    fn ensure_dir_never_follows_a_planted_link() {
+        let (tmp, _file) = binary_fixture();
+        let root = tmp.path().canonicalize().unwrap();
+        let target = root.join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        mode(&target, 0o700);
+        let link = root.join("bin/managed");
+        symlink(&target, &link).unwrap();
+        let msg = perm_message(ensure_dir(&link.join("serve"), mine(), 0o755));
+        assert!(msg.contains("symlink"), "{msg}");
+        assert_eq!(mode_of(&target), 0o700);
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    }
+
+    #[test]
+    fn publish_and_ensure_dir_ignore_umask() {
+        const NAME: &str = "service::trust::tests::publish_and_ensure_dir_ignore_umask";
+        super::super::fixtures::in_isolated_home(NAME, |home| {
+            // SAFETY: umask(2) only changes this child process's file mode
+            // creation mask; it has no memory-safety preconditions.
+            unsafe { libc::umask(0o077) };
+            let base = home.canonicalize().unwrap();
+            mode(&base, 0o755);
+            let dir = base.join("managed/serve");
+            ensure_dir(&dir, mine(), 0o755).unwrap();
+            assert_eq!(mode_of(&base.join("managed")), 0o755);
+            assert_eq!(mode_of(&dir), 0o755);
+            publish(&dir, mine(), "iroh-tunnel", "t", &mut &b"bin"[..], 0o755).unwrap();
+            assert_eq!(mode_of(&dir.join("iroh-tunnel")), 0o755);
+        });
+    }
+
+    /// A source that yields some bytes, then fails.
+    struct FailingRead(bool);
+
+    impl Read for FailingRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if std::mem::replace(&mut self.0, true) {
+                return Err(std::io::Error::other("source vanished"));
+            }
+            buf[..4].copy_from_slice(b"half");
+            Ok(4)
+        }
+    }
+
+    #[test]
+    fn publish_failure_before_rename_keeps_old_file_and_no_temp() {
+        let (_tmp, file) = binary_fixture();
+        let dir = file.parent().unwrap();
+        let err = publish(
+            dir,
+            mine(),
+            "iroh-tunnel",
+            "copy.tmp",
+            &mut FailingRead(false),
+            0o755,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("source vanished"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "#!/bin/sh\n");
+        let names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("iroh-tunnel")]);
+    }
+
+    #[test]
+    fn remove_entry_absent_and_dangling_link() {
+        let (tmp, _file) = binary_fixture();
+        let root = tmp.path().canonicalize().unwrap();
+        assert!(!remove_entry(&root.join("missing"), mine(), "iroh-tunnel").unwrap());
+
+        // A dangling link at the name is unlinked and the empty dir removed.
+        let role = root.join("role");
+        std::fs::create_dir(&role).unwrap();
+        mode(&role, 0o755);
+        symlink(root.join("nowhere"), role.join("iroh-tunnel")).unwrap();
+        assert!(remove_entry(&role, mine(), "iroh-tunnel").unwrap());
+        assert!(std::fs::symlink_metadata(&role).is_err());
+
+        // A live link is removed itself; its target is intact.
+        std::fs::create_dir(&role).unwrap();
+        mode(&role, 0o755);
+        let victim = root.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        symlink(&victim, role.join("iroh-tunnel")).unwrap();
+        std::fs::write(role.join("other"), "x").unwrap();
+        assert!(remove_entry(&role, mine(), "iroh-tunnel").unwrap());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        // Not empty: the directory stays.
+        assert!(role.is_dir());
+        // The name is now absent.
+        assert!(!remove_entry(&role, mine(), "iroh-tunnel").unwrap());
     }
 
     #[test]
