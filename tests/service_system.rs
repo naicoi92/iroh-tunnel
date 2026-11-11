@@ -597,6 +597,20 @@ fn alive(pid: &str) -> bool {
     !exited(pid)
 }
 
+/// The start time (field 22 of `/proc/<pid>/stat`) of `pid`, if it exists.
+fn start_time(pid: &str) -> Option<String> {
+    if pid.is_empty() {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields after the parenthesised command start at field 3.
+    stat.rsplit(") ")
+        .next()?
+        .split_whitespace()
+        .nth(19)
+        .map(str::to_owned)
+}
+
 /// The pid the service wrote into its status snapshot, if readable.
 fn snapshot_pid(user: &Home) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(&user.running_services()?).ok()?;
@@ -643,22 +657,27 @@ fn reset_binary_state() {
         .unwrap_or_default()
         .trim()
         .to_owned();
+    // Identify the process by pid and start time, so a reused pid is never
+    // killed or waited on.
+    let started = start_time(&pid);
+    let same_alive = || started.is_some() && start_time(&pid) == started && alive(&pid);
     if Path::new(SCRIPT).exists() {
         let _ = Command::new("sh").args([SCRIPT, "stop"]).output();
+    }
+    if same_alive() {
+        // A service that ignored `stop` must not outlive its binaries.
+        if let Ok(n) = pid.parse::<i32>() {
+            // SAFETY: kill(2) takes plain integers and has no memory effects.
+            unsafe { libc::kill(n, libc::SIGKILL) };
+        }
+    }
+    // Uninstall may delete the managed copy, so the process must be gone first.
+    wait_for("the previous service process to exit", || !same_alive());
+    if Path::new(SCRIPT).exists() {
         let _ = Command::new(BIN)
             .args(["serve", "service", "uninstall", "--system"])
             .output();
         let _ = std::fs::remove_file(SCRIPT);
-    }
-    if !pid.is_empty() {
-        if alive(&pid) {
-            // A service that ignored `stop` must not outlive its binaries.
-            if let Ok(n) = pid.parse::<i32>() {
-                // SAFETY: kill(2) takes plain integers and has no memory effects.
-                unsafe { libc::kill(n, libc::SIGKILL) };
-            }
-        }
-        wait_for("the previous service process to exit", || exited(&pid));
     }
     let _ = std::fs::remove_file(PIDFILE);
     let _ = std::fs::remove_file(LOG);
