@@ -170,7 +170,10 @@ fn check_effective(
         EffectiveBinary::Binary(path) => match verify(&path) {
             Ok(()) => return Ok(()),
             Err(err) => match err.downcast_ref::<CliError>() {
-                Some(CliError::Permission(msg)) => msg.clone(),
+                Some(CliError::Permission(msg)) => format!(
+                    "the registered service binary {} is not safe to run as root: {msg}",
+                    path.display()
+                ),
                 _ => format!(
                     "cannot check the registered service binary {}: {err:#}",
                     path.display()
@@ -757,13 +760,9 @@ mod guard_tests {
             return;
         };
         let msg = permission_text(&failure.error);
-        // RootOnly refuses the first untrusted component, here an ancestor of
-        // the file, so the message names the path up to that directory.
-        let ancestor = path.parent().unwrap().parent().unwrap();
-        assert!(
-            msg.contains(path.to_str().unwrap()) || msg.contains(ancestor.to_str().unwrap()),
-            "{msg}"
-        );
+        // RootOnly refuses the first untrusted component, an ancestor of the
+        // file; the refusal still names the registered binary itself.
+        assert!(msg.contains(path.to_str().unwrap()), "{msg}");
         assert!(msg.contains("service install --system"), "{msg}");
         assert!(failure.applied.is_empty(), "{:?}", failure.applied);
         assert_eq!(

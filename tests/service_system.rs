@@ -691,10 +691,9 @@ fn sm_bin_02_legacy_unsafe_daemon_refuses_start() {
     let out = service_verb("start", &path);
     let text = err(&out);
     assert_eq!(out.status.code(), Some(3), "{text}");
-    // The refusal names the first unsafe path component on the way down.
-    let user_dir = user_bin_dir(&alice);
+    // The refusal names the registered binary and the reinstall command.
     assert!(
-        text.contains(user_dir.to_str().unwrap()) && text.contains("service install --system"),
+        text.contains(user_binary) && text.contains("service install --system"),
         "{text}"
     );
     assert!(!Path::new(PIDFILE).exists(), "a refused start must not run");
