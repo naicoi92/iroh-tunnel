@@ -29,6 +29,9 @@ Windows service scope changes:
   user task.
 - **Breaking:** on Windows, `--system` without elevation now exits with code
   `3` (permission) with "Run as administrator" guidance, instead of `5`.
+
+Linux and macOS system service changes:
+
 - **Breaking:** on Linux and macOS, `service start --system` and `service
   restart --system` refuse a legacy system registration whose binary a non-root
   user can change (for example `~/.cargo/bin/iroh-tunnel`). They exit with code
