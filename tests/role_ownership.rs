@@ -338,23 +338,63 @@ async fn graceful_stop_removes_the_owner_record_but_keeps_the_lock_file() -> Res
     let world = World::new()?;
     let (key, _) = write_key(world.root.path(), "k.key")?;
     let state = world.state("main");
-    let mut process = start_serve(&world, ALL_IN_ONE, Some("serve"), &relay, &key, &state)?;
+    let process = start_serve(&world, ALL_IN_ONE, Some("serve"), &relay, &key, &state)?;
     let dir = world.home().join(".local/state/iroh-tunnel");
     assert!(dir.join("serve.owner.json").exists());
     // SIGINT = Ctrl+C, the documented foreground stop.
-    let pid = process.0.id().to_string();
-    assert!(Command::new("kill")
-        .args(["-INT", &pid])
-        .status()?
-        .success());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while process.0.try_wait()?.is_none() {
-        anyhow::ensure!(Instant::now() < deadline, "role did not stop on SIGINT");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    stop_with_signal(process, "INT")?;
     assert!(!dir.join("serve.owner.json").exists(), "owner record left");
     assert!(dir.join("serve.lock").exists(), "lock file must stay");
     Ok(())
+}
+
+/// #201: a stop signal that arrives right after readiness, before the role
+/// first waits for it, must still stop gracefully. The seam holds back that
+/// first wait, so the signal deterministically lands inside the window.
+#[tokio::test]
+async fn stop_signal_before_the_first_stop_wait_still_stops_gracefully() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    for signal in ["INT", "TERM"] {
+        let world = World::new()?;
+        let (key, _) = write_key(world.root.path(), "k.key")?;
+        let state = world.state("main");
+        let mut command = world.command(ALL_IN_ONE, Some("serve"), &state);
+        command.env("IROH_TUNNEL_TEST_DELAY_STOP_WAIT_MS", "2000");
+        let mut process = spawn(command, &serve_args(&relay, &key))?;
+        wait_running(&state.join("serve-status.json"), &mut process)?;
+        let status = stop_with_signal(process, signal)?;
+        assert!(
+            status.success(),
+            "SIG{signal}: not a graceful exit: {status}"
+        );
+        let dir = world.home().join(".local/state/iroh-tunnel");
+        assert!(
+            !dir.join("serve.owner.json").exists(),
+            "SIG{signal}: owner record left"
+        );
+        assert!(dir.join("serve.lock").exists(), "lock file must stay");
+    }
+    Ok(())
+}
+
+/// Send `SIG<signal>` to `process` and wait for it to exit.
+fn stop_with_signal(mut process: Process, signal: &str) -> Result<std::process::ExitStatus> {
+    let pid = process.0.id().to_string();
+    assert!(Command::new("kill")
+        .args([&format!("-{signal}"), &pid])
+        .status()?
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = process.0.try_wait()? {
+            return Ok(status);
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "role did not stop on SIG{signal}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[tokio::test]

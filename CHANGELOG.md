@@ -61,6 +61,7 @@ Windows service scope changes:
 - `service install` is refused with exit code `6` when the role is held at the other scope, naming how to stop it and the command that removes it.
 - `start refused:` is no longer prefixed to non-start conflicts.
 - `serve-status.json` and `serve status` now report `home_relay` once the endpoint registers with a relay, instead of `null` for the whole run (#177).
+- Ctrl+C or SIGTERM sent right after a role reports ready now stops it gracefully, removing its owner record, instead of killing the process (#201).
 
 ## [0.5.0] - 2026-11-06
 

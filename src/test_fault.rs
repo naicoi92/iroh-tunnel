@@ -13,6 +13,11 @@ const ENV_EXIT_AFTER_MS: &str = "IROH_TUNNEL_TEST_EXIT_AFTER_MS";
 #[cfg(feature = "test-utils")]
 const ENV_FAIL_BEFORE_READY: &str = "IROH_TUNNEL_TEST_FAIL_BEFORE_READY";
 
+/// Env: hold back the first poll of the stop-signal wait by this many
+/// milliseconds, widening the window between readiness and that first poll.
+#[cfg(feature = "test-utils")]
+const ENV_DELAY_STOP_WAIT_MS: &str = "IROH_TUNNEL_TEST_DELAY_STOP_WAIT_MS";
+
 /// Faults requested through the environment.
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +65,26 @@ pub(crate) fn wrap_ready(on_ready: OnReady) -> OnReady {
 #[cfg(not(feature = "test-utils"))]
 pub(crate) fn wrap_ready(on_ready: OnReady) -> OnReady {
     on_ready
+}
+
+/// Delay the first poll of `stop` by `IROH_TUNNEL_TEST_DELAY_STOP_WAIT_MS`.
+/// A stop signal sent inside that delay must still stop the role gracefully.
+#[cfg(feature = "test-utils")]
+pub(crate) async fn delay_stop_wait(stop: impl Future<Output = ()>) {
+    let delay = std::env::var(ENV_DELAY_STOP_WAIT_MS)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map(std::time::Duration::from_millis);
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
+    stop.await
+}
+
+/// Production build: no seam.
+#[cfg(not(feature = "test-utils"))]
+pub(crate) fn delay_stop_wait<F: Future<Output = ()>>(stop: F) -> F {
+    stop
 }
 
 /// Race `run` against `IROH_TUNNEL_TEST_EXIT_AFTER_MS`: when it elapses first

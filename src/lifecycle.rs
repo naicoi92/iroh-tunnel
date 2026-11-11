@@ -3,6 +3,7 @@
 //! Per-run drain mechanics live in the engine; this module owns the OS signal
 //! side, which the engine never touches.
 
+use std::future::Future;
 use std::time::Duration;
 
 use tokio::signal;
@@ -63,11 +64,17 @@ async fn latch_fired(rx: &mut watch::Receiver<bool>, replay: &mut bool) {
     }
 }
 
-/// Installed SIGINT/SIGTERM listeners (SIGINT only on non-Unix), plus the
-/// SCM stop latch on Windows.
+/// Installed SIGINT/SIGTERM listeners (Ctrl+C only on Windows), plus the
+/// SCM stop latch on Windows. Every listener is registered when this is
+/// built, so a signal that arrives before [`StopSignals::next`] is first
+/// polled is kept rather than hitting the default disposition (#201).
 struct StopSignals {
     #[cfg(unix)]
+    interrupt: signal::unix::Signal,
+    #[cfg(unix)]
     terminate: signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: signal::windows::CtrlC,
     #[cfg(windows)]
     scm: watch::Receiver<bool>,
     #[cfg(windows)]
@@ -89,18 +96,22 @@ impl StopSignals {
             // handler the process could never stop gracefully, so refuse to
             // start rather than run unstoppable.
             #[cfg(unix)]
+            interrupt: signal::unix::signal(signal::unix::SignalKind::interrupt())
+                .expect("failed to install SIGINT handler"),
+            #[cfg(unix)]
             terminate: signal::unix::signal(signal::unix::SignalKind::terminate())
                 .expect("failed to install SIGTERM handler"),
+            #[cfg(windows)]
+            ctrl_c: signal::windows::ctrl_c().expect("failed to install Ctrl+C handler"),
         }
     }
 
     /// Wait for the next stop signal and name it.
     async fn next(&mut self) -> &'static str {
-        let ctrl_c = async {
-            signal::ctrl_c()
-                .await
-                .expect("failed to install Ctrl+C handler");
-        };
+        #[cfg(unix)]
+        let ctrl_c = self.interrupt.recv();
+        #[cfg(windows)]
+        let ctrl_c = self.ctrl_c.recv();
         #[cfg(unix)]
         let term = self.terminate.recv();
         #[cfg(not(unix))]
@@ -117,15 +128,24 @@ impl StopSignals {
     }
 }
 
-/// Wait for a shutdown signal (SIGINT or SIGTERM), then return.
+/// Install the stop-signal listeners now and return a future that resolves
+/// on the first shutdown signal (SIGINT or SIGTERM).
 ///
-/// Both signals trigger the same graceful shutdown path. The function logs
+/// The listeners are registered by this call, not by the first poll of the
+/// returned future, so a stop that arrives after readiness but before the
+/// role first waits still drains gracefully (#201). Call it before the role
+/// starts.
+///
+/// Both signals trigger the same graceful shutdown path. The future logs
 /// which signal was received so operators can tell Ctrl-C apart from a
 /// service manager stop. Repeated signals are handled by [`forced_exit`],
 /// which the CLI boundary races against the whole run.
-pub async fn wait_for_signal() {
-    let signal_name = StopSignals::install(true).next().await;
-    tracing::info!("received {signal_name}");
+pub fn wait_for_signal() -> impl Future<Output = ()> {
+    let mut signals = StopSignals::install(true);
+    async move {
+        let signal_name = signals.next().await;
+        tracing::info!("received {signal_name}");
+    }
 }
 
 /// Resolve when a stuck or repeatedly interrupted shutdown must be abandoned.
