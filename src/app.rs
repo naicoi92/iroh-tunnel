@@ -243,25 +243,19 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext, ready: ReadyHook) -> any
         }
         Role::Serve { quick, cmd: None } => {
             let cfg = config_ops::quick_serve_config(&quick_serve_request(quick)?)?;
-            runtime::run_quick_serve(
-                cfg,
-                ctx,
-                crate::render::print_ready(),
-                lifecycle::wait_for_signal(),
-            )
-            .await
+            runtime::run_quick_serve(cfg, ctx, crate::render::print_ready(), stop_signal()).await
         }
         Role::Access { quick, cmd: None } => {
             let cfg = config_ops::quick_access_config(&quick_access_request(quick)?)?;
-            runtime::run_quick_access(
-                cfg,
-                ctx,
-                crate::render::print_ready(),
-                lifecycle::wait_for_signal(),
-            )
-            .await
+            runtime::run_quick_access(cfg, ctx, crate::render::print_ready(), stop_signal()).await
         }
     }
+}
+
+/// The stop wait handed to a running role, behind the test seam that can
+/// delay its first poll.
+fn stop_signal() -> impl std::future::Future<Output = ()> {
+    crate::test_fault::delay_stop_wait(lifecycle::wait_for_signal())
 }
 
 /// Map the quick serve flags to the host request; clap guarantees the
@@ -387,7 +381,7 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
                 &path,
                 ctx,
                 crate::test_fault::wrap_ready(compose_ready(crate::render::print_ready(), ready)),
-                lifecycle::wait_for_signal(),
+                stop_signal(),
             ))
             .await
         }
