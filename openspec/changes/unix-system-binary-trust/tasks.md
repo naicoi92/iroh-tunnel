@@ -71,5 +71,5 @@ Owns: `tests/service_system.rs` (Linux privileged, BusyBox backend, opt-in `IROH
 - [x] 7.2 Privileged E2E: stop, wait for release, point `DAEMON` at a user-writable binary → `service start` exits 3 naming the path, no pidfile; the init script started directly still runs the service (no self-check, "Boot start of a legacy registration"); re-install fixes start
 - [x] 7.3 Privileged E2E: uninstall removes the copy and its directory; install from a root-owned path registers it directly
 - [x] 7.4 Privileged E2E: a managed role directory pre-created by a user refuses install (exit 3) unchanged; a declined retarget writes no copy
-- [ ] 7.5 macOS manual check with the real binary under `sudo` (launchd, user-owned path); record results or the blocked reason in `verify.md`
+- [x] 7.5 macOS manual check with the real binary under `sudo` (launchd, user-owned path); record results or the blocked reason in `verify.md`
 - [x] 7.6 Full gates: fmt, clippy, rustdoc, tests (`--all-features --locked`), MSRV 1.91, plus a Windows target check (`cargo check --target x86_64-pc-windows-msvc --all-targets --all-features --locked` or CI)

@@ -22,15 +22,27 @@
 
 ## Commits
 
-- **Range**: `cf80f4d..<receipt commit>` (implementation through `0658bb9`, plus the receipt commit)
-- **Count**: `30` implementation commits, plus the receipt commit
+- **Range**: `cf80f4d..<this receipt commit>` (implementation through `cb67bfe`, plus the receipt commits `70bf042` and this one)
+- **Count**: `32` implementation commits, plus the receipt commits
 
 ---
 
 ## Tasks
 
-- **Completed**: `26 of 27` checkboxes in tasks.md flipped to `- [x]`
-- **Remaining**: `7.5`. The macOS manual check needs an interactive `sudo` on the developer's Mac, which this session could not run because `sudo -n` requires a password. Run the Task 7 Step 3 procedure in plan.md and record the result in `verify.md`.
+- **Completed**: `27 of 27` checkboxes in tasks.md flipped to `- [x]`
+- **Remaining**: none
+
+### macOS manual check (task 7.5)
+
+The developer ran this on an Apple silicon Mac with `sudo`, using the worktree binary copied to the user-owned `~/usbt-bin`, which was first on `PATH`.
+
+- **Install** printed the managed-copy note. `launchctl print system/dev.iroh-tunnel.serve` showed `state = running` and `program = /Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel`. The copy is owned by `root` with mode `-rwxr-xr-x`.
+- **Restart** left the bytes unchanged: the copy and the source have the same `shasum`, `cc60b2d9…`.
+- **Uninstall of a running service** found a bug.
+  - The first run removed the plist and the job but kept the copy.
+  - Diagnosis: `launchctl bootout` returns before launchd drops the job. For at least 0.4 s afterwards, `launchctl print` exits 0 with `state = SIGTERMed` and `program = <copy>`. The reference check therefore kept the copy as still referenced.
+  - Fixed in `6655726`: after a successful `bootout`, uninstall waits, bounded to 50 probes 100 ms apart, until `print` reports "Could not find service".
+  - Re-run with the fix: exit 0 in 1.1 s, `/Library/Application Support/iroh-tunnel/bin/` is empty (the `serve/` role directory was removed), and launchd has no job.
 
 ### Verification evidence (this run)
 
@@ -74,9 +86,10 @@ All entries are internal (`public: no`) and are recorded in plan.md `## Contract
 | Task 6 | sequential | `b01443d..039c000` | APPROVE_WITH_NOTES, notes applied | n/a (sequential) |
 | Task 7 | sequential | `039c000..3683b11` | APPROVE_WITH_NOTES after 2 fix rounds | n/a (sequential) |
 | Final whole-branch review | sequential | `cf80f4d..0658bb9` | APPROVE_WITH_NOTES; I-1, M-3, nits and the follow-up Windows lint fixed in `40f8f46..0658bb9`. M-1 (a failed cleanup after a `Direct` install reports failure) and M-2 (launchd may keep the copy if the job is still listed right after `bootout`; fail-safe) are left for verify. | n/a (sequential) |
+| 7.5 fix (launchd unload wait) | sequential | `70bf042..cb67bfe` | APPROVE_WITH_NOTES, comment notes applied. M-2 is confirmed and fixed. The parent mutation check (removing the wait) fails `bootout_waits_until_launchd_reports_the_job_gone`. Re-verified on a real Mac. | n/a (sequential) |
 
 ---
 
 ## Next step
 
-Run the macOS manual check (task 7.5) and record it in `verify.md`, then run `/opsx-verify`.
+Run `/opsx-verify`.
