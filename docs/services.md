@@ -126,7 +126,7 @@ sudo iroh-tunnel serve service install --system
   service manager will run, read from its loaded definition. If a non-root user
   could change it, or the manager's definition cannot be read, the command
   exits with code `3`, naming the unsafe path and its owner and mode where
-  known, and issues no start, stop or restart, so a running service keeps
+  known (or why the binary could not be determined), and issues no start, stop or restart, so a running service keeps
   running. Re-run the `service install --system` command the message prints.
   Starts by systemd, launchd or the init script at boot, on failure, or run
   directly are not checked.
