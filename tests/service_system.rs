@@ -15,6 +15,14 @@
 //! - SM-TRUST-01 (91.AC2, 91.CL3): an unauthorized writer, a group/world
 //!   writable parent, a symlink and a parent swapped for a link make the
 //!   service refuse to start, naming the path, owner and mode.
+//! - SM-BIN-01 (binary trust): install from a user-owned bin directory
+//!   registers a root-owned 0755 managed copy; the original is untouched.
+//! - SM-BIN-02: a legacy registration naming a user-writable binary refuses
+//!   CLI start (exit 3, no pidfile) while the init script still runs it.
+//! - SM-BIN-03: uninstall removes the copy and its directory; a root-owned
+//!   binary on `PATH` is registered directly with no copy.
+//! - SM-BIN-04: a role directory owned by a user refuses install (exit 3).
+//! - SM-BIN-05: a declined retarget writes no managed copy.
 //!
 //! Needs real root, real accounts and an init system the test may register
 //! with, so it is opt-in: `IROH_TUNNEL_E2E_PRIVILEGED=1` in a disposable Linux
@@ -489,4 +497,320 @@ fn system_service_across_the_privilege_boundary() {
     wait_for("bob's service via the resolved paths", || {
         std::fs::metadata(real.join(".local/state/iroh-tunnel/serve-status.json")).is_ok()
     });
+}
+
+// --- System binary trust (SM-BIN-*) ---------------------------------------
+
+const PIDFILE: &str = "/var/run/iroh-tunnel-serve.pid";
+const MANAGED_DIR: &str = "/var/lib/iroh-tunnel/bin/serve";
+const MANAGED_COPY: &str = "/var/lib/iroh-tunnel/bin/serve/iroh-tunnel";
+const SYSTEM_BIN: &str = "/usr/local/bin/iroh-tunnel";
+const SYSTEM_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+const NOTE: &str = "Registered a root-owned copy of";
+
+/// `PATH` that resolves `iroh-tunnel` to the user's own bin directory.
+fn user_path(user: &Home) -> String {
+    format!("{}:/usr/bin:/bin", user_bin_dir(user).display())
+}
+
+fn user_bin_dir(user: &Home) -> PathBuf {
+    user.home.join("bin")
+}
+
+fn user_bin(user: &Home) -> PathBuf {
+    user_bin_dir(user).join("iroh-tunnel")
+}
+
+/// Copy the binary under test to `dest` with the given owner and mode 0755.
+fn place_binary(dest: &Path, uid: u32) {
+    std::fs::copy(BIN, dest).unwrap();
+    own(dest, uid);
+    mode(dest, 0o755);
+}
+
+/// Put the binary under test in the user's own `bin` directory.
+fn place_user_binary(user: &Home) {
+    let dir = user_bin_dir(user);
+    std::fs::create_dir_all(&dir).unwrap();
+    own(&dir, user.uid);
+    mode(&dir, 0o755);
+    place_binary(&user_bin(user), user.uid);
+}
+
+/// Copy the binary under test to the root-owned `/usr/local/bin`.
+fn place_system_binary() {
+    place_binary(Path::new(SYSTEM_BIN), 0);
+}
+
+fn install_on_path(user: &Home, path: &str) -> Output {
+    run(
+        &["serve", "service", "install"],
+        &[
+            ("SUDO_USER", user.name),
+            ("IROH_TUNNEL_STATE_DIR", user.state().to_str().unwrap()),
+            ("PATH", path),
+        ],
+    )
+}
+
+fn service_verb(verb: &str, path: &str) -> Output {
+    run(&["serve", "service", verb, "--system"], &[("PATH", path)])
+}
+
+/// The binary the init script runs.
+fn daemon() -> String {
+    script()
+        .lines()
+        .find_map(|l| l.strip_prefix("DAEMON=\""))
+        .and_then(|l| l.strip_suffix('"'))
+        .map(str::to_owned)
+        .unwrap_or_default()
+}
+
+fn exited(pid: &str) -> bool {
+    // Without an init to reap it, an exited child stays a zombie (`Z`).
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit(") ").next().is_some_and(|r| r.starts_with('Z'))
+    })
+}
+
+/// Wait until the stopped service's process is gone, which releases its role
+/// lock, and its pidfile is removed.
+fn wait_released(pid: &str) {
+    wait_for("the service process to exit", || exited(pid));
+    wait_for("the pidfile to clear", || !Path::new(PIDFILE).exists());
+}
+
+/// `service stop`, then wait for the release of the pidfile and role lock.
+fn stop_and_release(path: &str) {
+    let pid = std::fs::read_to_string(PIDFILE)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let out = service_verb("stop", path);
+    assert!(out.status.success(), "stop: {}", err(&out));
+    wait_released(&pid);
+}
+
+fn wait_running(user: &Home) {
+    wait_for("serve to report status", || {
+        user.running_services().is_some()
+    });
+}
+
+/// Start from nothing and put everything these tests touch back on drop.
+struct BinSandbox;
+
+impl BinSandbox {
+    fn new() -> Self {
+        reset_binary_state();
+        Self
+    }
+}
+
+impl Drop for BinSandbox {
+    fn drop(&mut self) {
+        reset_binary_state();
+    }
+}
+
+/// Remove the registration, the running service and every binary copy the
+/// SM-BIN tests create, whatever state a previous test left.
+fn reset_binary_state() {
+    if Path::new(SCRIPT).exists() {
+        let _ = Command::new("sh").args([SCRIPT, "stop"]).output();
+        let _ = Command::new(BIN)
+            .args(["serve", "service", "uninstall", "--system"])
+            .output();
+        let _ = std::fs::remove_file(SCRIPT);
+    }
+    let _ = std::fs::remove_file(PIDFILE);
+    let _ = std::fs::remove_file(LOG);
+    let _ = std::fs::remove_dir_all(MANAGED_DIR);
+    let _ = std::fs::remove_file(SYSTEM_BIN);
+    for name in ["it91a", "it91b"] {
+        let _ = std::fs::remove_dir_all(format!("/home/{name}/bin"));
+    }
+}
+
+#[test]
+fn sm_bin_01_user_bin_dir_registers_managed_copy() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = BinSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    place_user_binary(&alice);
+    let original = std::fs::metadata(user_bin(&alice)).unwrap();
+
+    let out = install_on_path(&alice, &user_path(&alice));
+    assert!(out.status.success(), "{}", err(&out));
+
+    assert_eq!(daemon(), MANAGED_COPY, "{}", script());
+    let copy = std::fs::metadata(MANAGED_COPY).unwrap();
+    assert_eq!((copy.uid(), copy.mode() & 0o7777), (0, 0o755));
+    assert_eq!(
+        std::fs::read(MANAGED_COPY).unwrap(),
+        std::fs::read(BIN).unwrap()
+    );
+    let after = std::fs::metadata(user_bin(&alice)).unwrap();
+    assert_eq!(
+        (after.uid(), after.mode() & 0o7777),
+        (original.uid(), original.mode() & 0o7777)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(NOTE) && stdout.contains(MANAGED_COPY),
+        "{stdout}"
+    );
+    wait_running(&alice);
+}
+
+#[test]
+fn sm_bin_02_legacy_unsafe_daemon_refuses_start() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = BinSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    place_user_binary(&alice);
+    let path = user_path(&alice);
+    let user_binary = user_bin(&alice);
+    let user_binary = user_binary.to_str().unwrap();
+
+    let out = install_on_path(&alice, &path);
+    assert!(out.status.success(), "{}", err(&out));
+    wait_running(&alice);
+    stop_and_release(&path);
+
+    // A registration from before this change: the user's own binary.
+    let legacy = script().replace(&daemon(), user_binary);
+    std::fs::write(SCRIPT, legacy).unwrap();
+    assert_eq!(daemon(), user_binary);
+    let _ = std::fs::remove_file(alice.status_file());
+    let out = service_verb("start", &path);
+    let text = err(&out);
+    assert_eq!(out.status.code(), Some(3), "{text}");
+    // The refusal names the first unsafe path component on the way down.
+    let user_dir = user_bin_dir(&alice);
+    assert!(
+        text.contains(user_dir.to_str().unwrap()) && text.contains("service install --system"),
+        "{text}"
+    );
+    assert!(!Path::new(PIDFILE).exists(), "a refused start must not run");
+
+    // The init system starts it with no self-check, as at boot.
+    let status = Command::new("sh")
+        .args([SCRIPT, "start"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    wait_running(&alice);
+    stop_and_release(&path);
+
+    // Re-installing registers the managed copy, and start works again.
+    let out = install_on_path(&alice, &path);
+    assert!(out.status.success(), "{}", err(&out));
+    assert_eq!(daemon(), MANAGED_COPY);
+    wait_running(&alice);
+    stop_and_release(&path);
+    let _ = std::fs::remove_file(alice.status_file());
+    let out = service_verb("start", &path);
+    assert!(out.status.success(), "start: {}", err(&out));
+    wait_running(&alice);
+}
+
+#[test]
+fn sm_bin_03_root_path_direct_and_uninstall_cleans() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = BinSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    place_user_binary(&alice);
+    let path = user_path(&alice);
+
+    let out = install_on_path(&alice, &path);
+    assert!(out.status.success(), "{}", err(&out));
+    assert!(Path::new(MANAGED_COPY).exists());
+    wait_running(&alice);
+    let pid = std::fs::read_to_string(PIDFILE).unwrap().trim().to_owned();
+
+    let out = service_verb("uninstall", &path);
+    assert!(out.status.success(), "uninstall: {}", err(&out));
+    assert!(std::fs::symlink_metadata(MANAGED_COPY).is_err());
+    assert!(std::fs::symlink_metadata(MANAGED_DIR).is_err());
+    wait_released(&pid);
+
+    // A root-owned binary on PATH is registered directly.
+    place_system_binary();
+    let out = install_on_path(&alice, SYSTEM_PATH);
+    assert!(out.status.success(), "{}", err(&out));
+    assert_eq!(daemon(), SYSTEM_BIN, "{}", script());
+    assert!(std::fs::symlink_metadata(MANAGED_COPY).is_err());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains(NOTE));
+}
+
+#[test]
+fn sm_bin_04_role_dir_owned_by_user_refuses() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = BinSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    place_user_binary(&alice);
+    std::fs::create_dir_all(MANAGED_DIR).unwrap();
+    own(Path::new(MANAGED_DIR), alice.uid);
+    mode(Path::new(MANAGED_DIR), 0o755);
+
+    let out = install_on_path(&alice, &user_path(&alice));
+    let text = err(&out);
+    assert_eq!(out.status.code(), Some(3), "{text}");
+    assert!(
+        text.contains(MANAGED_DIR) && text.contains(&alice.uid.to_string()),
+        "{text}"
+    );
+    assert!(
+        !Path::new(SCRIPT).exists(),
+        "no registration may be written"
+    );
+    let dir = std::fs::metadata(MANAGED_DIR).unwrap();
+    assert_eq!((dir.uid(), dir.mode() & 0o7777), (alice.uid, 0o755));
+}
+
+#[test]
+fn sm_bin_05_declined_retarget_writes_no_copy() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = BinSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    let bob = Home::new("it91b", "bravo");
+    place_system_binary();
+    place_user_binary(&bob);
+
+    let out = install_on_path(&alice, SYSTEM_PATH);
+    assert!(out.status.success(), "{}", err(&out));
+    assert_eq!(daemon(), SYSTEM_BIN);
+    let registration = script();
+
+    let bob_state = bob.state();
+    let path = user_path(&bob);
+    let out = run_with_stdin(
+        &["serve", "service", "install"],
+        &[
+            ("SUDO_USER", bob.name),
+            ("IROH_TUNNEL_STATE_DIR", bob_state.to_str().unwrap()),
+            ("PATH", &path),
+        ],
+        "n\n",
+    );
+    assert_eq!(out.status.code(), Some(5), "{}", err(&out));
+    assert!(
+        std::fs::symlink_metadata(MANAGED_DIR).is_err(),
+        "a declined retarget must write no copy"
+    );
+    assert_eq!(script(), registration);
 }
