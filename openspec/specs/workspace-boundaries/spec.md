@@ -274,14 +274,6 @@ Source: issue #167; cleanup-config-dto-rustdoc design.md D5
 - **WHEN** a doc comment on an item compiled for the current target in `iroh-tunnel-host` or `iroh-tunnel-engine` links to an item that does not resolve or is crate-private while the documented item is public
 - **THEN** `cargo doc` for that crate fails
 
-### Requirement: Drop counter docs expose the unusable-datagram deviation
-The rustdoc of the `limit_shrink` drop counter, in both the engine observation and the host status schema, SHALL state that until #152 is resolved a connection whose datagrams are never usable also counts every datagram as `limit_shrink`, consistent with `docs/udp-integration-contract.md`.
-Source: issue #167, #152
-
-#### Scenario: Deviation visible in API docs
-- **WHEN** the rustdoc of `limit_shrink` in `iroh-tunnel-engine` and `iroh-tunnel-host` is read
-- **THEN** both mention the never-usable-datagrams case and reference #152
-
 ### Requirement: Engine dependencies are inherited from the workspace
 Every dependency of `iroh-tunnel-engine` MUST be inherited from the root manifest's `[workspace.dependencies]`. This covers its normal, build and dev dependency tables, including target-specific ones: each entry SHALL be declared with `workspace = true`, and none SHALL carry its own version, path or git source.
 Source: issue #164 (replaces the refactor-codebase lockfile baseline check)
@@ -317,3 +309,23 @@ Source: refactor-codebase design.md Decision 2; evidence crates/host/src/config/
 #### Scenario: Secret key is checked at key resolution
 - **WHEN** a role config whose `secret_key` is not valid base64 is parsed
 - **THEN** parsing succeeds, and the key is rejected when it is resolved, as `tunnel-configuration` "Secret key is a base64 32-byte value generated and persisted on first use" specifies
+
+### Requirement: Drop counter docs describe mid-session limit loss
+The rustdoc of the `limit_shrink` drop counter, in both the engine observation and the host status schema, SHALL state that it counts datagrams dropped because the datagram limit became unusable during a session incarnation, and MUST NOT describe the resolved #152 deviation.
+Source: issue #152, issue #167
+
+#### Scenario: Mid-session meaning visible in API docs
+- **WHEN** the rustdoc of `limit_shrink` in `iroh-tunnel-engine` and `iroh-tunnel-host` is read
+- **THEN** both describe drops caused by the limit becoming unusable mid-session, and neither describes the never-usable deviation or references #152
+
+### Requirement: Datagram-disable test seam stays in the explicit test feature graph
+The engine SHALL let a role process started with `IROH_TUNNEL_TEST_DISABLE_DATAGRAMS=1` advertise no datagram support only when built with the `test-utils` feature. Builds without `test-utils` MUST NOT read that variable, so it cannot change their datagram behavior.
+Source: issue #152, design.md D7
+
+#### Scenario: Seam disables datagrams in one role
+- **WHEN** a `test-utils` build starts one role with `IROH_TUNNEL_TEST_DISABLE_DATAGRAMS=1` and its peer without it
+- **THEN** only the role with the variable advertises no datagram support, and the peer detects the setup failure
+
+#### Scenario: Production build ignores the variable
+- **WHEN** the engine is built without `test-utils`
+- **THEN** no code reads `IROH_TUNNEL_TEST_DISABLE_DATAGRAMS`, and endpoints keep datagram support
