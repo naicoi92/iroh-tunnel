@@ -592,9 +592,31 @@ fn stop_and_release(path: &str) {
     wait_released(&pid);
 }
 
+/// Whether `pid` is a live process (a zombie counts as gone).
+fn alive(pid: &str) -> bool {
+    !exited(pid)
+}
+
+/// The pid the service wrote into its status snapshot, if readable.
+fn snapshot_pid(user: &Home) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(&user.running_services()?).ok()?;
+    Some(json.get("pid")?.as_u64()?.to_string())
+}
+
+/// Drop a snapshot left by an earlier process, so readiness can only come
+/// from the process about to start. Call it once the predecessor is gone.
+fn clear_snapshot(user: &Home) {
+    let _ = std::fs::remove_file(user.status_file());
+}
+
+/// Wait until the live process in the pidfile has written its own snapshot:
+/// a snapshot of a previous (even killed) process never satisfies this.
 fn wait_running(user: &Home) {
-    wait_for("serve to report status", || {
-        user.running_services().is_some()
+    wait_for("the live service to report its own status", || {
+        let pid = std::fs::read_to_string(PIDFILE)
+            .map(|p| p.trim().to_owned())
+            .unwrap_or_default();
+        !pid.is_empty() && alive(&pid) && snapshot_pid(user).as_deref() == Some(pid.as_str())
     });
 }
 
@@ -617,12 +639,26 @@ impl Drop for BinSandbox {
 /// Remove the registration, the running service and every binary copy the
 /// SM-BIN tests create, whatever state a previous test left.
 fn reset_binary_state() {
+    let pid = std::fs::read_to_string(PIDFILE)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
     if Path::new(SCRIPT).exists() {
         let _ = Command::new("sh").args([SCRIPT, "stop"]).output();
         let _ = Command::new(BIN)
             .args(["serve", "service", "uninstall", "--system"])
             .output();
         let _ = std::fs::remove_file(SCRIPT);
+    }
+    if !pid.is_empty() {
+        if alive(&pid) {
+            // A service that ignored `stop` must not outlive its binaries.
+            if let Ok(n) = pid.parse::<i32>() {
+                // SAFETY: kill(2) takes plain integers and has no memory effects.
+                unsafe { libc::kill(n, libc::SIGKILL) };
+            }
+        }
+        wait_for("the previous service process to exit", || exited(&pid));
     }
     let _ = std::fs::remove_file(PIDFILE);
     let _ = std::fs::remove_file(LOG);
@@ -642,7 +678,9 @@ fn sm_bin_01_user_bin_dir_registers_managed_copy() {
     let alice = Home::new("it91a", "alpha");
     place_user_binary(&alice);
     let original = std::fs::metadata(user_bin(&alice)).unwrap();
+    let original_bytes = std::fs::read(user_bin(&alice)).unwrap();
 
+    clear_snapshot(&alice);
     let out = install_on_path(&alice, &user_path(&alice));
     assert!(out.status.success(), "{}", err(&out));
 
@@ -658,9 +696,14 @@ fn sm_bin_01_user_bin_dir_registers_managed_copy() {
         (after.uid(), after.mode() & 0o7777),
         (original.uid(), original.mode() & 0o7777)
     );
+    assert_eq!(std::fs::read(user_bin(&alice)).unwrap(), original_bytes);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains(NOTE) && stdout.contains(MANAGED_COPY),
+        stdout.contains(NOTE)
+            // The source is the running executable the install copied from.
+            && stdout.contains(BIN)
+            && stdout.contains(MANAGED_COPY)
+            && stdout.contains("service install --system"),
         "{stdout}"
     );
     wait_running(&alice);
@@ -678,6 +721,7 @@ fn sm_bin_02_legacy_unsafe_daemon_refuses_start() {
     let user_binary = user_bin(&alice);
     let user_binary = user_binary.to_str().unwrap();
 
+    clear_snapshot(&alice);
     let out = install_on_path(&alice, &path);
     assert!(out.status.success(), "{}", err(&out));
     wait_running(&alice);
@@ -699,6 +743,7 @@ fn sm_bin_02_legacy_unsafe_daemon_refuses_start() {
     assert!(!Path::new(PIDFILE).exists(), "a refused start must not run");
 
     // The init system starts it with no self-check, as at boot.
+    clear_snapshot(&alice);
     let status = Command::new("sh")
         .args([SCRIPT, "start"])
         .stdout(Stdio::null())
@@ -710,6 +755,7 @@ fn sm_bin_02_legacy_unsafe_daemon_refuses_start() {
     stop_and_release(&path);
 
     // Re-installing registers the managed copy, and start works again.
+    clear_snapshot(&alice);
     let out = install_on_path(&alice, &path);
     assert!(out.status.success(), "{}", err(&out));
     assert_eq!(daemon(), MANAGED_COPY);
@@ -731,6 +777,7 @@ fn sm_bin_03_root_path_direct_and_uninstall_cleans() {
     place_user_binary(&alice);
     let path = user_path(&alice);
 
+    clear_snapshot(&alice);
     let out = install_on_path(&alice, &path);
     assert!(out.status.success(), "{}", err(&out));
     assert!(Path::new(MANAGED_COPY).exists());
