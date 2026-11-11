@@ -128,11 +128,61 @@ fn write_config(
     Ok(path)
 }
 
+/// How a role is started: quick mode for one service, `run --config` for several.
+enum Launch<'a> {
+    Config(&'a Path),
+    Quick(Vec<String>),
+}
+
+fn quick_serve(name: &str, target: SocketAddr, relay: &str) -> Launch<'static> {
+    Launch::Quick(
+        [
+            "serve",
+            "-n",
+            name,
+            "-t",
+            &target.to_string(),
+            "-p",
+            "udp",
+            "--relay-url",
+            relay,
+        ]
+        .map(String::from)
+        .to_vec(),
+    )
+}
+
+fn quick_access(
+    name: &str,
+    listen: SocketAddr,
+    node: &str,
+    protocol: &str,
+    relay: &str,
+) -> Launch<'static> {
+    Launch::Quick(
+        [
+            "access",
+            "-n",
+            name,
+            "-l",
+            &listen.to_string(),
+            "-N",
+            node,
+            "-p",
+            protocol,
+            "--relay-url",
+            relay,
+        ]
+        .map(String::from)
+        .to_vec(),
+    )
+}
+
 fn spawn(
     root: &Path,
     name: &str,
     role: &str,
-    config: &Path,
+    launch: Launch<'_>,
     disable_datagrams: bool,
 ) -> Result<Role> {
     let home = root.join(format!("{name}-home"));
@@ -140,7 +190,6 @@ fn spawn(
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(&state)?;
     let log = root.join(format!("{name}.log"));
-    eprintln!("spawn {name}: {role} run --config {}", config.display());
     let mut command = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
     command
         .env("HOME", &home)
@@ -153,9 +202,12 @@ fn spawn(
     if disable_datagrams {
         command.env(SEAM, "1");
     }
+    match &launch {
+        Launch::Config(path) => command.args([role, "run", "--config"]).arg(path),
+        Launch::Quick(args) => command.args(args),
+    };
+    eprintln!("spawn {name}: {command:?}");
     let child = command
-        .args([role, "run", "--config"])
-        .arg(config)
         .stdout(std::fs::File::create(&log)?)
         .stderr(Stdio::null())
         .spawn()?;
@@ -187,34 +239,85 @@ async fn wait_for<T>(
     }
 }
 
-async fn serve_ready(role: &mut Role, key: &SecretKey) -> Result<()> {
-    let expected = key.public().to_string();
-    wait_for("serve status node_id", role, |r| {
-        let body = std::fs::read_to_string(r.state.join("serve-status.json")).ok()?;
+/// Wait for the role's status file to carry a `node_id`; returns it.
+async fn node_id(role: &mut Role, kind: &str) -> Result<String> {
+    let file = format!("{kind}-status.json");
+    wait_for("status node_id", role, |r| {
+        let body = std::fs::read_to_string(r.state.join(&file)).ok()?;
         let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-        (json["node_id"] == expected.as_str()).then_some(())
+        json["node_id"].as_str().map(String::from)
     })
     .await
 }
 
-/// Wait for the Access UDP listener(s); returns the addresses in log order.
-async fn udp_listeners_ready(role: &mut Role, count: usize) -> Result<()> {
-    wait_for("access udp listener", role, |r| {
+/// A rendered log line: exact level token, exact `field=value` tokens and the
+/// message text, all on the same line. Substrings of other fields (a peer id
+/// containing "bad") can therefore never satisfy a matcher.
+struct LineMatch<'a> {
+    level: &'a str,
+    message: &'a str,
+    fields: Vec<(&'a str, &'a str)>,
+}
+
+impl LineMatch<'_> {
+    fn matches(&self, line: &str) -> bool {
+        line.contains(self.message)
+            && line.split_whitespace().any(|t| t == self.level)
+            && self.fields.iter().all(|(k, v)| {
+                let want = format!("{k}={v}");
+                line.split_whitespace().any(|t| t == want)
+            })
+    }
+
+    fn position(&self, log: &str) -> Option<usize> {
+        log.lines().position(|l| self.matches(l))
+    }
+
+    fn count(&self, log: &str) -> usize {
+        log.lines().filter(|l| self.matches(l)).count()
+    }
+}
+
+/// ERROR line with the exact service field and the full peer id.
+fn error_match<'a>(
+    message: &'a str,
+    service_field: &'a str,
+    service: &'a str,
+    peer: &'a str,
+) -> LineMatch<'a> {
+    LineMatch {
+        level: "ERROR",
+        message,
+        fields: vec![(service_field, service), ("peer", peer)],
+    }
+}
+
+/// The single back-off WARN of an Access service.
+fn backoff_match(service: &str) -> LineMatch<'_> {
+    LineMatch {
+        level: "WARN",
+        message: BACKOFF_WARNING,
+        fields: vec![("svc", service)],
+    }
+}
+
+/// Wait until every expected address appears in a "listening for local udp
+/// clients" line (`listen_addr=ADDR`).
+async fn udp_listeners_ready(role: &mut Role, addrs: &[SocketAddr]) -> Result<()> {
+    wait_for("access udp listeners", role, |r| {
         let log = r.log();
-        (log.lines()
-            .filter(|l| l.contains("listening for local udp clients"))
-            .count()
-            >= count)
+        addrs
+            .iter()
+            .all(|addr| {
+                let want = format!("listen_addr={addr}");
+                log.lines().any(|l| {
+                    l.contains("listening for local udp clients")
+                        && l.split_whitespace().any(|t| t == want)
+                })
+            })
             .then_some(())
     })
     .await
-}
-
-fn error_line(log: &str, text: &str, service: &str, peer: &SecretKey) -> Option<usize> {
-    let peer = peer.public().to_string();
-    log.lines().position(|l| {
-        l.contains(text) && l.contains("ERROR") && l.contains(service) && l.contains(&peer)
-    })
 }
 
 /// A free local UDP/TCP-agnostic port: reserve, release, let the role rebind.
@@ -272,10 +375,13 @@ fn count(log: &str, text: &str) -> usize {
     log.lines().filter(|l| l.contains(text)).count()
 }
 
-/// Backoff and redial assertions shared by Steps 1 and 2.
-fn assert_single_attempt(access_log: &str, failure_line: usize) {
+/// No-redial assertions shared by Steps 1 and 2. "connected to serve peer" is
+/// logged once per established connection, so exactly one proves a single dial;
+/// "connect attempt" is logged only for failed attempts, so it is a secondary
+/// check, not a dial marker.
+fn assert_single_attempt(access_log: &str, failure_line: usize, service: &str) {
     assert_eq!(count(access_log, CONNECTED), 1, "{access_log}");
-    assert_eq!(count(access_log, BACKOFF_WARNING), 1, "{access_log}");
+    assert_eq!(backoff_match(service).count(access_log), 1, "{access_log}");
     let after: Vec<&str> = access_log.lines().skip(failure_line + 1).collect();
     assert!(
         after.iter().all(|l| !l.contains(CONNECT_ATTEMPT)),
@@ -290,42 +396,33 @@ async fn serve_without_datagrams_fails_access_setup() -> Result<()> {
         let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
         let relay = relay.to_string();
         let (target, received) = udp_target().await?;
-        let (serve_key, access_key) = (SecretKey::generate(), SecretKey::generate());
         let listen = free_udp_addr().await?;
 
-        let serve_cfg = write_config(
+        let mut serve = spawn(
             root.path(),
-            "serve.toml",
-            &serve_key,
-            &relay,
-            &[Service {
-                name: "dns",
-                protocol: "udp",
-                addr: target,
-                node_id: None,
-            }],
+            "serve",
+            "serve",
+            quick_serve("dns", target, &relay),
+            true,
         )?;
-        let mut serve = spawn(root.path(), "serve", "serve", &serve_cfg, true)?;
-        serve_ready(&mut serve, &serve_key).await?;
-        let access_cfg = write_config(
+        let serve_id = node_id(&mut serve, "serve").await?;
+        let mut access = spawn(
             root.path(),
-            "access.toml",
-            &access_key,
-            &relay,
-            &[Service {
-                name: "dns",
-                protocol: "udp",
-                addr: listen,
-                node_id: Some(serve_key.public().to_string()),
-            }],
+            "access",
+            "access",
+            quick_access("dns", listen, &serve_id, "udp", &relay),
+            false,
         )?;
-        let mut access = spawn(root.path(), "access", "access", &access_cfg, false)?;
-        udp_listeners_ready(&mut access, 1).await?;
+        let access_id = node_id(&mut access, "access").await?;
+        udp_listeners_ready(&mut access, &[listen]).await?;
 
+        let access_fail = error_match(SERVE_FAIL_ON_ACCESS, "svc", "dns", &serve_id);
+        let serve_closed = error_match(SERVE_CLOSED_BY_ACCESS, "service", "dns", &access_id);
         let client = UdpSocket::bind("127.0.0.1:0").await?;
-        let (mut access_line, mut serve_line) = (None, None);
         let deadline = Instant::now() + MILESTONE_TIMEOUT;
-        while access_line.is_none() || serve_line.is_none() {
+        while access_fail.position(&access.log()).is_none()
+            || serve_closed.position(&serve.log()).is_none()
+        {
             anyhow::ensure!(
                 Instant::now() < deadline,
                 "failure lines missing\nA:{}\nS:{}",
@@ -334,10 +431,6 @@ async fn serve_without_datagrams_fails_access_setup() -> Result<()> {
             );
             client.send_to(b"ping", listen).await?;
             tokio::time::sleep(SEND_EVERY).await;
-            access_line = access_line
-                .or_else(|| error_line(&access.log(), SERVE_FAIL_ON_ACCESS, "dns", &serve_key));
-            serve_line = serve_line
-                .or_else(|| error_line(&serve.log(), SERVE_CLOSED_BY_ACCESS, "dns", &access_key));
         }
         send_for(&client, listen, Duration::from_secs(5)).await?;
 
@@ -348,10 +441,7 @@ async fn serve_without_datagrams_fails_access_setup() -> Result<()> {
         );
         assert!(access.running() && serve.running(), "a role exited");
         let log = access.log();
-        assert_single_attempt(
-            &log,
-            error_line(&log, SERVE_FAIL_ON_ACCESS, "dns", &serve_key).unwrap(),
-        );
+        assert_single_attempt(&log, access_fail.position(&log).unwrap(), "dns");
         access.stop();
         serve.stop();
         Ok(())
@@ -367,13 +457,10 @@ async fn access_without_datagrams_is_closed_by_serve() -> Result<()> {
         let relay = relay.to_string();
         let (udp, received) = udp_target().await?;
         let tcp = tcp_echo_target().await?;
-        let (serve_key, access_key, web_key) = (
-            SecretKey::generate(),
-            SecretKey::generate(),
-            SecretKey::generate(),
-        );
+        let serve_key = SecretKey::generate();
         let (dns_listen, web_listen) = (free_udp_addr().await?, free_tcp_addr().await?);
 
+        // Two services: multi-service role, so `run --config`.
         let serve_cfg = write_config(
             root.path(),
             "serve.toml",
@@ -394,47 +481,49 @@ async fn access_without_datagrams_is_closed_by_serve() -> Result<()> {
                 },
             ],
         )?;
-        let mut serve = spawn(root.path(), "serve", "serve", &serve_cfg, false)?;
-        serve_ready(&mut serve, &serve_key).await?;
-        let id = serve_key.public().to_string();
-        let access_cfg = write_config(
+        let mut serve = spawn(
             root.path(),
-            "access.toml",
-            &access_key,
-            &relay,
-            &[Service {
-                name: "dns",
-                protocol: "udp",
-                addr: dns_listen,
-                node_id: Some(id.clone()),
-            }],
+            "serve",
+            "serve",
+            Launch::Config(&serve_cfg),
+            false,
         )?;
-        let mut access = spawn(root.path(), "access", "access", &access_cfg, true)?;
-        udp_listeners_ready(&mut access, 1).await?;
-        let web_cfg = write_config(
+        let serve_id = node_id(&mut serve, "serve").await?;
+        let mut access = spawn(
             root.path(),
-            "web.toml",
-            &web_key,
-            &relay,
-            &[Service {
-                name: "web",
-                protocol: "tcp",
-                addr: web_listen,
-                node_id: Some(id),
-            }],
+            "access",
+            "access",
+            quick_access("dns", dns_listen, &serve_id, "udp", &relay),
+            true,
         )?;
-        let mut web = spawn(root.path(), "web", "access", &web_cfg, false)?;
+        let access_id = node_id(&mut access, "access").await?;
+        udp_listeners_ready(&mut access, &[dns_listen]).await?;
+        let mut web = spawn(
+            root.path(),
+            "web",
+            "access",
+            quick_access("web", web_listen, &serve_id, "tcp", &relay),
+            false,
+        )?;
         wait_for("web listener", &mut web, |r| {
+            let want = format!("listen_addr={web_listen}");
             r.log()
-                .contains("listening for local clients")
+                .lines()
+                .any(|l| {
+                    l.contains("listening for local clients")
+                        && l.split_whitespace().any(|t| t == want)
+                })
                 .then_some(())
         })
         .await?;
 
+        let serve_fail = error_match(ACCESS_FAIL_ON_SERVE, "service", "dns", &access_id);
+        let access_closed = error_match(ACCESS_CLOSED_BY_SERVE, "svc", "dns", &serve_id);
         let client = UdpSocket::bind("127.0.0.1:0").await?;
-        let (mut access_line, mut serve_line) = (None, None);
         let deadline = Instant::now() + MILESTONE_TIMEOUT;
-        while access_line.is_none() || serve_line.is_none() {
+        while serve_fail.position(&serve.log()).is_none()
+            || access_closed.position(&access.log()).is_none()
+        {
             anyhow::ensure!(
                 Instant::now() < deadline,
                 "failure lines missing\nA:{}\nS:{}",
@@ -443,10 +532,6 @@ async fn access_without_datagrams_is_closed_by_serve() -> Result<()> {
             );
             client.send_to(b"ping", dns_listen).await?;
             tokio::time::sleep(SEND_EVERY).await;
-            serve_line = serve_line
-                .or_else(|| error_line(&serve.log(), ACCESS_FAIL_ON_SERVE, "dns", &access_key));
-            access_line = access_line
-                .or_else(|| error_line(&access.log(), ACCESS_CLOSED_BY_SERVE, "dns", &serve_key));
         }
         send_for(&client, dns_listen, Duration::from_secs(5)).await?;
 
@@ -472,10 +557,7 @@ async fn access_without_datagrams_is_closed_by_serve() -> Result<()> {
             "a role exited"
         );
         let log = access.log();
-        assert_single_attempt(
-            &log,
-            error_line(&log, ACCESS_CLOSED_BY_SERVE, "dns", &serve_key).unwrap(),
-        );
+        assert_single_attempt(&log, access_closed.position(&log).unwrap(), "dns");
         web.stop();
         access.stop();
         serve.stop();
@@ -519,41 +601,25 @@ async fn one_failing_udp_service_does_not_stop_another() -> Result<()> {
         let relay = relay.to_string();
         let (bad_target, bad_received) = udp_target().await?;
         let (good_target, _) = udp_target().await?;
-        let (a_key, b_key, access_key) = (
-            SecretKey::generate(),
-            SecretKey::generate(),
-            SecretKey::generate(),
-        );
+        let access_key = SecretKey::generate();
         let (bad_listen, good_listen) = (free_udp_addr().await?, free_udp_addr().await?);
 
-        let a_cfg = write_config(
+        let mut serve_a = spawn(
             root.path(),
-            "a.toml",
-            &a_key,
-            &relay,
-            &[Service {
-                name: "bad",
-                protocol: "udp",
-                addr: bad_target,
-                node_id: None,
-            }],
+            "serve-a",
+            "serve",
+            quick_serve("bad", bad_target, &relay),
+            true,
         )?;
-        let b_cfg = write_config(
+        let mut serve_b = spawn(
             root.path(),
-            "b.toml",
-            &b_key,
-            &relay,
-            &[Service {
-                name: "good",
-                protocol: "udp",
-                addr: good_target,
-                node_id: None,
-            }],
+            "serve-b",
+            "serve",
+            quick_serve("good", good_target, &relay),
+            false,
         )?;
-        let mut serve_a = spawn(root.path(), "serve-a", "serve", &a_cfg, true)?;
-        let mut serve_b = spawn(root.path(), "serve-b", "serve", &b_cfg, false)?;
-        serve_ready(&mut serve_a, &a_key).await?;
-        serve_ready(&mut serve_b, &b_key).await?;
+        let a_id = node_id(&mut serve_a, "serve").await?;
+        let b_id = node_id(&mut serve_b, "serve").await?;
         let access_cfg = write_config(
             root.path(),
             "access.toml",
@@ -564,33 +630,37 @@ async fn one_failing_udp_service_does_not_stop_another() -> Result<()> {
                     name: "bad",
                     protocol: "udp",
                     addr: bad_listen,
-                    node_id: Some(a_key.public().to_string()),
+                    node_id: Some(a_id.clone()),
                 },
                 Service {
                     name: "good",
                     protocol: "udp",
                     addr: good_listen,
-                    node_id: Some(b_key.public().to_string()),
+                    node_id: Some(b_id),
                 },
             ],
         )?;
-        let mut access = spawn(root.path(), "access", "access", &access_cfg, false)?;
-        udp_listeners_ready(&mut access, 2).await?;
+        let mut access = spawn(
+            root.path(),
+            "access",
+            "access",
+            Launch::Config(&access_cfg),
+            false,
+        )?;
+        udp_listeners_ready(&mut access, &[bad_listen, good_listen]).await?;
 
         let client = UdpSocket::bind("127.0.0.1:0").await?;
-        let warned = |log: &str| log.contains(BACKOFF_WARNING);
-        let mut seen = None;
+        let failure = error_match(SERVE_FAIL_ON_ACCESS, "svc", "bad", &a_id);
+        let warning = backoff_match("bad");
         let deadline = Instant::now() + MILESTONE_TIMEOUT;
-        while seen.is_none() {
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "setup failure missing\n{}",
-                access.log()
-            );
+        loop {
+            let log = access.log();
+            if failure.position(&log).is_some() && warning.position(&log).is_some() {
+                break;
+            }
+            anyhow::ensure!(Instant::now() < deadline, "setup failure missing\n{log}");
             client.send_to(b"ping", bad_listen).await?;
             tokio::time::sleep(SEND_EVERY).await;
-            let log = access.log();
-            seen = error_line(&log, SERVE_FAIL_ON_ACCESS, "bad", &a_key).filter(|_| warned(&log));
         }
 
         // Keep hitting `bad` while `good` round-trips.
