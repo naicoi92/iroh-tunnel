@@ -879,3 +879,262 @@ fn sm_bin_05_declined_retarget_writes_no_copy() {
     );
     assert_eq!(script(), registration);
 }
+
+// ---- Integrated coverage for unix-service-binary-trust (#208, verify W2) ----
+//
+// - SM-BIN-06: a root-owned binary below a user-owned directory is not trusted.
+// - SM-BIN-07: a cargo bin directory and a Homebrew prefix register a copy.
+// - SM-BIN-08: uninstalling serve leaves the access copy untouched.
+// - SM-BIN-09: cleanup refused on an unsafe directory after unregistering.
+// - SM-BIN-10: BusyBox `--user` install from a user-writable binary.
+//
+// The "loaded definition differs from the file" scenario has no BusyBox
+// counterpart: the loaded definition is the init script itself.
+
+const ACCESS_SCRIPT: &str = "/etc/init.d/S96iroh-tunnel-access";
+const ACCESS_PIDFILE: &str = "/var/run/iroh-tunnel-access.pid";
+const ACCESS_DIR: &str = "/var/lib/iroh-tunnel/bin/access";
+const ACCESS_COPY: &str = "/var/lib/iroh-tunnel/bin/access/iroh-tunnel";
+const BREW_PREFIX: &str = "/home/linuxbrew/.linuxbrew";
+
+/// Remove the access registration, process and copy the tests below create.
+fn reset_access_state() {
+    if Path::new(ACCESS_SCRIPT).exists() {
+        let _ = Command::new("sh").args([ACCESS_SCRIPT, "stop"]).output();
+        wait_for("the access process to exit", || {
+            std::fs::read_to_string(ACCESS_PIDFILE)
+                .map(|p| exited(p.trim()))
+                .unwrap_or(true)
+        });
+        let _ = Command::new(BIN)
+            .args(["access", "service", "uninstall", "--system"])
+            .output();
+        let _ = std::fs::remove_file(ACCESS_SCRIPT);
+    }
+    let _ = std::fs::remove_file(ACCESS_PIDFILE);
+    let _ = std::fs::remove_dir_all(ACCESS_DIR);
+    let _ = std::fs::remove_dir_all("/home/linuxbrew");
+}
+
+/// `BinSandbox` that also clears the access role and the Homebrew prefix.
+struct WideSandbox(BinSandbox);
+
+impl WideSandbox {
+    fn new() -> Self {
+        reset_access_state();
+        Self(BinSandbox::new())
+    }
+}
+
+impl Drop for WideSandbox {
+    fn drop(&mut self) {
+        reset_access_state();
+    }
+}
+
+/// Write an access config for `user` and return its path.
+fn write_access_config(user: &Home) -> PathBuf {
+    let key = iroh::SecretKey::generate();
+    let peer = iroh::SecretKey::generate().public();
+    let path = user.home.join(".config/iroh-tunnel/access.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[node]\nsecret_key = {:?}\nrelay_urls = [\"https://relay.invalid\"]\n\n\
+             [[services]]\nname = \"alpha\"\nnode_id = \"{peer}\"\nprotocol = \"tcp\"\nport = 39123\n",
+            iroh_tunnel_host::config::encode_secret_key(&key)
+        ),
+    )
+    .unwrap();
+    own(&path, user.uid);
+    mode(&path, 0o600);
+    path
+}
+
+fn place_binary_in(dir: &Path, dir_uid: u32, bin_uid: u32) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    own(dir, dir_uid);
+    mode(dir, 0o755);
+    let dest = dir.join("iroh-tunnel");
+    place_binary(&dest, bin_uid);
+    dest
+}
+
+fn assert_registers_copy(user: &Home, bin: &Path, dir: &Path) {
+    let before = std::fs::read(bin).unwrap();
+    let meta = std::fs::metadata(bin).unwrap();
+    clear_snapshot(user);
+    let path = format!("{}:/usr/bin:/bin", dir.display());
+    let out = install_on_path(user, &path);
+    assert!(out.status.success(), "{}", err(&out));
+    assert_eq!(daemon(), MANAGED_COPY, "{}", script());
+    let copy = std::fs::metadata(MANAGED_COPY).unwrap();
+    assert_eq!((copy.uid(), copy.mode() & 0o7777), (0, 0o755));
+    let after = std::fs::metadata(bin).unwrap();
+    assert_eq!(
+        (after.uid(), after.mode() & 0o7777),
+        (meta.uid(), meta.mode() & 0o7777)
+    );
+    assert_eq!(std::fs::read(bin).unwrap(), before);
+    wait_running(user);
+}
+
+#[test]
+fn sm_bin_06_root_owned_binary_below_user_owned_directory_gets_a_copy() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = WideSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    let dir = user_bin_dir(&alice);
+    let bin = place_binary_in(&dir, alice.uid, 0);
+    assert_registers_copy(&alice, &bin, &dir);
+}
+
+#[test]
+fn sm_bin_07_cargo_and_homebrew_prefixes_register_a_copy() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = WideSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+
+    let cargo = alice.home.join(".cargo/bin");
+    std::fs::create_dir_all(&cargo).unwrap();
+    own(&alice.home.join(".cargo"), alice.uid);
+    let bin = place_binary_in(&cargo, alice.uid, alice.uid);
+    assert_registers_copy(&alice, &bin, &cargo);
+    stop_and_release(&user_path(&alice));
+    reset_binary_state();
+
+    let brew = Path::new(BREW_PREFIX).join("bin");
+    std::fs::create_dir_all(&brew).unwrap();
+    for dir in ["/home/linuxbrew", BREW_PREFIX] {
+        own(Path::new(dir), alice.uid);
+        mode(Path::new(dir), 0o755);
+    }
+    let bin = place_binary_in(&brew, alice.uid, alice.uid);
+    assert_registers_copy(&alice, &bin, &brew);
+}
+
+fn install_access(user: &Home, config: &Path, path: &str) -> Output {
+    run(
+        &["access", "service", "install", "--system", "--config"]
+            .iter()
+            .copied()
+            .chain([config.to_str().unwrap()])
+            .collect::<Vec<_>>(),
+        &[
+            ("SUDO_USER", user.name),
+            ("IROH_TUNNEL_STATE_DIR", user.state().to_str().unwrap()),
+            ("PATH", path),
+        ],
+    )
+}
+
+#[test]
+fn sm_bin_08_uninstalling_serve_keeps_the_access_copy() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = WideSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    place_user_binary(&alice);
+    let path = user_path(&alice);
+
+    let out = install_on_path(&alice, &path);
+    assert!(out.status.success(), "{}", err(&out));
+    let config = write_access_config(&alice);
+    let out = install_access(&alice, &config, &path);
+    assert!(out.status.success(), "access: {}", err(&out));
+    let access_bytes = std::fs::read(ACCESS_COPY).unwrap();
+    let access_meta = std::fs::metadata(ACCESS_COPY).unwrap();
+    assert!(Path::new(MANAGED_COPY).exists());
+
+    let pid = std::fs::read_to_string(PIDFILE).unwrap_or_default();
+    let out = service_verb("uninstall", &path);
+    assert!(out.status.success(), "uninstall: {}", err(&out));
+    wait_released(pid.trim());
+    assert!(std::fs::symlink_metadata(MANAGED_COPY).is_err());
+    assert!(std::fs::symlink_metadata(MANAGED_DIR).is_err());
+    assert_eq!(std::fs::read(ACCESS_COPY).unwrap(), access_bytes);
+    let after = std::fs::metadata(ACCESS_COPY).unwrap();
+    assert_eq!(
+        (after.uid(), after.mode() & 0o7777, after.ino()),
+        (
+            access_meta.uid(),
+            access_meta.mode() & 0o7777,
+            access_meta.ino()
+        )
+    );
+}
+
+#[test]
+fn sm_bin_09_cleanup_on_unsafe_directory_fails_after_unregistering() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = WideSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    place_user_binary(&alice);
+    let path = user_path(&alice);
+
+    let out = install_on_path(&alice, &path);
+    assert!(out.status.success(), "{}", err(&out));
+    wait_running(&alice);
+    stop_and_release(&path);
+    own(Path::new(MANAGED_DIR), alice.uid);
+
+    let out = service_verb("uninstall", &path);
+    let text = err(&out);
+    assert_eq!(out.status.code(), Some(3), "{text}");
+    assert!(text.contains(MANAGED_DIR), "{text}");
+    assert!(
+        !Path::new(SCRIPT).exists(),
+        "the registration must be gone: {text}"
+    );
+    let dir = std::fs::metadata(MANAGED_DIR).unwrap();
+    assert_eq!((dir.uid(), dir.mode() & 0o7777), (alice.uid, 0o755));
+    assert!(Path::new(MANAGED_COPY).exists(), "the copy must be kept");
+}
+
+#[test]
+fn sm_bin_10_busybox_user_scope_install_registers_a_copy() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = WideSandbox::new();
+    let alice = Home::new("it91a", "alpha");
+    place_user_binary(&alice);
+    clear_snapshot(&alice);
+    let config = alice.config();
+    let out = run(
+        &[
+            "serve",
+            "service",
+            "install",
+            "--user",
+            "--config",
+            config.to_str().unwrap(),
+        ],
+        &[
+            ("SUDO_USER", alice.name),
+            ("IROH_TUNNEL_STATE_DIR", alice.state().to_str().unwrap()),
+            ("PATH", &user_path(&alice)),
+        ],
+    );
+    assert!(out.status.success(), "{}", err(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("system-wide") || stdout.contains(SCRIPT),
+        "{stdout}"
+    );
+    assert_eq!(daemon(), MANAGED_COPY, "{}", script());
+    // The config pin is unchanged: a user-scope request pins no trusted uid.
+    assert!(
+        !script().contains("IROH_TUNNEL_TRUSTED_UID"),
+        "{}",
+        script()
+    );
+    wait_running(&alice);
+}
