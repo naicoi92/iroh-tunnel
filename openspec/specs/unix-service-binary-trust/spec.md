@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD
+Define how a root-run service on Linux or macOS (system scope, plus every scope on BusyBox init) runs only a binary that root alone can change. Install registers that binary directly, or a root-owned managed copy of the running executable; CLI start and restart re-check the binary the service manager has loaded; uninstall removes the copy once nothing references it. Service registration and the command surface are owned by `system-service-management`, and the Windows counterpart by `windows-service-trust`.
 
 ## Requirements
 
