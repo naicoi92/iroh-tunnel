@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Before 1.0.0, a minor release may contain breaking changes; they are marked
 **Breaking**.
 
+## [Unreleased]
+
 ## [0.6.0] - 2026-11-12
 
 ### BREAKING
@@ -447,6 +449,7 @@ riscv64 (musl) release artifacts and build pipeline.
 First stable release: serve/access TCP tunneling, config CLI, systemd/
 launchd service management, status file, GoReleaser packaging.
 
+[Unreleased]: https://github.com/naicoi92/iroh-tunnel/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/naicoi92/iroh-tunnel/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/naicoi92/iroh-tunnel/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/naicoi92/iroh-tunnel/compare/v0.4.1...v0.4.2

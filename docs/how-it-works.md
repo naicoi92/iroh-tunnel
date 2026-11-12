@@ -131,9 +131,9 @@ changed since 0.1.
 
 | Peers | Status |
 |---|---|
-| 0.5 ↔ 0.4.x, either role, TCP | Expected to work. A development build passed one TCP exchange per pairing against the published 0.4.0 and 0.4.2 releases on macOS arm64 (#85), before the iroh 1.4 upgrade; not re-run on the 0.5.0 release |
-| 0.5 Access → Serve older than 0.2.0 | Not supported. Old Serve accepts one stream per connection, so a second client hangs. Upgrade Serve |
-| UDP | Needs 0.5 on both sides |
+| 0.6 ↔ 0.5.x and 0.4.x, either role, TCP | Expected to work. A development build passed one TCP exchange per pairing against the published 0.4.0 and 0.4.2 releases on macOS arm64 (#85), before the iroh 1.4 upgrade; not re-run on the 0.6.0 release |
+| 0.6 Access → Serve older than 0.2.0 | Not supported. Old Serve accepts one stream per connection, so a second client hangs. Upgrade Serve |
+| UDP | Needs 0.5 or later on both sides |
 | Self-hosted iroh-relay 1.x | Supported; see [Self-hosted relay](self-hosted-relay.md) |
 
 When upgrading a pair, upgrade Serve first.
