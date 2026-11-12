@@ -18,6 +18,7 @@
 mod common;
 
 use anyhow::{Context, Result};
+use common::busy_exec;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -109,18 +110,17 @@ impl RoleForm<'_> {
             command.get_program(),
             self.prefix
         );
-        Ok(Process(
+        Ok(Process(busy_exec::spawn(
             command
                 .stdout(std::fs::File::create(log)?)
-                .stderr(Stdio::null())
-                .spawn()?,
-        ))
+                .stderr(Stdio::null()),
+        )?))
     }
 
     fn output(&self, args: &[&str]) -> Result<Output> {
         let state = tempfile::tempdir()?;
         let mut command = self.install.command(self.alias, state.path())?;
-        Ok(command.args(self.prefix).args(args).output()?)
+        Ok(busy_exec::output(command.args(self.prefix).args(args))?)
     }
 }
 

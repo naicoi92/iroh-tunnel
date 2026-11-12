@@ -9,6 +9,7 @@
 mod common;
 
 use anyhow::Result;
+use common::busy_exec;
 use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::Owner;
 use iroh_tunnel_host::update::{
@@ -188,11 +189,12 @@ fn real_binary_in_a_container_prints_redeploy_guidance_and_changes_nothing() -> 
     std::fs::copy(SERVE, &exe)?;
     let before = std::fs::read(&exe)?;
 
-    let out = Command::new(&exe)
-        .args(["update", "-i", "--yes"])
-        .env("IROH_TUNNEL_BASE_URL", &f.server.url)
-        .env("IROH_TUNNEL_CONTAINER", "1")
-        .output()?;
+    let out = busy_exec::output(
+        Command::new(&exe)
+            .args(["update", "-i", "--yes"])
+            .env("IROH_TUNNEL_BASE_URL", &f.server.url)
+            .env("IROH_TUNNEL_CONTAINER", "1"),
+    )?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
