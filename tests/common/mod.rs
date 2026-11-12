@@ -2,6 +2,7 @@
 // Each test crate uses a different subset of these helpers.
 #![allow(dead_code)]
 
+pub mod busy_exec;
 pub mod release_server;
 #[cfg(windows)]
 pub mod restricted;

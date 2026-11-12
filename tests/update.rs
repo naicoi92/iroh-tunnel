@@ -16,12 +16,14 @@
 mod common;
 
 use anyhow::{Context, Result};
+use common::busy_exec;
 use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::{
     update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
 };
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write as _;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -98,17 +100,47 @@ fn install_real_binary() -> Result<Install> {
 }
 
 fn run_update(exe: &Path, base_url: &str, args: &[&str]) -> Result<Output> {
-    Command::new(exe)
-        .arg("update")
-        .args(args)
-        .env("IROH_TUNNEL_BASE_URL", base_url)
-        .output()
-        .context("cannot run update")
+    busy_exec::output(
+        Command::new(exe)
+            .arg("update")
+            .args(args)
+            .env("IROH_TUNNEL_BASE_URL", base_url),
+    )
+    .context("cannot run update")
 }
 
 fn run_installed(exe: &Path) -> Result<String> {
-    let out = Command::new(exe).output()?;
+    let out = busy_exec::output(&mut Command::new(exe))?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// #206: while any process holds a writer descriptor on an executable, Linux
+/// refuses to exec it (`ETXTBSY`). In the flake a sibling test's forked child
+/// inherits that descriptor until its own exec; here it is held on purpose.
+#[test]
+fn exec_retry_outlasts_a_transient_writer_on_the_executable() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let script = dir.path().join("script");
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o755)
+        .open(&script)?;
+    (&writer).write_all(b"#!/bin/sh\necho READY\n")?;
+    if cfg!(target_os = "linux") {
+        let err = Command::new(&script).output().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ExecutableFileBusy);
+    }
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(writer);
+    });
+
+    let out = busy_exec::output(&mut Command::new(&script))?;
+
+    release.join().expect("writer thread panicked");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "READY");
+    Ok(())
 }
 
 #[test]
@@ -216,11 +248,12 @@ fn update_does_not_stop_a_running_process_of_the_old_binary() -> Result<()> {
     let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
     let install = install_real_binary()?;
     // A live tunnel started from the very file that is about to be replaced.
-    let mut running = Command::new(&install.exe)
-        .args(["--target", "127.0.0.1:9", "--name", "update-test"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let mut running = busy_exec::spawn(
+        Command::new(&install.exe)
+            .args(["--target", "127.0.0.1:9", "--name", "update-test"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )?;
     std::thread::sleep(std::time::Duration::from_secs(2));
     assert!(running.try_wait()?.is_none(), "tunnel did not start");
 
