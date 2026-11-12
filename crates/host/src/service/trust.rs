@@ -722,14 +722,22 @@ mod tests {
     #[test]
     fn an_owner_that_is_neither_root_nor_trusted_is_refused() {
         let (_tmp, file) = fixture();
-        let other = if me() == 4242 { 4243 } else { 4242 };
+        // Root is always trusted, so as root hand the fixture to a non-root
+        // owner; otherwise the current user already is one.
+        let owner = if me() == 0 {
+            std::os::unix::fs::chown(&file, Some(4242), None).unwrap();
+            4242
+        } else {
+            me()
+        };
+        let other = if owner == 4242 { 4243 } else { 4242 };
         // The refusal may come from the file or, when the fixture lives under
         // a sticky `/tmp`, from the directory above it; either way a path that
         // a different principal owns must be named and refused.
         let msg = refusal(read_verified(&file, other));
         assert!(msg.contains("unsafe") && msg.contains("/"), "{msg}");
         // And the same path is accepted when its owner is the trusted uid.
-        assert!(read_verified(&file, me()).is_ok());
+        assert!(read_verified(&file, owner).is_ok());
     }
 
     #[test]
