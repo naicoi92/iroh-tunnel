@@ -71,6 +71,7 @@
 - `verb::check_effective(loaded, role, verify)` (new, private): pure refusal formatting behind `guard_effective_binary`; prefixes the registered binary path when the trust message does not already name it.
 - `install::plan_user_install(req, env, probe, lock_dirs, system_wide_only)` (new, private) and `policy::ensure_root_run_privilege(root_run, elevated)` (new): the final review found an unprivileged BusyBox `--user` install reaching `materialize` (exit 1); the privilege check now runs during planning with the existing BusyBox text.
 - `Native::output` is compiled on Linux too (previously macOS, Windows and tests only), for the systemd `effective_binary` query.
+- `launchd` private helpers `UnloadPoll`/`UNLOAD_POLL`, `bootout_job`, `wait_until_unloaded` and `print_definition` (new, task 7.5 fix): after a successful `bootout`, uninstall polls `launchctl print` (up to 50 probes, 100 ms apart) until launchd drops the job, so the release step does not see a `SIGTERMed` job still naming the copy. Timeout or an unexpected probe failure is not an error; the conservative reference check then keeps the copy. `uninstall` keeps its signature.
 - `platform::effective_binary`, `RegistrationSources` and `managed_copy_referenced` exist only on Linux and macOS, as Global Constraints scope the behaviour.
 
 ---

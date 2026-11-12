@@ -71,6 +71,7 @@ All entries are internal (`public: no`) and are recorded in plan.md `## Contract
 - `install::plan_user_install` and `policy::ensure_root_run_privilege`: new. They refuse an unprivileged root-run (BusyBox) install during planning, keeping the previous exit 3 and text. The final review found this regression.
 - `Native::output`: now also compiled on Linux, for the systemd query.
 - `platform::effective_binary`, `RegistrationSources` and `managed_copy_referenced`: exist only on Linux and macOS.
+- `launchd` private helpers `UnloadPoll`/`UNLOAD_POLL`, `bootout_job`, `wait_until_unloaded`, `print_definition`: new in `6655726`, a bounded wait after `bootout` so uninstall of a running job releases the copy. They are private, and `uninstall` keeps its signature. Recorded after verify W1.
 
 ---
 
