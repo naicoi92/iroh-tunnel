@@ -69,6 +69,15 @@ pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
             (Stream::Stdout, format!("{role} is not running\n"))
         }
         ServiceNote::TaskListing { text } => (Stream::Stdout, text.clone()),
+        ServiceNote::ManagedBinary { role, source, copy } => (
+            Stream::Stdout,
+            format!(
+                "Registered a root-owned copy of {} at {} for the {role} service; re-run \
+                 `sudo iroh-tunnel {role} service install --system` after upgrading to update it\n",
+                source.display(),
+                copy.display()
+            ),
+        ),
     }
 }
 
@@ -426,6 +435,17 @@ mod tests {
             },
             Stream::Stdout,
             "a\nb",
+        );
+        check(
+            ServiceNote::ManagedBinary {
+                role: "serve".into(),
+                source: "/home/u/.cargo/bin/iroh-tunnel".into(),
+                copy: "/var/lib/iroh-tunnel/bin/serve/iroh-tunnel".into(),
+            },
+            Stream::Stdout,
+            "Registered a root-owned copy of /home/u/.cargo/bin/iroh-tunnel at \
+             /var/lib/iroh-tunnel/bin/serve/iroh-tunnel for the serve service; re-run \
+             `sudo iroh-tunnel serve service install --system` after upgrading to update it\n",
         );
     }
 

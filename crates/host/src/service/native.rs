@@ -103,6 +103,16 @@ pub enum ServiceNote {
         /// The listing text.
         text: String,
     },
+    /// A root-run registration runs a managed root-owned copy of the
+    /// executable, because the resolved one was writable by a non-root user.
+    ManagedBinary {
+        /// Role name.
+        role: String,
+        /// The executable the copy was made from.
+        source: PathBuf,
+        /// The managed copy the registration runs.
+        copy: PathBuf,
+    },
 }
 
 /// The result of one native command.
@@ -200,7 +210,7 @@ impl<'a> Native<'a> {
     /// Run `command` and always capture, whatever the caller's mode. For
     /// commands whose output the backend must read (launchctl `kill`'s
     /// "No process to signal", `schtasks` listings, `whoami`).
-    #[cfg(any(target_os = "macos", windows, test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub(crate) fn output(&mut self, command: &mut Command) -> io::Result<NativeOutput> {
         (self.runner)(command, OutputMode::Capture)
     }

@@ -16,6 +16,7 @@ mod account_name;
 mod backend;
 mod decide_install_scope;
 mod default_scope;
+mod effective_binary;
 mod execute;
 #[cfg(test)]
 mod fixtures;
@@ -28,6 +29,7 @@ mod platform;
 mod policy;
 mod registration;
 mod restart;
+mod service_binary;
 mod start;
 mod status;
 mod stop;
@@ -65,7 +67,8 @@ pub use system::unknown_user;
 pub(crate) use trust_windows::{create_dir_with_sddl, program_data_dir, verify_machine_dir};
 pub use types::{
     AppliedEffect, Environment, Fact, InstallNeed, InstallOutcome, InstallRequest, Registration,
-    ScopeDecision, ServiceFailure, ServiceReport, ServiceScope, ServiceStatusReport,
+    RunningExecutable, ScopeDecision, ServiceFailure, ServiceReport, ServiceScope,
+    ServiceStatusReport,
 };
 pub use uninstall::uninstall;
 

@@ -30,8 +30,29 @@ Windows service scope changes:
 - **Breaking:** on Windows, `--system` without elevation now exits with code
   `3` (permission) with "Run as administrator" guidance, instead of `5`.
 
+Linux and macOS system service changes:
+
+- **Breaking:** on Linux and macOS, `service start --system` and `service
+  restart --system` refuse a legacy system registration whose binary a non-root
+  user can change (for example `~/.cargo/bin/iroh-tunnel`). They exit with code
+  `3`, naming the path, and its owner and mode where known, and issue no start,
+  stop or restart. Run `sudo iroh-tunnel <role> service install --system` once
+  to re-register. On BusyBox init hosts, where every service runs as root,
+  `service start` and `service restart` are checked with or without `--system`.
+  A refused start or restart leaves a running service running, and starts by
+  the service manager at boot are not checked.
+
 ### Added
 
+- **Root-owned service binary on Linux and macOS:** `service install --system`
+  from a binary the root-only check rejects (Homebrew, `cargo install`, a binary
+  under your home) registers a root-owned copy at
+  `/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
+  `/Library/Application Support/iroh-tunnel/bin/<role>/iroh-tunnel` (macOS), and
+  prints a note. Re-run `sudo iroh-tunnel <role> service install --system` after
+  upgrading to refresh it. Uninstall removes the copy once no registration
+  references it, and keeps it when references cannot be ruled out. The original
+  binary is never changed.
 - **Windows system services:** `service install --system` registers a
   LocalSystem Windows Service that starts at boot, trusts one pinned user's
   config and state, checks their ownership and access (no junctions or links)

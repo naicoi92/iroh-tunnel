@@ -4,6 +4,7 @@
 //! `~/.config/systemd/user` (user scope). Each action delegates to `systemctl`
 //! with `--user` added automatically for the per-user domain.
 
+use super::super::effective_binary::{parse_systemd_show, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::{instance_suffix, write_registration};
@@ -142,6 +143,21 @@ fn systemctl(
 /// Where the unit file is (or would be).
 pub(crate) fn registration_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
     unit_path(role, scope)
+}
+
+/// What systemd will run for the role's system unit, from the loaded unit.
+pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBinary {
+    let unit = unit_name(role);
+    let mut cmd = std::process::Command::new("systemctl");
+    cmd.args(["show", "-p", "LoadState", "-p", "ExecStart", &unit]);
+    match native.output(&mut cmd) {
+        Ok(out) if out.success() => parse_systemd_show(&String::from_utf8_lossy(&out.stdout)),
+        Ok(out) => EffectiveBinary::Unknown(format!(
+            "systemctl show {unit} failed with {}",
+            out.status_text()
+        )),
+        Err(e) => EffectiveBinary::Unknown(format!("failed to run systemctl show {unit}: {e}")),
+    }
 }
 
 /// The installed unit's text, if any (to read its pin).
@@ -283,6 +299,50 @@ mod tests {
                 OutputMode::Capture
             )]
         );
+    }
+
+    #[test]
+    fn effective_binary_runs_show_for_the_system_unit() {
+        let events = Events::default();
+        let loaded =
+            "LoadState=loaded\nExecStart={ path=/usr/bin/x ; argv[]=/usr/bin/x ; status=0/0 }\n";
+        let mut fake = FakeRunner::new(&events, vec![output(0, loaded, "")]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Inherit, &mut runner);
+        assert_eq!(
+            effective_binary(&mut native, "serve"),
+            EffectiveBinary::Binary(PathBuf::from("/usr/bin/x"))
+        );
+        assert_eq!(
+            *events.borrow(),
+            vec![call(
+                "systemctl",
+                &[
+                    "show",
+                    "-p",
+                    "LoadState",
+                    "-p",
+                    "ExecStart",
+                    "iroh-tunnel-serve.service"
+                ],
+                OutputMode::Capture
+            )]
+        );
+    }
+
+    #[test]
+    fn effective_binary_command_failure_is_unknown() {
+        let mut runner = |_: &mut std::process::Command, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no systemctl",
+            ))
+        };
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        assert!(matches!(
+            effective_binary(&mut native, "serve"),
+            EffectiveBinary::Unknown(_)
+        ));
     }
 
     #[test]
@@ -430,6 +490,28 @@ mod tests {
         assert_eq!(
             p,
             PathBuf::from("/etc/systemd/system/iroh-tunnel-serve.service")
+        );
+    }
+
+    #[test]
+    fn managed_path_renders_as_one_argument_in_each_backend() {
+        let copy = "/Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel";
+        let body = format_unit("serve", Path::new(copy), Path::new("/c"), Path::new("/s"));
+        let exec = body
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .expect("the unit has an ExecStart line");
+        // The space is quoted, so systemd splits no word out of the path.
+        assert_eq!(exec, format!("\"{copy}\" serve run --config /c"));
+        // How systemd reports that unit once loaded.
+        let shown = format!(
+            "LoadState=loaded\nExecStart={{ path={copy} ; argv[]={copy} serve run --config /c ; \
+             ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; \
+             status=0/0 }}\n"
+        );
+        assert_eq!(
+            parse_systemd_show(&shown),
+            EffectiveBinary::Binary(PathBuf::from(copy))
         );
     }
 }

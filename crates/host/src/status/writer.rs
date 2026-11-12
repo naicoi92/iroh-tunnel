@@ -179,15 +179,18 @@ impl StatusWriter {
         // go through a verified handle instead of paths (SM-04).
         #[cfg(unix)]
         if let Some(uid) = crate::service::trust::trusted_uid_from_env()? {
+            use crate::service::trust::{publish, remove_in, TrustedOwners};
+            let owners = TrustedOwners::RootAnd(uid);
             let temp = format!(
                 "{}.tmp.{}.{}",
                 self.file_name(),
                 std::process::id(),
                 TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             );
-            crate::service::trust::publish(dir, uid, self.file_name(), &temp, content.as_bytes())?;
+            let mut bytes = content.as_bytes();
+            publish(dir, owners, self.file_name(), &temp, &mut bytes, 0o644)?;
             // Best-effort, like the path-based branch below.
-            let _ = crate::service::trust::remove_in(dir, uid, LEGACY_STATUS_FILE_NAME);
+            let _ = remove_in(dir, owners, LEGACY_STATUS_FILE_NAME);
             return Ok(path);
         }
         #[cfg(windows)]
@@ -292,19 +295,20 @@ fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path
     };
     #[cfg(unix)]
     if let Ok(Some(uid)) = crate::service::trust::trusted_uid_from_env() {
-        use crate::service::trust::{read_in, remove_in};
+        use crate::service::trust::{read_in, remove_in, TrustedOwners};
+        let owners = TrustedOwners::RootAnd(uid);
         let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
         else {
             return;
         };
-        let ours = read_in(dir, uid, name).is_some_and(|body| {
+        let ours = read_in(dir, owners, name).is_some_and(|body| {
             matches!(
                 serde_json::from_str::<StatusFilePid>(&body),
                 Ok(probe) if probe.pid == std::process::id()
             )
         });
         if ours {
-            if let Err(e) = remove_in(dir, uid, name) {
+            if let Err(e) = remove_in(dir, owners, name) {
                 tracing::debug!("failed to remove status file: {e:#}");
             }
         }

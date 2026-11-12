@@ -51,6 +51,26 @@ System services need root; the error prints the `sudo` command to run. On
 Windows, open a terminal with "Run as administrator" and run the printed
 command there.
 
+**`service start --system` or `restart --system` exits with code 3 and names a binary.**
+On Linux and macOS the service manager would run a binary that a non-root user
+can change (for example one under your home directory, or a directory above it
+that is group- or world-writable), or its definition cannot be read. The
+message names the unsafe path, and its owner and mode where known, or explains
+why the binary could not be determined.
+Nothing was started, stopped or restarted, so a running service keeps running.
+Re-run the install as root, then start again:
+
+```sh
+sudo iroh-tunnel <role> service install --system
+sudo iroh-tunnel <role> service start --system
+```
+
+Install registers the binary directly if it passes the root-only check, or
+otherwise a root-owned copy at
+`/var/lib/iroh-tunnel/bin/<role>/iroh-tunnel` (Linux) or
+`/Library/Application Support/iroh-tunnel/bin/<role>/iroh-tunnel` (macOS). See
+[System services](services.md#system-services).
+
 **A Windows system service refuses to start: `permission error`.**
 The config, state directory, binary or `%ProgramData%\iroh-tunnel` can be
 changed by an account the service does not trust, or the path goes through a

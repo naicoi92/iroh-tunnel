@@ -20,12 +20,12 @@
 //! both scopes manage the one `/etc/init.d` script — User scope prints a
 //! note rather than failing. Requires root.
 
+use super::super::effective_binary::{parse_busybox_script, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::write_registration;
 use super::super::types::AppliedEffect;
 use super::super::types::ServiceScope;
-use crate::error::CliError;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -149,16 +149,12 @@ fn set_executable(path: &Path) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`CliError::Permission`] with rerun guidance.
+/// [`crate::error::CliError::Permission`] with rerun guidance.
 fn require_root() -> Result<()> {
-    if !super::super::is_elevated::is_elevated() {
-        return Err(CliError::Permission(
-            "this host runs BusyBox init, which has no per-user services; managing the \
-             /etc/init.d service requires root. Nothing was changed. Re-run with sudo."
-                .into(),
-        )
-        .into());
-    }
+    super::super::policy::ensure_root_run_privilege(
+        true,
+        super::super::is_elevated::is_elevated(),
+    )?;
     Ok(())
 }
 
@@ -192,6 +188,11 @@ fn run_script(native: &mut Native, role: &str, verb: &str) -> Result<()> {
 /// Where the init script is (or would be).
 pub(crate) fn registration_path(role: &str) -> PathBuf {
     script_path(role)
+}
+
+/// What the init script will run, read from the installed script.
+pub(crate) fn effective_binary(role: &str) -> EffectiveBinary {
+    parse_busybox_script(existing_registration(role).as_deref())
 }
 
 /// The installed script's text, if any (to read its pin).
@@ -319,6 +320,21 @@ mod tests {
     }
 
     #[test]
+    fn effective_binary_round_trips_the_generated_script() {
+        let script = format_script(
+            "serve",
+            Path::new("/a b/iroh-tunnel"),
+            Path::new("/c"),
+            Path::new("/s"),
+            None,
+        );
+        assert_eq!(
+            parse_busybox_script(Some(&script)),
+            EffectiveBinary::Binary(PathBuf::from("/a b/iroh-tunnel"))
+        );
+    }
+
+    #[test]
     fn script_name_has_boot_order_prefix() {
         assert_eq!(script_name("serve"), "S96iroh-tunnel-serve");
         assert_eq!(script_name("access"), "S96iroh-tunnel-access");
@@ -368,5 +384,27 @@ mod tests {
         ] {
             assert!(s.contains(arm), "missing case arm `{arm}`:\n{s}");
         }
+    }
+
+    #[test]
+    fn managed_path_renders_as_one_argument_in_each_backend() {
+        let copy = "/Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel";
+        let script = format_script(
+            "serve",
+            Path::new(copy),
+            Path::new("/c"),
+            Path::new("/s"),
+            None,
+        );
+        // Assigned in double quotes and expanded quoted: one shell word.
+        assert!(script.contains(&format!("DAEMON=\"{copy}\"\n")), "{script}");
+        assert!(
+            script.contains("\"$DAEMON\" \"$ROLE\" run --config \"$CONFIG\""),
+            "{script}"
+        );
+        assert_eq!(
+            parse_busybox_script(Some(&script)),
+            EffectiveBinary::Binary(PathBuf::from(copy))
+        );
     }
 }
