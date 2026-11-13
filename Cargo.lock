@@ -1896,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-tunnel"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-tunnel-engine"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-tunnel-host"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "data-encoding",

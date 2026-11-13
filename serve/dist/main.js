@@ -23248,7 +23248,7 @@ import { access as access2, readFile } from "node:fs/promises";
 import { join as join4 } from "node:path";
 
 // src/version.ts
-var BUILD_VERSION = "0.5.0";
+var BUILD_VERSION = "0.6.0";
 var MIN_VERSION = "0.6.0";
 
 // src/adapters/target.ts

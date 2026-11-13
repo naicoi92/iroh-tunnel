@@ -15,7 +15,7 @@ executable, so arguments start at the role or command.
 Quick mode needs no file:
 
 ```sh
-docker run --rm ghcr.io/naicoi92/iroh-tunnel-serve:v0.5.0 \
+docker run --rm ghcr.io/naicoi92/iroh-tunnel-serve:v0.6.0 \
   -n web -t 192.0.2.10:80
 ```
 
@@ -26,7 +26,7 @@ generated key into a read-only file:
 ```sh
 docker run --rm \
   -v "$PWD/serve.toml:/etc/iroh-tunnel/serve.toml:ro" \
-  ghcr.io/naicoi92/iroh-tunnel:v0.5.0 \
+  ghcr.io/naicoi92/iroh-tunnel:v0.6.0 \
   serve run --config /etc/iroh-tunnel/serve.toml
 ```
 
@@ -96,7 +96,7 @@ spec:
     spec:
       containers:
         - name: serve
-          image: ghcr.io/naicoi92/iroh-tunnel-serve:v0.5.0
+          image: ghcr.io/naicoi92/iroh-tunnel-serve:v0.6.0
           args: ["run", "--config", "/etc/iroh-tunnel/serve.toml"]
           volumeMounts:
             - name: config

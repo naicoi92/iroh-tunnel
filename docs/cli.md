@@ -110,7 +110,7 @@ ita update ...
 
 | Flag | Meaning |
 |---|---|
-| `--to VERSION` | Install this release (`0.5.0` or `v0.5.0`); allows downgrades |
+| `--to VERSION` | Install this release (`0.6.0` or `v0.6.0`); allows downgrades |
 | `-i`, `--insecure` | Skip signature and checksum verification, with a warning |
 | `-y`, `--yes` | Replace a package- or Homebrew-owned executable anyway |
 
