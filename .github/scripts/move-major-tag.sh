@@ -12,13 +12,14 @@ highest_stable() { # <major>
 }
 
 # Force-move refs/tags/v<major> to <sha>; create it only when it does not exist.
+# GitHub answers 422 "Reference does not exist" (not 404) for a missing ref.
 # Any other PATCH error (403, 5xx, rate limit) is returned, not retried as POST.
 move_ref() { # <major> <sha>
   local err
   if err="$(gh api -X PATCH "repos/$GH_REPO/git/refs/tags/v${1}" -f sha="$2" -F force=true 2>&1 >/dev/null)"; then
     return 0
   fi
-  if [[ "$err" == *"HTTP 404"* || "$err" == *"Not Found"* ]]; then
+  if [[ "$err" == *"HTTP 404"* || "$err" == *"Not Found"* || "$err" == *"Reference does not exist"* ]]; then
     gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/v${1}" -f sha="$2" >/dev/null
   else
     echo "$err" >&2

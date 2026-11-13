@@ -80,7 +80,7 @@ out="$(bash "$script" --dry-run v0.6.0 "$work/empty.txt" 2>&1)" || rc=$?
 check "empty tag list exits 1 with a message" \
   "1|no stable v0 tags found" "$rc|$out"
 
-# Stateful gh shim for the live path. PATCH_MODE: ok | 404 | 403.
+# Stateful gh shim for the live path. PATCH_MODE: ok | 404 | 422 | 403.
 cat > "$work/bin/gh" <<'SHIM'
 #!/bin/sh
 echo "$*" >> "$GH_LOG"
@@ -91,6 +91,7 @@ case "$*" in
     case "$PATCH_MODE" in
       ok) ;;
       404) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+      422) echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1 ;;
       *) echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1 ;;
     esac ;;
   *"-X POST"*) ;;
@@ -109,6 +110,7 @@ live() { # <mode>; prints "rc|calls|output-has-manual"
 }
 check "live: PATCH succeeds, no POST" "0|1 patch,0 post|manual=no" "$(live ok)"
 check "live: PATCH 404 falls back to POST" "0|1 patch,1 post|manual=no" "$(live 404)"
+check "live: PATCH 422 (ref missing) falls back to POST" "0|1 patch,1 post|manual=no" "$(live 422)"
 check "live: PATCH 403 makes no POST and prints the manual hint" "1|1 patch,0 post|manual=yes" "$(live 403)"
 
 echo "$passed passed, $failed failed"
