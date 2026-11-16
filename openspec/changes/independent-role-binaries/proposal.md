@@ -21,6 +21,7 @@ None.
 - `system-service-management`: standalone executables can register and manage their own role services without the combined executable.
 - `install-release-packaging`: publish independent, co-installable Homebrew casks for all three executables.
 - `self-update`: make Windows locked-service guidance usable without the combined executable and direct Homebrew users to the matching cask.
+- `unix-service-binary-trust`: tailor unsafe-binary reinstall guidance to the invoked standalone or combined executable while preserving refusal and trust checks.
 
 ## Impact
 
