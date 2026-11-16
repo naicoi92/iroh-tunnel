@@ -2,9 +2,9 @@
 
 Blocked by: none
 
-- [ ] 1.1 Add failing tests for isolated standalone role service dispatch, registration argument forms, trusted managed copies and unchanged combined behavior in `tests/role_binaries.rs`, service backend tests and `tests/service_user.rs`.
-- [ ] 1.2 Carry invocation identity through `src/app.rs`, `src/cli_service.rs`, `crates/host/src/service/` and backend registration, retaining trust and role policies.
-- [ ] 1.3 Cover Windows standalone SCM startup and shutdown using `src/scm_runtime/` and `tests/service_system_windows.rs`; verify Unix systemd, BusyBox and launchd registration paths and platform lifecycle tests.
+- [x] 1.1 Add failing tests for isolated standalone role service dispatch, registration argument forms, trusted managed copies and unchanged combined behavior in `tests/role_binaries.rs`, service backend tests and `tests/service_user.rs`.
+- [x] 1.2 Carry invocation identity through `src/app.rs`, `src/cli_service.rs`, `crates/host/src/service/` and backend registration, retaining trust and role policies.
+- [x] 1.3 Cover Windows standalone SCM startup and shutdown using `src/scm_runtime/` and `tests/service_system_windows.rs`; verify Unix systemd, BusyBox and launchd registration paths and platform lifecycle tests.
 
 ## 2. Role-specific update guidance
 
