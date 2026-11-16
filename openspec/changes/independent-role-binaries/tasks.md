@@ -24,5 +24,5 @@ Blocked by: none
 
 Blocked by: 1, 2, 3
 
-- [ ] 4.1 Update `README.md` and `docs/install.md` and relevant service/update guidance for independent role installations and ownership policies.
-- [ ] 4.2 Run focused tests, project validation, and available Linux, macOS and Windows service/release tests; record unverified platform coverage explicitly.
+- [x] 4.1 Update `README.md` and `docs/install.md` and relevant service/update guidance for independent role installations and ownership policies.
+- [x] 4.2 Run focused tests, project validation, and available Linux, macOS and Windows service/release tests; record unverified platform coverage explicitly.
