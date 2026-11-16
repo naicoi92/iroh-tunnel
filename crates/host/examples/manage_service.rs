@@ -87,6 +87,7 @@ fn run() -> Result<String> {
     match args.action.as_str() {
         "install" => {
             let request = InstallRequest {
+                invocation: iroh_tunnel_host::service::ServiceInvocation::Combined,
                 role: args.role,
                 scope: Some(args.scope),
                 config: args.config,

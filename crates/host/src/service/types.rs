@@ -129,16 +129,27 @@ pub struct ServiceStatusReport {
     pub native: Option<NativeOutput>,
 }
 
+/// Command-line form accepted by the executable registered as a service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceInvocation {
+    /// The combined executable requires a role subcommand.
+    Combined,
+    /// A role-specific executable accepts `run` directly.
+    Standalone,
+}
+
 /// Everything `install` needs from its caller.
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
     /// The role to register.
     pub role: Role,
+    /// The command-line form accepted by the selected executable.
+    pub invocation: ServiceInvocation,
     /// `None` lets [`super::decide_install_scope`] decide.
     pub scope: Option<ServiceScope>,
     /// Config file; `None` selects the role default.
     pub config: Option<PathBuf>,
-    /// The `iroh-tunnel` executable the registration runs. Must be absolute.
+    /// The selected executable the registration runs. Must be absolute.
     pub tunnel_executable: PathBuf,
     /// The executable running this install: the source of a managed copy
     /// when a root-run registration cannot trust `tunnel_executable`.

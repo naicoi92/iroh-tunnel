@@ -67,8 +67,8 @@ pub use system::unknown_user;
 pub(crate) use trust_windows::{create_dir_with_sddl, program_data_dir, verify_machine_dir};
 pub use types::{
     AppliedEffect, Environment, Fact, InstallNeed, InstallOutcome, InstallRequest, Registration,
-    RunningExecutable, ScopeDecision, ServiceFailure, ServiceReport, ServiceScope,
-    ServiceStatusReport,
+    RunningExecutable, ScopeDecision, ServiceFailure, ServiceInvocation, ServiceReport,
+    ServiceScope, ServiceStatusReport,
 };
 pub use uninstall::uninstall;
 

@@ -135,6 +135,8 @@ struct Fixture {
     root: tempfile::TempDir,
     suffix: String,
     exe: PathBuf,
+    standalone: bool,
+    role: &'static str,
     machine: PathBuf,
     /// Removes `exe_dir` and `machine` after the service is gone; declared
     /// last so it drops after `root`.
@@ -203,6 +205,8 @@ impl Fixture {
                 .tempdir_in(local_app_data())?,
             suffix: format!("-e2e-{tag}"),
             exe,
+            standalone: false,
+            role: "serve",
             machine,
             _dirs: dirs,
         };
@@ -211,7 +215,7 @@ impl Fixture {
     }
 
     fn name(&self) -> String {
-        format!("iroh-tunnel-serve{}", self.suffix)
+        format!("iroh-tunnel-{}{}", self.role, self.suffix)
     }
 
     fn base(&self) -> PathBuf {
@@ -220,7 +224,9 @@ impl Fixture {
     }
 
     fn config(&self) -> PathBuf {
-        self.base().join("cfg dir").join("serve.toml")
+        self.base()
+            .join("cfg dir")
+            .join(format!("{}.toml", self.role))
     }
 
     fn state(&self) -> PathBuf {
@@ -228,11 +234,11 @@ impl Fixture {
     }
 
     fn status_file(&self) -> PathBuf {
-        self.state().join("serve-status.json")
+        self.state().join(format!("{}-status.json", self.role))
     }
 
     fn log_file(&self) -> PathBuf {
-        self.machine.join("logs").join("serve.log")
+        self.machine.join("logs").join(format!("{}.log", self.role))
     }
 
     /// Write a serve config with a fresh key publishing `echo_port`; returns
@@ -292,7 +298,11 @@ impl Fixture {
 
     /// `serve service <verb> [flags]` from the trusted copy.
     fn service(&self, verb: &str, flags: &[&str]) -> Result<Output> {
-        let mut args = vec!["serve", "service", verb];
+        let mut args = if self.standalone {
+            vec!["service", verb]
+        } else {
+            vec![self.role, "service", verb]
+        };
         args.extend_from_slice(flags);
         Ok(self.command(&args).output()?)
     }
@@ -414,6 +424,70 @@ fn wait_for_new_pid(fx: &Fixture, node_id: &str, old: u64) -> Result<u64> {
             && pid_of(&fx.status_file()).is_some_and(|p| p != old)
     })?;
     Ok(pid_of(&fx.status_file()).unwrap())
+}
+
+#[tokio::test]
+async fn standalone_serve_service_starts_and_stops_under_scm() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let mut fx = Fixture::new("standalone-lifecycle")?;
+    // Keep the combined binary on PATH to verify it is not selected.
+    let standalone = fx.exe.with_file_name("renamed role.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_iroh-tunnel-serve"), &standalone)?;
+    fx.exe = standalone;
+    fx.standalone = true;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&["--system"])?;
+    let pid = wait_for_node(&fx, &node_id)?;
+    let expected = format!(
+        "\"{}\" run --config \"{}\"",
+        fx.exe.display(),
+        fx.config().display()
+    );
+    assert_eq!(fx.image_path()?.to_lowercase(), expected.to_lowercase());
+    fx.service_ok("stop", &["--system"])?;
+    wait_for("standalone process to exit", || !pid_alive(pid))?;
+    assert!(!fx.status_file().exists());
+    fx.service_ok("uninstall", &["--system"])?;
+    fx.wait_absent()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn standalone_access_service_starts_and_stops_under_scm() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let mut fx = Fixture::new("standalone-access")?;
+    fx.role = "access";
+    let standalone = fx.exe.with_file_name("renamed access.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_iroh-tunnel-access"), &standalone)?;
+    fx.exe = standalone;
+    fx.standalone = true;
+    let key = iroh::SecretKey::generate();
+    let peer = iroh::SecretKey::generate().public();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = socket.local_addr()?.port();
+    drop(socket);
+    std::fs::create_dir_all(fx.config().parent().unwrap())?;
+    std::fs::write(fx.config(), format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = \"{peer}\"\nprotocol = \"tcp\"\nhost = \"127.0.0.1\"\nport = {port}\n", iroh_tunnel_host::config::encode_secret_key(&key), relay.as_ref() as &str))?;
+    fx.install_ok(&["--system"])?;
+    let pid = wait_for_node(&fx, &key.public().to_string())?;
+    let expected = format!(
+        "\"{}\" run --config \"{}\"",
+        fx.exe.display(),
+        fx.config().display()
+    );
+    assert_eq!(fx.image_path()?.to_lowercase(), expected.to_lowercase());
+    fx.service_ok("stop", &["--system"])?;
+    wait_for("standalone access process to exit", || !pid_alive(pid))?;
+    assert!(!fx.status_file().exists());
+    fx.service_ok("uninstall", &["--system"])?;
+    fx.wait_absent()?;
+    Ok(())
 }
 
 #[tokio::test]

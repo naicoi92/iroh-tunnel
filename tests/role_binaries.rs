@@ -710,19 +710,47 @@ fn unusable_key_files_fail_without_revealing_contents_or_writing_config() -> Res
 }
 
 #[test]
-fn standalone_service_install_is_refused_instead_of_writing_a_broken_unit() -> Result<()> {
-    let (_, its, ita) = installs()?;
-    for install in [&its, &ita] {
-        let form = RoleForm {
-            install,
-            alias: true,
-            prefix: None,
-        };
-        let output = form.output(&["service", "install"])?;
+fn standalone_service_dispatches_its_own_role() -> Result<()> {
+    let (it, its, ita) = installs()?;
+    for (install, role, other) in [(&its, "serve", "access"), (&ita, "access", "serve")] {
+        let state = tempfile::tempdir()?;
+        let missing = state.path().join("missing.toml");
+        let mut standalone = install.command(true, state.path())?;
+        let output = busy_exec::output(
+            standalone
+                .args(["service", "install", "--user", "--config"])
+                .arg(&missing),
+        )?;
+        let mut combined = it.command(true, state.path())?;
+        let reference = busy_exec::output(
+            combined
+                .args([role, "service", "install", "--user", "--config"])
+                .arg(&missing),
+        )?;
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(5), "{stderr}");
-        assert!(stderr.contains("not yet supported"), "{stderr}");
-        assert_eq!(std::fs::read_dir(install.home())?.count(), 0);
+        assert!(
+            !output.status.success(),
+            "missing config unexpectedly installed a service"
+        );
+        assert_eq!(
+            output.status.code(),
+            reference.status.code(),
+            "standalone: {stderr}; combined: {}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+        assert_eq!(
+            output.stderr, reference.stderr,
+            "standalone service must follow {role} policy"
+        );
+        let rejected = busy_exec::output(
+            install
+                .command(true, state.path())?
+                .args([other, "service", "status"]),
+        )?;
+        assert!(
+            !rejected.status.success(),
+            "{role} accepted {other} service"
+        );
     }
     Ok(())
 }

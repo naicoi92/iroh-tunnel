@@ -12,23 +12,9 @@ use iroh_tunnel_host::error::CliError;
 use iroh_tunnel_host::service::Environment;
 use iroh_tunnel_host::service::{
     self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, RunningExecutable, ServiceCall,
-    ServiceScope,
+    ServiceInvocation, ServiceScope,
 };
 use iroh_tunnel_host::Role;
-
-/// The `iroh-tunnel` executable to register: the one on `PATH` (so a system
-/// install is used), else the running executable so `cargo run -- service
-/// install` works during development.
-///
-/// # Errors
-///
-/// When the running executable cannot be resolved and `PATH` has none.
-pub(crate) fn resolve_tunnel_executable() -> anyhow::Result<PathBuf> {
-    resolve_tunnel_executable_with(
-        || which::which("iroh-tunnel").ok(),
-        || std::env::current_exe().context("failed to resolve current executable"),
-    )
-}
 
 /// The executable running this command, the source of a managed copy.
 ///
@@ -72,12 +58,16 @@ pub(crate) fn is_interactive() -> bool {
 }
 
 fn resolve_tunnel_executable_with(
+    invocation: ServiceInvocation,
     on_path: impl FnOnce() -> Option<PathBuf>,
     current_exe: impl FnOnce() -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
-    match on_path() {
-        Some(path) => Ok(path),
-        None => current_exe(),
+    match invocation {
+        ServiceInvocation::Standalone => current_exe(),
+        ServiceInvocation::Combined => match on_path() {
+            Some(path) => Ok(path),
+            None => current_exe(),
+        },
     }
 }
 
@@ -100,7 +90,11 @@ fn explicit_scope(args: &ScopeArgs) -> Option<ServiceScope> {
 
 /// Run one `service` action: map flags to a request, answer the needs the
 /// operation reports, and print notes and native output.
-pub(crate) fn dispatch(role: Role, action: ServiceAction) -> anyhow::Result<()> {
+pub(crate) fn dispatch(
+    role: Role,
+    action: ServiceAction,
+    invocation: ServiceInvocation,
+) -> anyhow::Result<()> {
     let env = detect_environment();
     // Verbs on an existing service: no prompt, and the scope follows privilege
     // when it is not given.
@@ -110,9 +104,14 @@ pub(crate) fn dispatch(role: Role, action: ServiceAction) -> anyhow::Result<()> 
     let mut notes = print_service_note;
     let mut call = cli_call(&mut notes);
     match action {
-        ServiceAction::Install { config, scope } => {
-            install(role, config, explicit_scope(&scope), env, &mut call)
-        }
+        ServiceAction::Install { config, scope } => install(
+            role,
+            config,
+            explicit_scope(&scope),
+            env,
+            &mut call,
+            invocation,
+        ),
         ServiceAction::Uninstall { scope } => {
             service::uninstall(role, existing(&scope), env, &mut call)
                 .map(drop)
@@ -142,12 +141,18 @@ fn install(
     scope: Option<ServiceScope>,
     env: Environment,
     call: &mut ServiceCall,
+    invocation: ServiceInvocation,
 ) -> anyhow::Result<()> {
     let mut request = InstallRequest {
+        invocation,
         role,
         scope,
         config,
-        tunnel_executable: resolve_tunnel_executable()?,
+        tunnel_executable: resolve_tunnel_executable_with(
+            invocation,
+            || which::which("iroh-tunnel").ok(),
+            || std::env::current_exe().context("failed to resolve current executable"),
+        )?,
         running_executable: running_executable()?,
         sudo_user: std::env::var("SUDO_USER").ok(),
         invoking_user: None,
@@ -278,6 +283,17 @@ fn confirm_retarget(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_resolution_ignores_combined_binary_on_path() {
+        let path = resolve_tunnel_executable_with(
+            ServiceInvocation::Standalone,
+            || panic!("combined executable must not be selected"),
+            || Ok(PathBuf::from("/renamed standalone")),
+        )
+        .unwrap();
+        assert_eq!(path, PathBuf::from("/renamed standalone"));
+    }
+
     use super::*;
 
     #[test]
@@ -307,14 +323,18 @@ mod tests {
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let found = resolve_tunnel_executable_with(
+            ServiceInvocation::Combined,
             || which::which_in("iroh-tunnel", Some(dir.path()), dir.path()).ok(),
             || panic!("current_exe must not be consulted when PATH has the binary"),
         )
         .unwrap();
         assert_eq!(found, exe);
-        let fallback =
-            resolve_tunnel_executable_with(|| None, || Ok(PathBuf::from("/somewhere/current")))
-                .unwrap();
+        let fallback = resolve_tunnel_executable_with(
+            ServiceInvocation::Combined,
+            || None,
+            || Ok(PathBuf::from("/somewhere/current")),
+        )
+        .unwrap();
         assert_eq!(fallback, PathBuf::from("/somewhere/current"));
     }
 }

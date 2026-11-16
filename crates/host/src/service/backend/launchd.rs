@@ -25,6 +25,7 @@ use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::{instance_suffix, write_registration};
 use super::super::types::AppliedEffect;
+use super::super::types::ServiceInvocation;
 use super::super::types::{RestartPolicy, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -92,6 +93,7 @@ fn format_plist(role: &str, binary: &Path, config: &Path, state: &Path) -> Strin
     format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT, None)
 }
 
+#[cfg(test)]
 fn format_plist_with(
     role: &str,
     binary: &Path,
@@ -100,9 +102,34 @@ fn format_plist_with(
     policy: &RestartPolicy,
     pin: Option<&Pin>,
 ) -> String {
+    format_plist_invocation(
+        role,
+        binary,
+        config,
+        state,
+        policy,
+        pin,
+        ServiceInvocation::Combined,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_plist_invocation(
+    role: &str,
+    binary: &Path,
+    config: &Path,
+    state: &Path,
+    policy: &RestartPolicy,
+    pin: Option<&Pin>,
+    invocation: ServiceInvocation,
+) -> String {
+    let role_arg = if invocation == ServiceInvocation::Combined {
+        format!("\t\t<string>{}</string>\n", xml_escape(role))
+    } else {
+        String::new()
+    };
     let label = xml_escape(&label(role));
     let binary = xml_escape(&binary.to_string_lossy());
-    let role = xml_escape(role);
     let config = xml_escape(&config.to_string_lossy());
     let state = xml_escape(&state.to_string_lossy());
     // launchd spells restart-on-failure as KeepAlive{SuccessfulExit=false}:
@@ -139,7 +166,7 @@ fn format_plist_with(
          \t<key>ProgramArguments</key>\n\
          \t<array>\n\
          \t\t<string>{binary}</string>\n\
-         \t\t<string>{role}</string>\n\
+         {role_arg}\
          \t\t<string>run</string>\n\
          \t\t<string>--config</string>\n\
          \t\t<string>{config}</string>\n\
@@ -183,6 +210,7 @@ pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: ServiceInvocation,
     scope: ServiceScope,
     binary: &Path,
     config: &Path,
@@ -190,7 +218,15 @@ pub(crate) fn install(
     pin: Option<&Pin>,
 ) -> Result<()> {
     super::super::pin::require_unix_pin(pin)?;
-    let plist = format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT, pin);
+    let plist = format_plist_invocation(
+        role,
+        binary,
+        config,
+        state,
+        &RestartPolicy::DEFAULT,
+        pin,
+        invocation,
+    );
     let path = plist_path(role, scope)?;
     write_registration(&path, &plist)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));
@@ -446,6 +482,34 @@ pub(crate) fn status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invocation_form_survives_managed_paths_with_spaces() {
+        for role in ["serve", "access"] {
+            for invocation in [ServiceInvocation::Combined, ServiceInvocation::Standalone] {
+                let body = format_plist_invocation(
+                    role,
+                    Path::new("/managed path/copy"),
+                    Path::new("/config path/c"),
+                    Path::new("/state"),
+                    &RestartPolicy::DEFAULT,
+                    None,
+                    invocation,
+                );
+                let role_line = format!("<string>{role}</string>");
+                assert_eq!(
+                    body.contains(&role_line),
+                    invocation == ServiceInvocation::Combined,
+                    "{body}"
+                );
+                assert!(
+                    body.contains("<string>/managed path/copy</string>"),
+                    "{body}"
+                );
+                assert!(body.contains("<string>run</string>"), "{body}");
+            }
+        }
+    }
+
     use super::*;
     use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
     use crate::service::native::{Native, OutputMode};

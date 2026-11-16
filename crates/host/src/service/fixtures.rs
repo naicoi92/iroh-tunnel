@@ -25,6 +25,7 @@ pub(crate) fn tunnel_exe() -> PathBuf {
 
 pub(crate) fn request(scope: Option<ServiceScope>) -> InstallRequest {
     InstallRequest {
+        invocation: super::ServiceInvocation::Combined,
         role: Role::Serve,
         scope,
         config: None,

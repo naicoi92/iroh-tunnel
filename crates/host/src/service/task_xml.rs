@@ -57,7 +57,22 @@ fn ensure_plain(what: &str, path: &Path) -> Result<()> {
 /// # Errors
 ///
 /// [`CliError::Config`] when a path contains `"` or `%`.
+#[cfg(test)]
 pub(super) fn task_action(role: &str, binary: &Path, config: &Path) -> Result<TaskAction> {
+    task_action_invocation(
+        role,
+        binary,
+        config,
+        super::types::ServiceInvocation::Combined,
+    )
+}
+
+pub(super) fn task_action_invocation(
+    role: &str,
+    binary: &Path,
+    config: &Path,
+    invocation: super::types::ServiceInvocation,
+) -> Result<TaskAction> {
     ensure_plain("binary", binary)?;
     ensure_plain("config", config)?;
     let (Some(binary), Some(config)) = (binary.to_str(), config.to_str()) else {
@@ -68,9 +83,14 @@ pub(super) fn task_action(role: &str, binary: &Path, config: &Path) -> Result<Ta
         )
         .into());
     };
+    let prefix = if invocation == super::types::ServiceInvocation::Combined {
+        format!("{role} ")
+    } else {
+        String::new()
+    };
     Ok(TaskAction {
         command: binary.to_owned(),
-        arguments: format!("{role} run --config \"{config}\""),
+        arguments: format!("{prefix}run --config \"{config}\""),
     })
 }
 
@@ -151,6 +171,35 @@ pub(super) fn encode_utf16_le(xml: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_invocation_uses_the_correct_role_form() {
+        for role in ["serve", "access"] {
+            for (invocation, prefix) in [
+                (
+                    super::super::types::ServiceInvocation::Combined,
+                    format!("{role} "),
+                ),
+                (
+                    super::super::types::ServiceInvocation::Standalone,
+                    String::new(),
+                ),
+            ] {
+                let action = task_action_invocation(
+                    role,
+                    Path::new(r"C:\Program Files\renamed.exe"),
+                    Path::new(r"C:\config dir\role.toml"),
+                    invocation,
+                )
+                .unwrap();
+                assert_eq!(action.command, r"C:\Program Files\renamed.exe");
+                assert_eq!(
+                    action.arguments,
+                    format!(r#"{prefix}run --config "C:\config dir\role.toml""#)
+                );
+            }
+        }
+    }
+
     use super::*;
 
     const POLICY: RestartPolicy = RestartPolicy::DEFAULT;

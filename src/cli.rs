@@ -553,6 +553,34 @@ pub fn init_tracing_with(verbose: u8, quiet: bool, writer: BoxMakeWriter) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_scm_command_parses_as_its_own_role() {
+        for (binary, role) in [(Binary::Serve, "serve"), (Binary::Access, "access")] {
+            let parsed = super::parse_cli(
+                binary,
+                ["renamed", "run", "--config", "config path"].map(std::ffi::OsString::from),
+            )
+            .unwrap();
+            match (role, parsed.role) {
+                (
+                    "serve",
+                    super::Role::Serve {
+                        cmd: Some(super::RoleCmd::Run { config }),
+                        ..
+                    },
+                )
+                | (
+                    "access",
+                    super::Role::Access {
+                        cmd: Some(super::RoleCmd::Run { config }),
+                        ..
+                    },
+                ) => assert_eq!(config.unwrap(), std::path::PathBuf::from("config path")),
+                _ => panic!("wrong SCM role for {role}"),
+            }
+        }
+    }
+
     use super::*;
     use std::collections::HashMap;
 

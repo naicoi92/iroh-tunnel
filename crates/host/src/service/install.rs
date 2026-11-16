@@ -20,7 +20,7 @@ use super::policy::{ensure_privilege, ensure_root_run_privilege, ensure_supporte
 use super::service_binary::ServiceBinary;
 use super::types::{
     AppliedEffect, Environment, InstallNeed, InstallOutcome, InstallRequest, ScopeDecision,
-    ServiceFailure, ServiceScope,
+    ServiceFailure, ServiceInvocation, ServiceScope,
 };
 use crate::error::CliError;
 use crate::ownership::{self, Liveness, LockDirs, LockResolver, Tier};
@@ -89,6 +89,7 @@ pub(crate) fn install_via(
                     native,
                     notes,
                     role,
+                    req.invocation,
                     plan.scope,
                     binary,
                     &plan.config,
@@ -721,6 +722,7 @@ fn backend_install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: ServiceInvocation,
     scope: ServiceScope,
     binary: &Path,
     config: &Path,
@@ -731,23 +733,29 @@ fn backend_install(
     {
         // Same BusyBox-vs-systemd condition as `platform::system_wide_only`.
         if super::platform::linux_is_systemd() {
-            super::backend::systemd::install(native, notes, role, scope, binary, config, state, pin)
+            super::backend::systemd::install(
+                native, notes, role, invocation, scope, binary, config, state, pin,
+            )
         } else {
-            super::backend::busybox::install(native, notes, role, scope, binary, config, state, pin)
+            super::backend::busybox::install(
+                native, notes, role, invocation, scope, binary, config, state, pin,
+            )
         }
     }
     #[cfg(target_os = "macos")]
     {
-        super::backend::launchd::install(native, notes, role, scope, binary, config, state, pin)
+        super::backend::launchd::install(
+            native, notes, role, invocation, scope, binary, config, state, pin,
+        )
     }
     #[cfg(windows)]
     {
         match scope {
-            ServiceScope::User => {
-                super::backend::windows::install(native, notes, role, scope, binary, config, state)
-            }
+            ServiceScope::User => super::backend::windows::install(
+                native, notes, role, invocation, scope, binary, config, state,
+            ),
             ServiceScope::System => {
-                install_windows_service(notes, role, binary, config, state, pin)
+                install_windows_service(notes, role, invocation, binary, config, state, pin)
             }
         }
     }
@@ -762,6 +770,7 @@ fn backend_install(
 fn install_windows_service(
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: ServiceInvocation,
     binary: &Path,
     config: &Path,
     state: &Path,
@@ -772,7 +781,15 @@ fn install_windows_service(
     use super::types::RestartPolicy;
 
     let pin = pin.context("internal: a Windows service needs a pin")?;
-    let spec = ServiceSpec::render(role, binary, config, state, pin, &RestartPolicy::DEFAULT)?;
+    let spec = ServiceSpec::render_with_invocation(
+        role,
+        binary,
+        config,
+        state,
+        pin,
+        &RestartPolicy::DEFAULT,
+        invocation,
+    )?;
     install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
     notes(&ServiceNote::Installed {
         name: spec.name,
