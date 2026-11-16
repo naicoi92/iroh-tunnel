@@ -1013,22 +1013,31 @@ mod tests {
         assert!(commands(&log).is_empty(), "{log:?}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn standalone_install_privilege_guidance_uses_invoked_binary_and_absolute_config() {
         for role in [Role::Serve, Role::Access] {
             let mut req = request(Some(ServiceScope::System));
             req.role = role;
             req.invocation = ServiceInvocation::Standalone;
-            req.tunnel_executable = PathBuf::from("/opt/role bin/renamed");
+            req.tunnel_executable = PathBuf::from(if cfg!(windows) {
+                r"C:\Program Files\role bin\renamed.exe"
+            } else {
+                "/opt/role bin/renamed"
+            });
             req.config = Some(PathBuf::from("relative config.toml"));
             let (result, log) = run_install(&req, BATCH, vec![]);
             let err = anyhow::Error::from(result.expect_err("must refuse"));
             let message = err.to_string();
-            assert!(
-                message.contains("sudo '/opt/role bin/renamed' service install --system --config"),
-                "{message}"
-            );
+            let command = if cfg!(windows) {
+                r"& 'C:\Program Files\role bin\renamed.exe' service install --system --config"
+            } else {
+                "sudo '/opt/role bin/renamed' service install --system --config"
+            };
+            assert!(message.contains(command), "{message}");
+            assert!(matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ));
             assert!(
                 message.contains(
                     &std::env::current_dir()

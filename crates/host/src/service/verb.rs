@@ -369,14 +369,22 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
     #[test]
     fn standalone_privilege_guidance_for_all_verbs_uses_supplied_executable() {
         let env = Environment {
             elevated: false,
             can_answer: false,
         };
-        let path = Path::new("/opt/role bin/renamed");
+        let path = Path::new(if cfg!(windows) {
+            r"C:\Program Files\role bin\renamed.exe"
+        } else {
+            "/opt/role bin/renamed"
+        });
+        let command = if cfg!(windows) {
+            r"& 'C:\Program Files\role bin\renamed.exe'"
+        } else {
+            "sudo '/opt/role bin/renamed'"
+        };
         for role in [Role::Serve, Role::Access] {
             for verb in ["start", "stop", "restart", "uninstall"] {
                 let mut notes = |_: &ServiceNote| {};
@@ -419,11 +427,13 @@ mod tests {
                 .unwrap_err();
                 let message = err.error.to_string();
                 assert!(
-                    message.contains(&format!(
-                        "sudo '/opt/role bin/renamed' service {verb} --system"
-                    )),
+                    message.contains(&format!("{command} service {verb} --system")),
                     "{message}"
                 );
+                assert!(matches!(
+                    err.error.downcast_ref::<CliError>(),
+                    Some(CliError::Permission(_))
+                ));
                 assert!(err.applied.is_empty());
             }
             let mut notes = |_: &ServiceNote| {};
@@ -440,7 +450,8 @@ mod tests {
             assert!(err
                 .error
                 .to_string()
-                .contains("sudo '/opt/role bin/renamed' service status --system"));
+                .contains(&format!("{command} service status --system")));
+            assert!(err.applied.is_empty());
         }
     }
 
