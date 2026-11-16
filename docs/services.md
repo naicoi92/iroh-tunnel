@@ -199,6 +199,23 @@ iroh-tunnel serve service install
 - While the system service runs, a user start of the same role exits with code
   `6`; a system start while a user process runs stops cleanly (no restart).
 
+When a system service holds an executable open during an update, stop the
+matching role from an elevated PowerShell ("Run as administrator"):
+
+```powershell
+# Standalone executable for each role:
+iroh-tunnel-serve.exe service stop --system
+iroh-tunnel-access.exe service stop --system
+
+# Combined executable for each role:
+iroh-tunnel.exe serve service stop --system
+iroh-tunnel.exe access service stop --system
+```
+
+Stop any other process holding the executable before retrying; the updater
+never stops it automatically. If the updater itself keeps the file locked,
+retry from another copy. User-scope tasks use `--user` instead of `--system`.
+
 #### Trust rules
 
 Before it registers, and at every service start, the config file, the state

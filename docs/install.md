@@ -233,10 +233,24 @@ remain unchanged. `--yes` replaces only the invoked package- or
 Homebrew-owned file after a warning; containers are never updated in place.
 `--insecure` (`-i`) skips signature and checksum verification and prints a
 warning, but does not by itself override ownership. A permission failure exits
-with code `3`. On Windows a running executable can be locked: stop the matching
-service or process before retrying; the updater does not stop it for you.
-A managed system-service copy may also need refreshing after an upgrade; see
-[System services](services.md#system-services).
+with code `3`. On Windows a running executable can be locked; the updater does
+not stop services or processes. If a system service holds it open, run the
+matching command from an elevated PowerShell ("Run as administrator"):
+
+```powershell
+# Standalone Serve or Access, respectively:
+iroh-tunnel-serve.exe service stop --system
+iroh-tunnel-access.exe service stop --system
+
+# Combined executable, for the role or roles using it:
+iroh-tunnel.exe serve service stop --system
+iroh-tunnel.exe access service stop --system
+```
+
+Stop any other process holding the executable too. If the updater itself keeps
+the file locked, retry from another copy. See [Windows system services](services.md#system-scope)
+for service scope and [System services](services.md#system-services) for
+refreshing a managed system-service copy after an upgrade.
 
 ## Verifying a release
 
