@@ -17,8 +17,8 @@ Blocked by: none
 
 Blocked by: none
 
-- [ ] 3.1 Add renderer and release-pipeline tests for separate archive checksums, aliases, cask coexistence and independent uninstall.
-- [ ] 3.2 Update `packaging/homebrew-cask.sh` and `.github/workflows/release.yml` to render and publish all three role-specific casks.
+- [x] 3.1 Add renderer and release-pipeline tests for separate archive checksums, aliases, cask coexistence and independent uninstall.
+- [x] 3.2 Update `packaging/homebrew-cask.sh` and `.github/workflows/release.yml` to render and publish all three role-specific casks.
 
 ## 4. Documentation and verification
 
