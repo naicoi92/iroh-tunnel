@@ -10,8 +10,12 @@ integration tests; no network fetch or Homebrew installation is needed.
 annotations and unprivileged filesystem utilities. The Rust test's Ruby harness
 supplies DSL and installer lifecycle boundaries. Commands run locally; `xattr`
 is recorded and can fail on request. The fixture uses Homebrew's generic Unix
-link command, not its macOS-specific command/metadata extension. Thus these tests
-are not a native Homebrew, privilege, sandbox or metadata test.
+link command, not its macOS-specific command/metadata extension. At the test-owned
+`SystemCommand` boundary, its GNU `ln --no-dereference --force --symbolic`
+options become the BSD/GNU-compatible `ln -n -f -s`; conflict, replacement and
+unlink decisions still execute in the unmodified upstream artifacts. A regression
+rejects GNU long options at the subprocess boundary and checks actual links and
+cleanup. These tests are not a native Homebrew, privilege, sandbox or metadata test.
 
 When refreshing the pinned sources, review upstream behavior changes and keep
 these files unmodified so tests do not merely mirror our own ownership policy.

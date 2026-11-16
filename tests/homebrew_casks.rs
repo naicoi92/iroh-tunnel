@@ -188,6 +188,11 @@ HOMEBREW_PREFIX = Pathname.new(ARGV.fetch(0))
 HOMEBREW_CELLAR = HOMEBREW_PREFIX/"Cellar"
 class SystemCommand
   def self.run!(program, args:, **options)
+    # The pinned generic Unix artifact emits GNU ln options. Adapt only this
+    # OS-command boundary, not Homebrew's conflict/link/unlink decisions.
+    if program == "/bin/ln" && args.take(3) == ["--no-dereference", "--force", "--symbolic"]
+      args = ["-n", "-f", "-s", *args.drop(3)]
+    end
     raise "command failed: #{program}" unless system(program, *args.map(&:to_s))
   end
 end
@@ -371,6 +376,36 @@ impl Prefix {
                 }
             }
         }
+    }
+}
+
+/// Reject GNU-only options even on Linux, but execute accepted commands on the
+/// real filesystem. Reverting the command-boundary adapter must break this test.
+#[test]
+fn artifact_commands_install_with_bsd_compatible_ln_options() {
+    for (index, role) in ROLES.iter().enumerate() {
+        let mut prefix = Prefix::new();
+        prefix.casks[index] = format!(
+            r#"
+class << SystemCommand
+  def system(program, *args)
+    if program == "/bin/ln" && args.any? {{ |arg| arg.start_with?("--") }}
+      raise "BSD ln does not accept GNU long options"
+    end
+    super
+  end
+end
+{}
+"#,
+            prefix.casks[index]
+        );
+        symlink("missing", prefix.bin(role.alias)).unwrap();
+        prefix.install(index);
+        let mut installed = [false; 3];
+        installed[index] = true;
+        prefix.assert_installed(&installed);
+        prefix.uninstall(index);
+        prefix.assert_installed(&[false; 3]);
     }
 }
 
