@@ -86,7 +86,9 @@ Homebrew-managed `binary` artifacts. Install any combination:
 | `iroh-tunnel-serve` | `iroh-tunnel-serve` | `its` |
 | `iroh-tunnel-access` | `iroh-tunnel-access` | `ita` |
 
-For example, `brew install --cask iroh-tunnel-serve` installs Serve alone.
+For example, `brew install --cask iroh-tunnel-serve` installs Serve alone;
+`brew install --cask iroh-tunnel-access` installs Access alone. The combined
+binary is not required for either role, including service management.
 The casks remove quarantine from their executables and are updated on stable
 releases only. Use `brew upgrade --cask <cask-name>` to update.
 
@@ -222,12 +224,19 @@ ita update                     # iroh-tunnel-access
 - never stops a running tunnel: restart it afterwards;
 - does not downgrade unless you pass `--to`.
 
-Installs owned by something else are sent back to their owner: Homebrew
-(`brew upgrade`), a Linux package in `/usr/bin` (your package manager) and
-containers (pull the new image). `--yes` replaces a package- or
-Homebrew-owned file anyway, after a warning; containers are never updated in
-place. `--insecure` (`-i`) skips signature and checksum verification and
-prints a warning. A permission failure exits with code `3`.
+Installs owned by something else are sent back to their owner: use
+`brew upgrade --cask iroh-tunnel`, `brew upgrade --cask iroh-tunnel-serve`
+or `brew upgrade --cask iroh-tunnel-access` for the matching Homebrew cask;
+use your package manager for a Linux package in `/usr/bin`; and pull a new
+image for a container. Without `--yes`, package- and Homebrew-owned files
+remain unchanged. `--yes` replaces only the invoked package- or
+Homebrew-owned file after a warning; containers are never updated in place.
+`--insecure` (`-i`) skips signature and checksum verification and prints a
+warning, but does not by itself override ownership. A permission failure exits
+with code `3`. On Windows a running executable can be locked: stop the matching
+service or process before retrying; the updater does not stop it for you.
+A managed system-service copy may also need refreshing after an upgrade; see
+[System services](services.md#system-services).
 
 ## Verifying a release
 

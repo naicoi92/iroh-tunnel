@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/install.s
 
 # macOS with Homebrew
 brew tap naicoi92/tap https://github.com/naicoi92/homebrew-tap
-brew install --cask iroh-tunnel
+brew install --cask iroh-tunnel  # or iroh-tunnel-serve / iroh-tunnel-access
 
 # Docker
 docker run --rm ghcr.io/naicoi92/iroh-tunnel:latest --version
@@ -68,11 +68,15 @@ irm https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/install.ps1 -Out
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-The installers put three executables on your `PATH`: `iroh-tunnel` (both
-roles), `iroh-tunnel-serve` and `iroh-tunnel-access`. On Linux and macOS
-they also add the aliases `it`, `its` and `ita`. `.deb`/`.apk` packages,
-per-role images, archives and building from source are covered in
-[Install](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/install.md).
+The shell and PowerShell installers put three executables on your `PATH`:
+`iroh-tunnel` (both roles), `iroh-tunnel-serve` and `iroh-tunnel-access`.
+The shell installer also adds the aliases `it`, `its` and `ita`.
+
+Homebrew casks install independently: `iroh-tunnel` (`it`),
+`iroh-tunnel-serve` (`its`), and `iroh-tunnel-access` (`ita`). See
+[Install](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/install.md)
+for cask path-conflict caveats, `.deb`/`.apk` packages, per-role images,
+archives and building from source.
 
 ## Quick start
 
@@ -123,6 +127,8 @@ To start a role at boot, register it as a service:
 
 ```sh
 iroh-tunnel serve service install
+# Alternatively, with only the Serve executable installed:
+its service install
 ```
 
 More in [Configuration](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/configuration.md) and

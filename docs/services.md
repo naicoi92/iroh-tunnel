@@ -16,9 +16,12 @@ iroh-tunnel serve service uninstall
 Verbs: `install`, `uninstall`, `start`, `stop`, `restart`, `status`. Each
 takes `--user` or `--system`; `install` also takes `--config PATH`.
 
-Only the all-in-one `iroh-tunnel` manages services. The standalone
-`iroh-tunnel-serve` and `iroh-tunnel-access` refuse `service` and point to
-`iroh-tunnel <role> service ...`.
+Each standalone executable manages its own role without the combined binary.
+For example, use `its service install` and `its service status` for Serve,
+or `ita service install` and `ita service status` for Access. The same service
+verbs, scope and config flags apply; neither executable manages the other role.
+Existing combined-binary registrations remain valid; reinstall a role with
+its standalone executable to register that executable instead.
 
 - [Backends](#backends)
 - [User or system scope](#user-or-system-scope)
@@ -82,9 +85,11 @@ are logged in unless lingering is enabled (`loginctl enable-linger $USER`).
 - On macOS, `install` enables the launchd label, replaces any loaded copy and
   bootstraps the job. If bootstrap fails, a disabled label is the usual cause;
   check `launchctl print-disabled <domain>`.
-- The registration runs the `iroh-tunnel` found on `PATH`, or the absolute
-  path of the running executable when there is none. A system service on Linux
-  or macOS may run a managed copy instead; see [System services](#system-services).
+- For the combined CLI, the registration runs `iroh-tunnel` found on `PATH`,
+  or the absolute path of the running executable when there is none. A
+  standalone invocation registers its own executable, not the combined CLI.
+  A system service on Linux or macOS may run a managed copy instead; see
+  [System services](#system-services).
 
 ## System services
 
@@ -121,7 +126,9 @@ sudo iroh-tunnel serve service install --system
   with no copy.
 - After upgrading iroh-tunnel, re-run `sudo iroh-tunnel <role> service install
   --system` to refresh the copy. Until then the service keeps running the old
-  copy: `brew upgrade` and `cargo install` do not change it.
+  copy: `brew upgrade` and `cargo install` do not change it. For a standalone
+  service, use the matching command, for example `sudo its service install
+  --system` or `sudo ita service install --system`.
 - `service start --system` and `service restart --system` check the binary the
   service manager will run, read from its loaded definition. If a non-root user
   could change it, or the manager's definition cannot be read, the command
