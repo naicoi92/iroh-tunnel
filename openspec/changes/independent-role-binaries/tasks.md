@@ -10,8 +10,8 @@ Blocked by: none
 
 Blocked by: none
 
-- [ ] 2.1 Add failing isolated role update and Homebrew ownership guidance tests in `tests/update.rs`, `tests/update_ownership.rs`, and Windows locked-update tests.
-- [ ] 2.2 Update `crates/host/src/update/` guidance for the invoked binary and preserve signature, checksum, ownership and container behavior.
+- [x] 2.1 Add failing isolated role update and Homebrew ownership guidance tests in `tests/update.rs`, `tests/update_ownership.rs`, and Windows locked-update tests.
+- [x] 2.2 Update `crates/host/src/update/` guidance for the invoked binary and preserve signature, checksum, ownership and container behavior.
 
 ## 3. Independent Homebrew casks
 
