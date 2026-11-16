@@ -1,6 +1,5 @@
 //! Shared mechanics of the uninstall/start/stop/restart operations (private).
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
 
 use anyhow::Result;
@@ -13,7 +12,6 @@ use super::platform;
 use super::policy::{ensure_privilege, ensure_supported};
 use super::service_binary::release_unreferenced_copy;
 use super::types::{AppliedEffect, Environment, ServiceFailure, ServiceReport, ServiceScope};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::error::CliError;
 use crate::role::Role;
 
@@ -43,20 +41,31 @@ pub(crate) fn flag(scope: ServiceScope) -> &'static str {
     }
 }
 
-/// Platform support and privilege for a verb on an existing service, with the
-/// rerun guidance the CLI always printed.
-pub(crate) fn check_verb_policy(
+pub(crate) fn check_verb_policy_with_invocation(
     verb: &str,
     role: Role,
     scope: ServiceScope,
     env: Environment,
+    invocation: super::ServiceInvocation,
+    executable: &Path,
 ) -> Result<()> {
     ensure_supported(scope)?;
-    let rerun = ["iroh-tunnel", role.name(), "service", verb, flag(scope)].map(str::to_owned);
+    let mut rerun = match invocation {
+        super::ServiceInvocation::Combined => {
+            vec!["iroh-tunnel".to_owned(), role.name().to_owned()]
+        }
+        super::ServiceInvocation::Standalone => vec![executable.to_string_lossy().into_owned()],
+    };
+    rerun.extend([
+        "service".to_owned(),
+        verb.to_owned(),
+        flag(scope).to_owned(),
+    ]);
     ensure_privilege(scope, env.elevated, &rerun)
 }
 
 /// [`uninstall`]/[`start`]/[`stop`]/[`restart`] over an injected runner.
+#[cfg(test)]
 pub(crate) fn verb_via(
     verb: Verb,
     role: Role,
@@ -65,7 +74,30 @@ pub(crate) fn verb_via(
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
 ) -> Result<ServiceReport, ServiceFailure> {
-    check_verb_policy(verb.word(), role, scope, env)
+    verb_via_with_invocation(
+        verb,
+        role,
+        scope,
+        env,
+        call,
+        runner,
+        super::ServiceInvocation::Combined,
+        Path::new("iroh-tunnel"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verb_via_with_invocation(
+    verb: Verb,
+    role: Role,
+    scope: ServiceScope,
+    env: Environment,
+    call: &mut ServiceCall,
+    runner: &mut Runner<'_>,
+    invocation: super::ServiceInvocation,
+    executable: &Path,
+) -> Result<ServiceReport, ServiceFailure> {
+    check_verb_policy_with_invocation(verb.word(), role, scope, env, invocation, executable)
         .and_then(|()| {
             if matches!(verb, Verb::Start) {
                 // Refuse before the manager: the unit would otherwise start and
@@ -81,7 +113,7 @@ pub(crate) fn verb_via(
             native,
             notes,
             verb,
-            |native| guard_root_run(native, role.name(), root_run),
+            |native| guard_root_run(native, role.name(), root_run, invocation, executable),
             |native, notes| backend_verb(verb, native, notes, role, scope),
             |native| release_unreferenced_copy(native, role.name(), root_run),
         )
@@ -122,18 +154,34 @@ fn verb_steps(
 /// Refuse to start a root-run service whose effective binary is not
 /// root-only writable. Registrations that do not run as root are not checked.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn guard_root_run(native: &mut Native, role: &str, root_run: bool) -> Result<()> {
+fn guard_root_run(
+    native: &mut Native,
+    role: &str,
+    root_run: bool,
+    invocation: super::ServiceInvocation,
+    executable: &Path,
+) -> Result<()> {
     if !root_run {
         return Ok(());
     }
-    guard_effective_binary(native, role, &|path| {
-        super::trust::verify_binary(path, super::trust::TrustedOwners::RootOnly)
-    })
+    check_effective_with_invocation(
+        platform::effective_binary(native, role),
+        role,
+        &|path| super::trust::verify_binary(path, super::trust::TrustedOwners::RootOnly),
+        invocation,
+        executable,
+    )
 }
 
 /// No binary guard off Linux and macOS.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn guard_root_run(_native: &mut Native, _role: &str, _root_run: bool) -> Result<()> {
+fn guard_root_run(
+    _native: &mut Native,
+    _role: &str,
+    _root_run: bool,
+    _invocation: super::ServiceInvocation,
+    _executable: &Path,
+) -> Result<()> {
     Ok(())
 }
 
@@ -143,7 +191,7 @@ fn guard_root_run(_native: &mut Native, _role: &str, _root_run: bool) -> Result<
 /// # Errors
 ///
 /// See [`check_effective`].
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 fn guard_effective_binary(
     native: &mut Native,
     role: &str,
@@ -159,11 +207,28 @@ fn guard_effective_binary(
 ///
 /// [`CliError::Permission`] keeping `verify`'s reason (path, owner, mode),
 /// or naming why the definition is unreadable, with reinstall guidance.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 fn check_effective(
     loaded: EffectiveBinary,
     role: &str,
     verify: &dyn Fn(&Path) -> Result<()>,
+) -> Result<()> {
+    check_effective_with_invocation(
+        loaded,
+        role,
+        verify,
+        super::ServiceInvocation::Combined,
+        Path::new("iroh-tunnel"),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn check_effective_with_invocation(
+    loaded: EffectiveBinary,
+    role: &str,
+    verify: &dyn Fn(&Path) -> Result<()>,
+    invocation: super::ServiceInvocation,
+    executable: &Path,
 ) -> Result<()> {
     let reason = match loaded {
         EffectiveBinary::NotLoaded => return Ok(()),
@@ -189,9 +254,17 @@ fn check_effective(
             "cannot tell which binary the {role} service runs ({why}); refusing to start it"
         ),
     };
+    let command = match invocation {
+        super::ServiceInvocation::Combined => {
+            format!("sudo iroh-tunnel {role} service install --system")
+        }
+        super::ServiceInvocation::Standalone => format!(
+            "sudo {} service install --system --config <absolute-config-path>",
+            super::policy::shell_quote(&executable.to_string_lossy())
+        ),
+    };
     Err(CliError::Permission(format!(
-        "{reason}. To register a root-owned binary, re-run \
-         `sudo iroh-tunnel {role} service install --system`."
+        "{reason}. To register a root-owned binary, re-run `{command}`."
     ))
     .into())
 }
@@ -293,6 +366,81 @@ mod tests {
             );
             assert!(commands(&events.borrow()).is_empty());
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_privilege_guidance_for_all_verbs_uses_supplied_executable() {
+        let env = Environment {
+            elevated: false,
+            can_answer: false,
+        };
+        let path = Path::new("/opt/role bin/renamed");
+        for role in [Role::Serve, Role::Access] {
+            for verb in ["start", "stop", "restart", "uninstall"] {
+                let mut notes = |_: &ServiceNote| {};
+                let mut call = ServiceCall::capture(&mut notes);
+                let invocation = super::super::ServiceInvocation::Standalone;
+                let err = match verb {
+                    "start" => super::super::start_with_invocation(
+                        role,
+                        ServiceScope::System,
+                        env,
+                        &mut call,
+                        invocation,
+                        path,
+                    ),
+                    "stop" => super::super::stop_with_invocation(
+                        role,
+                        ServiceScope::System,
+                        env,
+                        &mut call,
+                        invocation,
+                        path,
+                    ),
+                    "restart" => super::super::restart_with_invocation(
+                        role,
+                        ServiceScope::System,
+                        env,
+                        &mut call,
+                        invocation,
+                        path,
+                    ),
+                    _ => super::super::uninstall_with_invocation(
+                        role,
+                        ServiceScope::System,
+                        env,
+                        &mut call,
+                        invocation,
+                        path,
+                    ),
+                }
+                .unwrap_err();
+                let message = err.error.to_string();
+                assert!(
+                    message.contains(&format!(
+                        "sudo '/opt/role bin/renamed' service {verb} --system"
+                    )),
+                    "{message}"
+                );
+                assert!(err.applied.is_empty());
+            }
+            let mut notes = |_: &ServiceNote| {};
+            let mut call = ServiceCall::capture(&mut notes);
+            let err = super::super::status_with_invocation(
+                role,
+                ServiceScope::System,
+                env,
+                &mut call,
+                super::super::ServiceInvocation::Standalone,
+                path,
+            )
+            .unwrap_err();
+            assert!(err
+                .error
+                .to_string()
+                .contains("sudo '/opt/role bin/renamed' service status --system"));
+        }
     }
 
     #[test]
@@ -672,6 +820,21 @@ mod guard_tests {
             |_| Ok(None),
         );
         (result, issued.into_inner())
+    }
+
+    #[test]
+    fn standalone_guard_guidance_names_invoked_executable_and_config() {
+        for role in ["serve", "access"] {
+            let err = check_effective_with_invocation(
+                EffectiveBinary::Binary("/unsafe".into()),
+                role,
+                &refuse_unsafe,
+                super::super::ServiceInvocation::Standalone,
+                Path::new("/opt/role bin/renamed"),
+            )
+            .unwrap_err();
+            assert!(permission_text(&err).contains("sudo '/opt/role bin/renamed' service install --system --config <absolute-config-path>"));
+        }
     }
 
     #[test]

@@ -262,6 +262,45 @@ fn installs() -> Result<(Installed, Installed, Installed)> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn renamed_managed_path_binaries_start_both_roles() -> Result<()> {
+    let serve = Installed::new(SERVE, "iroh-tunnel", "its")?;
+    let access = Installed::new(ACCESS, "iroh-tunnel", "ita")?;
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let peer = iroh::SecretKey::generate().public().to_string();
+    for (installed, role) in [(&serve, "serve"), (&access, "access")] {
+        let state = tempfile::tempdir()?;
+        let config = state.path().join("config.toml");
+        let secret = iroh::SecretKey::generate();
+        let node = format!(
+            "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n",
+            iroh_tunnel_host::config::encode_secret_key(&secret),
+            relay.to_string()
+        );
+        let service = if role == "serve" {
+            "[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n".to_owned()
+        } else {
+            let port = TcpListener::bind("127.0.0.1:0").await?.local_addr()?.port();
+            format!("[[services]]\nname = \"echo\"\nnode_id = {peer:?}\nprotocol = \"tcp\"\nport = {port}\n")
+        };
+        std::fs::write(&config, node + &service)?;
+        let mut command = installed.command(false, state.path())?;
+        let mut process = Process(busy_exec::spawn(
+            command
+                .args(["run", "--config"])
+                .arg(&config)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )?);
+        wait_status(
+            &state.path().join(format!("{role}-status.json")),
+            &mut process,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_in_one_alias_runs_both_roles_alone() -> Result<()> {
     let (it, _, _) = installs()?;
     let serve = RoleForm {

@@ -81,11 +81,46 @@ pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
     }
 }
 
-/// The CLI's service-note observer: print each note at once to its stream, so
-/// it stays ordered with the inherited output of native commands.
-pub(crate) fn print_service_note(note: &ServiceNote) {
+fn quote_shell_argument(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
+}
+
+pub(crate) fn render_service_note_for_invocation(
+    note: &ServiceNote,
+    invocation: iroh_tunnel_host::service::ServiceInvocation,
+    executable: &Path,
+    config: Option<&Path>,
+) -> (Stream, String) {
+    if let (
+        iroh_tunnel_host::service::ServiceInvocation::Standalone,
+        ServiceNote::ManagedBinary { role, source, copy },
+    ) = (invocation, note)
+    {
+        let config = config
+            .map(|p| quote_shell_argument(&p.to_string_lossy()))
+            .unwrap_or_else(|| "<absolute-config-path>".to_owned());
+        return (Stream::Stdout, format!("Registered a root-owned copy of {} at {} for the {role} service; re-run `sudo {} service install --system --config {config}` after upgrading to update it\n", source.display(), copy.display(), quote_shell_argument(&executable.to_string_lossy())));
+    }
+    render_service_note(note)
+}
+
+/// Print service notes synchronously, preserving native output ordering.
+pub(crate) fn print_service_note(
+    note: &ServiceNote,
+    invocation: iroh_tunnel_host::service::ServiceInvocation,
+    executable: &Path,
+    config: Option<&Path>,
+) {
     use std::io::Write as _;
-    let (stream, text) = render_service_note(note);
+    let (stream, text) = render_service_note_for_invocation(note, invocation, executable, config);
     match stream {
         Stream::Stdout => {
             print!("{text}");
@@ -350,6 +385,29 @@ mod tests {
         assert!(
             render_set(Role::Access, &outcome).contains("  listen: 127.0.0.1:1 -> 127.0.0.1:2\n")
         );
+    }
+
+    #[test]
+    fn standalone_managed_note_names_actual_executable_and_absolute_config() {
+        let note = ServiceNote::ManagedBinary {
+            role: "serve".into(),
+            source: "/source".into(),
+            copy: "/copy".into(),
+        };
+        let (_, text) = render_service_note_for_invocation(
+            &note,
+            iroh_tunnel_host::service::ServiceInvocation::Standalone,
+            Path::new("/opt/role bin/renamed"),
+            Some(Path::new("/home/a/config file.toml")),
+        );
+        assert!(text.contains("sudo '/opt/role bin/renamed' service install --system --config '/home/a/config file.toml'"), "{text}");
+        let (_, text) = render_service_note_for_invocation(
+            &note,
+            iroh_tunnel_host::service::ServiceInvocation::Standalone,
+            Path::new("/opt/role bin/renamed"),
+            None,
+        );
+        assert!(text.contains("sudo '/opt/role bin/renamed' service install --system --config <absolute-config-path>"), "{text}");
     }
 
     #[test]

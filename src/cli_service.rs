@@ -101,7 +101,12 @@ pub(crate) fn dispatch(
     let existing = |args: &ScopeArgs| {
         explicit_scope(args).unwrap_or_else(|| service::default_scope(env.elevated))
     };
-    let mut notes = print_service_note;
+    let executable = std::env::current_exe().context("failed to resolve current executable")?;
+    // The system install may select another user's default config. At the
+    // managed-copy note the registration has not yet been written, so the
+    // CLI cannot reliably recover the pinned path; require it explicitly.
+    let mut notes =
+        |note: &service::ServiceNote| print_service_note(note, invocation, &executable, None);
     let mut call = cli_call(&mut notes);
     match action {
         ServiceAction::Install { config, scope } => install(
@@ -112,25 +117,56 @@ pub(crate) fn dispatch(
             &mut call,
             invocation,
         ),
-        ServiceAction::Uninstall { scope } => {
-            service::uninstall(role, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Start { scope } => service::start(role, existing(&scope), env, &mut call)
-            .map(drop)
-            .map_err(Into::into),
-        ServiceAction::Stop { scope } => service::stop(role, existing(&scope), env, &mut call)
-            .map(drop)
-            .map_err(Into::into),
-        ServiceAction::Restart { scope } => {
-            service::restart(role, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Status { scope } => service::status(role, existing(&scope), env, &mut call)
-            .map(drop)
-            .map_err(Into::into),
+        ServiceAction::Uninstall { scope } => service::uninstall_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Start { scope } => service::start_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Stop { scope } => service::stop_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Restart { scope } => service::restart_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Status { scope } => service::status_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
     }
 }
 

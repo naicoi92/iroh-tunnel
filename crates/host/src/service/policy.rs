@@ -93,7 +93,7 @@ fn windows_quote(arg: &str) -> String {
 }
 
 /// Quote `arg` for a POSIX shell only when it needs it.
-fn shell_quote(arg: &str) -> String {
+pub(crate) fn shell_quote(arg: &str) -> String {
     let plain = !arg.is_empty()
         && arg
             .chars()
