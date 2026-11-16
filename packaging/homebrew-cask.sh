@@ -44,21 +44,35 @@ cask "${name}" do
 
   binary "${name}"
 
+  preflight do
+    alias_path = HOMEBREW_PREFIX/"bin/${alias}"
+    owned_alias = alias_path.symlink? && alias_path.readlink.to_s == "${name}"
+    if (alias_path.exist? || alias_path.symlink?) && !owned_alias
+      raise "Refusing to replace unrelated alias at #{alias_path}"
+    end
+  end
+
   postflight do
     # Remove the quarantine attribute so Gatekeeper does not block the
     # unsigned (cosign is deferred) command-line binary.
     system_command "/usr/bin/xattr",
                    args: ["-dr", "com.apple.quarantine", "#{staged_path}/${name}"]
 
-    # \`${alias}\` convenience alias. Runs after the \`binary\` stanza has linked
-    # ${name} into Homebrew's bin dir, so the relative target resolves.
-    system_command "/bin/ln",
-                   args: ["-sf", "${name}", "#{HOMEBREW_PREFIX}/bin/${alias}"]
+    # Keep the existing relative alias form. File.symlink refuses any path
+    # that appeared after preflight, including dangling links and directories.
+    alias_path = HOMEBREW_PREFIX/"bin/${alias}"
+    unless alias_path.symlink? && alias_path.readlink.to_s == "${name}"
+      File.symlink "${name}", alias_path
+    end
   end
 
-  # Remove the \`${alias}\` alias again so uninstall does not leave it dangling.
   uninstall_postflight do
-    system_command "/bin/rm", args: ["-f", "#{HOMEBREW_PREFIX}/bin/${alias}"]
+    # The named binary may already be unlinked. Compare the link text, not
+    # its resolved target, and leave a user's replacement path untouched.
+    alias_path = HOMEBREW_PREFIX/"bin/${alias}"
+    if alias_path.symlink? && alias_path.readlink.to_s == "${name}"
+      alias_path.unlink
+    end
   end
 end
 EOF

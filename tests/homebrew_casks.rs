@@ -1,10 +1,14 @@
 //! Homebrew renderer and stable tap publication contracts (Task 3).
+//! Requires Ruby to execute rendered hooks; `RUBY` overrides the executable.
 #![cfg(unix)]
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+
+use serde_json::Value;
 
 use tempfile::TempDir;
 
@@ -110,30 +114,13 @@ fn assert_cask(cask: &str, role: &Role) {
     assert_eq!(field(cask, "url "), role.url);
     assert_eq!(field(cask, "binary "), role.name);
     assert!(cask.lines().any(|l| l.trim() == "depends_on arch: :arm64"));
-    let commands = cask_commands(cask);
-    assert_eq!(commands.len(), 3, "unexpected side effects in {cask}");
-    assert_eq!(commands[0].0, "/usr/bin/xattr");
+    let temp = TempDir::new().unwrap();
+    let metadata: Value =
+        serde_json::from_str(&successful(ruby(cask, temp.path(), "inspect"))).unwrap();
+    assert_eq!(metadata["binary"], serde_json::json!([role.name]));
     assert_eq!(
-        commands[0].1,
-        [
-            "-dr",
-            "com.apple.quarantine",
-            &format!("#{{staged_path}}/{}", role.name)
-        ]
-    );
-    assert_eq!(commands[1].0, "/bin/ln");
-    assert_eq!(
-        commands[1].1,
-        [
-            "-sf",
-            role.name,
-            &format!("#{{HOMEBREW_PREFIX}}/bin/{}", role.alias)
-        ]
-    );
-    assert_eq!(commands[2].0, "/bin/rm");
-    assert_eq!(
-        commands[2].1,
-        ["-f", &format!("#{{HOMEBREW_PREFIX}}/bin/{}", role.alias)]
+        metadata["hooks"],
+        serde_json::json!(["postflight", "preflight", "uninstall_postflight"])
     );
 }
 
@@ -192,26 +179,105 @@ fn renderer_rejects_malformed_release_inputs() {
     }
 }
 
-/// Read the emitted command/args pairs, not a second renderer implementation.
-/// Unknown commands or changed argument shapes fail before any execution.
-fn cask_commands(cask: &str) -> Vec<(String, Vec<String>)> {
-    let mut commands = Vec::new();
-    let mut pending = None;
-    for line in cask.lines().map(str::trim) {
-        if line.starts_with("system_command ") {
-            assert!(pending.is_none());
-            pending = Some(quoted_values(line)[0].to_owned());
-        }
-        if let Some((_, args)) = line.split_once("args: ") {
-            let program = pending.take().expect("args without system_command");
-            commands.push((
-                program,
-                quoted_values(args).into_iter().map(str::to_owned).collect(),
-            ));
-        }
-    }
-    assert!(pending.is_none(), "system_command missing args");
-    commands
+// Evaluate the real Ruby DSL and execute the registered hook for each phase.
+// The fake artifact boundary links only the named executable. All alias policy
+// is evaluated from production cask code, never reimplemented here.
+const RUBY_HARNESS: &str = r##"
+require "json"
+require "pathname"
+HOMEBREW_PREFIX = Pathname.new(ARGV.fetch(0))
+class Harness
+  attr_reader :hooks, :binaries
+  def initialize
+    @hooks = {}
+    @binaries = []
+  end
+  def cask(_name, &block)
+    instance_eval(&block)
+  end
+  def version(value = nil)
+    @version = value unless value.nil?
+    @version
+  end
+  def sha256(_value); end
+  def url(_value); end
+  def name(_value); end
+  def desc(_value); end
+  def homepage(_value); end
+  def depends_on(**_values); end
+  def binary(name)
+    @binaries << name
+  end
+  def preflight(&block)
+    @hooks["preflight"] = block
+  end
+  def postflight(&block)
+    @hooks["postflight"] = block
+  end
+  def uninstall_preflight(&block)
+    @hooks["uninstall_preflight"] = block
+  end
+  def uninstall_postflight(&block)
+    @hooks["uninstall_postflight"] = block
+  end
+  def staged_path
+    HOMEBREW_PREFIX/"stage"/@binaries.fetch(0)
+  end
+  def system_command(program, args:, **options)
+    raise "unhandled command options: #{options}" unless options.empty?
+    if program == "/usr/bin/xattr"
+      File.open(HOMEBREW_PREFIX/"xattr.jsonl", "a") { |f| f.puts(JSON.generate(args.map(&:to_s))) }
+    else
+      raise "unexpected program: #{program}" unless ["/bin/ln", "/bin/rm"].include?(program)
+      raise "command failed: #{program}" unless system(program, *args.map(&:to_s))
+    end
+  end
+  def hook(name)
+    instance_eval(&@hooks.fetch(name)) if @hooks.key?(name)
+  end
+  def install
+    hook("preflight")
+    @binaries.each { |b| File.symlink(staged_path/b, HOMEBREW_PREFIX/"bin"/b) }
+    hook("postflight")
+  end
+  def uninstall
+    hook("uninstall_preflight")
+    @binaries.each { |b| File.unlink(HOMEBREW_PREFIX/"bin"/b) }
+    hook("uninstall_postflight")
+  end
+end
+h = Harness.new
+h.instance_eval(STDIN.read, "rendered-cask.rb")
+case ARGV.fetch(1)
+when "inspect" then puts JSON.generate(binary: h.binaries, hooks: h.hooks.keys.sort)
+when "preflight" then h.hook("preflight")
+when "postflight" then h.hook("postflight")
+when "install" then h.install
+when "uninstall" then h.uninstall
+else raise "unknown phase"
+end
+"##;
+
+fn ruby(cask: &str, root: &Path, phase: &str) -> Output {
+    let mut child = isolated(
+        &mut Command::new(std::env::var("RUBY").unwrap_or_else(|_| "ruby".into())),
+        root,
+    )
+    .args(["-e", RUBY_HARNESS])
+    .arg(root)
+    .arg(phase)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("Ruby is required for Homebrew cask hook tests (set RUBY to override)");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(cask.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 fn executable(path: &Path, contents: &str) {
@@ -219,8 +285,7 @@ fn executable(path: &Path, contents: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Exercise declared link/remove paths with real filesystem operations under
-/// an isolated prefix. This is not a replacement for native Homebrew smoke.
+/// Executes real rendered Ruby hooks against an isolated Homebrew prefix.
 struct Prefix {
     temp: TempDir,
     casks: Vec<String>,
@@ -234,6 +299,14 @@ impl Prefix {
             .iter()
             .map(|r| successful(render(&[VERSION, r.sha, r.selector])))
             .collect();
+        for role in &ROLES {
+            let stage = temp.path().join("stage").join(role.name);
+            fs::create_dir_all(&stage).unwrap();
+            executable(
+                &stage.join(role.name),
+                &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", role.name),
+            );
+        }
         Self { temp, casks }
     }
 
@@ -242,36 +315,30 @@ impl Prefix {
     }
 
     fn install(&self, index: usize) {
-        let role = &ROLES[index];
-        assert_cask(&self.casks[index], role);
-        let stage = self.temp.path().join(role.name);
-        fs::create_dir(&stage).unwrap();
-        let binary = field(&self.casks[index], "binary ");
-        executable(
-            &stage.join(binary),
-            &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", role.name),
+        successful(ruby(&self.casks[index], self.temp.path(), "install"));
+        let log = fs::read_to_string(self.temp.path().join("xattr.jsonl")).unwrap();
+        let args: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!([
+                "-dr",
+                "com.apple.quarantine",
+                self.temp
+                    .path()
+                    .join("stage")
+                    .join(ROLES[index].name)
+                    .join(ROLES[index].name)
+            ])
         );
-        symlink(stage.join(binary), self.bin(binary)).unwrap();
-        self.run_command(index, "/bin/ln");
     }
 
     fn uninstall(&self, index: usize) {
-        self.run_command(index, "/bin/rm");
-        fs::remove_file(self.bin(field(&self.casks[index], "binary "))).unwrap();
-    }
-
-    fn run_command(&self, index: usize, program: &str) {
-        let commands = cask_commands(&self.casks[index]);
-        let (_, args) = commands.iter().find(|(p, _)| p == program).unwrap();
-        let args: Vec<_> = args
-            .iter()
-            .map(|a| a.replace("#{HOMEBREW_PREFIX}", self.temp.path().to_str().unwrap()))
-            .collect();
-        successful(
-            isolated(&mut Command::new(program), self.temp.path())
-                .args(args)
-                .output()
-                .unwrap(),
+        let before = fs::read(self.temp.path().join("xattr.jsonl")).unwrap();
+        successful(ruby(&self.casks[index], self.temp.path(), "uninstall"));
+        assert_eq!(
+            before,
+            fs::read(self.temp.path().join("xattr.jsonl")).unwrap(),
+            "quarantine command ran during uninstall"
         );
     }
 
@@ -334,6 +401,161 @@ fn casks_coexist_in_every_install_uninstall_order() {
                 prefix.assert_installed(&installed);
             }
         }
+    }
+}
+
+#[test]
+fn preflight_has_no_install_side_effects() {
+    for index in 0..ROLES.len() {
+        let prefix = Prefix::new();
+        successful(ruby(&prefix.casks[index], prefix.temp.path(), "preflight"));
+        assert_eq!(
+            fs::read_dir(prefix.temp.path().join("bin"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(!prefix.temp.path().join("xattr.jsonl").exists());
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Conflict {
+    File,
+    ForeignLink,
+    DanglingLink,
+    Directory,
+    DirectoryLink,
+}
+
+const CONFLICTS: [Conflict; 5] = [
+    Conflict::File,
+    Conflict::ForeignLink,
+    Conflict::DanglingLink,
+    Conflict::Directory,
+    Conflict::DirectoryLink,
+];
+
+fn conflict(prefix: &Prefix, path: &Path, kind: Conflict) {
+    let foreign = prefix.temp.path().join("foreign");
+    match kind {
+        Conflict::File => fs::write(path, "unrelated file").unwrap(),
+        Conflict::ForeignLink => {
+            fs::write(&foreign, "unrelated target").unwrap();
+            symlink(&foreign, path).unwrap();
+        }
+        Conflict::DanglingLink => symlink(&foreign, path).unwrap(),
+        Conflict::Directory => {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("sentinel"), "unrelated child").unwrap();
+        }
+        Conflict::DirectoryLink => {
+            fs::create_dir(&foreign).unwrap();
+            fs::write(foreign.join("sentinel"), "unrelated child").unwrap();
+            symlink(&foreign, path).unwrap();
+        }
+    }
+}
+
+fn assert_conflict_unchanged(prefix: &Prefix, path: &Path, kind: Conflict) {
+    let foreign = prefix.temp.path().join("foreign");
+    match kind {
+        Conflict::File => assert_eq!(fs::read_to_string(path).unwrap(), "unrelated file"),
+        Conflict::ForeignLink | Conflict::DanglingLink => {
+            assert_eq!(fs::read_link(path).unwrap(), foreign);
+            if matches!(kind, Conflict::ForeignLink) {
+                assert_eq!(fs::read_to_string(path).unwrap(), "unrelated target");
+            } else {
+                assert!(!path.exists());
+            }
+        }
+        Conflict::Directory | Conflict::DirectoryLink => {
+            if matches!(kind, Conflict::DirectoryLink) {
+                assert_eq!(fs::read_link(path).unwrap(), foreign);
+            } else {
+                assert!(fs::symlink_metadata(path).unwrap().is_dir());
+            }
+            assert_eq!(
+                fs::read_to_string(path.join("sentinel")).unwrap(),
+                "unrelated child"
+            );
+            assert_eq!(
+                fs::read_dir(path).unwrap().count(),
+                1,
+                "populated alias directory"
+            );
+        }
+    }
+}
+
+#[test]
+fn alias_install_rejects_unrelated_paths() {
+    for (index, role) in ROLES.iter().enumerate() {
+        for kind in CONFLICTS {
+            let prefix = Prefix::new();
+            let alias = prefix.bin(role.alias);
+            conflict(&prefix, &alias, kind);
+            let output = ruby(&prefix.casks[index], prefix.temp.path(), "install");
+            assert!(
+                !output.status.success(),
+                "accepted {kind:?} at {}",
+                role.alias
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(role.alias));
+            assert_conflict_unchanged(&prefix, &alias, kind);
+            assert!(
+                fs::symlink_metadata(prefix.bin(role.name)).is_err(),
+                "conflict not rejected in preflight"
+            );
+            assert!(!prefix.temp.path().join("xattr.jsonl").exists());
+        }
+    }
+}
+
+#[test]
+fn alias_postflight_preserves_conflicts_created_after_preflight() {
+    for (index, role) in ROLES.iter().enumerate() {
+        for kind in CONFLICTS {
+            let prefix = Prefix::new();
+            successful(ruby(&prefix.casks[index], prefix.temp.path(), "preflight"));
+            let alias = prefix.bin(role.alias);
+            conflict(&prefix, &alias, kind);
+            let output = ruby(&prefix.casks[index], prefix.temp.path(), "postflight");
+            assert!(!output.status.success(), "postflight accepted {kind:?}");
+            assert_conflict_unchanged(&prefix, &alias, kind);
+        }
+    }
+}
+
+#[test]
+fn alias_uninstall_preserves_replacements() {
+    for (index, role) in ROLES.iter().enumerate() {
+        for kind in CONFLICTS {
+            let prefix = Prefix::new();
+            prefix.install(index);
+            let alias = prefix.bin(role.alias);
+            fs::remove_file(&alias).unwrap();
+            conflict(&prefix, &alias, kind);
+            prefix.uninstall(index);
+            assert_conflict_unchanged(&prefix, &alias, kind);
+            assert!(fs::symlink_metadata(prefix.bin(role.name)).is_err());
+        }
+    }
+}
+
+#[test]
+fn alias_install_accepts_owned_link() {
+    for (index, role) in ROLES.iter().enumerate() {
+        let prefix = Prefix::new();
+        let alias = prefix.bin(role.alias);
+        symlink(role.name, &alias).unwrap();
+        prefix.install(index);
+        assert_eq!(fs::read_link(alias).unwrap(), Path::new(role.name));
+        let mut installed = [false; 3];
+        installed[index] = true;
+        prefix.assert_installed(&installed);
+        prefix.uninstall(index);
+        prefix.assert_installed(&[false; 3]);
     }
 }
 
