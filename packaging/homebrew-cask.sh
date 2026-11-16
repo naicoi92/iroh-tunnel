@@ -43,36 +43,13 @@ cask "${name}" do
   depends_on arch: :arm64
 
   binary "${name}"
-
-  preflight do
-    alias_path = HOMEBREW_PREFIX/"bin/${alias}"
-    owned_alias = alias_path.symlink? && alias_path.readlink.to_s == "${name}"
-    if (alias_path.exist? || alias_path.symlink?) && !owned_alias
-      raise "Refusing to replace unrelated alias at #{alias_path}"
-    end
-  end
+  binary "${name}", target: "${alias}"
 
   postflight do
     # Remove the quarantine attribute so Gatekeeper does not block the
     # unsigned (cosign is deferred) command-line binary.
     system_command "/usr/bin/xattr",
                    args: ["-dr", "com.apple.quarantine", "#{staged_path}/${name}"]
-
-    # Keep the existing relative alias form. File.symlink refuses any path
-    # that appeared after preflight, including dangling links and directories.
-    alias_path = HOMEBREW_PREFIX/"bin/${alias}"
-    unless alias_path.symlink? && alias_path.readlink.to_s == "${name}"
-      File.symlink "${name}", alias_path
-    end
-  end
-
-  uninstall_postflight do
-    # The named binary may already be unlinked. Compare the link text, not
-    # its resolved target, and leave a user's replacement path untouched.
-    alias_path = HOMEBREW_PREFIX/"bin/${alias}"
-    if alias_path.symlink? && alias_path.readlink.to_s == "${name}"
-      alias_path.unlink
-    end
   end
 end
 EOF

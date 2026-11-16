@@ -77,10 +77,52 @@ brew tap naicoi92/tap https://github.com/naicoi92/homebrew-tap
 brew install --cask iroh-tunnel
 ```
 
-The cask installs the all-in-one `iroh-tunnel` and the `it` alias for Apple
-silicon, and removes the quarantine attribute so Gatekeeper does not block
-the unsigned binary. It is updated on stable releases only. Use
-`brew upgrade --cask iroh-tunnel` to update.
+Each Apple silicon cask installs one executable and its matching alias using
+Homebrew-managed `binary` artifacts. Install any combination:
+
+| Cask | Executable | Alias |
+|---|---|---|
+| `iroh-tunnel` | `iroh-tunnel` | `it` |
+| `iroh-tunnel-serve` | `iroh-tunnel-serve` | `its` |
+| `iroh-tunnel-access` | `iroh-tunnel-access` | `ita` |
+
+For example, `brew install --cask iroh-tunnel-serve` installs Serve alone.
+The casks remove quarantine from their executables and are updated on stable
+releases only. Use `brew upgrade --cask <cask-name>` to update.
+
+### Homebrew path conflicts and replacement links
+
+Both the long executable name and short alias follow **Homebrew's standard
+artifact policy**, not a custom ownership mechanism. Without force/adoption
+options, Homebrew rejects existing regular files, directories and ordinary live
+foreign symlinks; a link already resolving to the same staged executable may
+be accepted. A dangling symlink may be replaced. A conflict recognized as
+formula-owned may be skipped instead of failing, so inspect Homebrew's output:
+the skipped command can still resolve to the formula rather than this cask.
+
+On uninstall, regular-file and directory replacements are retained, but
+Homebrew may unlink **any replacement symlink**, including one with an
+identical or unrelated destination. Links recognized as formula-owned are
+normally skipped. Homebrew does not prove who created the current link.
+Do not repurpose cask-managed paths while the cask is installed; move or back
+up replacement links before uninstalling or upgrading. Force/adoption options
+can change conflict behavior further. Details may vary with Homebrew versions.
+
+### Upgrading the older combined cask
+
+Older `iroh-tunnel` casks created `it -> iroh-tunnel` in a postflight hook and
+removed it in an uninstall hook. A normal upgrade uses the installed old
+cask's uninstall logic before linking the new managed artifacts. The old hook
+may remove a replacement `it` path, so inspect and back it up first. If an
+interrupted upgrade or manually removed cask leaves a stale alias, inspect
+`ls -l "$(brew --prefix)/bin/it"` and move aside only the path you intend to
+replace; do not use `--force` merely to bypass an unexplained conflict.
+
+The long executable names, cask names and aliases remain unchanged; the alias
+now links directly to the staged executable instead of through its long name.
+Automated tests exercise pinned Homebrew artifact policy and the expected
+legacy upgrade ordering. Native macOS installation, quarantine, Homebrew
+privilege/sandbox behavior and migration still require smoke testing on macOS.
 
 ## Linux packages (`.deb`, `.apk`)
 

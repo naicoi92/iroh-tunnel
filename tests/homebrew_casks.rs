@@ -112,16 +112,15 @@ fn assert_cask(cask: &str, role: &Role) {
     assert_eq!(field(cask, "version "), VERSION);
     assert_eq!(field(cask, "sha256 "), role.sha);
     assert_eq!(field(cask, "url "), role.url);
-    assert_eq!(field(cask, "binary "), role.name);
     assert!(cask.lines().any(|l| l.trim() == "depends_on arch: :arm64"));
     let temp = TempDir::new().unwrap();
     let metadata: Value =
         serde_json::from_str(&successful(ruby(cask, temp.path(), "inspect"))).unwrap();
-    assert_eq!(metadata["binary"], serde_json::json!([role.name]));
     assert_eq!(
-        metadata["hooks"],
-        serde_json::json!(["postflight", "preflight", "uninstall_postflight"])
+        metadata["binary"],
+        serde_json::json!([[role.name, role.name], [role.name, role.alias]])
     );
+    assert_eq!(metadata["hooks"], serde_json::json!(["postflight"]));
 }
 
 #[test]
@@ -179,20 +178,28 @@ fn renderer_rejects_malformed_release_inputs() {
     }
 }
 
-// Evaluate the real Ruby DSL and execute the registered hook for each phase.
-// The fake artifact boundary links only the named executable. All alias policy
-// is evaluated from production cask code, never reimplemented here.
+// Execute the real rendered DSL plus pinned, unmodified Homebrew Binary and
+// Symlinked classes. Only DSL/installer/platform boundaries are supplied here.
 const RUBY_HARNESS: &str = r##"
 require "json"
 require "pathname"
+require "fileutils"
 HOMEBREW_PREFIX = Pathname.new(ARGV.fetch(0))
+HOMEBREW_CELLAR = HOMEBREW_PREFIX/"Cellar"
+class SystemCommand
+  def self.run!(program, args:, **options)
+    raise "command failed: #{program}" unless system(program, *args.map(&:to_s))
+  end
+end
+require "cask/artifact/binary"
 class Harness
   attr_reader :hooks, :binaries
   def initialize
     @hooks = {}
     @binaries = []
   end
-  def cask(_name, &block)
+  def cask(name, &block)
+    @name = name
     instance_eval(&block)
   end
   def version(value = nil)
@@ -205,53 +212,54 @@ class Harness
   def desc(_value); end
   def homepage(_value); end
   def depends_on(**_values); end
-  def binary(name)
-    @binaries << name
+  def binary(name, target: nil)
+    @binaries << Cask::Artifact::Binary.new(self, name, target: target)
   end
-  def preflight(&block)
-    @hooks["preflight"] = block
-  end
-  def postflight(&block)
-    @hooks["postflight"] = block
-  end
-  def uninstall_preflight(&block)
-    @hooks["uninstall_preflight"] = block
-  end
-  def uninstall_postflight(&block)
-    @hooks["uninstall_postflight"] = block
-  end
-  def staged_path
-    HOMEBREW_PREFIX/"stage"/@binaries.fetch(0)
-  end
+  def preflight(&block); @hooks["preflight"] = block; end
+  def postflight(&block); @hooks["postflight"] = block; end
+  def uninstall_preflight(&block); @hooks["uninstall_preflight"] = block; end
+  def uninstall_postflight(&block); @hooks["uninstall_postflight"] = block; end
+  def caskroom_path; HOMEBREW_PREFIX/"stage"/@name; end
+  def staged_path; caskroom_path/@version; end
   def system_command(program, args:, **options)
-    raise "unhandled command options: #{options}" unless options.empty?
-    if program == "/usr/bin/xattr"
+    raise "unexpected hook options" unless options.empty?
+    case program
+    when "/usr/bin/xattr"
       File.open(HOMEBREW_PREFIX/"xattr.jsonl", "a") { |f| f.puts(JSON.generate(args.map(&:to_s))) }
-    else
-      raise "unexpected program: #{program}" unless ["/bin/ln", "/bin/rm"].include?(program)
-      raise "command failed: #{program}" unless system(program, *args.map(&:to_s))
+      raise "injected xattr failure" if (HOMEBREW_PREFIX/"fail-xattr").exist?
+    when "/bin/ln", "/bin/rm"
+      # Only the archived legacy combined cask uses manual alias commands.
+      SystemCommand.run!(program, args: args)
+    else raise "unexpected hook command"
     end
   end
   def hook(name)
     instance_eval(&@hooks.fetch(name)) if @hooks.key?(name)
   end
   def install
+    completed = []
     hook("preflight")
-    @binaries.each { |b| File.symlink(staged_path/b, HOMEBREW_PREFIX/"bin"/b) }
+    @binaries.each do |artifact|
+      artifact.install_phase
+      completed.unshift(artifact)
+    end
     hook("postflight")
+  rescue
+    completed.each(&:uninstall_phase)
+    raise
   end
   def uninstall
     hook("uninstall_preflight")
-    @binaries.each { |b| File.unlink(HOMEBREW_PREFIX/"bin"/b) }
+    @binaries.each(&:uninstall_phase)
     hook("uninstall_postflight")
   end
 end
 h = Harness.new
 h.instance_eval(STDIN.read, "rendered-cask.rb")
 case ARGV.fetch(1)
-when "inspect" then puts JSON.generate(binary: h.binaries, hooks: h.hooks.keys.sort)
+when "inspect"
+  puts JSON.generate(binary: h.binaries.map { |b| [b.source.basename.to_s, b.target.basename.to_s] }, hooks: h.hooks.keys.sort)
 when "preflight" then h.hook("preflight")
-when "postflight" then h.hook("postflight")
 when "install" then h.install
 when "uninstall" then h.uninstall
 else raise "unknown phase"
@@ -263,6 +271,8 @@ fn ruby(cask: &str, root: &Path, phase: &str) -> Output {
         &mut Command::new(std::env::var("RUBY").unwrap_or_else(|_| "ruby".into())),
         root,
     )
+    .arg("-I")
+    .arg(Path::new(ROOT).join("tests/fixtures/homebrew"))
     .args(["-e", RUBY_HARNESS])
     .arg(root)
     .arg(phase)
@@ -300,7 +310,7 @@ impl Prefix {
             .map(|r| successful(render(&[VERSION, r.sha, r.selector])))
             .collect();
         for role in &ROLES {
-            let stage = temp.path().join("stage").join(role.name);
+            let stage = temp.path().join("stage").join(role.name).join(VERSION);
             fs::create_dir_all(&stage).unwrap();
             executable(
                 &stage.join(role.name),
@@ -327,6 +337,7 @@ impl Prefix {
                     .path()
                     .join("stage")
                     .join(ROLES[index].name)
+                    .join(VERSION)
                     .join(ROLES[index].name)
             ])
         );
@@ -423,15 +434,12 @@ fn preflight_has_no_install_side_effects() {
 enum Conflict {
     File,
     ForeignLink,
-    DanglingLink,
     Directory,
     DirectoryLink,
 }
-
-const CONFLICTS: [Conflict; 5] = [
+const CONFLICTS: [Conflict; 4] = [
     Conflict::File,
     Conflict::ForeignLink,
-    Conflict::DanglingLink,
     Conflict::Directory,
     Conflict::DirectoryLink,
 ];
@@ -444,7 +452,6 @@ fn conflict(prefix: &Prefix, path: &Path, kind: Conflict) {
             fs::write(&foreign, "unrelated target").unwrap();
             symlink(&foreign, path).unwrap();
         }
-        Conflict::DanglingLink => symlink(&foreign, path).unwrap(),
         Conflict::Directory => {
             fs::create_dir(path).unwrap();
             fs::write(path.join("sentinel"), "unrelated child").unwrap();
@@ -456,79 +463,80 @@ fn conflict(prefix: &Prefix, path: &Path, kind: Conflict) {
         }
     }
 }
-
 fn assert_conflict_unchanged(prefix: &Prefix, path: &Path, kind: Conflict) {
-    let foreign = prefix.temp.path().join("foreign");
     match kind {
         Conflict::File => assert_eq!(fs::read_to_string(path).unwrap(), "unrelated file"),
-        Conflict::ForeignLink | Conflict::DanglingLink => {
-            assert_eq!(fs::read_link(path).unwrap(), foreign);
-            if matches!(kind, Conflict::ForeignLink) {
-                assert_eq!(fs::read_to_string(path).unwrap(), "unrelated target");
-            } else {
-                assert!(!path.exists());
-            }
+        Conflict::ForeignLink => {
+            assert_eq!(
+                fs::read_link(path).unwrap(),
+                prefix.temp.path().join("foreign")
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), "unrelated target");
         }
         Conflict::Directory | Conflict::DirectoryLink => {
-            if matches!(kind, Conflict::DirectoryLink) {
-                assert_eq!(fs::read_link(path).unwrap(), foreign);
-            } else {
-                assert!(fs::symlink_metadata(path).unwrap().is_dir());
-            }
+            assert!(path.is_dir());
             assert_eq!(
                 fs::read_to_string(path.join("sentinel")).unwrap(),
                 "unrelated child"
             );
-            assert_eq!(
-                fs::read_dir(path).unwrap().count(),
-                1,
-                "populated alias directory"
-            );
+            assert_eq!(fs::read_dir(path).unwrap().count(), 1);
         }
     }
 }
 
 #[test]
-fn alias_install_rejects_unrelated_paths() {
+fn managed_artifacts_reject_live_conflicts_without_leaving_links() {
     for (index, role) in ROLES.iter().enumerate() {
-        for kind in CONFLICTS {
-            let prefix = Prefix::new();
-            let alias = prefix.bin(role.alias);
-            conflict(&prefix, &alias, kind);
-            let output = ruby(&prefix.casks[index], prefix.temp.path(), "install");
-            assert!(
-                !output.status.success(),
-                "accepted {kind:?} at {}",
-                role.alias
-            );
-            assert!(String::from_utf8_lossy(&output.stderr).contains(role.alias));
-            assert_conflict_unchanged(&prefix, &alias, kind);
-            assert!(
-                fs::symlink_metadata(prefix.bin(role.name)).is_err(),
-                "conflict not rejected in preflight"
-            );
-            assert!(!prefix.temp.path().join("xattr.jsonl").exists());
+        for destination in [role.name, role.alias] {
+            for kind in CONFLICTS {
+                let prefix = Prefix::new();
+                let path = prefix.bin(destination);
+                conflict(&prefix, &path, kind);
+                let output = ruby(&prefix.casks[index], prefix.temp.path(), "install");
+                assert!(
+                    !output.status.success(),
+                    "accepted {kind:?} at {destination}"
+                );
+                assert!(String::from_utf8_lossy(&output.stderr).contains(destination));
+                assert_conflict_unchanged(&prefix, &path, kind);
+                let other = if destination == role.name {
+                    role.alias
+                } else {
+                    role.name
+                };
+                assert!(
+                    fs::symlink_metadata(prefix.bin(other)).is_err(),
+                    "partial install not rolled back"
+                );
+                assert!(!prefix.temp.path().join("xattr.jsonl").exists());
+            }
         }
     }
 }
 
 #[test]
-fn alias_postflight_preserves_conflicts_created_after_preflight() {
+fn managed_artifacts_follow_homebrew_dangling_link_policy() {
     for (index, role) in ROLES.iter().enumerate() {
-        for kind in CONFLICTS {
-            let prefix = Prefix::new();
-            successful(ruby(&prefix.casks[index], prefix.temp.path(), "preflight"));
-            let alias = prefix.bin(role.alias);
-            conflict(&prefix, &alias, kind);
-            let output = ruby(&prefix.casks[index], prefix.temp.path(), "postflight");
-            assert!(!output.status.success(), "postflight accepted {kind:?}");
-            assert_conflict_unchanged(&prefix, &alias, kind);
-        }
+        let prefix = Prefix::new();
+        symlink("missing", prefix.bin(role.alias)).unwrap();
+        prefix.install(index);
+        assert_eq!(
+            fs::read_link(prefix.bin(role.alias)).unwrap(),
+            prefix
+                .temp
+                .path()
+                .join("stage")
+                .join(role.name)
+                .join(VERSION)
+                .join(role.name)
+        );
+        prefix.uninstall(index);
+        prefix.assert_installed(&[false; 3]);
     }
 }
 
 #[test]
-fn alias_uninstall_preserves_replacements() {
+fn managed_artifacts_follow_homebrew_replacement_policy() {
     for (index, role) in ROLES.iter().enumerate() {
         for kind in CONFLICTS {
             let prefix = Prefix::new();
@@ -537,25 +545,155 @@ fn alias_uninstall_preserves_replacements() {
             fs::remove_file(&alias).unwrap();
             conflict(&prefix, &alias, kind);
             prefix.uninstall(index);
-            assert_conflict_unchanged(&prefix, &alias, kind);
-            assert!(fs::symlink_metadata(prefix.bin(role.name)).is_err());
+            if matches!(kind, Conflict::ForeignLink | Conflict::DirectoryLink) {
+                assert!(
+                    fs::symlink_metadata(&alias).is_err(),
+                    "Homebrew unlinks non-formula replacement symlinks"
+                );
+                assert!(
+                    prefix.temp.path().join("foreign").exists(),
+                    "link target must survive"
+                );
+            } else {
+                assert_conflict_unchanged(&prefix, &alias, kind);
+            }
         }
+        let prefix = Prefix::new();
+        prefix.install(index);
+        let alias = prefix.bin(role.alias);
+        let same_target = fs::read_link(&alias).unwrap();
+        fs::remove_file(&alias).unwrap();
+        symlink(&same_target, &alias).unwrap();
+        prefix.uninstall(index);
+        assert!(
+            fs::symlink_metadata(alias).is_err(),
+            "approved same-target replacement limitation"
+        );
     }
 }
 
 #[test]
-fn alias_install_accepts_owned_link() {
+fn managed_artifacts_skip_formula_owned_alias() {
     for (index, role) in ROLES.iter().enumerate() {
         let prefix = Prefix::new();
+        let formula = prefix.temp.path().join("Cellar/other/1/bin/tool");
+        fs::create_dir_all(formula.parent().unwrap()).unwrap();
+        executable(&formula, "#!/bin/sh\nexit 0\n");
         let alias = prefix.bin(role.alias);
-        symlink(role.name, &alias).unwrap();
+        symlink(&formula, &alias).unwrap();
         prefix.install(index);
-        assert_eq!(fs::read_link(alias).unwrap(), Path::new(role.name));
-        let mut installed = [false; 3];
-        installed[index] = true;
-        prefix.assert_installed(&installed);
+        assert_eq!(fs::read_link(&alias).unwrap(), formula);
+        prefix.uninstall(index);
+        assert_eq!(fs::read_link(alias).unwrap(), formula);
+    }
+}
+
+#[test]
+fn postflight_failure_rolls_back_managed_artifacts() {
+    for index in 0..ROLES.len() {
+        let prefix = Prefix::new();
+        fs::write(prefix.temp.path().join("fail-xattr"), "").unwrap();
+        let output = ruby(&prefix.casks[index], prefix.temp.path(), "install");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("injected xattr failure"));
+        prefix.assert_installed(&[false; 3]);
+        assert_eq!(
+            fs::read_dir(prefix.temp.path().join("bin"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn upgrade_relinks_both_artifacts_to_new_version() {
+    for (index, role) in ROLES.iter().enumerate() {
+        let mut prefix = Prefix::new();
+        prefix.install(index);
+        let old = prefix
+            .temp
+            .path()
+            .join("stage")
+            .join(role.name)
+            .join(VERSION);
+        prefix.uninstall(index);
+        let next = old.parent().unwrap().join("1.2.4");
+        fs::create_dir(&next).unwrap();
+        executable(
+            &next.join(role.name),
+            &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", role.name),
+        );
+        fs::remove_dir_all(&old).unwrap();
+        prefix.casks[index] = successful(render(&["1.2.4", role.sha, role.selector]));
+        successful(ruby(&prefix.casks[index], prefix.temp.path(), "install"));
+        for name in [role.name, role.alias] {
+            assert_eq!(
+                fs::read_link(prefix.bin(name)).unwrap(),
+                next.join(role.name)
+            );
+            assert_eq!(
+                successful(
+                    isolated(&mut Command::new(prefix.bin(name)), prefix.temp.path())
+                        .output()
+                        .unwrap()
+                )
+                .trim(),
+                role.name
+            );
+        }
         prefix.uninstall(index);
         prefix.assert_installed(&[false; 3]);
+    }
+}
+
+#[test]
+fn legacy_combined_upgrade_removes_manual_alias_before_managed_install() {
+    let prefix = Prefix::new();
+    let old = prefix.temp.path().join("stage/iroh-tunnel/1.2.2");
+    fs::create_dir(&old).unwrap();
+    executable(&old.join("iroh-tunnel"), "#!/bin/sh\nexit 0\n");
+    let legacy = include_str!("fixtures/homebrew/legacy-combined.rb");
+    successful(ruby(legacy, prefix.temp.path(), "install"));
+    assert_eq!(
+        fs::read_link(prefix.bin("it")).unwrap(),
+        Path::new("iroh-tunnel")
+    );
+    // Homebrew uses the stored old cask's artifacts/hooks for this phase.
+    successful(ruby(legacy, prefix.temp.path(), "uninstall"));
+    prefix.assert_installed(&[false; 3]);
+    fs::remove_dir_all(old).unwrap();
+    prefix.install(0);
+    assert_eq!(
+        fs::read_link(prefix.bin("it")).unwrap(),
+        prefix
+            .temp
+            .path()
+            .join("stage/iroh-tunnel")
+            .join(VERSION)
+            .join("iroh-tunnel")
+    );
+    prefix.uninstall(0);
+    prefix.assert_installed(&[false; 3]);
+}
+
+#[test]
+fn managed_artifacts_accept_existing_same_source_link() {
+    for (index, role) in ROLES.iter().enumerate() {
+        let prefix = Prefix::new();
+        let source = prefix
+            .temp
+            .path()
+            .join("stage")
+            .join(role.name)
+            .join(VERSION)
+            .join(role.name);
+        let alias = prefix.bin(role.alias);
+        symlink(&source, &alias).unwrap();
+        prefix.install(index);
+        assert_eq!(fs::read_link(&alias).unwrap(), source);
+        prefix.uninstall(index);
+        assert!(fs::symlink_metadata(alias).is_err());
     }
 }
 
