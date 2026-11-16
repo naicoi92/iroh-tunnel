@@ -1,9 +1,7 @@
 //! `service start`; refused while the role already runs.
 
-use super::native::system_runner;
 use super::native::ServiceCall;
 use super::types::{Environment, ServiceFailure, ServiceReport, ServiceScope};
-use super::verb::{verb_via, Verb};
 use crate::role::Role;
 
 /// `service start`; refused while the role already runs.
@@ -17,8 +15,14 @@ pub fn start(
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceReport, ServiceFailure> {
-    let mut runner = system_runner;
-    verb_via(Verb::Start, role, scope, env, call, &mut runner)
+    super::start_with_invocation(
+        role,
+        scope,
+        env,
+        call,
+        super::ServiceInvocation::Combined,
+        std::path::Path::new("iroh-tunnel"),
+    )
 }
 
 #[cfg(test)]

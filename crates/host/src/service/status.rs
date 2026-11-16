@@ -3,11 +3,10 @@
 
 use anyhow::Result;
 
-use super::native::{system_runner, Native, NativeOutput, Runner, ServiceCall, ServiceNote};
+use super::native::{Native, NativeOutput, Runner, ServiceCall, ServiceNote};
 use super::types::{
     Environment, Fact, Registration, ServiceFailure, ServiceScope, ServiceStatusReport,
 };
-use super::verb::check_verb_policy;
 use crate::role::Role;
 
 /// `service status`: the registration, liveness and owner facts, plus the
@@ -24,11 +23,18 @@ pub fn status(
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
-    let mut runner = system_runner;
-    status_via(role, scope, env, call, &mut runner)
+    super::status_with_invocation(
+        role,
+        scope,
+        env,
+        call,
+        super::ServiceInvocation::Combined,
+        std::path::Path::new("iroh-tunnel"),
+    )
 }
 
 /// [`status`] over an injected command runner.
+#[cfg(test)]
 pub(crate) fn status_via(
     role: Role,
     scope: ServiceScope,
@@ -36,7 +42,30 @@ pub(crate) fn status_via(
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
-    check_verb_policy("status", role, scope, env).map_err(ServiceFailure::before_effects)?;
+    status_via_with_invocation(
+        role,
+        scope,
+        env,
+        call,
+        runner,
+        super::ServiceInvocation::Combined,
+        std::path::Path::new("iroh-tunnel"),
+    )
+}
+
+pub(super) fn status_via_with_invocation(
+    role: Role,
+    scope: ServiceScope,
+    env: Environment,
+    call: &mut ServiceCall,
+    runner: &mut Runner<'_>,
+    invocation: super::ServiceInvocation,
+    executable: &std::path::Path,
+) -> Result<ServiceStatusReport, ServiceFailure> {
+    super::verb::check_verb_policy_with_invocation(
+        "status", role, scope, env, invocation, executable,
+    )
+    .map_err(ServiceFailure::before_effects)?;
     let liveness = crate::ownership::probe(role);
     let owner = owner_fact(&liveness);
     // Queried once: the absent-service refusal and the registration fact share

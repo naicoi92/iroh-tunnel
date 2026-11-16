@@ -25,6 +25,7 @@ use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::write_registration;
 use super::super::types::AppliedEffect;
+use super::super::types::ServiceInvocation;
 use super::super::types::ServiceScope;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,7 @@ fn script_path(role: &str) -> PathBuf {
 /// Pure function (no I/O) so the template can be unit-tested without touching
 /// the filesystem. Paths are embedded verbatim inside double quotes; system
 /// paths never need shell escaping in practice.
+#[cfg(test)]
 fn format_script(
     role: &str,
     binary: &Path,
@@ -56,6 +58,29 @@ fn format_script(
     state: &Path,
     pin: Option<&Pin>,
 ) -> String {
+    format_script_invocation(
+        role,
+        binary,
+        config,
+        state,
+        pin,
+        ServiceInvocation::Combined,
+    )
+}
+
+fn format_script_invocation(
+    role: &str,
+    binary: &Path,
+    config: &Path,
+    state: &Path,
+    pin: Option<&Pin>,
+    invocation: ServiceInvocation,
+) -> String {
+    let role_arg = if invocation == ServiceInvocation::Combined {
+        "\"$ROLE\" "
+    } else {
+        ""
+    };
     let binary = binary.to_string_lossy();
     let config = config.to_string_lossy();
     let state = state.to_string_lossy();
@@ -87,7 +112,7 @@ start() {{
         return 0
     fi
     echo "Starting iroh-tunnel ($ROLE)"
-    "$DAEMON" "$ROLE" run --config "$CONFIG" >> "$LOG" 2>&1 &
+    "$DAEMON" {role_arg}run --config "$CONFIG" >> "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
 }}
 
@@ -205,6 +230,7 @@ pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: ServiceInvocation,
     scope: ServiceScope,
     binary: &Path,
     config: &Path,
@@ -216,7 +242,7 @@ pub(crate) fn install(
     if let Some(note) = busybox_scope_note(role, scope) {
         notes(&note);
     }
-    let script = format_script(role, binary, config, state, pin);
+    let script = format_script_invocation(role, binary, config, state, pin, invocation);
     let path = script_path(role);
     write_registration(&path, &script)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));
@@ -306,6 +332,30 @@ pub(crate) fn status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invocation_form_survives_managed_paths_with_spaces() {
+        for role in ["serve", "access"] {
+            for (invocation, expected) in [
+                (ServiceInvocation::Combined, "\"$ROLE\" run"),
+                (ServiceInvocation::Standalone, "run"),
+            ] {
+                let body = format_script_invocation(
+                    role,
+                    Path::new("/managed path/copy"),
+                    Path::new("/config path/c"),
+                    Path::new("/state"),
+                    None,
+                    invocation,
+                );
+                assert!(body.contains("DAEMON=\"/managed path/copy\""), "{body}");
+                assert!(
+                    body.contains(&format!("\"$DAEMON\" {expected} --config \"$CONFIG\"")),
+                    "{body}"
+                );
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

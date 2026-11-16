@@ -1,9 +1,7 @@
 //! `service stop`.
 
-use super::native::system_runner;
 use super::native::ServiceCall;
 use super::types::{Environment, ServiceFailure, ServiceReport, ServiceScope};
-use super::verb::{verb_via, Verb};
 use crate::role::Role;
 
 /// `service stop`.
@@ -17,8 +15,14 @@ pub fn stop(
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceReport, ServiceFailure> {
-    let mut runner = system_runner;
-    verb_via(Verb::Stop, role, scope, env, call, &mut runner)
+    super::stop_with_invocation(
+        role,
+        scope,
+        env,
+        call,
+        super::ServiceInvocation::Combined,
+        std::path::Path::new("iroh-tunnel"),
+    )
 }
 
 #[cfg(test)]

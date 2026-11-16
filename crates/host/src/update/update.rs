@@ -102,7 +102,7 @@ pub async fn update(req: &UpdateRequest, ctx: &UpdateContext<'_>) -> anyhow::Res
     tokio::task::spawn_blocking(move || replace_executable(&install_path, &contents))
         .await
         .context("replacement task failed")?
-        .map_err(classify_replace_error)?;
+        .map_err(|err| classify_replace_error(err, ctx.exe_name))?;
 
     Ok(UpdateOutcome::Updated {
         path: ctx.install_path.clone(),

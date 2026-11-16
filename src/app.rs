@@ -407,16 +407,20 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
             )
             .into()),
         },
-        RoleCmd::Service { .. } if binary.is_standalone() => Err(CliError::Service(format!(
-            "service management is not yet supported by the standalone {role} binary; \
-             use `iroh-tunnel {role} service ...`"
-        ))
-        .into()),
-        RoleCmd::Service { action } => {
-            tokio::task::spawn_blocking(move || crate::cli_service::dispatch(status_role, action))
-                .await
-                .context("service command task failed")?
-        }
+
+        RoleCmd::Service { action } => tokio::task::spawn_blocking(move || {
+            crate::cli_service::dispatch(
+                status_role,
+                action,
+                if binary.is_standalone() {
+                    iroh_tunnel_host::service::ServiceInvocation::Standalone
+                } else {
+                    iroh_tunnel_host::service::ServiceInvocation::Combined
+                },
+            )
+        })
+        .await
+        .context("service command task failed")?,
     }
 }
 

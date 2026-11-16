@@ -61,13 +61,23 @@ fn privilege_text(windows: bool, argv: &[String]) -> String {
     if windows {
         let command = argv
             .iter()
-            .map(|arg| windows_quote(arg))
+            .map(|arg| powershell_quote(arg))
             .collect::<Vec<_>>()
             .join(" ");
+        // A quoted executable is a string expression in PowerShell, not a
+        // command. Bare combined commands keep their existing invocation form.
+        let call_operator = if argv
+            .first()
+            .is_some_and(|arg| powershell_quote(arg) != *arg)
+        {
+            "& "
+        } else {
+            ""
+        };
         return format!(
             "a system service needs Administrator, and nothing was changed (no automatic \
              elevation, no fallback to a user service). Run as administrator: open an elevated \
-             terminal and run `{command}`, or use --user."
+             PowerShell terminal and run `{call_operator}{command}`, or use --user."
         );
     }
     let command = argv
@@ -82,18 +92,22 @@ fn privilege_text(windows: bool, argv: &[String]) -> String {
     )
 }
 
-/// Quote `arg` for a Windows command line: wrap in `"` when it holds a space
-/// or `"`, doubling inner quotes.
-fn windows_quote(arg: &str) -> String {
-    if arg.contains([' ', '"']) {
-        format!("\"{}\"", arg.replace('"', "\"\""))
-    } else {
+/// Quote a literal PowerShell argument without variable or backtick expansion.
+/// This is shell guidance, not SCM/CreateProcess command-line serialization.
+fn powershell_quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./\\:-".contains(c));
+    if plain {
         arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', "''"))
     }
 }
 
 /// Quote `arg` for a POSIX shell only when it needs it.
-fn shell_quote(arg: &str) -> String {
+pub(crate) fn shell_quote(arg: &str) -> String {
     let plain = !arg.is_empty()
         && arg
             .chars()
@@ -127,7 +141,7 @@ mod tests {
             panic!("expected Permission, got {err:?}");
         };
         let expected = if cfg!(windows) {
-            r#"Run as administrator: open an elevated terminal and run `iroh-tunnel serve service install --system --config "/a b/it's.toml"`"#
+            "Run as administrator: open an elevated PowerShell terminal and run `iroh-tunnel serve service install --system --config '/a b/it''s.toml'`"
         } else {
             r"sudo iroh-tunnel serve service install --system --config '/a b/it'\''s.toml'"
         };
@@ -172,13 +186,60 @@ mod tests {
     }
 
     #[test]
-    fn windows_quote_wraps_spaces_and_doubles_quotes() {
-        assert_eq!(
-            windows_quote("C:\\Program Files\\x"),
-            "\"C:\\Program Files\\x\""
-        );
-        assert_eq!(windows_quote("a\"b"), "\"a\"\"b\"");
-        assert_eq!(windows_quote("plain"), "plain");
+    fn windows_privilege_guidance_invokes_program_files_executable_in_powershell() {
+        for executable in [
+            r"C:\Program Files\iroh-tunnel\iroh-tunnel-serve.exe",
+            r"C:\Program Files\iroh-tunnel\iroh-tunnel-access.exe",
+        ] {
+            for verb in ["install", "uninstall", "start", "stop", "restart", "status"] {
+                let mut args = vec![
+                    executable.to_owned(),
+                    "service".into(),
+                    verb.into(),
+                    "--system".into(),
+                ];
+                if verb == "install" {
+                    args.extend([
+                        "--config".into(),
+                        r"C:\Program Files\it's $config`\role.toml".into(),
+                    ]);
+                }
+                let msg = privilege_text(true, &args);
+                assert!(msg.contains("elevated PowerShell terminal"), "{msg}");
+                assert!(
+                    msg.contains(&format!("`& '{executable}' service {verb} --system")),
+                    "{msg}"
+                );
+                if verb == "install" {
+                    assert!(
+                        msg.contains(r"--config 'C:\Program Files\it''s $config`\role.toml'"),
+                        "{msg}"
+                    );
+                }
+                assert!(!msg.contains("sudo"), "{msg}");
+                assert!(msg.contains("nothing was changed"), "{msg}");
+                assert!(
+                    msg.contains("no automatic elevation, no fallback to a user service"),
+                    "{msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn powershell_quote_preserves_literal_arguments() {
+        for (argument, expected) in [
+            (r"C:\Program Files\x", r"'C:\Program Files\x'"),
+            ("a\"b", "'a\"b'"),
+            ("it's", "'it''s'"),
+            ("$config`", "'$config`'"),
+            ("a\tb", "'a\tb'"),
+            ("a;b", "'a;b'"),
+            ("", "''"),
+            ("plain", "plain"),
+        ] {
+            assert_eq!(powershell_quote(argument), expected);
+        }
     }
 
     #[test]
@@ -186,7 +247,9 @@ mod tests {
         let msg = privilege_text(true, &argv());
         assert!(msg.contains("Run as administrator"), "{msg}");
         assert!(
-            msg.contains("`iroh-tunnel serve service install --system --config \"C:\\Program Files\\x.toml\"`"),
+            msg.contains(
+                "`iroh-tunnel serve service install --system --config 'C:\\Program Files\\x.toml'`"
+            ),
             "{msg}"
         );
         assert!(!msg.contains("sudo"), "{msg}");

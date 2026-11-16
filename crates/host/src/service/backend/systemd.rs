@@ -9,7 +9,7 @@ use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
 use super::super::registration::{instance_suffix, write_registration};
 use super::super::types::AppliedEffect;
-use super::super::types::{RestartPolicy, ServiceScope};
+use super::super::types::{RestartPolicy, ServiceInvocation, ServiceScope};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -20,7 +20,15 @@ fn unit_name(role: &str) -> String {
 /// Where the unit file lives for the given scope.
 fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
     Ok(match scope {
-        ServiceScope::System => PathBuf::from("/etc/systemd/system").join(unit_name(role)),
+        ServiceScope::System => {
+            #[cfg(feature = "test-utils")]
+            if let Some(dir) =
+                std::env::var_os("IROH_TUNNEL_TEST_SYSTEMD_DIR").filter(|d| !d.is_empty())
+            {
+                return Ok(PathBuf::from(dir).join(unit_name(role)));
+            }
+            PathBuf::from("/etc/systemd/system").join(unit_name(role))
+        }
         ServiceScope::User => {
             let home = dirs::home_dir().context("no home directory")?;
             home.join(".config/systemd/user").join(unit_name(role))
@@ -37,6 +45,7 @@ fn format_unit(role: &str, binary: &Path, config: &Path, state: &Path) -> String
     format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT, None)
 }
 
+#[cfg(test)]
 fn format_unit_with(
     role: &str,
     binary: &Path,
@@ -45,6 +54,32 @@ fn format_unit_with(
     policy: &RestartPolicy,
     pin: Option<&Pin>,
 ) -> String {
+    format_unit_invocation(
+        role,
+        binary,
+        config,
+        state,
+        policy,
+        pin,
+        ServiceInvocation::Combined,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_unit_invocation(
+    role: &str,
+    binary: &Path,
+    config: &Path,
+    state: &Path,
+    policy: &RestartPolicy,
+    pin: Option<&Pin>,
+    invocation: ServiceInvocation,
+) -> String {
+    let role_arg = if invocation == ServiceInvocation::Combined {
+        format!("{role} ")
+    } else {
+        String::new()
+    };
     let binary = quote_arg(&binary.to_string_lossy(), Expand::Command);
     let config = quote_arg(&config.to_string_lossy(), Expand::Command);
     let state_env = quote_arg(
@@ -74,7 +109,7 @@ fn format_unit_with(
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={binary} {role} run --config {config}\n\
+         ExecStart={binary} {role_arg}run --config {config}\n\
          Environment={state_env}\n\
          {trust_env}\
          Restart={restart}\n\
@@ -170,6 +205,7 @@ pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: ServiceInvocation,
     scope: ServiceScope,
     binary: &Path,
     config: &Path,
@@ -177,7 +213,15 @@ pub(crate) fn install(
     pin: Option<&Pin>,
 ) -> Result<()> {
     super::super::pin::require_unix_pin(pin)?;
-    let unit = format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT, pin);
+    let unit = format_unit_invocation(
+        role,
+        binary,
+        config,
+        state,
+        &RestartPolicy::DEFAULT,
+        pin,
+        invocation,
+    );
     let path = unit_path(role, scope)?;
     write_registration(&path, &unit)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));
@@ -278,6 +322,48 @@ pub(crate) fn status(
 
 #[cfg(test)]
 mod tests {
+    // AC1: isolate system registrations without changing the production manager.
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn system_registration_uses_isolated_test_directory() {
+        const NAME: &str =
+            "service::backend::systemd::tests::system_registration_uses_isolated_test_directory";
+        super::super::super::fixtures::in_isolated_home(NAME, |home| {
+            let root = home.join("system units");
+            std::env::set_var("IROH_TUNNEL_TEST_SYSTEMD_DIR", &root);
+            assert_eq!(
+                unit_path("serve", ServiceScope::System).unwrap(),
+                root.join(unit_name("serve"))
+            );
+        });
+    }
+
+    #[test]
+    fn invocation_form_survives_managed_paths_with_spaces() {
+        for role in ["serve", "access"] {
+            for (invocation, expected) in [
+                (ServiceInvocation::Combined, format!("{role} run")),
+                (ServiceInvocation::Standalone, "run".to_owned()),
+            ] {
+                let body = format_unit_invocation(
+                    role,
+                    Path::new("/managed path/copy"),
+                    Path::new("/config path/c"),
+                    Path::new("/state"),
+                    &RestartPolicy::DEFAULT,
+                    None,
+                    invocation,
+                );
+                assert!(
+                    body.contains(&format!(
+                        "ExecStart=\"/managed path/copy\" {expected} --config \"/config path/c\""
+                    )),
+                    "{body}"
+                );
+            }
+        }
+    }
+
     use super::*;
     use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
     use crate::service::native::{Native, OutputMode};

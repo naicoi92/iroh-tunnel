@@ -12,23 +12,9 @@ use iroh_tunnel_host::error::CliError;
 use iroh_tunnel_host::service::Environment;
 use iroh_tunnel_host::service::{
     self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, RunningExecutable, ServiceCall,
-    ServiceScope,
+    ServiceInvocation, ServiceScope,
 };
 use iroh_tunnel_host::Role;
-
-/// The `iroh-tunnel` executable to register: the one on `PATH` (so a system
-/// install is used), else the running executable so `cargo run -- service
-/// install` works during development.
-///
-/// # Errors
-///
-/// When the running executable cannot be resolved and `PATH` has none.
-pub(crate) fn resolve_tunnel_executable() -> anyhow::Result<PathBuf> {
-    resolve_tunnel_executable_with(
-        || which::which("iroh-tunnel").ok(),
-        || std::env::current_exe().context("failed to resolve current executable"),
-    )
-}
 
 /// The executable running this command, the source of a managed copy.
 ///
@@ -72,12 +58,16 @@ pub(crate) fn is_interactive() -> bool {
 }
 
 fn resolve_tunnel_executable_with(
+    invocation: ServiceInvocation,
     on_path: impl FnOnce() -> Option<PathBuf>,
     current_exe: impl FnOnce() -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
-    match on_path() {
-        Some(path) => Ok(path),
-        None => current_exe(),
+    match invocation {
+        ServiceInvocation::Standalone => current_exe(),
+        ServiceInvocation::Combined => match on_path() {
+            Some(path) => Ok(path),
+            None => current_exe(),
+        },
     }
 }
 
@@ -100,39 +90,124 @@ fn explicit_scope(args: &ScopeArgs) -> Option<ServiceScope> {
 
 /// Run one `service` action: map flags to a request, answer the needs the
 /// operation reports, and print notes and native output.
-pub(crate) fn dispatch(role: Role, action: ServiceAction) -> anyhow::Result<()> {
+pub(crate) fn dispatch(
+    role: Role,
+    action: ServiceAction,
+    invocation: ServiceInvocation,
+) -> anyhow::Result<()> {
     let env = detect_environment();
     // Verbs on an existing service: no prompt, and the scope follows privilege
     // when it is not given.
     let existing = |args: &ScopeArgs| {
         explicit_scope(args).unwrap_or_else(|| service::default_scope(env.elevated))
     };
-    let mut notes = print_service_note;
+    let executable = std::env::current_exe().context("failed to resolve current executable")?;
+    // Explicit paths are available even if registration fails after publishing
+    // the copy. Default system paths may belong to another user: recover those
+    // only from the registration's authoritative pin, not root's HOME.
+    let config = match &action {
+        ServiceAction::Install {
+            config: Some(path), ..
+        } => std::fs::canonicalize(path).ok(),
+        _ => None,
+    };
+    let mut pending = None;
+    let mut notes = |note: &service::ServiceNote| {
+        if invocation == ServiceInvocation::Standalone {
+            if matches!(note, service::ServiceNote::ManagedBinary { .. }) {
+                pending = Some(note.clone());
+                return;
+            }
+            if let service::ServiceNote::Installed {
+                at: service::InstalledAt::Path(path),
+                ..
+            } = note
+            {
+                let pinned = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|body| service::Pin::find(&body));
+                if let Some(managed) = pending.take() {
+                    print_service_note(
+                        &managed,
+                        invocation,
+                        &executable,
+                        pinned
+                            .as_ref()
+                            .map(|pin| pin.config.as_path())
+                            .or(config.as_deref()),
+                    );
+                }
+            }
+        }
+        print_service_note(note, invocation, &executable, config.as_deref());
+    };
     let mut call = cli_call(&mut notes);
-    match action {
-        ServiceAction::Install { config, scope } => {
-            install(role, config, explicit_scope(&scope), env, &mut call)
-        }
-        ServiceAction::Uninstall { scope } => {
-            service::uninstall(role, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Start { scope } => service::start(role, existing(&scope), env, &mut call)
-            .map(drop)
-            .map_err(Into::into),
-        ServiceAction::Stop { scope } => service::stop(role, existing(&scope), env, &mut call)
-            .map(drop)
-            .map_err(Into::into),
-        ServiceAction::Restart { scope } => {
-            service::restart(role, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Status { scope } => service::status(role, existing(&scope), env, &mut call)
-            .map(drop)
-            .map_err(Into::into),
+    let result = match action {
+        ServiceAction::Install { config, scope } => install(
+            role,
+            config,
+            explicit_scope(&scope),
+            env,
+            &mut call,
+            invocation,
+        ),
+        ServiceAction::Uninstall { scope } => service::uninstall_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Start { scope } => service::start_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Stop { scope } => service::stop_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Restart { scope } => service::restart_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+        ServiceAction::Status { scope } => service::status_with_invocation(
+            role,
+            existing(&scope),
+            env,
+            &mut call,
+            invocation,
+            &executable,
+        )
+        .map(drop)
+        .map_err(Into::into),
+    };
+    // A backend may fail after publishing the managed copy but before it can
+    // announce the registration. Still report the copy before the error.
+    if let Some(note) = pending {
+        print_service_note(&note, invocation, &executable, config.as_deref());
     }
+    result
 }
 
 /// Install, answering each [`InstallNeed`] with the prompt the CLI always had.
@@ -142,12 +217,18 @@ fn install(
     scope: Option<ServiceScope>,
     env: Environment,
     call: &mut ServiceCall,
+    invocation: ServiceInvocation,
 ) -> anyhow::Result<()> {
     let mut request = InstallRequest {
+        invocation,
         role,
         scope,
         config,
-        tunnel_executable: resolve_tunnel_executable()?,
+        tunnel_executable: resolve_tunnel_executable_with(
+            invocation,
+            || which::which("iroh-tunnel").ok(),
+            || std::env::current_exe().context("failed to resolve current executable"),
+        )?,
         running_executable: running_executable()?,
         sudo_user: std::env::var("SUDO_USER").ok(),
         invoking_user: None,
@@ -278,6 +359,17 @@ fn confirm_retarget(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_resolution_ignores_combined_binary_on_path() {
+        let path = resolve_tunnel_executable_with(
+            ServiceInvocation::Standalone,
+            || panic!("combined executable must not be selected"),
+            || Ok(PathBuf::from("/renamed standalone")),
+        )
+        .unwrap();
+        assert_eq!(path, PathBuf::from("/renamed standalone"));
+    }
+
     use super::*;
 
     #[test]
@@ -307,14 +399,18 @@ mod tests {
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let found = resolve_tunnel_executable_with(
+            ServiceInvocation::Combined,
             || which::which_in("iroh-tunnel", Some(dir.path()), dir.path()).ok(),
             || panic!("current_exe must not be consulted when PATH has the binary"),
         )
         .unwrap();
         assert_eq!(found, exe);
-        let fallback =
-            resolve_tunnel_executable_with(|| None, || Ok(PathBuf::from("/somewhere/current")))
-                .unwrap();
+        let fallback = resolve_tunnel_executable_with(
+            ServiceInvocation::Combined,
+            || None,
+            || Ok(PathBuf::from("/somewhere/current")),
+        )
+        .unwrap();
         assert_eq!(fallback, PathBuf::from("/somewhere/current"));
     }
 }

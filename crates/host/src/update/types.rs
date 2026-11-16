@@ -36,7 +36,7 @@ impl Owner {
                  `apk upgrade {package}`)"
             )),
             Owner::Homebrew => Some(format!(
-                "{exe_name} is managed by Homebrew; update it with `brew upgrade --cask iroh-tunnel`"
+                "{exe_name} is managed by Homebrew; update it with `brew upgrade --cask {exe_name}`"
             )),
             Owner::Container => Some(format!(
                 "{exe_name} runs in a container image and is not updated in place; pull the new \

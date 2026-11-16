@@ -20,26 +20,30 @@ use super::policy::{ensure_privilege, ensure_root_run_privilege, ensure_supporte
 use super::service_binary::ServiceBinary;
 use super::types::{
     AppliedEffect, Environment, InstallNeed, InstallOutcome, InstallRequest, ScopeDecision,
-    ServiceFailure, ServiceScope,
+    ServiceFailure, ServiceInvocation, ServiceScope,
 };
 use crate::error::CliError;
 use crate::ownership::{self, Liveness, LockDirs, LockResolver, Tier};
 use crate::role::Role;
 
 /// The argv (after `sudo`) that repeats an install with absolute paths.
-pub(crate) fn install_rerun(role: Role, scope: ServiceScope, config: &Path) -> Vec<String> {
-    [
-        "iroh-tunnel",
-        role.name(),
-        "service",
-        "install",
-        super::verb::flag(scope),
-        "--config",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .chain([config.to_string_lossy().into_owned()])
-    .collect()
+pub(crate) fn install_rerun(
+    req: &InstallRequest,
+    scope: ServiceScope,
+    config: &Path,
+) -> Vec<String> {
+    let mut argv = match req.invocation {
+        ServiceInvocation::Combined => vec!["iroh-tunnel".to_owned(), req.role.name().to_owned()],
+        ServiceInvocation::Standalone => vec![req.tunnel_executable.to_string_lossy().into_owned()],
+    };
+    argv.extend([
+        "service".to_owned(),
+        "install".to_owned(),
+        super::verb::flag(scope).to_owned(),
+        "--config".to_owned(),
+        config.to_string_lossy().into_owned(),
+    ]);
+    argv
 }
 
 /// `service install`: decide, check, then write the registration, enable and
@@ -89,6 +93,7 @@ pub(crate) fn install_via(
                     native,
                     notes,
                     role,
+                    req.invocation,
                     plan.scope,
                     binary,
                     &plan.config,
@@ -330,7 +335,7 @@ fn plan_user_install(
         req.config.as_deref(),
     )?)?;
     let state = pinned_state_dir(req.state_dir_override.as_deref())?;
-    let rerun = install_rerun(role, scope, &config);
+    let rerun = install_rerun(req, scope, &config);
     ensure_privilege(scope, env.elevated, &rerun)?;
     #[cfg(windows)]
     cross_scope_conflict(scope, probe(scope, role)?, role)?;
@@ -386,7 +391,7 @@ fn plan_system_install_with(
             role,
             req.config.as_deref(),
         )?)?;
-        let rerun = install_rerun(role, ServiceScope::System, &config);
+        let rerun = install_rerun(req, ServiceScope::System, &config);
         ensure_privilege(ServiceScope::System, false, &rerun)?;
     }
 
@@ -477,7 +482,7 @@ fn plan_system_install(
             Some(config) => config.clone(),
             None => absolute(&crate::config::resolve_config_path(role, None)?)?,
         };
-        let rerun = install_rerun(role, ServiceScope::System, &config);
+        let rerun = install_rerun(req, ServiceScope::System, &config);
         ensure_privilege(ServiceScope::System, false, &rerun)?;
     }
     // Before any trust check or registration: the user task is the other scope.
@@ -721,6 +726,7 @@ fn backend_install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: ServiceInvocation,
     scope: ServiceScope,
     binary: &Path,
     config: &Path,
@@ -731,23 +737,29 @@ fn backend_install(
     {
         // Same BusyBox-vs-systemd condition as `platform::system_wide_only`.
         if super::platform::linux_is_systemd() {
-            super::backend::systemd::install(native, notes, role, scope, binary, config, state, pin)
+            super::backend::systemd::install(
+                native, notes, role, invocation, scope, binary, config, state, pin,
+            )
         } else {
-            super::backend::busybox::install(native, notes, role, scope, binary, config, state, pin)
+            super::backend::busybox::install(
+                native, notes, role, invocation, scope, binary, config, state, pin,
+            )
         }
     }
     #[cfg(target_os = "macos")]
     {
-        super::backend::launchd::install(native, notes, role, scope, binary, config, state, pin)
+        super::backend::launchd::install(
+            native, notes, role, invocation, scope, binary, config, state, pin,
+        )
     }
     #[cfg(windows)]
     {
         match scope {
-            ServiceScope::User => {
-                super::backend::windows::install(native, notes, role, scope, binary, config, state)
-            }
+            ServiceScope::User => super::backend::windows::install(
+                native, notes, role, invocation, scope, binary, config, state,
+            ),
             ServiceScope::System => {
-                install_windows_service(notes, role, binary, config, state, pin)
+                install_windows_service(notes, role, invocation, binary, config, state, pin)
             }
         }
     }
@@ -762,6 +774,7 @@ fn backend_install(
 fn install_windows_service(
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: ServiceInvocation,
     binary: &Path,
     config: &Path,
     state: &Path,
@@ -772,7 +785,15 @@ fn install_windows_service(
     use super::types::RestartPolicy;
 
     let pin = pin.context("internal: a Windows service needs a pin")?;
-    let spec = ServiceSpec::render(role, binary, config, state, pin, &RestartPolicy::DEFAULT)?;
+    let spec = ServiceSpec::render_with_invocation(
+        role,
+        binary,
+        config,
+        state,
+        pin,
+        &RestartPolicy::DEFAULT,
+        invocation,
+    )?;
     install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
     notes(&ServiceNote::Installed {
         name: spec.name,
@@ -990,6 +1011,45 @@ mod tests {
         assert!(msg.contains("serve service install --system"), "{msg}");
         assert!(msg.contains("/tmp/iroh-tunnel-test/serve.toml"), "{msg}");
         assert!(commands(&log).is_empty(), "{log:?}");
+    }
+
+    #[test]
+    fn standalone_install_privilege_guidance_uses_invoked_binary_and_absolute_config() {
+        for role in [Role::Serve, Role::Access] {
+            let mut req = request(Some(ServiceScope::System));
+            req.role = role;
+            req.invocation = ServiceInvocation::Standalone;
+            req.tunnel_executable = PathBuf::from(if cfg!(windows) {
+                r"C:\Program Files\role bin\renamed.exe"
+            } else {
+                "/opt/role bin/renamed"
+            });
+            req.config = Some(PathBuf::from("relative config.toml"));
+            let (result, log) = run_install(&req, BATCH, vec![]);
+            let err = anyhow::Error::from(result.expect_err("must refuse"));
+            let message = err.to_string();
+            let command = if cfg!(windows) {
+                r"& 'C:\Program Files\role bin\renamed.exe' service install --system --config"
+            } else {
+                "sudo '/opt/role bin/renamed' service install --system --config"
+            };
+            assert!(message.contains(command), "{message}");
+            assert!(matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ));
+            assert!(
+                message.contains(
+                    &std::env::current_dir()
+                        .unwrap()
+                        .join("relative config.toml")
+                        .display()
+                        .to_string()
+                ),
+                "{message}"
+            );
+            assert!(commands(&log).is_empty());
+        }
     }
 
     fn conflict_text(requested: ServiceScope, role: Role) -> String {
@@ -1434,6 +1494,96 @@ mod unix_binary_tests {
             planned,
             ServiceBinary::Direct(req.tunnel_executable.canonicalize().unwrap())
         );
+    }
+
+    #[cfg(all(feature = "test-utils", target_os = "linux"))]
+    #[test]
+    fn managed_standalone_selection_materializes_and_registers_both_roles() {
+        use super::super::native::fake::{Events, FakeRunner};
+        use super::super::native::OutputMode;
+        use super::super::trust::TrustedOwners;
+        use std::os::unix::fs::PermissionsExt;
+        const NAME: &str = "service::install::unix_binary_tests::managed_standalone_selection_materializes_and_registers_both_roles";
+        in_isolated_home(NAME, |home| {
+            let base = home.join("managed path");
+            std::fs::create_dir(&base).unwrap();
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::env::set_var("IROH_TUNNEL_TEST_MANAGED_BIN_DIR", &base);
+            for role in [Role::Serve, Role::Access] {
+                let source = home.join(format!("renamed-{}", role.name()));
+                std::fs::write(
+                    &source,
+                    format!("#!/bin/sh\nprintf '%s:%s' '{}' \"$1\"\n", role.name()),
+                )
+                .unwrap();
+                std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let mut req = request(Some(ServiceScope::System));
+                req.role = role;
+                req.invocation = ServiceInvocation::Standalone;
+                req.tunnel_executable = source.clone();
+                req.running_executable = super::super::RunningExecutable {
+                    display: source.clone(),
+                    read_from: source.clone(),
+                };
+                // The writable source must fail the real root-only trust check.
+                std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o777)).unwrap();
+                assert!(verify_root_only(&source).is_err());
+                let chosen =
+                    plan_binary(&req, ServiceScope::System, false, &verify_root_only).unwrap();
+                assert!(matches!(chosen, ServiceBinary::Managed { .. }));
+                let events = Events::default();
+                let mut fake = FakeRunner::new(&events, vec![]);
+                let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+                let mut native = Native::new(OutputMode::Capture, &mut runner);
+                install_steps(
+                    &mut native,
+                    &mut |_| {},
+                    role.name(),
+                    &chosen,
+                    |binary| {
+                        super::super::service_binary::materialize(
+                            binary,
+                            TrustedOwners::RootAnd(unsafe { libc::geteuid() }),
+                        )
+                    },
+                    |native, notes, path| {
+                        super::super::backend::systemd::install(
+                            native,
+                            notes,
+                            role.name(),
+                            req.invocation,
+                            ServiceScope::User,
+                            path,
+                            &home.join("config"),
+                            &home.join("state"),
+                            None,
+                        )
+                    },
+                    |_| panic!("managed copy must not be released"),
+                )
+                .unwrap();
+                assert_eq!(
+                    std::fs::read(chosen.path()).unwrap(),
+                    std::fs::read(&source).unwrap()
+                );
+                let unit = std::fs::read_to_string(home.join(format!(
+                    ".config/systemd/user/iroh-tunnel-{}.service",
+                    role.name()
+                )))
+                .unwrap();
+                let expected = format!("ExecStart=\"{}\" run --config", chosen.path().display());
+                assert!(unit.contains(&expected), "{unit}");
+                let output = std::process::Command::new(chosen.path())
+                    .arg("run")
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    format!("{}:run", role.name())
+                );
+            }
+        });
     }
 
     #[cfg(feature = "test-utils")]

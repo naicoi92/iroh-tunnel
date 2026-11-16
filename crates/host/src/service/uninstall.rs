@@ -1,9 +1,7 @@
 //! `service uninstall`: stop, disable, and remove the registration.
 
-use super::native::system_runner;
 use super::native::ServiceCall;
 use super::types::{Environment, ServiceFailure, ServiceReport, ServiceScope};
-use super::verb::{verb_via, Verb};
 use crate::role::Role;
 
 /// `service uninstall`: stop, disable, and remove the registration.
@@ -17,8 +15,14 @@ pub fn uninstall(
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceReport, ServiceFailure> {
-    let mut runner = system_runner;
-    verb_via(Verb::Uninstall, role, scope, env, call, &mut runner)
+    super::uninstall_with_invocation(
+        role,
+        scope,
+        env,
+        call,
+        super::ServiceInvocation::Combined,
+        std::path::Path::new("iroh-tunnel"),
+    )
 }
 
 #[cfg(test)]

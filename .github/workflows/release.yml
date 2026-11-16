@@ -523,8 +523,8 @@ jobs:
           set -euo pipefail
           docker run --rm --platform linux/amd64 "ghcr.io/naicoi92/${IMAGE}@${DIGEST}" --help
 
-  # Pre-releases must not move the stable cask. Needs github-release so the
-  # cask never points at a release that does not exist.
+  # Pre-releases must not move the stable casks. Needs github-release so the
+  # casks never point at a release that does not exist.
   homebrew:
     name: update Homebrew tap
     needs: [preflight, github-release]
@@ -543,27 +543,36 @@ jobs:
           name: release-set
           path: release-set/
 
-      - name: Render cask from the signed checksums
+      - name: Render casks from the signed checksums
         run: |
           set -euo pipefail
-          sha="$(awk -v n="iroh-tunnel-${VERSION}-darwin-arm64.tar.gz" '$2 == n { print $1 }' release-set/checksums-darwin.txt)"
-          [[ -n "$sha" ]] || { echo "no darwin checksum for iroh-tunnel" >&2; exit 1; }
           mkdir -p tap-out
-          bash packaging/homebrew-cask.sh "$VERSION" "$sha" > tap-out/iroh-tunnel.rb
-          cat tap-out/iroh-tunnel.rb
+          for role in combined serve access; do
+            case "$role" in
+              combined) name=iroh-tunnel ;;
+              *) name="iroh-tunnel-${role}" ;;
+            esac
+            archive="${name}-${VERSION}-darwin-arm64.tar.gz"
+            sha="$(awk -v n="$archive" '$2 == n { print $1 }' release-set/checksums-darwin.txt)"
+            [[ -n "$sha" ]] || { echo "no darwin checksum for $name ($archive)" >&2; exit 1; }
+            bash packaging/homebrew-cask.sh "$VERSION" "$sha" "$role" > "tap-out/${name}.rb"
+            cat "tap-out/${name}.rb"
+          done
 
       - name: Push to naicoi92/homebrew-tap
         run: |
           set -euo pipefail
           git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/naicoi92/homebrew-tap.git" tap
           mkdir -p tap/Casks
-          cp tap-out/iroh-tunnel.rb tap/Casks/iroh-tunnel.rb
+          for name in iroh-tunnel iroh-tunnel-serve iroh-tunnel-access; do
+            cp "tap-out/${name}.rb" "tap/Casks/${name}.rb"
+          done
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/iroh-tunnel.rb
+          git add Casks/iroh-tunnel.rb Casks/iroh-tunnel-serve.rb Casks/iroh-tunnel-access.rb
           if git diff --cached --quiet; then
-            echo "cask already up to date"
+            echo "casks already up to date"
           else
             git commit -m "iroh-tunnel ${VERSION}"
             git push origin HEAD:main

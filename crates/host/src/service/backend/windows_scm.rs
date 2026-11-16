@@ -88,6 +88,7 @@ impl ServiceSpec {
     ///
     /// [`CliError::Service`] when `role` is not `serve`/`access` or `pin` is
     /// not a SID pin.
+    #[cfg(test)]
     pub(crate) fn render(
         role: &str,
         executable: &Path,
@@ -95,6 +96,27 @@ impl ServiceSpec {
         state: &Path,
         pin: &Pin,
         policy: &RestartPolicy,
+    ) -> Result<Self> {
+        Self::render_with_invocation(
+            role,
+            executable,
+            config,
+            state,
+            pin,
+            policy,
+            super::super::types::ServiceInvocation::Combined,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_with_invocation(
+        role: &str,
+        executable: &Path,
+        config: &Path,
+        state: &Path,
+        pin: &Pin,
+        policy: &RestartPolicy,
+        invocation: super::super::types::ServiceInvocation,
     ) -> Result<Self> {
         if !matches!(role, "serve" | "access") {
             return Err(CliError::Service(format!(
@@ -118,12 +140,18 @@ impl ServiceSpec {
             name: service_name(role),
             display_name: format!("iroh-tunnel {role}"),
             executable: executable.to_path_buf(),
-            launch_arguments: vec![
-                role.into(),
-                "run".into(),
-                "--config".into(),
-                config.as_os_str().to_owned(),
-            ],
+            launch_arguments: {
+                let mut args = Vec::new();
+                if invocation == super::super::types::ServiceInvocation::Combined {
+                    args.push(role.into());
+                }
+                args.extend([
+                    "run".into(),
+                    "--config".into(),
+                    config.as_os_str().to_owned(),
+                ]);
+                args
+            },
             env,
             description: format!("# {}", pin.record()),
             failure: FailurePlan::from_policy(policy),
@@ -607,6 +635,38 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scm_invocation_uses_the_correct_role_form() {
+        use crate::service::ServiceInvocation;
+        let cfg = Path::new(r"C:\config dir\role.toml");
+        for role in ["serve", "access"] {
+            for invocation in [ServiceInvocation::Combined, ServiceInvocation::Standalone] {
+                let spec = ServiceSpec::render_with_invocation(
+                    role,
+                    Path::new(r"C:\Program Files\renamed.exe"),
+                    cfg,
+                    cfg,
+                    &pin(cfg),
+                    &RestartPolicy::DEFAULT,
+                    invocation,
+                )
+                .unwrap();
+                let expected: Vec<OsString> = if invocation == ServiceInvocation::Combined {
+                    vec![
+                        role.into(),
+                        "run".into(),
+                        "--config".into(),
+                        cfg.as_os_str().into(),
+                    ]
+                } else {
+                    vec!["run".into(), "--config".into(), cfg.as_os_str().into()]
+                };
+                assert_eq!(spec.launch_arguments, expected);
+                assert_eq!(spec.executable, Path::new(r"C:\Program Files\renamed.exe"));
+            }
+        }
+    }
+
     use super::fake::{FakeClock, FakeScm, SERVE};
     use super::*;
     use crate::service::PinOwner;

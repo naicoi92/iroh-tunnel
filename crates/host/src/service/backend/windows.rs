@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::registration::instance_suffix;
-use super::super::task_xml::{encode_utf16_le, format_task_xml, task_action};
+use super::super::task_xml::{encode_utf16_le, format_task_xml, task_action_invocation};
 use super::super::types::AppliedEffect;
 use super::super::types::{RestartPolicy, ServiceScope};
 use crate::error::CliError;
@@ -127,10 +127,12 @@ fn ensure_default_state(state: &Path) -> Result<()> {
     .into())
 }
 
+#[allow(clippy::too_many_arguments)] // one registration's inputs
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
+    invocation: super::super::types::ServiceInvocation,
     scope: ServiceScope,
     binary: &Path,
     config: &Path,
@@ -138,7 +140,7 @@ pub(crate) fn install(
 ) -> Result<()> {
     debug_assert_eq!(scope, ServiceScope::User, "system scope is refused earlier");
     ensure_default_state(state)?;
-    let action = task_action(role, binary, config)?;
+    let action = task_action_invocation(role, binary, config, invocation)?;
     let xml = format_task_xml(
         role,
         &current_user(native)?,

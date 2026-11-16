@@ -45,7 +45,7 @@ to disk. Quick flags cannot be mixed with a command such as `run` or `config`.
 | `<role> run [-c PATH]` | Run the services in the config file in the foreground |
 | `<role> config ...` | Manage the config file |
 | `<role> status [--json]` | Show the running role's status; see [Monitoring](monitoring.md) |
-| `<role> service ...` | Manage a background service (all-in-one executable only) |
+| `<role> service ...` | Manage the role’s background service (combined or standalone executable) |
 | `its update`, `ita update` | Update the standalone executable |
 
 ## `config`
@@ -97,6 +97,10 @@ config-file errors print only the error.
 | `install [-c PATH] [--user\|--system]` | Register, enable and start the role |
 | `start`, `stop`, `restart`, `status` `[--user\|--system]` | Control the registered service |
 | `uninstall [--user\|--system]` | Stop and remove it |
+
+Use `iroh-tunnel serve service ...` or `iroh-tunnel access service ...`
+with the combined executable, or `its service ...` / `ita service ...` with
+the corresponding standalone executable.
 
 See [Running as a service](services.md).
 
