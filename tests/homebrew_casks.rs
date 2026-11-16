@@ -84,7 +84,7 @@ fn successful(output: Output) -> String {
 }
 
 fn render(args: &[&str]) -> Output {
-    let temp = TempDir::new().unwrap();
+    let temp = temp_dir();
     isolated(&mut Command::new("bash"), temp.path())
         .arg(Path::new(ROOT).join("packaging/homebrew-cask.sh"))
         .args(args)
@@ -113,7 +113,7 @@ fn assert_cask(cask: &str, role: &Role) {
     assert_eq!(field(cask, "sha256 "), role.sha);
     assert_eq!(field(cask, "url "), role.url);
     assert!(cask.lines().any(|l| l.trim() == "depends_on arch: :arm64"));
-    let temp = TempDir::new().unwrap();
+    let temp = temp_dir();
     let metadata: Value =
         serde_json::from_str(&successful(ruby(cask, temp.path(), "inspect"))).unwrap();
     assert_eq!(
@@ -271,21 +271,54 @@ else raise "unknown phase"
 end
 "##;
 
+/// Temp dir under the canonical temp root: the vendored Homebrew code compares
+/// `realpath` results with `HOMEBREW_PREFIX`, and macOS `/var` links to `/private/var`.
+fn temp_dir() -> TempDir {
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temp dir");
+    TempDir::new_in(base).unwrap()
+}
+
+fn ruby_executable() -> String {
+    std::env::var("RUBY").unwrap_or_else(|_| "ruby".into())
+}
+
+/// The vendored Homebrew fixtures use Ruby 3.1 syntax; fail with guidance
+/// instead of a SyntaxError from an older system Ruby (macOS ships 2.6).
+fn require_ruby_3_1() {
+    static CHECKED: std::sync::Once = std::sync::Once::new();
+    CHECKED.call_once(|| {
+        let ruby = ruby_executable();
+        let output = Command::new(&ruby)
+            .args([
+                "-e",
+                "exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('3.1') ? 0 : 1)",
+            ])
+            .output()
+            .expect("Ruby is required for Homebrew cask hook tests (set RUBY to override)");
+        assert!(
+            output.status.success(),
+            "Homebrew cask hook tests need Ruby >= 3.1; `{ruby}` is older. Set RUBY, for \
+             example to Homebrew's portable Ruby \
+             ($(brew --repository)/Library/Homebrew/vendor/portable-ruby/current/bin/ruby)"
+        );
+    });
+}
+
 fn ruby(cask: &str, root: &Path, phase: &str) -> Output {
-    let mut child = isolated(
-        &mut Command::new(std::env::var("RUBY").unwrap_or_else(|_| "ruby".into())),
-        root,
-    )
-    .arg("-I")
-    .arg(Path::new(ROOT).join("tests/fixtures/homebrew"))
-    .args(["-e", RUBY_HARNESS])
-    .arg(root)
-    .arg(phase)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .expect("Ruby is required for Homebrew cask hook tests (set RUBY to override)");
+    require_ruby_3_1();
+    let mut child = isolated(&mut Command::new(ruby_executable()), root)
+        .arg("-I")
+        .arg(Path::new(ROOT).join("tests/fixtures/homebrew"))
+        .args(["-e", RUBY_HARNESS])
+        .arg(root)
+        .arg(phase)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Ruby is required for Homebrew cask hook tests (set RUBY to override)");
     child
         .stdin
         .take()
@@ -308,7 +341,7 @@ struct Prefix {
 
 impl Prefix {
     fn new() -> Self {
-        let temp = TempDir::new().unwrap();
+        let temp = temp_dir();
         fs::create_dir(temp.path().join("bin")).unwrap();
         let casks = ROLES
             .iter()
@@ -790,7 +823,7 @@ struct Release {
 
 impl Release {
     fn new(missing: Option<usize>) -> Self {
-        let temp = TempDir::new().unwrap();
+        let temp = temp_dir();
         let root = temp.path();
         for dir in ["packaging", "release-set", "seed/Casks", "tools"] {
             fs::create_dir_all(root.join(dir)).unwrap();
