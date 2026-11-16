@@ -254,17 +254,18 @@ fn check_effective_with_invocation(
             "cannot tell which binary the {role} service runs ({why}); refusing to start it"
         ),
     };
-    let command = match invocation {
+    let guidance = match invocation {
         super::ServiceInvocation::Combined => {
-            format!("sudo iroh-tunnel {role} service install --system")
+            format!("re-run `sudo iroh-tunnel {role} service install --system`")
         }
         super::ServiceInvocation::Standalone => format!(
-            "sudo {} service install --system --config <absolute-config-path>",
+            "re-run service install with sudo using {}, select `--system`, and \
+             supply `--config` followed by the absolute path of this service's config",
             super::policy::shell_quote(&executable.to_string_lossy())
         ),
     };
     Err(CliError::Permission(format!(
-        "{reason}. To register a root-owned binary, re-run `{command}`."
+        "{reason}. To register a root-owned binary, {guidance}."
     ))
     .into())
 }
@@ -833,7 +834,13 @@ mod guard_tests {
                 Path::new("/opt/role bin/renamed"),
             )
             .unwrap_err();
-            assert!(permission_text(&err).contains("sudo '/opt/role bin/renamed' service install --system --config <absolute-config-path>"));
+            let text = permission_text(&err);
+            assert!(!text.contains("<absolute-config-path>"), "{text}");
+            assert!(
+                text.contains("supply `--config` followed by the absolute path"),
+                "{text}"
+            );
+            assert!(text.contains("/opt/role bin/renamed"), "{text}");
         }
     }
 

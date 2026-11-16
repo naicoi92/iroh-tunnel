@@ -300,6 +300,198 @@ async fn renamed_managed_path_binaries_start_both_roles() -> Result<()> {
     Ok(())
 }
 
+// AC1 (Binary resolution / Standalone executable alone): the real CLI must
+// select, publish and register its own bytes, then start from that registration.
+// Only systemctl is substituted: the unit, trust checks and role process are real.
+#[cfg(all(target_os = "linux", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standalone_managed_install_starts_registered_role() -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // Root-only publication is deliberately not bypassed for this test.
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipped: managed publication requires root");
+        return Ok(());
+    }
+    if !Path::new("/run/systemd/system").exists()
+        && !std::fs::read_link("/proc/1/exe").is_ok_and(|p| p.ends_with("systemd"))
+    {
+        eprintln!("skipped: isolated systemd registration requires the systemd backend");
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let peer = iroh::SecretKey::generate().public().to_string();
+    for (binary, role) in [(SERVE, "serve"), (ACCESS, "access")] {
+        let installed = Installed::new(binary, "renamed role", "alias")?;
+        let root = installed.root.path().canonicalize()?;
+        let bin = root.join("bin");
+        // Force the real RootOnly trust check to choose a managed copy, even
+        // as root, without weakening checks on the destination or config.
+        std::fs::set_permissions(&installed.real, std::fs::Permissions::from_mode(0o775))?;
+        let original = std::fs::read(&installed.real)?;
+        std::fs::copy(ALL_IN_ONE, bin.join("iroh-tunnel"))?;
+        let state = root.join("state");
+        std::fs::create_dir(&state)?;
+        let config_dir = root.join("user config");
+        std::fs::create_dir(&config_dir)?;
+        // Existing unprivileged account: no real home/config/state is changed.
+        // Its home (/nonexistent on Linux) also keeps the cross-scope probe
+        // away from the operator's running root role.
+        let nobody = Command::new("/usr/bin/id")
+            .args(["-u", "nobody"])
+            .output()?;
+        anyhow::ensure!(nobody.status.success(), "nobody account required");
+        let uid: u32 = String::from_utf8(nobody.stdout)?.trim().parse()?;
+        std::os::unix::fs::chown(&config_dir, Some(uid), None)?;
+        let config = config_dir.join("config file.toml");
+        let secret = iroh::SecretKey::generate();
+        let node = format!(
+            "[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n",
+            iroh_tunnel_host::config::encode_secret_key(&secret),
+            relay.to_string()
+        );
+        let service = if role == "serve" {
+            "[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n".to_owned()
+        } else {
+            let port = TcpListener::bind("127.0.0.1:0").await?.local_addr()?.port();
+            format!("[[services]]\nname = \"echo\"\nnode_id = {peer:?}\nprotocol = \"tcp\"\nport = {port}\n")
+        };
+        std::fs::write(&config, node + &service)?;
+        let units = root.join("system units");
+        let managed = root.join("managed path");
+        let copy = managed.join(format!("iroh-tunnel/bin/{role}/iroh-tunnel"));
+        // A temporary systemctl reads and executes the actual generated unit.
+        // Its strict subset refuses unexpected commands instead of claiming
+        // success without starting the registered executable.
+        std::fs::write(
+            bin.join("systemctl"),
+            r#"#!/usr/bin/python3
+import json, os, pathlib, shlex, subprocess, sys
+verb, *args = sys.argv[1:]
+if verb == "daemon-reload":
+    sys.exit(0)
+unit = pathlib.Path(os.environ["IROH_TUNNEL_TEST_SYSTEMD_DIR"]) / args[0]
+assert unit.is_file(), unit
+if verb == "enable":
+    sys.exit(0)
+assert verb == "restart", sys.argv
+lines = unit.read_text().splitlines()
+argv = shlex.split(next(l.removeprefix("ExecStart=") for l in lines if l.startswith("ExecStart=")))
+env = os.environ.copy()
+for line in lines:
+    if line.startswith("Environment="):
+        for value in shlex.split(line.removeprefix("Environment=")):
+            key, value = value.split("=", 1)
+            env[key] = value
+state = pathlib.Path(env["IROH_TUNNEL_STATE_DIR"])
+(state / "argv.json").write_text(json.dumps(argv))
+with (state / "service.log").open("wb") as log:
+    process = subprocess.Popen(argv, env=env, stdout=log, stderr=log, start_new_session=True)
+(state / "service.pid").write_text(str(process.pid))
+"#,
+        )?;
+        std::fs::set_permissions(
+            bin.join("systemctl"),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let _cleanup = RegisteredProcess(state.join("service.pid"));
+        let mut command = installed.command(true, &state)?;
+        let out = busy_exec::output(
+            command
+                .current_dir(&root)
+                .env("IROH_TUNNEL_TEST_SYSTEMD_DIR", &units)
+                .env("IROH_TUNNEL_TEST_MANAGED_BIN_DIR", &managed)
+                .args([
+                    "service",
+                    "install",
+                    "--system",
+                    "--config",
+                    "user config/config file.toml",
+                ]),
+        )?;
+        anyhow::ensure!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        anyhow::ensure!(
+            std::fs::read(&copy)? == original,
+            "wrong executable published for {role}"
+        );
+        let metadata = std::fs::metadata(&copy)?;
+        anyhow::ensure!(
+            metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o755,
+            "untrusted copy"
+        );
+        anyhow::ensure!(
+            std::fs::read(&installed.real)? == original,
+            "source changed"
+        );
+        anyhow::ensure!(
+            std::fs::metadata(&installed.real)?.mode() & 0o7777 == 0o775,
+            "source mode changed"
+        );
+        let argv: Vec<String> = serde_json::from_slice(&std::fs::read(state.join("argv.json"))?)?;
+        assert_eq!(
+            argv,
+            [
+                copy.to_string_lossy().into_owned(),
+                "run".into(),
+                "--config".into(),
+                config.to_string_lossy().into_owned()
+            ]
+        );
+        let status_path = state.join(format!("{role}-status.json"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status: serde_json::Value = loop {
+            if let Ok(bytes) = std::fs::read(&status_path) {
+                break serde_json::from_slice(&bytes)?;
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "startup timeout: {}",
+                std::fs::read_to_string(state.join("service.log"))?
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert_eq!(node_id(&status)?, secret.public().to_string());
+        let pid: u32 = std::fs::read_to_string(state.join("service.pid"))?.parse()?;
+        assert_eq!(status["pid"].as_u64(), Some(u64::from(pid)));
+        // AC2: resolved relative --config is carried through the CLI observer.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let expected = format!(
+            "sudo '{}' service install --system --config '{}'",
+            installed.real.display(),
+            config.display()
+        );
+        anyhow::ensure!(
+            stdout.contains(&expected),
+            "missing actionable config guidance: {stdout}"
+        );
+        assert!(!stdout.contains("<absolute-config-path>"), "{stdout}");
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "test-utils"))]
+struct RegisteredProcess(PathBuf);
+
+#[cfg(all(target_os = "linux", feature = "test-utils"))]
+impl Drop for RegisteredProcess {
+    fn drop(&mut self) {
+        if let Ok(pid) = std::fs::read_to_string(&self.0)
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            // SAFETY: the pid was produced by our isolated manager; signal the
+            // child before its temporary executable and config are removed.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_in_one_alias_runs_both_roles_alone() -> Result<()> {
     let (it, _, _) = installs()?;

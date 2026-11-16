@@ -104,10 +104,18 @@ pub(crate) fn render_service_note_for_invocation(
         ServiceNote::ManagedBinary { role, source, copy },
     ) = (invocation, note)
     {
-        let config = config
-            .map(|p| quote_shell_argument(&p.to_string_lossy()))
-            .unwrap_or_else(|| "<absolute-config-path>".to_owned());
-        return (Stream::Stdout, format!("Registered a root-owned copy of {} at {} for the {role} service; re-run `sudo {} service install --system --config {config}` after upgrading to update it\n", source.display(), copy.display(), quote_shell_argument(&executable.to_string_lossy())));
+        let executable = quote_shell_argument(&executable.to_string_lossy());
+        let rerun = match config {
+            Some(config) => format!(
+                "re-run `sudo {executable} service install --system --config {}`",
+                quote_shell_argument(&config.to_string_lossy())
+            ),
+            None => format!(
+                "re-run service install with sudo using {executable}, select `--system`, and \
+                 supply `--config` followed by the absolute path of this service's config"
+            ),
+        };
+        return (Stream::Stdout, format!("Registered a root-owned copy of {} at {} for the {role} service; {rerun} after upgrading to update it\n", source.display(), copy.display()));
     }
     render_service_note(note)
 }
@@ -407,7 +415,12 @@ mod tests {
             Path::new("/opt/role bin/renamed"),
             None,
         );
-        assert!(text.contains("sudo '/opt/role bin/renamed' service install --system --config <absolute-config-path>"), "{text}");
+        assert!(!text.contains("<absolute-config-path>"), "{text}");
+        assert!(
+            text.contains("supply `--config` followed by the absolute path"),
+            "{text}"
+        );
+        assert!(text.contains("/opt/role bin/renamed"), "{text}");
     }
 
     #[test]

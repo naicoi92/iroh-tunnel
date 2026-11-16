@@ -102,13 +102,47 @@ pub(crate) fn dispatch(
         explicit_scope(args).unwrap_or_else(|| service::default_scope(env.elevated))
     };
     let executable = std::env::current_exe().context("failed to resolve current executable")?;
-    // The system install may select another user's default config. At the
-    // managed-copy note the registration has not yet been written, so the
-    // CLI cannot reliably recover the pinned path; require it explicitly.
-    let mut notes =
-        |note: &service::ServiceNote| print_service_note(note, invocation, &executable, None);
+    // Explicit paths are available even if registration fails after publishing
+    // the copy. Default system paths may belong to another user: recover those
+    // only from the registration's authoritative pin, not root's HOME.
+    let config = match &action {
+        ServiceAction::Install {
+            config: Some(path), ..
+        } => std::fs::canonicalize(path).ok(),
+        _ => None,
+    };
+    let mut pending = None;
+    let mut notes = |note: &service::ServiceNote| {
+        if invocation == ServiceInvocation::Standalone {
+            if matches!(note, service::ServiceNote::ManagedBinary { .. }) {
+                pending = Some(note.clone());
+                return;
+            }
+            if let service::ServiceNote::Installed {
+                at: service::InstalledAt::Path(path),
+                ..
+            } = note
+            {
+                let pinned = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|body| service::Pin::find(&body));
+                if let Some(managed) = pending.take() {
+                    print_service_note(
+                        &managed,
+                        invocation,
+                        &executable,
+                        pinned
+                            .as_ref()
+                            .map(|pin| pin.config.as_path())
+                            .or(config.as_deref()),
+                    );
+                }
+            }
+        }
+        print_service_note(note, invocation, &executable, config.as_deref());
+    };
     let mut call = cli_call(&mut notes);
-    match action {
+    let result = match action {
         ServiceAction::Install { config, scope } => install(
             role,
             config,
@@ -167,7 +201,13 @@ pub(crate) fn dispatch(
         )
         .map(drop)
         .map_err(Into::into),
+    };
+    // A backend may fail after publishing the managed copy but before it can
+    // announce the registration. Still report the copy before the error.
+    if let Some(note) = pending {
+        print_service_note(&note, invocation, &executable, config.as_deref());
     }
+    result
 }
 
 /// Install, answering each [`InstallNeed`] with the prompt the CLI always had.

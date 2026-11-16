@@ -20,7 +20,15 @@ fn unit_name(role: &str) -> String {
 /// Where the unit file lives for the given scope.
 fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
     Ok(match scope {
-        ServiceScope::System => PathBuf::from("/etc/systemd/system").join(unit_name(role)),
+        ServiceScope::System => {
+            #[cfg(feature = "test-utils")]
+            if let Some(dir) =
+                std::env::var_os("IROH_TUNNEL_TEST_SYSTEMD_DIR").filter(|d| !d.is_empty())
+            {
+                return Ok(PathBuf::from(dir).join(unit_name(role)));
+            }
+            PathBuf::from("/etc/systemd/system").join(unit_name(role))
+        }
         ServiceScope::User => {
             let home = dirs::home_dir().context("no home directory")?;
             home.join(".config/systemd/user").join(unit_name(role))
@@ -314,6 +322,22 @@ pub(crate) fn status(
 
 #[cfg(test)]
 mod tests {
+    // AC1: isolate system registrations without changing the production manager.
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn system_registration_uses_isolated_test_directory() {
+        const NAME: &str =
+            "service::backend::systemd::tests::system_registration_uses_isolated_test_directory";
+        super::super::super::fixtures::in_isolated_home(NAME, |home| {
+            let root = home.join("system units");
+            std::env::set_var("IROH_TUNNEL_TEST_SYSTEMD_DIR", &root);
+            assert_eq!(
+                unit_path("serve", ServiceScope::System).unwrap(),
+                root.join(unit_name("serve"))
+            );
+        });
+    }
+
     #[test]
     fn invocation_form_survives_managed_paths_with_spaces() {
         for role in ["serve", "access"] {
