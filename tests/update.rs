@@ -250,7 +250,14 @@ fn update_does_not_stop_a_running_process_of_the_old_binary() -> Result<()> {
     // A live tunnel started from the very file that is about to be replaced.
     let mut running = busy_exec::spawn(
         Command::new(&install.exe)
-            .args(["--target", "127.0.0.1:9", "--name", "update-test"])
+            .args([
+                "--target",
+                "127.0.0.1:9",
+                "--name",
+                "update-test",
+                "--relay-url",
+                "https://127.0.0.1:9",
+            ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
     )?;

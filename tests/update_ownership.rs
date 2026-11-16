@@ -24,6 +24,24 @@ use std::process::Command;
 const SERVE: &str = env!("CARGO_BIN_EXE_iroh-tunnel-serve");
 const EXE: &str = "iroh-tunnel-serve";
 const OLD: &[u8] = b"#!/bin/sh\necho OLD\n";
+const NEW: &[u8] = b"#!/bin/sh\necho NEW\n";
+const HOMEBREW_CASES: [(&str, &str, &str); 3] = [
+    (
+        env!("CARGO_BIN_EXE_iroh-tunnel"),
+        "iroh-tunnel",
+        "brew upgrade --cask iroh-tunnel",
+    ),
+    (
+        SERVE,
+        "iroh-tunnel-serve",
+        "brew upgrade --cask iroh-tunnel-serve",
+    ),
+    (
+        env!("CARGO_BIN_EXE_iroh-tunnel-access"),
+        "iroh-tunnel-access",
+        "brew upgrade --cask iroh-tunnel-access",
+    ),
+];
 
 struct Accept;
 impl SignatureVerifier for Accept {
@@ -36,31 +54,36 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn publish(root: &Path) -> Result<()> {
+fn publish(root: &Path, exe_name: &str, target: &str) -> Result<()> {
     let dir = root.join("9.9.9");
     std::fs::create_dir_all(&dir)?;
     let staging = tempfile::tempdir()?;
-    let script = staging.path().join(EXE);
-    std::fs::write(&script, "#!/bin/sh\necho NEW\n")?;
+    let script = staging.path().join(exe_name);
+    std::fs::write(&script, NEW)?;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
-    let name = format!("{EXE}-9.9.9-linux-amd64.tar.gz");
+    let name = format!("{exe_name}-9.9.9-{target}.tar.gz");
     let archive = dir.join(&name);
     assert!(Command::new("tar")
         .arg("-czf")
         .arg(&archive)
         .arg("-C")
         .arg(staging.path())
-        .arg(EXE)
+        .arg(exe_name)
         .status()?
         .success());
+    let checksums = if target.starts_with("darwin-") {
+        "checksums-darwin.txt"
+    } else {
+        "checksums.txt"
+    };
     std::fs::write(
-        dir.join("checksums.txt"),
+        dir.join(checksums),
         format!(
             "{}  {name}\n",
             hex(&Sha256::digest(std::fs::read(&archive)?))
         ),
     )?;
-    std::fs::write(dir.join("checksums.txt.sigstore.json"), "{}")?;
+    std::fs::write(dir.join(format!("{checksums}.sigstore.json")), "{}")?;
     Ok(())
 }
 
@@ -73,7 +96,7 @@ struct Fixture {
 
 fn fixture() -> Result<Fixture> {
     let releases = tempfile::tempdir()?;
-    publish(releases.path())?;
+    publish(releases.path(), EXE, "linux-amd64")?;
     let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
     let dir = tempfile::tempdir()?;
     let exe = dir.path().join(EXE);
@@ -176,6 +199,113 @@ fn only_the_invoked_file_changes_when_a_package_owner_is_overridden() -> Result<
     std::fs::write(&sibling, b"unrelated")?;
     run(&f, deb(), true, true)?;
     assert_eq!(std::fs::read(&sibling)?, b"unrelated");
+    Ok(())
+}
+
+/// A real executable below the ownership detector's Homebrew prefix, with
+/// unrelated siblings. No Homebrew installation or package database is touched.
+struct HomebrewInstall {
+    dir: tempfile::TempDir,
+    exe: PathBuf,
+    siblings: Vec<PathBuf>,
+}
+
+impl HomebrewInstall {
+    fn new(source: &str, exe_name: &str) -> Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let bin = dir.path().join("Caskroom").join(exe_name).join("0.0.1");
+        std::fs::create_dir_all(&bin)?;
+        let exe = bin.join(exe_name);
+        std::fs::copy(source, &exe)?;
+        let mut siblings = Vec::new();
+        for (_, name, _) in HOMEBREW_CASES {
+            if name != exe_name {
+                let sibling = bin.join(name);
+                std::fs::write(&sibling, b"unrelated")?;
+                siblings.push(sibling);
+            }
+        }
+        Ok(Self { dir, exe, siblings })
+    }
+
+    fn command(&self, base_url: &str) -> Command {
+        let mut command = Command::new(&self.exe);
+        command
+            .arg("update")
+            .env_remove("IROH_TUNNEL_CONTAINER")
+            .env("IROH_TUNNEL_BASE_URL", base_url)
+            .env("HOME", self.dir.path())
+            .env("XDG_CONFIG_HOME", self.dir.path().join("config"))
+            .env("XDG_DATA_HOME", self.dir.path().join("data"))
+            .env("XDG_STATE_HOME", self.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", self.dir.path().join("cache"))
+            .env("IROH_TUNNEL_STATE_DIR", self.dir.path().join("state"));
+        command
+    }
+
+    fn assert_siblings_unchanged(&self) -> Result<()> {
+        for sibling in &self.siblings {
+            assert_eq!(std::fs::read(sibling)?, b"unrelated", "{sibling:?}");
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn real_homebrew_binaries_delegate_to_their_own_casks() -> Result<()> {
+    for (source, exe_name, expected_command) in HOMEBREW_CASES {
+        let install = HomebrewInstall::new(source, exe_name)?;
+        let before = std::fs::read(&install.exe)?;
+        for args in [vec![], vec!["--insecure"]] {
+            // Delegation must happen before any release fetch, even insecurely.
+            let out = busy_exec::output(install.command("http://127.0.0.1:9").args(&args))?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{exe_name} {args:?}: {stderr}");
+            assert!(
+                stdout.contains(&format!("`{expected_command}`")),
+                "{exe_name} {args:?}: {stdout}"
+            );
+            assert!(stdout.contains("--yes"), "{stdout}");
+            assert_eq!(std::fs::read(&install.exe)?, before, "{exe_name} {args:?}");
+            install.assert_siblings_unchanged()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn confirmed_homebrew_updates_warn_before_replacing_only_the_invoked_file() -> Result<()> {
+    let target = iroh_tunnel_host::update::current_target()?;
+    for (source, exe_name, _) in HOMEBREW_CASES {
+        let releases = tempfile::tempdir()?;
+        publish(releases.path(), exe_name, target)?;
+        let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+        let install = HomebrewInstall::new(source, exe_name)?;
+
+        // With confirmation, the warning must precede a failed release fetch too.
+        let failed = busy_exec::output(
+            install
+                .command("http://127.0.0.1:9")
+                .args(["--yes", "--insecure"]),
+        )?;
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(!failed.status.success(), "{exe_name}: {stderr}");
+        let warning = stderr.find("warning: replacing").expect("override warning");
+        let error = stderr.find("cannot fetch").expect("release fetch error");
+        assert!(warning < error, "{exe_name}: {stderr}");
+
+        let out = busy_exec::output(install.command(&server.url).args(["--yes", "--insecure"]))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{exe_name}: {stderr}");
+        assert!(
+            stderr.contains("warning: replacing"),
+            "{exe_name}: {stderr}"
+        );
+        assert!(stderr.contains("package manager"), "{exe_name}: {stderr}");
+        assert_eq!(std::fs::read(&install.exe)?, NEW, "{exe_name}");
+        install.assert_siblings_unchanged()?;
+    }
     Ok(())
 }
 

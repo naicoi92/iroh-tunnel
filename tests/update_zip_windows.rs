@@ -39,9 +39,18 @@ fn publish_zip(
 }
 
 fn run_update(server: &ReleaseServer, target: &str, install: &Path) -> Result<()> {
+    run_update_for(server, target, install, EXE)
+}
+
+fn run_update_for(
+    server: &ReleaseServer,
+    target: &str,
+    install: &Path,
+    exe_name: &str,
+) -> Result<()> {
     let ctx = UpdateContext {
         base_url: server.url.clone(),
-        exe_name: EXE,
+        exe_name,
         target,
         current_version: "0.0.1",
         install_path: install.to_owned(),
@@ -121,7 +130,38 @@ mod locked {
     use super::*;
     use std::process::{Command, Stdio};
 
-    const SERVE: &str = env!("CARGO_BIN_EXE_iroh-tunnel-serve");
+    const CASES: [(&str, &str, Option<&str>, &[&str]); 3] = [
+        (
+            env!("CARGO_BIN_EXE_iroh-tunnel"),
+            "iroh-tunnel",
+            Some("serve"),
+            &[
+                "iroh-tunnel serve service stop --system",
+                "iroh-tunnel access service stop --system",
+            ],
+        ),
+        (
+            env!("CARGO_BIN_EXE_iroh-tunnel-serve"),
+            "iroh-tunnel-serve",
+            None,
+            &["iroh-tunnel-serve service stop --system"],
+        ),
+        (
+            env!("CARGO_BIN_EXE_iroh-tunnel-access"),
+            "iroh-tunnel-access",
+            None,
+            &["iroh-tunnel-access service stop --system"],
+        ),
+    ];
+
+    struct Running(std::process::Child);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
 
     fn target() -> &'static str {
         if cfg!(target_arch = "aarch64") {
@@ -131,15 +171,66 @@ mod locked {
         }
     }
 
-    /// Start the real serve binary from `exe` so the OS locks that file.
-    fn run_from(exe: &Path) -> Result<std::process::Child> {
-        let child = Command::new(exe)
-            .args(["--target", "127.0.0.1:9", "--name", "locked-test"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+    fn isolated_command(exe: &Path, home: &Path) -> Command {
+        let mut command = Command::new(exe);
+        command
+            .env_remove("IROH_TUNNEL_CONTAINER")
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("APPDATA", home.join("config"))
+            .env("LOCALAPPDATA", home.join("data"))
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("XDG_CACHE_HOME", home.join("cache"))
+            .env("IROH_TUNNEL_TEST_CONFIG_DIR", home.join("config"))
+            .env("IROH_TUNNEL_STATE_DIR", home.join("state"));
+        command
+    }
+
+    /// Run a real role executable, with only a loopback relay, to lock its image.
+    fn run_from(exe: &Path, prefix: Option<&str>, access: bool, home: &Path) -> Result<Running> {
+        let mut command = isolated_command(exe, home);
+        command.args(prefix);
+        if access {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let listen = listener.local_addr()?.to_string();
+            drop(listener);
+            let peer = iroh::SecretKey::generate().public().to_string();
+            command.args(["--listen", &listen, "--node-id", &peer]);
+        } else {
+            command.args(["--target", "127.0.0.1:9"]);
+        }
+        let child = Running(
+            command
+                .args([
+                    "--name",
+                    "locked-test",
+                    "--relay-url",
+                    "https://127.0.0.1:9",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        );
         std::thread::sleep(std::time::Duration::from_secs(3));
         Ok(child)
+    }
+
+    fn assert_stop_guidance(message: &str, commands: &[&str]) {
+        for command in commands {
+            assert!(message.contains(command), "{message}");
+        }
+        for (_, _, _, other_commands) in CASES {
+            for command in other_commands {
+                if !commands.contains(command) {
+                    assert!(!message.contains(command), "{message}");
+                }
+            }
+        }
+        assert!(message.contains("elevated"), "{message}");
+        assert!(!message.contains("<role>"), "{message}");
+        assert!(!message.contains("sudo"), "{message}");
     }
 
     fn leftovers(dir: &Path) -> Vec<String> {
@@ -154,82 +245,77 @@ mod locked {
     /// Another process holds the target open as its running image.
     #[test]
     fn replacing_an_exe_that_another_process_runs_fails_and_keeps_it() -> Result<()> {
-        let releases = tempfile::tempdir()?;
-        publish_zip(
-            releases.path(),
-            "9.9.9",
-            target(),
-            &format!("{EXE}.exe"),
-            NEW,
-        )?;
-        let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
-        let dir = tempfile::tempdir()?;
-        let exe = dir.path().join(format!("{EXE}.exe"));
-        std::fs::copy(SERVE, &exe)?;
-        let before = std::fs::read(&exe)?;
-        let mut running = run_from(&exe)?;
-        assert!(running.try_wait()?.is_none(), "tunnel did not start");
+        for (source, exe_name, prefix, commands) in CASES {
+            let releases = tempfile::tempdir()?;
+            let entry = format!("{exe_name}.exe");
+            common::publish_zips(
+                releases.path(),
+                "9.9.9",
+                target(),
+                &[(exe_name, &entry, NEW)],
+            )?;
+            let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+            let dir = tempfile::tempdir()?;
+            let home = tempfile::tempdir()?;
+            let exe = dir.path().join(&entry);
+            std::fs::copy(source, &exe)?;
+            let before = std::fs::read(&exe)?;
+            let mut running =
+                run_from(&exe, prefix, exe_name == "iroh-tunnel-access", home.path())?;
+            assert!(running.0.try_wait()?.is_none(), "{exe_name} did not start");
 
-        let result = run_update(&server, target(), &exe);
+            let result = run_update_for(&server, target(), &exe, exe_name);
 
-        let alive = running.try_wait()?.is_none();
-        let _ = running.kill();
-        let _ = running.wait();
-        let err = result.expect_err("a locked executable cannot be replaced");
-        eprintln!("locked replace error: {err:#}");
-        assert!(format!("{err:#}").contains("cannot replace"), "{err:#}");
-        assert!(format!("{err:#}").contains("stop it"), "{err:#}");
-        for cmd in [
-            "iroh-tunnel serve service stop --system",
-            "iroh-tunnel access service stop --system",
-        ] {
-            assert!(format!("{err:#}").contains(cmd), "{err:#}");
+            let alive = running.0.try_wait()?.is_none();
+            let err = result.expect_err("a locked executable cannot be replaced");
+            let message = format!("{err:#}");
+            assert!(message.contains("cannot replace"), "{message}");
+            assert!(message.contains("stop it"), "{message}");
+            assert_stop_guidance(&message, commands);
+            assert!(alive, "{exe_name}: the running process must not be stopped");
+            assert_eq!(std::fs::read(&exe)?, before, "{exe_name}");
+            assert_eq!(leftovers(dir.path()), Vec::<String>::new());
         }
-        assert!(!format!("{err:#}").contains("<role>"), "{err:#}");
-        assert!(!format!("{err:#}").contains("sudo"), "{err:#}");
-        assert!(alive, "the running process must not be stopped");
-        assert_eq!(std::fs::read(&exe)?, before);
-        assert_eq!(leftovers(dir.path()), Vec::<String>::new());
         Ok(())
     }
 
-    /// `iroh-tunnel-serve update` run on itself: the updater is the locked file.
+    /// Each binary's `update` run on itself: the updater is the locked file.
     #[test]
     fn an_executable_updating_itself_fails_cleanly_and_stays_usable() -> Result<()> {
-        let releases = tempfile::tempdir()?;
-        publish_zip(
-            releases.path(),
-            "9.9.9",
-            target(),
-            &format!("{EXE}.exe"),
-            NEW,
-        )?;
-        let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
-        let dir = tempfile::tempdir()?;
-        let exe = dir.path().join(format!("{EXE}.exe"));
-        std::fs::copy(SERVE, &exe)?;
-        let before = std::fs::read(&exe)?;
+        for (source, exe_name, _, commands) in CASES {
+            let releases = tempfile::tempdir()?;
+            let entry = format!("{exe_name}.exe");
+            common::publish_zips(
+                releases.path(),
+                "9.9.9",
+                target(),
+                &[(exe_name, &entry, NEW)],
+            )?;
+            let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+            let dir = tempfile::tempdir()?;
+            let home = tempfile::tempdir()?;
+            let exe = dir.path().join(&entry);
+            std::fs::copy(source, &exe)?;
+            let before = std::fs::read(&exe)?;
 
-        let out = Command::new(&exe)
-            .args(["update", "-i"])
-            .env("IROH_TUNNEL_BASE_URL", &server.url)
-            .output()?;
+            let out = isolated_command(&exe, home.path())
+                .args(["update", "-i"])
+                .env("IROH_TUNNEL_BASE_URL", &server.url)
+                .output()?;
 
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        eprintln!("self-update exit={:?} stderr={stderr}", out.status.code());
-        assert!(!out.status.success(), "{stderr}");
-        assert!(stderr.contains("cannot replace"), "{stderr}");
-        assert!(
-            stderr.contains("stop it") && !stderr.contains("sudo"),
-            "{stderr}"
-        );
-        assert_eq!(std::fs::read(&exe)?, before);
-        assert_eq!(leftovers(dir.path()), Vec::<String>::new());
-        assert!(Command::new(&exe)
-            .arg("--version")
-            .output()?
-            .status
-            .success());
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{exe_name}: {stderr}");
+            assert!(stderr.contains("cannot replace"), "{exe_name}: {stderr}");
+            assert!(stderr.contains("stop it"), "{exe_name}: {stderr}");
+            assert_stop_guidance(&stderr, commands);
+            assert_eq!(std::fs::read(&exe)?, before, "{exe_name}");
+            assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+            assert!(isolated_command(&exe, home.path())
+                .arg("--version")
+                .output()?
+                .status
+                .success());
+        }
         Ok(())
     }
 }

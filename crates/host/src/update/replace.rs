@@ -17,13 +17,22 @@ const REPLACE_DENIED_HINT: &str =
      stop it and run the update again from another copy; otherwise check the file permissions";
 
 /// Appended on Windows: a system service holds its executable open, and only
-/// an elevated `service stop --system` releases it. Both role commands are
-/// named because `update` does not know which role the service runs, and a
-/// `<role>` placeholder would break copy-paste (`<` redirects in shells).
+/// an elevated `service stop --system` releases it. Standalone binaries name
+/// their own command; the combined binary names both possible service roles.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(super) fn windows_locked_hint() -> &'static str {
-    "; if a system service runs this executable, stop it first from an elevated terminal: \
-     iroh-tunnel serve service stop --system or iroh-tunnel access service stop --system"
+pub(super) fn windows_locked_hint(exe_name: &str) -> String {
+    let commands = match exe_name {
+        "iroh-tunnel-serve" | "iroh-tunnel-access" => {
+            format!("{exe_name} service stop --system")
+        }
+        _ => "iroh-tunnel serve service stop --system or \
+              iroh-tunnel access service stop --system"
+            .to_owned(),
+    };
+    format!(
+        "; if a system service runs this executable, stop it first from an elevated terminal: \
+         {commands}"
+    )
 }
 
 #[cfg(not(windows))]
@@ -31,7 +40,7 @@ const REPLACE_DENIED_HINT: &str = "rerun with sufficient privileges (for example
 
 /// A permission failure while replacing is reported as [`CliError::Permission`]
 /// (exit 3, RS-06); everything else keeps its unclassified exit 1.
-pub(super) fn classify_replace_error(err: anyhow::Error) -> anyhow::Error {
+pub(super) fn classify_replace_error(err: anyhow::Error, exe_name: &str) -> anyhow::Error {
     let denied = err.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -39,9 +48,9 @@ pub(super) fn classify_replace_error(err: anyhow::Error) -> anyhow::Error {
     });
     if denied {
         let extra = if cfg!(windows) {
-            windows_locked_hint()
+            windows_locked_hint(exe_name)
         } else {
-            ""
+            String::new()
         };
         CliError::Permission(format!("{err:#}; {REPLACE_DENIED_HINT}{extra}")).into()
     } else {
@@ -202,18 +211,21 @@ mod tests {
     #[test]
     fn permission_denied_becomes_exit_class_permission() {
         let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        let err = classify_replace_error(anyhow::Error::new(io).context("cannot stage"));
+        let err = classify_replace_error(
+            anyhow::Error::new(io).context("cannot stage"),
+            "iroh-tunnel",
+        );
         assert!(matches!(
             err.downcast_ref::<CliError>(),
             Some(CliError::Permission(_))
         ));
-        let other = classify_replace_error(anyhow::anyhow!("boom"));
+        let other = classify_replace_error(anyhow::anyhow!("boom"), "iroh-tunnel");
         assert!(other.downcast_ref::<CliError>().is_none());
     }
 
     #[test]
     fn windows_locked_hint_mentions_service_stop_system() {
-        let hint = windows_locked_hint();
+        let hint = windows_locked_hint("iroh-tunnel");
         assert!(
             hint.contains("iroh-tunnel serve service stop --system"),
             "{hint}"
@@ -223,6 +235,30 @@ mod tests {
             "{hint}"
         );
         assert!(!hint.contains("<role>"), "{hint}");
+        assert!(hint.contains("elevated"), "{hint}");
+    }
+
+    #[test]
+    fn windows_locked_hint_for_serve_needs_no_combined_executable() {
+        let hint = windows_locked_hint("iroh-tunnel-serve");
+        assert!(
+            hint.contains("iroh-tunnel-serve service stop --system"),
+            "{hint}"
+        );
+        assert!(!hint.contains("iroh-tunnel serve"), "{hint}");
+        assert!(!hint.contains("access"), "{hint}");
+        assert!(hint.contains("elevated"), "{hint}");
+    }
+
+    #[test]
+    fn windows_locked_hint_for_access_needs_no_combined_executable() {
+        let hint = windows_locked_hint("iroh-tunnel-access");
+        assert!(
+            hint.contains("iroh-tunnel-access service stop --system"),
+            "{hint}"
+        );
+        assert!(!hint.contains("iroh-tunnel access"), "{hint}");
+        assert!(!hint.contains("serve"), "{hint}");
         assert!(hint.contains("elevated"), "{hint}");
     }
 
