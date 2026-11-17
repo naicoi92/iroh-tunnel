@@ -51,4 +51,4 @@ The worktree branch `ci-cross-platform-clippy` was fast-forwarded into `refactor
 
 ## Next step
 
-Wait for PR #239's CI: `lint (linux)`, `lint (macos)`, `lint (windows)` and `ci-ok` passing closes task 1.5 (tick it on this branch). After code review approval, run `/opsx-archive` on this feature branch, push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch` or GitHub UI) only with the user's approval — that single merge lands #216, this CI change and the archive into main.
+Task 1.5 is closed: PR #239's CI run (https://github.com/naicoi92/iroh-tunnel/actions/runs/44033467348) passed `lint (linux)` (2m7s), `lint (macos)` (2m16s), `lint (windows)` (3m29s), all three unit jobs and `ci-ok` on native runners. After code review approval, run `/opsx-archive` on this feature branch, push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch` or GitHub UI) only with the user's approval — that single merge lands #216, this CI change and the archive into main.
