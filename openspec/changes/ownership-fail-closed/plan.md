@@ -22,7 +22,7 @@
 - Other role stopping (record removed, lock still held) → must not refuse — covered by `publish_identity_proceeds_while_the_other_role_has_no_record`.
 - System service of role A starting while user processes hold role B's machine lock shared (no or stale machine record) → must not refuse — `publish_identity_ignores_a_machine_record_under_a_shared_hold`.
 - Garbage record left by a crash with the lock free → must not block — `publish_identity_ignores_a_corrupt_record_of_a_stopped_role`.
-- Restrictive umask hiding the system holder's machine record from users → `machine_owner_record_is_world_readable_under_umask_077`.
+- Restrictive umask hiding the system holder's machine record from users → `machine_owner_record_mode_ignores_the_creation_mode` (see Scenario → test).
 
 ---
 
@@ -86,7 +86,7 @@
 
 - [ ] **Step 1: Failing unit tests** (all with temp `TierDirs { user, machine: Some(MachineDir{ path, verify: false }) }` and `claim_in`):
   - `write_owner_failure_names_the_record_path`: `write_owner(&missing_dir, Role::Serve, None, 0o600)` → `Err`, `{e:#}` contains `serve.owner.json`.
-  - `machine_owner_record_is_world_readable_under_umask_077` (unix; runs in a child via `crate::service::fixtures::in_isolated_home` with `NAME = "ownership::tests::machine_owner_record_is_world_readable_under_umask_077"`; make `service/mod.rs` declare `pub(crate) mod fixtures;` (still `#[cfg(test)]`)): after `umask(0o077)` (with a `// SAFETY:` comment), `write_owner(dir, Role::Serve, None, 0o644)` → file mode & 0o004 != 0.
+  - `machine_owner_record_mode_ignores_the_creation_mode` (unix; ruled during apply, replacing the planned `umask(0o077)` child test): pre-create the temp record at 0o600, `write_owner(.., 0o644)` → record mode 0o644. Mirror `user_owner_record_is_private_even_over_a_wider_temp`.
   - `read_owner_record_distinguishes_absent_present_and_corrupt`: no file → `Absent`; valid → `Present`; `"{not json"` → `Unreadable { path }` with `path` ending `serve.owner.json`.
   - `publish_identity_refuses_the_same_key_in_the_other_role`: serve `claim_in` + `publish_identity("K")`; access `claim_in` (same dirs) + `publish_identity("K")` → `CliError::Conflict` containing `same public identity`.
   - `publish_identity_refuses_when_the_running_other_role_record_is_corrupt`: serve claimed, then overwrite user `serve.owner.json` with `"{not json"`; access `publish_identity("A")` → `CliError::Conflict` whose message contains `identity cannot be determined` and `serve.owner.json`. Repeat with the corrupt record on the machine tier.
@@ -132,7 +132,7 @@
 - Corrupt machine record while the machine lock is held only shared → `publish_identity_ignores_a_machine_record_under_a_shared_hold` + `held_exclusively_distinguishes_free_shared_and_exclusive`
 - Owner record round trip → `owner_record_round_trips_without_secret_material` (existing, updated signature)
 - Owner record cannot be written → `write_owner_failure_names_the_record_path` + `claim_fails_when_the_owner_record_cannot_be_written`
-- Machine record readable under a restrictive umask → `machine_owner_record_is_world_readable_under_umask_077`
+- Machine record readable under a restrictive umask → `machine_owner_record_mode_ignores_the_creation_mode` (fork-free stand-in: a pre-existing 0o600 temp still yields 0o644; a real `umask(077)` child test was dropped because a child spawned from the lib test binary inherits concurrent tests' lock fds) + `user_owner_record_is_private_even_over_a_wider_temp`
 - Machine lock location → `machine_dir_from_program_data_joins_iroh_tunnel_and_verifies` (Windows) + existing platform constants
 - System lock held, user start → existing `tests/role_ownership.rs` system-tier test (unchanged)
 - User running, system start → existing `machine_lock_exclusive_then_shared_is_refused`
