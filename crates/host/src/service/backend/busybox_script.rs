@@ -210,6 +210,29 @@ exit $?
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn script_matches_golden_for_every_case() {
+        use super::super::super::golden::{assert_golden, cases, unix_paths, unix_pin};
+        let mut all = String::new();
+        for case in cases() {
+            let paths = unix_paths(case.role);
+            let pin = unix_pin(case.scope, &paths.config);
+            all.push_str(&case.header());
+            let script = InitScript {
+                role: case.role,
+                invocation: case.invocation,
+                binary: &paths.binary,
+                config: &paths.config,
+                state: &paths.state,
+                pin: pin.as_ref(),
+            }
+            .render(&ScriptLayout::for_role(case.role))
+            .unwrap();
+            all.push_str(&script);
+        }
+        assert_golden("busybox.txt", &all);
+    }
+
     use super::super::super::effective_binary::{parse_busybox_script, EffectiveBinary};
     use super::*;
     use crate::error::CliError;

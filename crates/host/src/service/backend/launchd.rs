@@ -482,6 +482,27 @@ pub(crate) fn status(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn plist_matches_golden_for_every_case() {
+        use super::super::super::golden::{assert_golden, cases, unix_paths, unix_pin};
+        let mut all = String::new();
+        for case in cases() {
+            let paths = unix_paths(case.role);
+            let pin = unix_pin(case.scope, &paths.config);
+            all.push_str(&case.header());
+            all.push_str(&format_plist_invocation(
+                case.role,
+                &paths.binary,
+                &paths.config,
+                &paths.state,
+                &RestartPolicy::DEFAULT,
+                pin.as_ref(),
+                case.invocation,
+            ));
+        }
+        assert_golden("launchd.txt", &all);
+    }
+
+    #[test]
     fn invocation_form_survives_managed_paths_with_spaces() {
         for role in ["serve", "access"] {
             for invocation in [ServiceInvocation::Combined, ServiceInvocation::Standalone] {

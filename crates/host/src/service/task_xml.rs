@@ -169,6 +169,33 @@ pub(super) fn encode_utf16_le(xml: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn task_matches_golden_for_every_user_case() {
+        use super::super::golden::{assert_golden, cases};
+        let mut all = String::new();
+        for case in cases()
+            .into_iter()
+            .filter(|c| c.scope == super::super::types::ServiceScope::User)
+        {
+            let config = format!(r"C:\Users\a b\it's & <cfg>\{}.toml", case.role);
+            let action = task_action_invocation(
+                case.role,
+                Path::new(r"C:\Program Files\iroh tunnel\iroh-tunnel.exe"),
+                Path::new(&config),
+                case.invocation,
+            )
+            .unwrap();
+            all.push_str(&case.header());
+            all.push_str(&format_task_xml(
+                case.role,
+                r"HOST\a b",
+                &action,
+                &RestartPolicy::DEFAULT,
+            ));
+        }
+        assert_golden("windows_task.txt", &all);
+    }
+
+    #[test]
     fn task_invocation_uses_the_correct_role_form() {
         for role in ["serve", "access"] {
             for (invocation, prefix) in [

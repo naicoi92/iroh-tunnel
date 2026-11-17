@@ -641,6 +641,56 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn spec_matches_golden_for_every_system_case() {
+        use crate::service::golden::{assert_golden, cases};
+        let mut all = String::new();
+        for case in cases()
+            .into_iter()
+            .filter(|c| c.scope == crate::service::ServiceScope::System)
+        {
+            let config = PathBuf::from(format!(r"C:\Users\a b\it's & <cfg>\{}.toml", case.role));
+            let mut spec = ServiceSpec::render_with_invocation(
+                case.role,
+                Path::new(r"C:\Program Files\iroh tunnel\iroh-tunnel.exe"),
+                &config,
+                Path::new(r"C:\Users\a b\AppData\Local\iroh $state%n"),
+                &pin(&config),
+                &RestartPolicy::DEFAULT,
+                case.invocation,
+            )
+            .unwrap();
+            // Forwarded test-utils variables depend on the test environment.
+            spec.env.retain(|(key, _)| {
+                !key.starts_with("IROH_TUNNEL_TEST_") && key != "IROH_TUNNEL_MACHINE_LOCK_DIR"
+            });
+            all.push_str(&case.header());
+            all.push_str(&describe(&spec));
+        }
+        assert_golden("windows_scm.txt", &all);
+    }
+
+    /// Every field of `spec`, one per line, in a toolchain-stable form.
+    fn describe(spec: &ServiceSpec) -> String {
+        let mut text = format!(
+            "name: {}\ndisplay_name: {}\nexecutable: {}\n",
+            spec.name,
+            spec.display_name,
+            spec.executable.display()
+        );
+        for arg in &spec.launch_arguments {
+            text.push_str(&format!("arg: {}\n", arg.to_string_lossy()));
+        }
+        for (key, value) in &spec.env {
+            text.push_str(&format!("env: {key}={value}\n"));
+        }
+        text.push_str(&format!(
+            "description: {}\nfailure: {:?}\n",
+            spec.description, spec.failure
+        ));
+        text
+    }
+
+    #[test]
     fn scm_invocation_uses_the_correct_role_form() {
         use crate::service::ServiceInvocation;
         let cfg = Path::new(r"C:\config dir\role.toml");

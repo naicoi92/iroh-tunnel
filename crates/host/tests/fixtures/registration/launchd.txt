@@ -1,0 +1,240 @@
+==== role=serve invocation=Combined scope=User ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>serve</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/serve $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+==== role=serve invocation=Combined scope=System ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/serve%20%24x%25i.toml uid=1000 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>serve</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/serve $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_TRUSTED_UID</key>
+		<string>1000</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+==== role=serve invocation=Standalone scope=User ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/serve $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+==== role=serve invocation=Standalone scope=System ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/serve%20%24x%25i.toml uid=1000 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/serve $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_TRUSTED_UID</key>
+		<string>1000</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+==== role=access invocation=Combined scope=User ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.access</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>access</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/access $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+==== role=access invocation=Combined scope=System ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/access%20%24x%25i.toml uid=1000 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.access</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>access</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/access $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_TRUSTED_UID</key>
+		<string>1000</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+==== role=access invocation=Standalone scope=User ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.access</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/access $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>
+==== role=access invocation=Standalone scope=System ====
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/access%20%24x%25i.toml uid=1000 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.iroh-tunnel.access</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/iroh tunnel/bin/iroh-tunnel</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/home/a b/it's &amp; &lt;cfg&gt;/access $x%i.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IROH_TUNNEL_STATE_DIR</key>
+		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_TRUSTED_UID</key>
+		<string>1000</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>

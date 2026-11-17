@@ -20,6 +20,8 @@ mod effective_binary;
 mod execute;
 #[cfg(test)]
 mod fixtures;
+#[cfg(test)]
+mod golden;
 mod install;
 mod is_elevated;
 mod native;

@@ -321,6 +321,27 @@ pub(crate) fn status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unit_matches_golden_for_every_case() {
+        use super::super::super::golden::{assert_golden, cases, unix_paths, unix_pin};
+        let mut all = String::new();
+        for case in cases() {
+            let paths = unix_paths(case.role);
+            let pin = unix_pin(case.scope, &paths.config);
+            all.push_str(&case.header());
+            all.push_str(&format_unit_invocation(
+                case.role,
+                &paths.binary,
+                &paths.config,
+                &paths.state,
+                &RestartPolicy::DEFAULT,
+                pin.as_ref(),
+                case.invocation,
+            ));
+        }
+        assert_golden("systemd.txt", &all);
+    }
+
     // AC1: isolate system registrations without changing the production manager.
     #[cfg(feature = "test-utils")]
     #[test]

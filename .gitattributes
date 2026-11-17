@@ -8,3 +8,5 @@ tests/fixtures/golden/* -text -whitespace
 access/dist/** linguist-generated=true
 serve/dist/** linguist-generated=true
 /action.yml linguist-generated=true
+# Registration goldens pin exact bytes, LF included.
+crates/host/tests/fixtures/registration/* -text
