@@ -89,6 +89,8 @@ impl StagedFile {
             path,
             armed: std::cell::Cell::new(true),
         };
+        #[cfg(all(test, unix))]
+        tests::record_mode_at_open(&file);
         file.set_permissions(permissions.clone()).with_context(|| {
             format!(
                 "cannot set permissions on staged update for {}",
@@ -273,20 +275,69 @@ mod tests {
         assert!(hint.contains("elevated"), "{hint}");
     }
 
+    #[cfg(unix)]
+    thread_local! {
+        /// Mode of the staging file right after `StagedFile::create` opened
+        /// it, before the final permissions are applied.
+        static MODE_AT_OPEN: std::cell::Cell<Option<u32>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    #[cfg(unix)]
+    pub(super) fn record_mode_at_open(file: &std::fs::File) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file.metadata().ok().map(|m| m.permissions().mode());
+        MODE_AT_OPEN.with(|cell| cell.set(mode));
+    }
+
+    /// Sets the process umask and restores the previous one on drop.
+    #[cfg(unix)]
+    struct UmaskGuard(libc::mode_t);
+
+    #[cfg(unix)]
+    impl UmaskGuard {
+        fn set(mask: libc::mode_t) -> Self {
+            // SAFETY: umask(2) has no preconditions and cannot fail.
+            Self(unsafe { libc::umask(mask) })
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            // SAFETY: umask(2) has no preconditions and cannot fail.
+            unsafe { libc::umask(self.0) };
+        }
+    }
+
     /// Issue #230: the staging file is owner-only from the moment it exists,
     /// so a permissive umask never lets another user grab a write fd before
     /// the final permissions are set.
     #[cfg(unix)]
     #[test]
-    fn staging_file_is_created_owner_only() {
+    fn staging_file_is_created_owner_only_under_a_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("staged");
+        let target = dir.path().join("t");
+        std::fs::write(&target, b"o").unwrap();
+        let perms = std::fs::Permissions::from_mode(0o755);
 
-        let file = open_staging(&path).unwrap();
+        // Explicit, so the test does not depend on the runner's umask (a 077
+        // umask would hide the bug). 022 is enough to expose group/other bits
+        // on a default-mode open; umask is process-wide, so stay no looser
+        // than the usual default to avoid widening files of parallel tests.
+        let staged = {
+            let _umask = UmaskGuard::set(0o022);
+            StagedFile::create(dir.path(), &target, b"new", &perms).unwrap()
+        };
 
-        let mode = file.metadata().unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "mode {:o}", mode & 0o777);
+        let at_open = MODE_AT_OPEN.with(std::cell::Cell::take).unwrap();
+        assert_eq!(at_open & 0o077, 0, "mode at open {:o}", at_open & 0o777);
+        let final_mode = std::fs::metadata(&staged.path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(final_mode & 0o777, 0o755);
     }
 
     #[test]
