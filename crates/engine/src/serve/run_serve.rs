@@ -1323,6 +1323,9 @@ fn quarantine(
 /// Longest wait for a target hostname to resolve when a flow opens.
 const UPSTREAM_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Most lookups of one UDP service's target address in flight at once (#248).
+const MAX_RESOLVES_PER_SERVICE: usize = 4;
+
 /// Gives a quarantined flow's slot back when the sink task ends for any
 /// reason, including being aborted or unwinding from a panic.
 struct QuarantineSlot(Arc<crate::udp::UdpStats>);
@@ -1337,14 +1340,27 @@ impl Drop for QuarantineSlot {
 type ResolveFuture =
     std::pin::Pin<Box<dyn Future<Output = std::io::Result<Vec<std::net::SocketAddr>>> + Send>>;
 
+/// Starts one lookup of a UDP target address.
+type Lookup = Arc<dyn Fn(String) -> ResolveFuture + Send + Sync>;
+
 /// Resolves a UDP service's target address when one of its flows opens; the
 /// system resolver by default, replaceable so tests can model a slow one.
+///
+/// Clones share one bound of lookups in flight, so every flow of a service
+/// draws from it (#248). A lookup keeps its permit until it finishes, even
+/// after the open that started it gave up: the system resolver's
+/// `getaddrinfo` cannot be cancelled and holds a blocking-pool thread. The
+/// cost: while the bound is spent on hung lookups, new flows of the service
+/// time out even if the resolver has recovered, until those lookups end.
 #[derive(Clone)]
-struct UpstreamResolver(Arc<dyn Fn(String) -> ResolveFuture + Send + Sync>);
+struct UpstreamResolver {
+    lookup: Lookup,
+    permits: Arc<tokio::sync::Semaphore>,
+}
 
 impl Default for UpstreamResolver {
     fn default() -> Self {
-        Self(Arc::new(|local_addr: String| {
+        Self::new(Arc::new(|local_addr: String| {
             Box::pin(async move {
                 let addrs = tokio::net::lookup_host(local_addr).await?;
                 Ok(addrs.collect())
@@ -1354,8 +1370,35 @@ impl Default for UpstreamResolver {
 }
 
 impl UpstreamResolver {
-    fn resolve(&self, local_addr: &str) -> ResolveFuture {
-        (self.0)(local_addr.to_string())
+    fn new(lookup: Lookup) -> Self {
+        Self {
+            lookup,
+            permits: Arc::new(tokio::sync::Semaphore::new(MAX_RESOLVES_PER_SERVICE)),
+        }
+    }
+
+    /// Wait for a free share of the bound, then resolve in a task of its own
+    /// that holds the share until the lookup ends.
+    async fn resolve(&self, local_addr: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        if self.permits.available_permits() == 0 {
+            tracing::debug!(
+                local_addr,
+                "udp target lookups at their bound, waiting for one to end"
+            );
+        }
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(std::io::Error::other)?;
+        let lookup = (self.lookup)(local_addr.to_string());
+        tokio::spawn(async move {
+            let _permit = permit;
+            lookup.await
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 }
 
@@ -2057,7 +2100,7 @@ mod tests {
             + 'static,
     ) -> UpstreamResolver {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        UpstreamResolver(Arc::new(move |_local_addr: String| {
+        UpstreamResolver::new(Arc::new(move |_local_addr: String| {
             let call = calls.fetch_add(1, Ordering::Relaxed);
             let answer = answer(call);
             Box::pin(async move {
@@ -2067,6 +2110,137 @@ mod tests {
                 }
             })
         }))
+    }
+
+    /// A resolver that counts the lookups it starts and answers each with
+    /// `answer` (`None`: never, as a hung resolver).
+    fn counting_resolver(
+        answer: fn() -> Option<std::io::Result<Vec<std::net::SocketAddr>>>,
+    ) -> (UpstreamResolver, Arc<std::sync::atomic::AtomicUsize>) {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = scripted_resolver({
+            let started = started.clone();
+            move |_| {
+                started.fetch_add(1, Ordering::Relaxed);
+                answer()
+            }
+        });
+        (resolver, started)
+    }
+
+    /// Start `count` opens of one service at once, as many new flows do.
+    fn spawn_opens(
+        opens: &mut JoinSet<Result<UdpSocket>>,
+        resolver: &UpstreamResolver,
+        count: usize,
+    ) {
+        for _ in 0..count {
+            let resolver = resolver.clone();
+            opens.spawn(async move { open_upstream("hung.invalid:53", &resolver).await });
+        }
+    }
+
+    /// Let every spawned task run until it waits on something. Too few
+    /// yields can only start fewer lookups, which fails the bound assertion
+    /// instead of passing it falsely.
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// #248: with a hung resolver, concurrent opens of one service start at
+    /// most the bound of lookups; the waiting ones still give up at the
+    /// resolve timeout, and lookups orphaned by a timed-out open keep
+    /// counting against the bound.
+    #[tokio::test(start_paused = true)]
+    async fn hung_resolver_bounds_lookups_in_flight_per_service() {
+        let (resolver, started) = counting_resolver(|| None);
+        let mut opens = JoinSet::new();
+        spawn_opens(&mut opens, &resolver, 3 * MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        assert_eq!(started.load(Ordering::Relaxed), MAX_RESOLVES_PER_SERVICE);
+
+        while let Some(open) = opens.join_next().await {
+            let err = open
+                .expect("open task")
+                .expect_err("a hung resolver never opens");
+            assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        }
+
+        spawn_opens(&mut opens, &resolver, MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        assert_eq!(started.load(Ordering::Relaxed), MAX_RESOLVES_PER_SERVICE);
+        opens.abort_all();
+    }
+
+    /// #248: a lookup that finishes frees its share of the bound.
+    #[tokio::test(start_paused = true)]
+    async fn finished_lookups_free_the_bound() {
+        let (resolver, started) =
+            counting_resolver(|| Some(Err(std::io::ErrorKind::NotFound.into())));
+        let mut opens = JoinSet::new();
+        spawn_opens(&mut opens, &resolver, 3 * MAX_RESOLVES_PER_SERVICE);
+        while let Some(open) = opens.join_next().await {
+            let err = open.expect("open task").expect_err("the lookup fails");
+            assert!(format!("{err:#}").contains("cannot resolve"), "{err:#}");
+        }
+        assert_eq!(
+            started.load(Ordering::Relaxed),
+            3 * MAX_RESOLVES_PER_SERVICE
+        );
+    }
+
+    /// #248: an open cancelled while it waits for a share of the bound (as
+    /// when its flow ends or the role stops) takes no share with it.
+    #[tokio::test(start_paused = true)]
+    async fn an_open_cancelled_while_waiting_takes_no_share() {
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = UpstreamResolver::new(Arc::new({
+            let (release, started) = (release.clone(), started.clone());
+            move |_local_addr: String| {
+                let call = started.fetch_add(1, Ordering::Relaxed);
+                let release = release.clone();
+                Box::pin(async move {
+                    // The first lookups hang until released; later ones fail.
+                    if call < MAX_RESOLVES_PER_SERVICE {
+                        drop(release.acquire().await);
+                    }
+                    Err(std::io::ErrorKind::NotFound.into())
+                })
+            }
+        }));
+        let mut holders = JoinSet::new();
+        spawn_opens(&mut holders, &resolver, MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        let mut waiters = JoinSet::new();
+        spawn_opens(&mut waiters, &resolver, MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        assert_eq!(
+            started.load(Ordering::Relaxed),
+            MAX_RESOLVES_PER_SERVICE,
+            "the waiters must be blocked on the bound before the cancel"
+        );
+        assert_eq!(resolver.permits.available_permits(), 0);
+        waiters.abort_all();
+        while waiters.join_next().await.is_some() {}
+
+        release.add_permits(MAX_RESOLVES_PER_SERVICE);
+        while let Some(open) = holders.join_next().await {
+            open.expect("open task").expect_err("the lookup fails");
+        }
+        let mut next = JoinSet::new();
+        spawn_opens(&mut next, &resolver, MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        assert_eq!(
+            started.load(Ordering::Relaxed),
+            2 * MAX_RESOLVES_PER_SERVICE,
+            "the cancelled opens must neither start a lookup nor keep a share"
+        );
+        while let Some(open) = next.join_next().await {
+            open.expect("open task").expect_err("the lookup fails");
+        }
     }
 
     async fn read_flow_reply(conn: &Connection, flow: u32) {
