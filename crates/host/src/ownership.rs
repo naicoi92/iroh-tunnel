@@ -161,7 +161,13 @@ pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
 /// The Windows machine directory under the resolved `%ProgramData%` folder.
 /// Compiled on every target so the fail-closed mapping is testable; only
 /// Windows production builds call it.
-#[cfg_attr(any(feature = "test-utils", not(windows)), allow(dead_code))] // Windows non-test builds only
+#[cfg_attr(
+    any(feature = "test-utils", not(windows)),
+    allow(
+        dead_code,
+        reason = "called only by the Windows production machine_dir and by tests; `expect` would be unfulfilled under cfg(test)"
+    )
+)]
 fn machine_dir_from_program_data(program_data: Result<PathBuf>) -> Result<Option<MachineDir>> {
     let dir = program_data.context("cannot resolve the machine lock directory (%ProgramData%)")?;
     Ok(Some(MachineDir {
