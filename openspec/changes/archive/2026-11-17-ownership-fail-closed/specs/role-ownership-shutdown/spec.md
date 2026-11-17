@@ -2,7 +2,7 @@
 
 ### Requirement: Same public identity rejected across roles
 The system SHALL refuse to start a role whose public node id equals the public node id of the other role running at the user or machine tier, with a conflict naming "the same public identity" and suggesting `config keygen`. The system SHALL fail closed when the identity of a running other role cannot be determined: if the other role's lock is held exclusively at a tier and its owner record at that tier exists but still cannot be read or parsed after a brief retry (four attempts at 25 ms intervals), the start SHALL be refused with the conflict status (exit code 6) and a message naming the record path. An owner record that is absent, or present without a node id, SHALL NOT refuse the start; within one tier this is safe because every start publishes its own node id before it inspects the other role. An owner record SHALL be consulted only while the other role's lock at that tier is held exclusively; a record at a tier whose lock is free, or at the machine tier held only shared by user processes, SHALL NOT be consulted. Known limitation: a user-session process of one role started before a system service of the other role with the same key is not detected by the system start, because per-user records of other accounts are not inspected; the reverse start order is refused.
-Evidence: src/ownership.rs:436-470, tests/role_ownership.rs:264-272
+Evidence: crates/host/src/ownership.rs:785-850, tests/role_ownership.rs:241-273 (roles_with_distinct_keys_coexist_but_a_shared_key_is_rejected), tests/role_ownership.rs:276-303 (access_is_refused_when_the_running_serve_record_is_corrupt)
 
 #### Scenario: Access started with the serve key
 - **WHEN** serve is running with key K and access is started with the same key K
@@ -30,7 +30,7 @@ Evidence: src/ownership.rs:436-470, tests/role_ownership.rs:264-272
 
 ### Requirement: Owner record is informational and public only
 The system SHALL publish a `<role>.owner.json` next to the lock containing role, pid, public node id (once known) and start time, SHALL NOT write any secret key to it, and SHALL NOT use it as proof of liveness. The record SHALL be published in the user tier and, only when the process holds the machine lock exclusively, in the machine tier; a shared machine-tier holder SHALL NOT write a machine record. Publishing SHALL be a precondition of running: when a record cannot be written at claim time or when the node id is published, the start SHALL be refused with an error naming the record path. On Unix a record in the machine tier SHALL be readable by other accounts regardless of the process umask; on Windows it inherits the machine directory's access rules.
-Evidence: src/ownership.rs:22-34, src/ownership.rs:237-260, src/ownership.rs:60-70, src/ownership.rs:572-580 (owner_record_round_trips_without_secret_material)
+Evidence: crates/host/src/ownership.rs:466-527, crates/host/src/ownership.rs:609-651, crates/host/src/ownership.rs:763-771, crates/host/src/ownership.rs:1127 (owner_record_round_trips_without_secret_material)
 
 #### Scenario: Owner record round trip
 - **WHEN** an owner record is written with node id "abc"
@@ -46,6 +46,7 @@ Evidence: src/ownership.rs:22-34, src/ownership.rs:237-260, src/ownership.rs:60-
 
 ### Requirement: Machine-tier lock between system service and user processes
 The system SHALL prevent a system process and a user process of one role from running at the same time, using a machine lock that its creator holds exclusively and other processes hold shared, regardless of start order. The tier SHALL exist on Linux, macOS and Windows. A failure to resolve the machine lock directory on a platform that has a machine tier (on Windows, the `%ProgramData%` known folder) SHALL be an error with context in claim, probe, status and install, never a fallback to the user tier alone; only a platform without a machine tier SHALL have none.
+Evidence: crates/host/src/ownership.rs:144-244, crates/host/src/ownership.rs:906-932, crates/host/src/service/install.rs:512, tests/role_ownership.rs:505 (system_tier_lock_refuses_user_start_and_blocks_a_system_start)
 
 #### Scenario: Machine lock location
 - **WHEN** a machine-tier lock is resolved
