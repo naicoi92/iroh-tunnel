@@ -5,7 +5,35 @@ use std::time::Duration;
 
 use anyhow::Result;
 use iroh::endpoint::Connection;
-use tokio::task::JoinHandle;
+use tokio::sync::oneshot;
+use tokio::task::{JoinHandle, JoinSet};
+
+use crate::fault::Faults;
+use crate::runtime::{OnReady, ReadyReport, ReadyServices, RunCompletion, StatusSink};
+
+/// Report readiness to the host before anything is admitted.
+///
+/// # Errors
+///
+/// The hook's error; the endpoint is closed first, since the role never
+/// starts.
+pub(crate) async fn announce_ready(
+    ep: &iroh::Endpoint,
+    services: ReadyServices,
+    on_ready: OnReady,
+) -> Result<()> {
+    let report = ReadyReport {
+        node_id: crate::endpoint::node_id_string(ep),
+        home_relay: crate::endpoint::home_relay(ep).map(|relay| relay.to_string()),
+        services,
+    };
+    if let Err(error) = on_ready(&report) {
+        ep.close().await;
+        return Err(error);
+    }
+    tracing::info!("endpoint ready");
+    Ok(())
+}
 
 /// How long a role waits for its status flush task to stop at shutdown.
 const STATUS_FLUSH_JOIN_BOUND: Duration = Duration::from_secs(5);
@@ -40,6 +68,101 @@ pub(crate) async fn stop_flush(
             false
         }
     }
+}
+
+/// A role's status flush task and its cooperative stop signal; empty when
+/// the role publishes no status.
+pub(crate) struct StatusFlush(Option<(oneshot::Sender<()>, JoinHandle<()>)>);
+
+impl StatusFlush {
+    /// Spawn `flush` on `sink`, when there is one; the loop must stop on its
+    /// receiver (see [`stop_flush`]).
+    pub(crate) fn spawn<O, F, Fut>(sink: Option<StatusSink<O>>, flush: F) -> Self
+    where
+        F: FnOnce(StatusSink<O>, oneshot::Receiver<()>) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self(sink.map(|sink| {
+            let (stop_tx, stop_rx) = oneshot::channel();
+            (stop_tx, tokio::spawn(flush(sink, stop_rx)))
+        }))
+    }
+
+    /// Stop and join the task; whether the writer quiesced (always without
+    /// one), so the run owner may remove the status file.
+    pub(crate) async fn stop(self) -> bool {
+        match self.0 {
+            Some((stop_tx, flush)) => stop_flush(stop_tx, flush).await,
+            None => true,
+        }
+    }
+}
+
+/// Save a role's first observation before admission opens.
+///
+/// Returns the flush loop's change-detection seed: the observation when it
+/// was written, so the first tick does not rewrite an identical snapshot;
+/// `None` after a failed write (logged, never fatal), so the first tick
+/// retries it. Without a sink nothing is published.
+pub(crate) async fn save_initial<O: Clone>(
+    sink: Option<&mut StatusSink<O>>,
+    initial: O,
+) -> Option<O> {
+    let sink = sink?;
+    match sink.save(initial.clone()).await {
+        Ok(()) => Some(initial),
+        Err(error) => {
+            tracing::warn!("failed to write status file: {error:#}");
+            None
+        }
+    }
+}
+
+/// Run a role until `shutdown` resolves or one of its units raises a fault,
+/// observing supervisor `tasks` that end meanwhile.
+///
+/// # Errors
+///
+/// The first raised fault.
+pub(crate) async fn run_until(
+    tasks: &mut JoinSet<()>,
+    shutdown: impl Future<Output = ()>,
+    faults: &mut Faults,
+) -> Result<()> {
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut shutdown => return Ok(()),
+            error = faults.first() => return Err(error),
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                crate::shutdown::observe(result);
+            }
+        }
+    }
+}
+
+/// A drained role's completion: its run result, failed by a fault raised
+/// during the drain when the run itself succeeded.
+pub(crate) fn completion(
+    result: Result<()>,
+    faults: &mut Faults,
+    status_quiesced: bool,
+) -> RunCompletion {
+    let result = result.and_then(|()| faults.take().map_or(Ok(()), Err));
+    RunCompletion {
+        result,
+        status_quiesced,
+    }
+}
+
+/// Seconds since the Unix epoch, for a role's `started_at`; `0` when the
+/// clock reads before the epoch.
+pub(crate) fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +336,28 @@ fn deadline_expired(last_error: Option<anyhow::Error>) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_raised_fault_ends_the_run_with_its_error() {
+        let (fault, mut faults) = crate::fault::channel();
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move { fault.raise(anyhow::anyhow!("peer tracker poisoned")) });
+        let result = run_until(&mut tasks, std::future::pending(), &mut faults).await;
+        let completion = completion(result, &mut faults, true);
+        let error = completion.result.expect_err("a fault fails the run");
+        assert_eq!(error.to_string(), "peer tracker poisoned");
+    }
+
+    #[tokio::test]
+    async fn a_fault_raised_during_the_drain_fails_a_clean_stop() {
+        let (fault, mut faults) = crate::fault::channel();
+        let result = run_until(&mut JoinSet::new(), async {}, &mut faults).await;
+        assert!(result.is_ok(), "shutdown alone stops cleanly");
+        fault.raise(anyhow::anyhow!("sinks poisoned"));
+        let completion = completion(result, &mut faults, false);
+        assert!(completion.result.is_err());
+        assert!(!completion.status_quiesced);
+    }
 
     #[test]
     fn format_local_addr_brackets_ipv6_literal() {

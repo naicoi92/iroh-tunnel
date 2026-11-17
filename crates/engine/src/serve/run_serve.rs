@@ -26,15 +26,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::endpoint;
+use crate::fault::{self, Fault};
+use crate::locked::Locked;
 use crate::observation::{
     PeerConnectionObservation, ServeObservation, ServiceObservation, STATUS_FLUSH_INTERVAL,
 };
 use crate::proto;
 use crate::runtime::support;
-use crate::runtime::{ReadyReport, ReadyServices, ServeReady};
+use crate::runtime::{ReadyServices, ServeReady};
 use crate::runtime::{RoleHooks, RunCompletion, RunContext, StatusSink};
 use crate::settings::{Protocol, ServeSettings, UdpLimits};
 use crate::shutdown;
@@ -52,142 +56,111 @@ pub async fn run_serve(
     hooks: RoleHooks<ServeObservation>,
     shutdown: impl Future<Output = ()>,
 ) -> RunCompletion {
-    let RoleHooks {
-        on_ready,
-        status: sink,
-    } = hooks;
-    let report = ReadyReport {
-        node_id: endpoint::node_id_string(&ep),
-        home_relay: endpoint::home_relay(&ep).map(|relay| relay.to_string()),
-        services: ready_services(&settings),
-    };
-    if let Err(error) = on_ready(&report) {
-        ep.close().await;
+    let RoleHooks { on_ready, status } = hooks;
+    if let Err(error) = support::announce_ready(&ep, ready_services(&settings), on_ready).await {
         return RunCompletion {
             result: Err(error),
             status_quiesced: true,
         };
     }
-    tracing::info!("endpoint ready");
-    let cfg = settings;
+    let (fault, mut faults) = fault::channel();
+    let mut role = ServeRole::start(&ep, &settings, status, fault).await;
+    let result = support::run_until(&mut role.accept, shutdown, &mut faults).await;
+    let status_quiesced = role.shutdown(&ctx).await;
+    ep.close().await;
+    support::completion(result, &mut faults, status_quiesced)
+}
 
-    // Build the ALPN -> target lookup for demultiplexing accepted
-    // streams.
-    let mut targets: HashMap<Vec<u8>, ServiceTarget> = HashMap::new();
-    for svc in &cfg.services {
-        let target =
-            ServiceTarget::new(format!("{}:{}", svc.host, svc.port), svc.protocol, svc.udp);
-        targets.insert(proto::alpn_for(&svc.name), target);
-    }
+/// One running Serve role: its admission supervisor, the quarantine sinks
+/// that outlive connections, and the status writer.
+struct ServeRole {
+    accept: JoinSet<()>,
+    stop: watch::Sender<Option<Instant>>,
+    sinks: Arc<shutdown::QuarantineSinks>,
+    flush: support::StatusFlush,
+}
 
-    // Operator-facing status snapshot (T-13), refreshed by the flush task
-    // below as stream counts change. Best-effort: a failure to write
-    // status is logged but does not stop the tunnel. Built before the
-    // accept task takes ownership of `targets`.
-    let status = StatusSnapshot {
-        node_id: endpoint::node_id_string(&ep),
-        pid: std::process::id(),
-        started_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        services: cfg
-            .services
-            .iter()
-            .map(|s| StatusServiceRow {
-                name: s.name.clone(),
-                protocol: s.protocol.as_str().to_string(),
-                local_addr: support::format_local_addr(&s.host, s.port),
-                active_streams: targets
-                    .get(&proto::alpn_for(&s.name))
-                    .map(ServiceTarget::active_streams)
-                    .unwrap_or_default(),
-                udp_stats: (s.protocol == Protocol::Udp)
-                    .then(|| {
-                        targets
-                            .get(&proto::alpn_for(&s.name))
-                            .map(|t| t.udp_stats.clone())
-                    })
-                    .flatten(),
-            })
-            .collect(),
-    };
-    let initial = status.render(current_home_relay(&ep), Vec::new());
-    // Seed the flush loop's change detection with the initial write when
-    // it succeeded — otherwise the first tick would rewrite an identical
-    // idle snapshot. A failed initial write seeds `None`, so the first
-    // tick retries it. Without a sink nothing is published.
-    let mut sink = sink;
-    let seeded = match sink.as_mut() {
-        Some(sink) => match sink.save(initial.clone()).await {
-            Ok(()) => Some(initial),
-            Err(e) => {
-                tracing::warn!("failed to write status file: {e:#}");
-                None
-            }
-        },
-        None => None,
-    };
+impl ServeRole {
+    /// Save the initial status, then open admission: nothing is accepted
+    /// before the first snapshot is published.
+    async fn start(
+        ep: &iroh::Endpoint,
+        settings: &ServeSettings,
+        mut sink: Option<StatusSink<ServeObservation>>,
+        fault: Fault,
+    ) -> Self {
+        let targets = service_targets(settings, &fault);
+        let status = StatusSnapshot::new(ep, settings, &targets);
+        let initial = status.render(current_home_relay(ep), Vec::new());
+        let seeded = support::save_initial(sink.as_mut(), initial).await;
 
-    // Live registry of connected peers, fed by the accept loop below and
-    // read by the status flush task (issue #57).
-    let peers = PeerTracker::default();
-    tracing::info!("serve endpoint ready, accepting connections");
-    let accept_ep = ep.clone();
-    let accept_peers = peers.clone();
-    let (stop, stop_rx) = shutdown::channel();
-    let sinks = Arc::new(shutdown::QuarantineSinks::default());
-    let accept_sinks = sinks.clone();
-    let mut accept = JoinSet::new();
-    accept.spawn(async move {
-        accept_loop(&accept_ep, targets, accept_peers, accept_sinks, stop_rx).await;
-    });
-
-    // Cooperative stop channel for the flush task.
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-
-    // Refresh serve-status.json when the rendered snapshot changes —
-    // stream counters, connected peers, or their transport states — at
-    // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
-    // stream churn, still near-live for operators.
-    let flush = sink.map(|sink| {
-        tokio::spawn(status_flush_loop(
-            status,
-            ep.clone(),
-            peers,
-            sink,
-            seeded,
-            stop_rx,
-            STATUS_FLUSH_INTERVAL,
-        ))
-    });
-
-    tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut shutdown => break,
-            Some(result) = accept.join_next(), if !accept.is_empty() => shutdown::observe(result),
+        // Live registry of connected peers, fed by the accept loop and read
+        // by the status flush task (issue #57).
+        let peers = PeerTracker::new(fault.clone());
+        tracing::info!("serve endpoint ready, accepting connections");
+        let (stop, stop_rx) = shutdown::channel();
+        let sinks = Arc::new(shutdown::QuarantineSinks::new(fault));
+        let mut accept = JoinSet::new();
+        accept.spawn({
+            let (ep, peers, sinks) = (ep.clone(), peers.clone(), sinks.clone());
+            async move { accept_loop(&ep, targets, peers, sinks, stop_rx).await }
+        });
+        // Refresh serve-status.json when the rendered snapshot changes, at
+        // most once per STATUS_FLUSH_INTERVAL: no disk churn under busy
+        // stream churn, still near-live for operators.
+        let flush = support::StatusFlush::spawn(sink, |sink, stop| {
+            status_flush_loop(
+                status,
+                ep.clone(),
+                peers,
+                sink,
+                seeded,
+                stop,
+                STATUS_FLUSH_INTERVAL,
+            )
+        });
+        Self {
+            accept,
+            stop,
+            sinks,
+            flush,
         }
     }
-    shutdown::begin(&stop, &ctx);
-    // The accept supervisor seals handshakes and connection admission;
-    // its connection children seal stream admission and join pipe leaves.
-    shutdown::join(&mut accept).await;
-    // Quarantine sinks outlive their connections but not the role.
-    let drain_deadline = (*stop.borrow()).unwrap_or_else(tokio::time::Instant::now);
-    sinks.shutdown(drain_deadline).await;
-    // Stop the flush task and bound its join; the run owner removes the
-    // status file only when this reports the writer quiesced.
-    let status_quiesced = match flush {
-        Some(flush) => support::stop_flush(stop_tx, flush).await,
-        None => true,
-    };
-    ep.close().await;
-    RunCompletion {
-        result: Ok(()),
-        status_quiesced,
+
+    /// Stop admission, drain connections and sinks against one deadline,
+    /// then stop the status writer; returns whether the writer quiesced.
+    async fn shutdown(mut self, ctx: &RunContext) -> bool {
+        shutdown::begin(&self.stop, ctx);
+        // The accept supervisor seals handshakes and connection admission;
+        // its connection children seal stream admission and join pipe leaves.
+        shutdown::join(&mut self.accept).await;
+        // Quarantine sinks outlive their connections but not the role.
+        let drain_deadline = (*self.stop.borrow()).unwrap_or_else(Instant::now);
+        self.sinks.shutdown(drain_deadline).await;
+        // The run owner removes the status file only when the writer
+        // quiesced.
+        self.flush.stop().await
     }
+}
+
+/// The ALPN -> target lookup that demultiplexes accepted connections.
+fn service_targets(settings: &ServeSettings, fault: &Fault) -> HashMap<Vec<u8>, ServiceTarget> {
+    settings
+        .services
+        .iter()
+        .map(|svc| {
+            let local_addr = format!("{}:{}", svc.host, svc.port);
+            let target = ServiceTarget::new(local_addr, svc.protocol, svc.udp, fault.clone());
+            (proto::alpn_for(&svc.name), target)
+        })
+        .collect()
+}
+
+/// A service's name from its ALPN, or the raw bytes when it is not ours.
+fn service_name(alpn: &[u8]) -> String {
+    proto::name_from_alpn(alpn)
+        .map(String::from)
+        .unwrap_or_else(|| format!("{alpn:02x?}"))
 }
 
 fn ready_services(settings: &ServeSettings) -> ReadyServices {
@@ -223,13 +196,15 @@ struct ServiceTarget {
 }
 
 impl ServiceTarget {
-    fn new(local_addr: String, protocol: Protocol, udp_limits: UdpLimits) -> Self {
+    /// `fault` ends the role when the service's shared per-peer counts are
+    /// poisoned.
+    fn new(local_addr: String, protocol: Protocol, udp_limits: UdpLimits, fault: Fault) -> Self {
         Self {
             local_addr,
             protocol,
             udp_limits,
             udp_stats: Arc::default(),
-            udp_peer_slots: Arc::default(),
+            udp_peer_slots: Arc::new(crate::udp::PeerFlowSlots::new(fault)),
             udp_resolver: UpstreamResolver::default(),
             active_streams: Arc::new(AtomicU64::new(0)),
         }
@@ -264,6 +239,39 @@ struct StatusServiceRow {
 }
 
 impl StatusSnapshot {
+    /// The immutable rows of `settings`' services, wired to their targets'
+    /// live counters.
+    fn new(
+        ep: &iroh::Endpoint,
+        settings: &ServeSettings,
+        targets: &HashMap<Vec<u8>, ServiceTarget>,
+    ) -> Self {
+        let services = settings
+            .services
+            .iter()
+            .map(|s| {
+                let target = targets.get(&proto::alpn_for(&s.name));
+                StatusServiceRow {
+                    name: s.name.clone(),
+                    protocol: s.protocol.as_str().to_string(),
+                    local_addr: support::format_local_addr(&s.host, s.port),
+                    active_streams: target
+                        .map(ServiceTarget::active_streams)
+                        .unwrap_or_default(),
+                    udp_stats: target
+                        .filter(|_| s.protocol == Protocol::Udp)
+                        .map(|t| t.udp_stats.clone()),
+                }
+            })
+            .collect();
+        Self {
+            node_id: endpoint::node_id_string(ep),
+            pid: std::process::id(),
+            started_at: support::unix_now_secs(),
+            services,
+        }
+    }
+
     fn render(
         &self,
         home_relay: Option<String>,
@@ -297,19 +305,34 @@ impl StatusSnapshot {
 /// the registry into `connections`. A peer with several connections to the
 /// same service (e.g. a legacy access peer) is
 /// refcounted, and services are merged across a peer's connections.
-#[derive(Clone, Default)]
-struct PeerTracker(Arc<std::sync::Mutex<PeerRegistry>>);
+///
+/// The registry is role-wide: a poisoned lock (a panic mid-section may have
+/// left the refcounts inconsistent) raises a role fault (#216, #226).
+#[derive(Clone)]
+struct PeerTracker {
+    registry: Arc<Locked<PeerRegistry>>,
+    fault: Fault,
+}
 
 /// Connection refcount per service, per peer.
 type PeerRegistry = HashMap<iroh::EndpointId, HashMap<String, u64>>;
 
 impl PeerTracker {
-    /// Lock the registry; a poisoned lock is fatal for the caller (#216):
-    /// a panic mid-section may have left the refcounts inconsistent.
-    fn registry(&self) -> Result<std::sync::MutexGuard<'_, PeerRegistry>> {
-        self.0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("peer tracker lock poisoned"))
+    fn new(fault: Fault) -> Self {
+        Self {
+            registry: Arc::default(),
+            fault,
+        }
+    }
+
+    /// Run `section` on the registry; a poisoned registry raises the role
+    /// fault and fails the caller.
+    fn with<R>(&self, section: impl FnOnce(&mut PeerRegistry) -> R) -> Result<R> {
+        self.registry.with(section).map_err(|poisoned| {
+            self.fault
+                .raise(anyhow::Error::new(poisoned).context("peer tracker"));
+            anyhow::Error::new(poisoned).context("peer tracker")
+        })
     }
 
     /// Record one accepted connection from `peer` for `service`, returning
@@ -323,14 +346,13 @@ impl PeerTracker {
     ///
     /// The registry lock is poisoned.
     fn track(&self, peer: iroh::EndpointId, service: &str) -> Result<TrackedPeer> {
-        // std Mutex is deliberate: the critical section is a few map ops and
-        // the guard is never held across an await.
-        self.registry()?
-            .entry(peer)
-            .or_default()
-            .entry(service.to_string())
-            .and_modify(|n| *n += 1)
-            .or_insert(1);
+        self.with(|registry| {
+            *registry
+                .entry(peer)
+                .or_default()
+                .entry(service.to_string())
+                .or_default() += 1;
+        })?;
         Ok(TrackedPeer {
             peers: self.clone(),
             peer,
@@ -345,21 +367,21 @@ impl PeerTracker {
     ///
     /// The registry lock is poisoned.
     fn untrack(&self, peer: iroh::EndpointId, service: &str) -> Result<()> {
-        let mut guard = self.registry()?;
-        let Some(services) = guard.get_mut(&peer) else {
-            return Ok(());
-        };
-        let Some(count) = services.get_mut(service) else {
-            return Ok(());
-        };
-        *count -= 1;
-        if *count == 0 {
-            services.remove(service);
-            if services.is_empty() {
-                guard.remove(&peer);
+        self.with(|registry| {
+            let Some(services) = registry.get_mut(&peer) else {
+                return;
+            };
+            let Some(count) = services.get_mut(service) else {
+                return;
+            };
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                services.remove(service);
+                if services.is_empty() {
+                    registry.remove(&peer);
+                }
             }
-        }
-        Ok(())
+        })
     }
 
     /// Point-in-time copy of the registry: `(peer, sorted service names)`,
@@ -369,15 +391,16 @@ impl PeerTracker {
     ///
     /// The registry lock is poisoned.
     fn snapshot(&self) -> Result<Vec<(iroh::EndpointId, Vec<String>)>> {
-        let mut peers: Vec<_> = self
-            .registry()?
-            .iter()
-            .map(|(peer, services)| {
-                let mut names: Vec<String> = services.keys().cloned().collect();
-                names.sort();
-                (*peer, names)
-            })
-            .collect();
+        let mut peers: Vec<_> = self.with(|registry| {
+            registry
+                .iter()
+                .map(|(peer, services)| {
+                    let mut names: Vec<String> = services.keys().cloned().collect();
+                    names.sort();
+                    (*peer, names)
+                })
+                .collect()
+        })?;
         // Cached key: the node-id string is computed once per peer instead
         // of once per comparison.
         peers.sort_by_cached_key(|(peer, _)| peer.to_string());
@@ -394,10 +417,9 @@ struct TrackedPeer {
 
 impl Drop for TrackedPeer {
     fn drop(&mut self) {
-        // Drop cannot propagate: report the poisoned registry instead.
-        if let Err(error) = self.peers.untrack(self.peer, &self.service) {
-            tracing::error!(peer = %self.peer, service = %self.service, "{error:#}");
-        }
+        // Drop cannot propagate; a poisoned registry already raised the
+        // role fault.
+        let _ = self.peers.untrack(self.peer, &self.service);
     }
 }
 
@@ -498,17 +520,22 @@ async fn accept_loop(
     sinks: Arc<shutdown::QuarantineSinks>,
     mut stop: shutdown::Stop,
 ) {
-    let mut connections = JoinSet::new();
-    let mut watchers = JoinSet::new();
+    let mut admission = ServeAdmission {
+        targets,
+        peers,
+        sinks,
+        connections: JoinSet::new(),
+        watchers: JoinSet::new(),
+    };
     loop {
         let incoming = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
-            Some(result) = connections.join_next(), if !connections.is_empty() => {
+            Some(result) = admission.connections.join_next(), if !admission.connections.is_empty() => {
                 shutdown::observe(result);
                 continue;
             }
-            Some(result) = watchers.join_next(), if !watchers.is_empty() => {
+            Some(result) = admission.watchers.join_next(), if !admission.watchers.is_empty() => {
                 shutdown::observe(result);
                 continue;
             }
@@ -530,24 +557,9 @@ async fn accept_loop(
                 }
             }
         };
-
-        // Demultiplex by the negotiated ALPN to find the service target.
-        let alpn = conn.alpn().to_vec();
-        let Some(target) = targets.get(&alpn).cloned() else {
-            let name = proto::name_from_alpn(&alpn)
-                .map(String::from)
-                .unwrap_or_else(|| format!("{alpn:02x?}"));
-            tracing::warn!("connection with unknown ALPN for service '{name}', dropping");
+        let Some(accepted) = admission.demultiplex(conn) else {
             continue;
         };
-
-        // The access peer's NodeId, from its cert. Logged on connect and
-        // (via the watcher below) on disconnect, so operators can see who is
-        // tunneling in and correlate with access-side logs.
-        let remote_id = conn.remote_id();
-        let name = proto::name_from_alpn(&alpn)
-            .map(String::from)
-            .unwrap_or_else(|| format!("{alpn:02x?}"));
         // Query the fresh path so the connect line carries it — symmetric
         // with the access role's established lines (`via relay=…`). Right
         // after the handshake iroh may not have an active-path snapshot
@@ -556,49 +568,106 @@ async fn accept_loop(
         let report = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
-            report = crate::conn_path::peer_path_report(ep, remote_id) => report,
+            report = crate::conn_path::peer_path_report(ep, accepted.conn.remote_id()) => report,
         };
+        admission.admit(accepted, report.as_ref(), stop.clone());
+    }
+    admission.close().await;
+}
+
+/// The connections the accept loop owns and what it hands each of them.
+struct ServeAdmission {
+    targets: HashMap<Vec<u8>, ServiceTarget>,
+    peers: PeerTracker,
+    sinks: Arc<shutdown::QuarantineSinks>,
+    connections: JoinSet<()>,
+    /// Disconnect loggers, one per admitted connection.
+    watchers: JoinSet<()>,
+}
+
+/// A handshaken connection matched to its service.
+struct AcceptedConnection {
+    conn: Connection,
+    target: ServiceTarget,
+    service: String,
+}
+
+impl ServeAdmission {
+    /// Match `conn` to its service by the negotiated ALPN; an unknown ALPN
+    /// is logged and the connection dropped.
+    fn demultiplex(&self, conn: Connection) -> Option<AcceptedConnection> {
+        let alpn = conn.alpn();
+        let service = service_name(alpn);
+        let Some(target) = self.targets.get(alpn).cloned() else {
+            tracing::warn!("connection with unknown ALPN for service '{service}', dropping");
+            return None;
+        };
+        Some(AcceptedConnection {
+            conn,
+            target,
+            service,
+        })
+    }
+
+    /// Log the connection and spawn its owner and disconnect watcher.
+    fn admit(
+        &mut self,
+        accepted: AcceptedConnection,
+        report: Option<&crate::observation::PeerPathObservation>,
+        stop: shutdown::Stop,
+    ) {
+        let AcceptedConnection {
+            conn,
+            target,
+            service,
+        } = accepted;
+        // The access peer's NodeId, from its cert. Logged on connect and
+        // (via the watcher below) on disconnect, so operators can see who is
+        // tunneling in and correlate with access-side logs.
+        let remote_id = conn.remote_id();
         tracing::info!(
             peer = %remote_id,
-            service = %name,
+            service = %service,
             "peer connected via {}",
-            crate::conn_path::render_established_paths(report.as_ref())
+            crate::conn_path::render_established_paths(report)
         );
-
         // Watcher: emit a disconnect line when the QUIC connection closes. The
         // weak handle is registered while `conn` is still alive (before the
         // stream-handling task takes it), so iroh guarantees the close event is
         // delivered even if the connection drops before this resolves.
-        watchers.spawn(support::disconnect_watcher(
+        self.watchers.spawn(support::disconnect_watcher(
             &conn,
             remote_id.to_string(),
-            format!("peer disconnected (service {name})"),
+            format!("peer disconnected (service {service})"),
         ));
-        let conn_peers = peers.clone();
-        let conn_stop = stop.clone();
-        let conn_sinks = sinks.clone();
-
-        connections.spawn(async move {
+        let (peers, sinks) = (self.peers.clone(), self.sinks.clone());
+        self.connections.spawn(async move {
             // Track the peer for the status file's `connections` array for
             // as long as this connection lives (issue #57). The guard
             // untracks on drop — normal return or panic unwind alike — so
             // the refcount can never leak.
-            let _tracked = match conn_peers.track(remote_id, &name) {
+            let _tracked = match peers.track(remote_id, &service) {
                 Ok(tracked) => tracked,
                 Err(error) => {
-                    // A poisoned tracker ends this connection (#216).
-                    tracing::error!(peer = %remote_id, "connection refused: {error:#}");
+                    // A poisoned tracker raised the role fault (#226), which
+                    // logs it; this connection ends.
+                    tracing::debug!(peer = %remote_id, "connection refused: {error:#}");
                     return;
                 }
             };
-            handle_connection(&conn, target, &conn_sinks, conn_stop).await;
+            handle_connection(&conn, target, &sinks, stop).await;
         });
     }
-    // Supervisors are not aborted: each joins its own stream children using
-    // the same absolute deadline. Idle connections do not consume grace.
-    shutdown::join(&mut connections).await;
-    watchers.abort_all();
-    shutdown::join(&mut watchers).await;
+
+    /// Join every connection owner, then end the watchers.
+    async fn close(mut self) {
+        // Supervisors are not aborted: each joins its own stream children
+        // using the same absolute deadline. Idle connections do not consume
+        // grace.
+        shutdown::join(&mut self.connections).await;
+        self.watchers.abort_all();
+        shutdown::join(&mut self.watchers).await;
+    }
 }
 
 /// Bound on one stream's local target connect; see `handle_connection`.
@@ -664,52 +733,12 @@ async fn handle_connection(
         stream_no += 1;
         tracing::debug!(stream = stream_no, "accepted stream on connection");
         let counter = ActiveStream::new(target.active_streams());
-        let local_addr = target.local_addr.clone();
-        streams.spawn(async move {
-            let _counter = counter;
-            // Connect inside the stream's own task: a slow target must not
-            // hold up accepting other streams on this connection. A failed
-            // or timed-out connect closes only this channel (dropping the
-            // stream halves resets it).
-            let Some(local) = connect_local(
-                TcpStream::connect(&local_addr),
-                LOCAL_CONNECT_TIMEOUT,
-                &local_addr,
-                stream_no,
-            )
-            .await
-            else {
-                return;
-            };
-            // AsyncWrite::shutdown only queues QUIC FIN. Keep channel owned
-            // until final bytes are acknowledged, or last-pipe completion
-            // could close the endpoint and discard its queued response. The
-            // wait is bounded: a vanished peer must not pin this task and
-            // the active_streams counter.
-            let delivered = send.stopped();
-            match crate::tcp::pipe_tcp_bidirectional(local, (recv, send)).await {
-                Ok(()) => {
-                    match crate::tcp::await_delivery(delivered, crate::tcp::DELIVERY_ACK_GRACE)
-                        .await
-                    {
-                        crate::tcp::Delivery::Acknowledged => {
-                            tracing::debug!("stream closed normally")
-                        }
-                        crate::tcp::Delivery::PeerStopped(code) => {
-                            tracing::debug!(%code, "peer stopped completed stream")
-                        }
-                        crate::tcp::Delivery::Unconfirmed => tracing::warn!(
-                            stream = stream_no,
-                            "peer lost: no delivery acknowledgement within grace"
-                        ),
-                        crate::tcp::Delivery::Lost(error) => {
-                            tracing::warn!("stream delivery error: {error}")
-                        }
-                    }
-                }
-                Err(error) => tracing::warn!("stream error: {error:#}"),
-            }
-        });
+        streams.spawn(serve_stream(
+            (send, recv),
+            target.local_addr.clone(),
+            stream_no,
+            counter,
+        ));
     };
     if let Some(deadline) = deadline {
         shutdown::drain(&mut streams, deadline).await;
@@ -717,6 +746,50 @@ async fn handle_connection(
         // Peer loss cannot drain and must never replay partially copied data.
         streams.abort_all();
         shutdown::join(&mut streams).await;
+    }
+}
+
+/// Pipe one accepted stream to a fresh connection to the local target, then
+/// wait (bounded) for the peer to acknowledge the final bytes.
+async fn serve_stream(
+    (send, recv): (iroh::endpoint::SendStream, iroh::endpoint::RecvStream),
+    local_addr: String,
+    stream_no: u64,
+    _counter: ActiveStream,
+) {
+    // Connect inside the stream's own task: a slow target must not hold up
+    // accepting other streams on this connection. A failed or timed-out
+    // connect closes only this channel (dropping the stream halves resets
+    // it).
+    let Some(local) = connect_local(
+        TcpStream::connect(&local_addr),
+        LOCAL_CONNECT_TIMEOUT,
+        &local_addr,
+        stream_no,
+    )
+    .await
+    else {
+        return;
+    };
+    // AsyncWrite::shutdown only queues QUIC FIN. Keep channel owned until
+    // final bytes are acknowledged, or last-pipe completion could close the
+    // endpoint and discard its queued response. The wait is bounded: a
+    // vanished peer must not pin this task and the active_streams counter.
+    let delivered = send.stopped();
+    if let Err(error) = crate::tcp::pipe_tcp_bidirectional(local, (recv, send)).await {
+        tracing::warn!("stream error: {error:#}");
+        return;
+    }
+    match crate::tcp::await_delivery(delivered, crate::tcp::DELIVERY_ACK_GRACE).await {
+        crate::tcp::Delivery::Acknowledged => tracing::debug!("stream closed normally"),
+        crate::tcp::Delivery::PeerStopped(code) => {
+            tracing::debug!(%code, "peer stopped completed stream");
+        }
+        crate::tcp::Delivery::Unconfirmed => tracing::warn!(
+            stream = stream_no,
+            "peer lost: no delivery acknowledgement within grace"
+        ),
+        crate::tcp::Delivery::Lost(error) => tracing::warn!("stream delivery error: {error}"),
     }
 }
 
@@ -761,17 +834,26 @@ struct FlowReservation {
     service: ServiceFlowSlot,
 }
 
+/// Why a flow got no reservation.
+enum ReserveRefused {
+    /// The named cap (`peer` or `service`) is full.
+    Cap(&'static str),
+    /// The per-peer counts are poisoned; the role fault is already raised.
+    Poisoned,
+}
+
 impl FlowReservation {
     /// Reserve the peer's slot (its live flows across all its connections),
-    /// then the service's (shared by every peer); `Err` names the full cap.
-    fn try_new(target: &ServiceTarget, peer: iroh::EndpointId) -> Result<Self, &'static str> {
+    /// then the service's (shared by every peer).
+    fn try_new(target: &ServiceTarget, peer: iroh::EndpointId) -> Result<Self, ReserveRefused> {
         let limits = target.udp_limits;
         let peer = target
             .udp_peer_slots
             .try_reserve(peer, limits.max_flows_per_peer)
-            .ok_or("peer")?;
-        let service =
-            ServiceFlowSlot::try_reserve(&target.udp_stats, limits.max_flows).ok_or("service")?;
+            .map_err(|_| ReserveRefused::Poisoned)?
+            .ok_or(ReserveRefused::Cap("peer"))?;
+        let service = ServiceFlowSlot::try_reserve(&target.udp_stats, limits.max_flows)
+            .ok_or(ReserveRefused::Cap("service"))?;
         Ok(Self { peer, service })
     }
 }
@@ -805,8 +887,9 @@ impl UdpFlow {
     }
 }
 
-/// One peer connection's UDP flows, shared with the reply relays.
-type UdpFlowTable = Arc<std::sync::Mutex<crate::udp::PeerFlows<UdpFlow>>>;
+/// One peer connection's UDP flows, shared with the reply relays. A poisoned
+/// table ends its connection only (#226).
+type UdpFlowTable = Arc<Locked<crate::udp::PeerFlows<UdpFlow>>>;
 
 /// What an opener task hands back to its connection: the flow's queued
 /// datagrams and, when the upstream opened, its socket and reservation.
@@ -839,6 +922,8 @@ struct UdpConnectionFlows<'conn> {
     conn: &'conn Connection,
     target: ServiceTarget,
     table: UdpFlowTable,
+    /// Ends this connection when its table is poisoned.
+    fault: Fault,
     /// Reply relays and queue writers of live flows.
     readers: JoinSet<()>,
     /// Upstreams still being opened.
@@ -846,20 +931,24 @@ struct UdpConnectionFlows<'conn> {
 }
 
 impl<'conn> UdpConnectionFlows<'conn> {
-    fn new(conn: &'conn Connection, target: ServiceTarget) -> Self {
+    fn new(conn: &'conn Connection, target: ServiceTarget, fault: Fault) -> Self {
         Self {
             conn,
             target,
             table: UdpFlowTable::default(),
+            fault,
             readers: JoinSet::new(),
             openers: JoinSet::new(),
         }
     }
 
-    fn flows(&self) -> std::sync::MutexGuard<'_, crate::udp::PeerFlows<UdpFlow>> {
-        self.table
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Run `section` on the flow table; `None` once the table is poisoned,
+    /// which raises the connection's fault.
+    fn flows<R>(
+        &self,
+        section: impl FnOnce(&mut crate::udp::PeerFlows<UdpFlow>) -> R,
+    ) -> Option<R> {
+        flow_table_section(&self.table, &self.fault, section)
     }
 
     fn stats(&self) -> &Arc<crate::udp::UdpStats> {
@@ -876,17 +965,21 @@ impl<'conn> UdpConnectionFlows<'conn> {
             return;
         };
         let now = std::time::Instant::now();
-        let admission = self.flows().admit(flow, now);
+        let Some(admission) = self.flows(|flows| flows.admit(flow, now)) else {
+            return;
+        };
         let queue = match admission {
             Admission::Unknown => {
                 self.stats().record_drop(DropReason::UnknownFlow);
                 tracing::debug!(flow = flow.0, "dropping datagram for unknown udp flow");
                 return;
             }
-            Admission::Live => match self.flows().get(flow) {
-                Some(entry) => entry.queue().clone(),
-                None => return,
-            },
+            Admission::Live => {
+                match self.flows(|flows| flows.get(flow).map(|entry| entry.queue().clone())) {
+                    Some(Some(queue)) => queue,
+                    _ => return,
+                }
+            }
             Admission::New => match self.start_open(flow, now) {
                 Some(queue) => queue,
                 None => return,
@@ -915,12 +1008,14 @@ impl<'conn> UdpConnectionFlows<'conn> {
     ) -> Option<crate::udp::FlowQueue> {
         let reservation = match FlowReservation::try_new(&self.target, self.conn.remote_id()) {
             Ok(reservation) => reservation,
-            Err(cap) => {
-                self.flows().refuse(flow);
+            Err(ReserveRefused::Cap(cap)) => {
+                self.flows(|flows| flows.refuse(flow))?;
                 self.stats().record_drop(crate::udp::DropReason::Cap);
                 tracing::debug!(flow = flow.0, cap, "udp flow refused: flow cap reached");
                 return None;
             }
+            // The role is stopping; the datagram is dropped uncounted.
+            Err(ReserveRefused::Poisoned) => return None,
         };
         let (queue, rx) = crate::udp::FlowQueue::new(self.target.udp_limits.queue_depth);
         let opener = self
@@ -930,7 +1025,8 @@ impl<'conn> UdpConnectionFlows<'conn> {
             queue: queue.clone(),
             opener,
         };
-        self.flows().insert(flow, entry, now);
+        // A poisoned table ends the connection, whose close aborts the opener.
+        self.flows(|flows| flows.insert(flow, entry, now))?;
         Some(queue)
     }
 
@@ -938,28 +1034,29 @@ impl<'conn> UdpConnectionFlows<'conn> {
     /// upstream could not be opened.
     fn finish_open(&mut self, attempt: OpenAttempt) {
         let OpenAttempt { flow, rx, opened } = attempt;
-        // One lock from the check to the swap: the flow cannot end between.
-        let table = self.table.clone();
-        let mut flows = table
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let queue = match flows.get(flow) {
-            Some(UdpFlow::Opening { queue, .. }) => queue.clone(),
-            // The flow ended while its open finished: drop the result.
-            _ => return,
+        let opening = self.flows(|flows| match flows.get(flow) {
+            Some(UdpFlow::Opening { queue, .. }) => Some(queue.clone()),
+            _ => None,
+        });
+        // The flow ended while its open finished (or the table is poisoned):
+        // drop the result, releasing its reservation.
+        let Some(Some(queue)) = opening else {
+            return;
         };
         match opened {
             Ok((socket, reservation)) => {
                 let upstream = self.spawn_live(flow, Arc::new(socket), queue, rx, reservation);
-                // The finished opener's handle is all the old entry holds.
-                drop(flows.replace(flow, UdpFlow::Live(upstream)));
+                // Only this loop ends flows, so the flow is still opening.
+                // The finished opener's handle is all the old entry holds; a
+                // poisoned table drops the upstream, whose tasks the
+                // connection's close aborts.
+                drop(self.flows(|flows| flows.replace(flow, UdpFlow::Live(upstream))));
             }
             Err(error) => {
                 // Resolve, bind or descriptor failure refuses the flow and
                 // drops what it queued; the process keeps running (contract:
                 // counter `cap`).
-                flows.remove(flow);
-                drop(flows);
+                drop(self.flows(|flows| flows.remove(flow)));
                 // The queue holds at least the datagram that admitted it.
                 for _ in 0..rx.len() {
                     self.stats().record_drop(crate::udp::DropReason::Cap);
@@ -982,7 +1079,7 @@ impl<'conn> UdpConnectionFlows<'conn> {
             self.conn.clone(),
             flow,
             socket.clone(),
-            self.table.clone(),
+            (self.table.clone(), self.fault.clone()),
             self.stats().clone(),
         ));
         // A writer per flow: a slow or blocked target stalls only this
@@ -1013,7 +1110,10 @@ impl<'conn> UdpConnectionFlows<'conn> {
     /// End every flow idle for the service's idle timeout.
     fn expire_idle(&self, stop: &shutdown::Stop, sinks: &shutdown::QuarantineSinks) {
         let idle = self.target.udp_limits.idle_timeout;
-        let ended = self.flows().expire(std::time::Instant::now(), idle);
+        let now = std::time::Instant::now();
+        let Some(ended) = self.flows(|flows| flows.expire(now, idle)) else {
+            return;
+        };
         if !ended.is_empty() {
             tracing::debug!(count = ended.len(), "udp upstream flows expired");
         }
@@ -1026,8 +1126,13 @@ impl<'conn> UdpConnectionFlows<'conn> {
     async fn close(mut self, stop: &shutdown::Stop, sinks: &shutdown::QuarantineSinks) {
         // The connection's flows end with it, but their sockets are
         // quarantined like any expired flow: they outlive the incarnation
-        // as sinks only.
-        let ended = self.flows().drain_all();
+        // as sinks only. A poisoned table already ended the connection with
+        // its fault; its flows are dropped, releasing their slots, when the
+        // last table handle goes (this owner, after the relays are joined).
+        let ended = self
+            .table
+            .with(crate::udp::PeerFlows::drain_all)
+            .unwrap_or_default();
         for flow in ended {
             end_flow(flow, self.stats(), stop, sinks);
         }
@@ -1057,6 +1162,19 @@ fn end_flow(
     }
 }
 
+/// Run `section` on a connection's flow table; `None` once it is poisoned,
+/// which raises `fault` to end the connection.
+fn flow_table_section<R>(
+    table: &UdpFlowTable,
+    fault: &Fault,
+    section: impl FnOnce(&mut crate::udp::PeerFlows<UdpFlow>) -> R,
+) -> Option<R> {
+    table
+        .with(section)
+        .map_err(|poisoned| fault.raise(anyhow::Error::new(poisoned).context("udp flow table")))
+        .ok()
+}
+
 /// Carry one peer's UDP flows over QUIC DATAGRAMs (#88).
 ///
 /// Each flow gets its own connected upstream socket, so a reply is attributed
@@ -1072,37 +1190,22 @@ async fn handle_udp_connection(
     sinks: &shutdown::QuarantineSinks,
     mut stop: shutdown::Stop,
 ) {
-    use crate::udp::{
-        carries_datagrams, closed_for_unsupported_datagrams, DATAGRAMS_UNSUPPORTED_CODE,
-        DATAGRAMS_UNSUPPORTED_REASON,
-    };
     let peer = conn.remote_id();
-    let alpn = conn.alpn();
-    let service = proto::name_from_alpn(alpn)
-        .map(String::from)
-        .unwrap_or_else(|| format!("{alpn:02x?}"));
-    // A connection that cannot carry datagrams never gets a flow table,
-    // sweep or reader: close it with the dedicated code and stop.
-    if !carries_datagrams(conn.max_datagram_size()) {
-        tracing::error!(
-            peer = %peer,
-            service = %service,
-            "udp datagrams unsupported by access peer, closing the connection"
-        );
-        conn.close(
-            VarInt::from_u32(DATAGRAMS_UNSUPPORTED_CODE),
-            DATAGRAMS_UNSUPPORTED_REASON,
-        );
+    let service = service_name(conn.alpn());
+    if !accepts_datagrams(conn, peer, &service) {
         return;
     }
     let idle = target.udp_limits.idle_timeout;
-    let mut flows = UdpConnectionFlows::new(conn, target);
+    let (fault, mut faults) = fault::channel();
+    let mut flows = UdpConnectionFlows::new(conn, target, fault);
     let mut sweep = tokio::time::interval(crate::udp::sweep_interval(idle));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
+            // Already logged where it was raised; it ends this connection.
+            _ = faults.first() => break,
             _ = sweep.tick() => flows.expire_idle(&stop, sinks),
             Some(result) = flows.readers.join_next(), if !flows.readers.is_empty() => {
                 shutdown::observe(result);
@@ -1118,21 +1221,48 @@ async fn handle_udp_connection(
             result = conn.read_datagram() => match result {
                 Ok(datagram) => flows.route(&datagram),
                 Err(error) => {
-                    if closed_for_unsupported_datagrams(&error) {
-                        tracing::error!(
-                            peer = %peer,
-                            service = %service,
-                            "access peer closed the udp connection: datagrams unsupported"
-                        );
-                    } else {
-                        tracing::debug!("udp connection closed: {error}");
-                    }
+                    log_udp_connection_end(&error, peer, &service);
                     break;
                 }
             }
         }
     }
     flows.close(&stop, sinks).await;
+}
+
+/// Whether `conn` can carry datagrams. One that cannot never gets a flow
+/// table, sweep or reader: it is closed with the dedicated code.
+fn accepts_datagrams(conn: &Connection, peer: iroh::EndpointId, service: &str) -> bool {
+    use crate::udp::{carries_datagrams, DATAGRAMS_UNSUPPORTED_CODE, DATAGRAMS_UNSUPPORTED_REASON};
+    if carries_datagrams(conn.max_datagram_size()) {
+        return true;
+    }
+    tracing::error!(
+        peer = %peer,
+        service = %service,
+        "udp datagrams unsupported by access peer, closing the connection"
+    );
+    conn.close(
+        VarInt::from_u32(DATAGRAMS_UNSUPPORTED_CODE),
+        DATAGRAMS_UNSUPPORTED_REASON,
+    );
+    false
+}
+
+fn log_udp_connection_end(
+    error: &iroh::endpoint::ConnectionError,
+    peer: iroh::EndpointId,
+    service: &str,
+) {
+    if crate::udp::closed_for_unsupported_datagrams(error) {
+        tracing::error!(
+            peer = %peer,
+            service = %service,
+            "access peer closed the udp connection: datagrams unsupported"
+        );
+    } else {
+        tracing::debug!("udp connection closed: {error}");
+    }
 }
 
 /// End a flow: stop relaying its replies and keep its socket open as a sink
@@ -1262,7 +1392,7 @@ async fn relay_upstream_replies(
     conn: Connection,
     flow: crate::udp::FlowId,
     upstream: Arc<UdpSocket>,
-    flows: UdpFlowTable,
+    (flows, fault): (UdpFlowTable, Fault),
     stats: Arc<crate::udp::UdpStats>,
 ) {
     use crate::udp::{send_decision, DropReason, SendDecision};
@@ -1282,10 +1412,10 @@ async fn relay_upstream_replies(
                 break;
             }
         };
-        flows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .refresh(flow, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        if flow_table_section(&flows, &fault, |flows| flows.refresh(flow, now)).is_none() {
+            return;
+        }
         let max = conn.max_datagram_size();
         let limit = crate::udp::payload_limit(max);
         stats.set_datagram_limit(limit);
@@ -1393,7 +1523,7 @@ mod tests {
 
     #[test]
     fn track_refcounts_connections_until_the_last_untrack() {
-        let tracker = PeerTracker::default();
+        let tracker = PeerTracker::new(Fault::detached());
         let p = peer();
         let first = tracker.track(p, "echo").unwrap();
         let second = tracker.track(p, "echo").unwrap();
@@ -1419,7 +1549,7 @@ mod tests {
     fn guard_untracks_via_drop_without_any_explicit_call() {
         // The panic-safety contract: nothing calls `untrack` manually —
         // dropping the guard (as an unwind would) must clean up.
-        let tracker = PeerTracker::default();
+        let tracker = PeerTracker::new(Fault::detached());
         let p = peer();
         {
             let _tracked = tracker.track(p, "echo").unwrap();
@@ -1433,7 +1563,7 @@ mod tests {
 
     #[test]
     fn services_merge_across_a_peers_connections() {
-        let tracker = PeerTracker::default();
+        let tracker = PeerTracker::new(Fault::detached());
         let p = peer();
         let web = tracker.track(p, "web").unwrap();
         let echo = tracker.track(p, "echo").unwrap();
@@ -1455,13 +1585,15 @@ mod tests {
 
     #[test]
     fn a_poisoned_tracker_reports_errors_instead_of_panicking() {
-        let tracker = PeerTracker::default();
+        let tracker = PeerTracker::new(Fault::detached());
         let p = peer();
         let held = tracker.track(p, "echo").unwrap();
         let poisoner = tracker.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = poisoner.0.lock().unwrap();
-            panic!("poison the tracker");
+            poisoner
+                .registry
+                .with(|_| panic!("poison the tracker"))
+                .ok();
         })
         .join();
 
@@ -1473,7 +1605,7 @@ mod tests {
 
     #[test]
     fn snapshot_orders_peers_deterministically() {
-        let tracker = PeerTracker::default();
+        let tracker = PeerTracker::new(Fault::detached());
         let peers: Vec<_> = (0..3).map(|_| peer()).collect();
         // Hold every guard so all peers stay tracked.
         let guards: Vec<_> = peers
@@ -1548,7 +1680,7 @@ mod tests {
         let sink = StatusSink::new(move |observation| {
             let log = log_for_save.clone();
             Box::pin(async move {
-                let mut log = log.lock().unwrap();
+                let mut log = log.lock().expect("log lock");
                 log.push(observation);
                 if fail_first && log.len() == 1 {
                     Err(anyhow::anyhow!("first save fails"))
@@ -1560,7 +1692,7 @@ mod tests {
         let flush = tokio::spawn(status_flush_loop(
             empty_snapshot(),
             ep,
-            PeerTracker::default(),
+            PeerTracker::new(Fault::detached()),
             sink,
             last,
             stop_rx,
@@ -1569,7 +1701,7 @@ mod tests {
         tokio::time::sleep(interval * 3 + Duration::from_secs(1)).await;
         let _ = stop_tx.send(());
         flush.await.expect("flush task must not panic");
-        let saved = log.lock().unwrap().clone();
+        let saved = log.lock().expect("log lock").clone();
         saved
     }
 
@@ -1638,12 +1770,12 @@ mod tests {
                 let release = release.clone();
                 let entered_tx = entered_tx.clone();
                 Box::pin(async move {
-                    let first = entered_tx.lock().unwrap().take();
+                    let first = entered_tx.lock().expect("entered tx lock").take();
                     if let Some(tx) = first {
-                        events.lock().unwrap().push("save-started");
+                        events.lock().expect("events lock").push("save-started");
                         let _ = tx.send(());
                         release.notified().await;
-                        events.lock().unwrap().push("save-finished");
+                        events.lock().expect("events lock").push("save-finished");
                     }
                     Ok(())
                 })
@@ -1678,7 +1810,10 @@ mod tests {
             .await
             .expect("admission opens once the initial save finished")
             .expect("connect after initial save");
-        assert_eq!(*events.lock().unwrap(), ["save-started", "save-finished"]);
+        assert_eq!(
+            *events.lock().expect("events lock"),
+            ["save-started", "save-finished"]
+        );
         drop(conn);
 
         let _ = stop_tx.send(());
@@ -1730,9 +1865,10 @@ mod tests {
             "127.0.0.1:9".to_string(),
             Protocol::Udp,
             UdpLimits::default(),
+            Fault::detached(),
         );
         let (_stop_tx, stop) = shutdown::channel();
-        let sinks = shutdown::QuarantineSinks::default();
+        let sinks = shutdown::QuarantineSinks::new(Fault::detached());
         // Keep an endpoint handle alive past the Serve task: handle_udp_connection
         // returns right after the close, and dropping the last endpoint would tear
         // down before the close frame reaches the client.
@@ -1782,7 +1918,12 @@ mod tests {
 
     impl UdpServeHarness {
         async fn start(limits: UdpLimits) -> Self {
-            let target = ServiceTarget::new("127.0.0.1:9".to_string(), Protocol::Udp, limits);
+            let target = ServiceTarget::new(
+                "127.0.0.1:9".to_string(),
+                Protocol::Udp,
+                limits,
+                Fault::detached(),
+            );
             Self::start_with(target).await
         }
 
@@ -1805,7 +1946,7 @@ mod tests {
             let (stop_tx, stop) = shutdown::channel();
             let ep = server.clone();
             let accept = tokio::spawn(async move {
-                let sinks = Arc::new(shutdown::QuarantineSinks::default());
+                let sinks = Arc::new(shutdown::QuarantineSinks::new(Fault::detached()));
                 let mut conns = JoinSet::new();
                 let mut admission = stop.clone();
                 loop {
@@ -1943,8 +2084,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_flow_still_opening_does_not_stall_a_live_flow() {
         let (echo_addr, echo) = udp_echo_target().await;
-        let mut target =
-            ServiceTarget::new(echo_addr.to_string(), Protocol::Udp, UdpLimits::default());
+        let mut target = ServiceTarget::new(
+            echo_addr.to_string(),
+            Protocol::Udp,
+            UdpLimits::default(),
+            Fault::detached(),
+        );
         // The first open (flow 0) resolves at once; the second (flow 1)
         // never does, as with a hung resolver.
         target.udp_resolver =
@@ -1982,7 +2127,12 @@ mod tests {
             ..UdpLimits::default()
         };
         let (echo_addr, echo) = udp_echo_target().await;
-        let mut target = ServiceTarget::new(echo_addr.to_string(), Protocol::Udp, limits);
+        let mut target = ServiceTarget::new(
+            echo_addr.to_string(),
+            Protocol::Udp,
+            limits,
+            Fault::detached(),
+        );
         target.udp_resolver = scripted_resolver(move |call| {
             Some(if call == 0 {
                 Err(std::io::ErrorKind::NotFound.into())
@@ -2017,6 +2167,7 @@ mod tests {
             "127.0.0.1:9".to_string(),
             Protocol::Udp,
             UdpLimits::default(),
+            Fault::detached(),
         );
         target.udp_resolver = scripted_resolver(|_| None);
         let serve = UdpServeHarness::start_with(target).await;
@@ -2035,7 +2186,7 @@ mod tests {
             .expect("accept task must not panic");
         assert_eq!(stats.snapshot().active_flows, 0);
         assert!(
-            peer_slots.try_reserve(client.id(), 1).is_some(),
+            peer_slots.try_reserve(client.id(), 1).unwrap().is_some(),
             "the opening flow's peer slot must be released"
         );
         drop(conn);
@@ -2102,8 +2253,9 @@ mod tests {
         let idle = || tokio::spawn(std::future::pending::<()>()).abort_handle();
         let (queue, _rx) = crate::udp::FlowQueue::new(1);
         let reservation = FlowReservation {
-            peer: Arc::new(crate::udp::PeerFlowSlots::default())
+            peer: Arc::new(crate::udp::PeerFlowSlots::new(Fault::detached()))
                 .try_reserve(peer(), 1)
+                .unwrap()
                 .expect("peer slot"),
             service: ServiceFlowSlot::try_reserve(stats, usize::MAX).expect("service slot"),
         };
@@ -2117,10 +2269,46 @@ mod tests {
         quarantine(upstream, stats, stop, sinks);
     }
 
+    /// #226: a poisoned flow table is never recovered; it raises the fault of
+    /// its own connection only.
+    #[test]
+    fn a_poisoned_flow_table_raises_its_connection_fault() {
+        let table = UdpFlowTable::default();
+        let poisoner = table.clone();
+        let panicked = std::thread::spawn(move || {
+            poisoner.with(|_| panic!("poison the flow table")).ok();
+        })
+        .join();
+        assert!(panicked.is_err());
+        let (fault, mut faults) = fault::channel();
+        assert!(flow_table_section(&table, &fault, |flows| flows.len()).is_none());
+        let raised = faults.take().expect("the connection fault is raised");
+        assert!(
+            format!("{raised:#}").contains("udp flow table"),
+            "{raised:#}"
+        );
+    }
+
+    /// #226: once the sink set is poisoned a new sink is not tracked: it is
+    /// dropped unpolled, releasing its slot, and the role fault is raised.
+    #[tokio::test(start_paused = true)]
+    async fn poisoned_quarantine_sinks_drop_new_sinks_and_raise_a_role_fault() {
+        let stats = Arc::new(crate::udp::UdpStats::default());
+        let (fault, mut faults) = fault::channel();
+        let sinks = Arc::new(shutdown::QuarantineSinks::new(fault));
+        let poisoner = sinks.clone();
+        let panicked = std::thread::spawn(move || poisoner.poison_for_test()).join();
+        assert!(panicked.is_err());
+        let (_stop, stop_rx) = shutdown::channel();
+        quarantined_upstream(&stats, &stop_rx, &sinks).await;
+        assert_eq!(stats.snapshot().quarantined_flows, 0, "slot released");
+        assert!(faults.take().is_some(), "the role fault is raised");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn quarantine_sinks_are_joined_on_role_stop() {
         let stats = Arc::new(crate::udp::UdpStats::default());
-        let sinks = shutdown::QuarantineSinks::default();
+        let sinks = shutdown::QuarantineSinks::new(Fault::detached());
         let (stop, mut stop_rx) = shutdown::channel();
         let before = tokio::runtime::Handle::current()
             .metrics()
@@ -2143,7 +2331,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn failed_quarantine_sink_releases_its_slot() {
         let stats = Arc::new(crate::udp::UdpStats::default());
-        let sinks = shutdown::QuarantineSinks::default();
+        let sinks = shutdown::QuarantineSinks::new(Fault::detached());
         stats.quarantine_started();
         let slot = QuarantineSlot(stats.clone());
         // Same exit as the real sink on a non-transient recv error: break.
@@ -2159,7 +2347,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn quarantine_sink_outlives_its_connection() {
         let stats = Arc::new(crate::udp::UdpStats::default());
-        let sinks = shutdown::QuarantineSinks::default();
+        let sinks = shutdown::QuarantineSinks::new(Fault::detached());
         let (_stop, stop_rx) = shutdown::channel();
         {
             let mut connection = JoinSet::new();

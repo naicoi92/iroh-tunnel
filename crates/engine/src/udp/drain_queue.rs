@@ -26,14 +26,19 @@ mod tests {
         let sink_seen = seen.clone();
         let writer = tokio::spawn(drain_queue(rx, move |datagram: Bytes| {
             let sink_seen = sink_seen.clone();
-            async move { sink_seen.lock().unwrap().push(datagram) }
+            async move { sink_seen.lock().expect("sink seen lock").push(datagram) }
         }));
         for word in [&b"a"[..], b"b", b"c"] {
             assert_eq!(queue.push(Bytes::copy_from_slice(word)), Push::Queued);
         }
         drop(queue);
         writer.await.unwrap();
-        let got: Vec<_> = seen.lock().unwrap().iter().map(|b| b.to_vec()).collect();
+        let got: Vec<_> = seen
+            .lock()
+            .expect("seen lock")
+            .iter()
+            .map(|b| b.to_vec())
+            .collect();
         assert_eq!(got, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
