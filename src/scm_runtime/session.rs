@@ -167,6 +167,9 @@ impl<S: StatusSink> Session<S> {
     /// The role is ready: report `Running` unless a stop is already in
     /// flight. A `Running` report the SCM keeps refusing stops the service
     /// with [`Fault::StatusReport`] rather than leaving it start-pending.
+    /// Retries hold the state lock and may block the caller for up to
+    /// `REPORT_ATTEMPTS - 1` retry delays, so a racing stop control waits
+    /// and then sees the settled phase.
     ///
     /// # Errors
     ///
@@ -227,10 +230,15 @@ impl<S: StatusSink> Session<S> {
     }
 
     /// Last resort for a fatal fault: report `Stopped` with its code without
-    /// the state lock (best effort) and return the process exit code.
+    /// the state lock (best effort) and return the process exit code. After
+    /// [`Fault::StatusReport`] the SCM already refused `Stopped` every time,
+    /// so nothing is resent; the process exit code is all it gets.
     pub(crate) fn abandon(&self, fault: Fault) -> i32 {
         let code = fault.code();
-        let _process_exit_follows = self.send_retrying(Status::Stopped(ScmExit::Specific(code)));
+        if fault != Fault::StatusReport {
+            let _process_exit_follows =
+                self.send_retrying(Status::Stopped(ScmExit::Specific(code)));
+        }
         i32::try_from(code).unwrap_or(1)
     }
 }
@@ -369,11 +377,8 @@ mod tests {
         let (session, _) = session(&handle);
         assert_eq!(session.on_finished(0), Err(Fault::StatusReport));
         assert_eq!(session.abandon(Fault::StatusReport), 101);
-        assert_eq!(
-            handle.sent(),
-            [Status::Stopped(ScmExit::Specific(101))],
-            "abandon retries the final report"
-        );
+        assert!(handle.sent().is_empty());
+        assert_eq!(handle.attempts().len(), 3, "abandon does not resend");
     }
 
     #[test]

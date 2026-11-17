@@ -25,7 +25,8 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   grace.
 - Windows system service (#223): install, start, stop, restart and
   uninstall through the Service Control Manager now list the changes they
-  made (including a rollback's) when they fail. A refused `Running` or
+  made (including a rollback's), as the other backends do; a reinstall over
+  an existing service reports `Stopped`, `Disabled`, `Enabled`, `Started`. A refused `Running` or
   `Stopped` status report is logged and retried; a `Running` report that
   keeps failing stops the service with a service-specific failure code
   instead of leaving it start-pending. A poisoned internal state lock or a

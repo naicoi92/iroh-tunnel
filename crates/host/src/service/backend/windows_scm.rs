@@ -216,7 +216,8 @@ pub(crate) type EffectSink<'a> = dyn FnMut(AppliedEffect) + 'a;
 ///
 /// The mapping follows the scheduled-task backend: a created service is
 /// [`AppliedEffect::Enabled`] (it starts automatically), a deleted one
-/// [`AppliedEffect::Disabled`].
+/// [`AppliedEffect::Disabled`]. A stop the adapter accepts because the
+/// service had just exited still records [`AppliedEffect::Stopped`].
 pub(crate) struct RecordingPort<'p, 's> {
     port: &'p mut dyn ScmPort,
     sink: &'p mut EffectSink<'s>,
