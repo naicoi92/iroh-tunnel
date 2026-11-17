@@ -101,14 +101,55 @@ pub(crate) fn parse_busybox_script(script: Option<&str>) -> EffectiveBinary {
     let Some(script) = script else {
         return EffectiveBinary::NotLoaded;
     };
-    let daemon = script
-        .lines()
-        .find_map(|line| line.strip_prefix("DAEMON=\""))
-        .and_then(|rest| rest.strip_suffix('"'));
-    match daemon {
-        Some(path) if !path.is_empty() => EffectiveBinary::Binary(PathBuf::from(path)),
-        _ => unknown("init script has no DAEMON line"),
+    let Some(value) = script.lines().find_map(|line| line.strip_prefix("DAEMON=")) else {
+        return unknown("init script has no DAEMON line");
+    };
+    let path = match value.strip_prefix('"') {
+        Some(rest) => decode_legacy_double_quoted(rest),
+        None => decode_shell_word(value),
+    };
+    match path {
+        Some(path) => EffectiveBinary::Binary(PathBuf::from(path)),
+        None => unknown("init script DAEMON value is not a plain shell literal"),
     }
+}
+
+/// Decode the inside of a legacy `DAEMON="<path>"` value (opening quote
+/// already stripped), accepting it only when no shell expansion is possible.
+fn decode_legacy_double_quoted(rest: &str) -> Option<String> {
+    let inner = rest.strip_suffix('"')?;
+    let literal = !inner.is_empty() && !inner.contains(['$', '`', '\\', '"']);
+    literal.then(|| inner.to_owned())
+}
+
+/// Decode a restricted POSIX shell word: plain characters, `'…'` runs and
+/// `\'`. Anything else (expansions, other escapes, spaces) is rejected.
+fn decode_shell_word(word: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    inner => out.push(inner),
+                }
+            },
+            '\\' => {
+                if chars.next()? != '\'' {
+                    return None;
+                }
+                out.push('\'');
+            }
+            c if is_plain_word_char(c) => out.push(c),
+            _ => return None,
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn is_plain_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c)
 }
 
 #[cfg(test)]
@@ -278,5 +319,53 @@ mod tests {
             )),
             bin("/a b/iroh-tunnel")
         );
+    }
+
+    fn daemon(line: &str) -> EffectiveBinary {
+        parse_busybox_script(Some(&format!("#!/bin/sh\n{line}\nROLE='serve'\n")))
+    }
+
+    #[test]
+    fn busybox_single_quoted_daemon_yields_exact_path() {
+        assert_eq!(
+            daemon(r"DAEMON='/a b/it'\''s/iroh-tunnel'"),
+            bin("/a b/it's/iroh-tunnel")
+        );
+    }
+
+    #[test]
+    fn busybox_plain_daemon_yields_path() {
+        assert_eq!(
+            daemon("DAEMON=/usr/bin/iroh-tunnel"),
+            bin("/usr/bin/iroh-tunnel")
+        );
+    }
+
+    #[test]
+    fn busybox_legacy_double_quoted_daemon_still_parses() {
+        assert_eq!(
+            daemon("DAEMON=\"/a b/iroh-tunnel\""),
+            bin("/a b/iroh-tunnel")
+        );
+    }
+
+    #[test]
+    fn busybox_daemon_with_expansion_is_unknown() {
+        for line in [
+            "DAEMON=$HOME/x",
+            "DAEMON=`id`",
+            "DAEMON='/a",
+            "DAEMON=/a b",
+            "DAEMON=",
+            "DAEMON=\"/a/$x\"",
+            "DAEMON=\"/a/`id`\"",
+            r#"DAEMON="/a\b""#,
+            r#"DAEMON="/a"b""#,
+        ] {
+            assert!(
+                matches!(daemon(line), EffectiveBinary::Unknown(_)),
+                "{line} must be Unknown"
+            );
+        }
     }
 }
