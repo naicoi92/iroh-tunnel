@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod error;
+pub(crate) mod fs_util;
 pub(crate) mod ownership;
 pub mod paths;
 pub mod role;

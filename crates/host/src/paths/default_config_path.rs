@@ -86,7 +86,7 @@ fn copy_no_overwrite(legacy: &Path, dest: &Path) -> std::io::Result<()> {
         std::process::id()
     ));
     let result = (|| {
-        let mut file = private_new_file(&tmp)?;
+        let mut file = crate::fs_util::create_private_new(&tmp)?;
         file.write_all(&content)?;
         file.sync_all()?;
         // hard_link fails if `dest` exists: an atomic create-if-absent that
@@ -114,24 +114,6 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
-}
-
-#[cfg(unix)]
-fn private_new_file(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn private_new_file(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
 }
 
 #[cfg(test)]
