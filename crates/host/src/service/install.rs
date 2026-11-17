@@ -459,35 +459,80 @@ fn plan_system_install(
     probe: &mut OtherScopeProbe<'_>,
     lock_dirs: LockResolver<'_>,
 ) -> Result<Planned> {
-    use super::backend::windows_scm::{existing_registration_body, service_name};
-    use super::backend::windows_scm_impl::Scm;
-    use super::pin::{retarget_decision_for, RetargetDecision};
-    use super::system_windows::{resolve_target, WinRequest};
-    use super::trust_windows::model::TrustedSet;
-    use super::trust_windows::{
-        account_of, owner_of, read_verified, token_user, verify_binary, verify_dir,
-        verify_machine_dir,
-    };
+    let paths = WindowsSystemPaths::of(req)?;
+    ensure_windows_system_install_allowed(req, env, &paths, probe, lock_dirs)?;
+    let target = resolve_windows_target(req.role, &paths)?;
+    verify_windows_trust(req, &target)?;
+    // Read the registration last, right before the write, so a consent given
+    // for an earlier look at it is checked against the current one.
+    if let Some(need) = windows_retarget_need(req, &target)? {
+        return Ok(Planned::Needs(need));
+    }
+    Ok(Planned::Ready(InstallPlan {
+        scope: ServiceScope::System,
+        pin: Some(target.pin()),
+        config: target.config,
+        state: target.state,
+        // Windows trusts the binary through `verify_windows_trust` above.
+        binary: plan_binary(req, ServiceScope::System, false, &verify_root_only)?,
+    }))
+}
 
+/// The explicit paths of a Windows system install, made absolute before
+/// anything reads them: the service runs elsewhere, and the trust checks
+/// refuse a relative path.
+#[cfg(windows)]
+struct WindowsSystemPaths {
+    /// `--config`, absolute and without a verbatim prefix.
+    config: Option<PathBuf>,
+    /// `IROH_TUNNEL_STATE_DIR`, absolute.
+    state: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+impl WindowsSystemPaths {
+    fn of(req: &InstallRequest) -> Result<Self> {
+        let config = req
+            .config
+            .as_deref()
+            .map(windows_absolute_config)
+            .transpose()?;
+        let state = req
+            .state_dir_override
+            .as_deref()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(|dir| {
+                std::path::absolute(dir).with_context(|| {
+                    format!("cannot make state directory {} absolute", dir.display())
+                })
+            })
+            .transpose()?;
+        Ok(Self { config, state })
+    }
+}
+
+/// `path` made absolute (a bare filename has no parent to read) and without
+/// a verbatim prefix, as a Windows registration pins it.
+#[cfg(windows)]
+fn windows_absolute_config(path: &Path) -> Result<PathBuf> {
+    absolutize_config_path(path).map(strip_verbatim_prefix)
+}
+
+/// Refuse a Windows system install without elevation (with rerun guidance)
+/// or while the role is registered or running in the user scope.
+#[cfg(windows)]
+fn ensure_windows_system_install_allowed(
+    req: &InstallRequest,
+    env: Environment,
+    paths: &WindowsSystemPaths,
+    probe: &mut OtherScopeProbe<'_>,
+    lock_dirs: LockResolver<'_>,
+) -> Result<()> {
     let role = req.role;
-    // Absolute before anything reads its parent: a bare filename has none.
-    let absolute = |path: &Path| absolutize_config_path(path).map(strip_verbatim_prefix);
-    let config_abs = req.config.as_deref().map(absolute).transpose()?;
-    // A relative override is resolved here, like `--config`: the service runs
-    // elsewhere and `verify_dir` refuses a relative path.
-    let state_abs = req
-        .state_dir_override
-        .as_deref()
-        .filter(|d| !d.as_os_str().is_empty())
-        .map(|dir| {
-            std::path::absolute(dir)
-                .with_context(|| format!("cannot make state directory {} absolute", dir.display()))
-        })
-        .transpose()?;
     if !env.elevated {
-        let config = match &config_abs {
+        let config = match &paths.config {
             Some(config) => config.clone(),
-            None => absolute(&crate::config::resolve_config_path(role, None)?)?,
+            None => windows_absolute_config(&crate::config::resolve_config_path(role, None)?)?,
         };
         let rerun = install_rerun(req, ServiceScope::System, &config);
         ensure_privilege(ServiceScope::System, false, &rerun)?;
@@ -499,52 +544,78 @@ fn plan_system_install(
         role,
     )?;
     // A user process of the role holds the user tier: refused like on Unix.
-    ensure_no_cross_scope_conflict(role, ServiceScope::System, None, lock_dirs)?;
+    ensure_no_cross_scope_conflict(role, ServiceScope::System, None, lock_dirs)
+}
+
+/// The account and files a Windows system service of `role` is for: the
+/// installing token's user, with default paths from its LocalAppData.
+#[cfg(windows)]
+fn resolve_windows_target(
+    role: Role,
+    paths: &WindowsSystemPaths,
+) -> Result<super::system_windows::WinTarget> {
+    use super::system_windows::{resolve_target, WinRequest};
+    use super::trust_windows::{account_of, owner_of, token_user};
 
     let token = token_user()?;
     // The token user is the elevated process's own user: the shell resolves
     // its LocalAppData with the current token.
-    let target = resolve_target(
+    resolve_target(
         &WinRequest {
             role: role.name(),
-            config: config_abs.as_deref(),
-            state: state_abs.as_deref(),
+            config: paths.config.as_deref(),
+            state: paths.state.as_deref(),
         },
         &token,
         &owner_of,
         &|_| crate::paths::local_app_data(),
         &account_of,
-    )?;
+    )
+}
+
+/// Fail closed before registering anything LocalSystem would later refuse:
+/// the machine directory, the target's state directory and config, and the
+/// binary must all be trusted.
+#[cfg(windows)]
+fn verify_windows_trust(
+    req: &InstallRequest,
+    target: &super::system_windows::WinTarget,
+) -> Result<()> {
+    use super::trust_windows::model::TrustedSet;
+    use super::trust_windows::{read_verified, verify_binary, verify_dir, verify_machine_dir};
 
     if let Some(machine) = crate::ownership::machine_dir()? {
         if machine.verify && machine.path.exists() {
             verify_machine_dir(&machine.path).map_err(|e| machine_dir_refusal(e, &machine.path))?;
         }
     }
-
-    // Fail closed before registering anything LocalSystem would later refuse.
     let trusted = TrustedSet::for_user_files(&target.sid);
     verify_dir(&target.state, &trusted)?;
     let text = read_verified(&target.config, &trusted)?;
-    check_installable_text(role, &text, &target.config)?;
-    verify_binary(&req.tunnel_executable)?;
+    check_installable_text(req.role, &text, &target.config)?;
+    verify_binary(&req.tunnel_executable)
+}
 
-    // Read the registration last, right before the write, so a consent given
-    // for an earlier look at it is checked against the current one.
-    let existing = existing_registration_body(&mut Scm, &service_name(role.name()))?;
-    if let RetargetDecision::Needs { previous, proposed } =
-        retarget_decision_for(existing.as_deref(), target.pin(), req.retarget.as_ref())
-    {
-        return Ok(Planned::Needs(InstallNeed::Retarget { previous, proposed }));
-    }
-    Ok(Planned::Ready(InstallPlan {
-        scope: ServiceScope::System,
-        pin: Some(target.pin()),
-        config: target.config,
-        state: target.state,
-        // Windows trusts the binary through `verify_binary` above.
-        binary: plan_binary(req, ServiceScope::System, false, &verify_root_only)?,
-    }))
+/// The retarget decision needed before replacing the role's current Windows
+/// service, if it belongs to someone else.
+#[cfg(windows)]
+fn windows_retarget_need(
+    req: &InstallRequest,
+    target: &super::system_windows::WinTarget,
+) -> Result<Option<InstallNeed>> {
+    use super::backend::windows_scm::{existing_registration_body, service_name};
+    use super::backend::windows_scm_impl::Scm;
+    use super::pin::{retarget_decision_for, RetargetDecision};
+
+    let existing = existing_registration_body(&mut Scm, &service_name(req.role.name()))?;
+    Ok(
+        match retarget_decision_for(existing.as_deref(), target.pin(), req.retarget.as_ref()) {
+            RetargetDecision::Needs { previous, proposed } => {
+                Some(InstallNeed::Retarget { previous, proposed })
+            }
+            RetargetDecision::Proceed => None,
+        },
+    )
 }
 
 /// Keep a `Permission` refusal from the machine-directory check as it is
