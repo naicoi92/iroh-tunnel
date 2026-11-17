@@ -16,8 +16,8 @@ Blocked by: none
 
 Owns `crates/host/src/service/backend/windows_scm.rs` (tests module only). Platform: pure orchestration, run on every OS with the fake SCM.
 
-- [ ] 2.1 Add a test where the started service stops by itself before running: applied effects are enabled, started, disabled, with no stopped (scenario "Windows system install rolls back a service that stopped by itself")
-- [ ] 2.2 Rename `rolled_back_install_records_the_rollback` to match scenario "Windows system install rolls back a service stuck starting" and `failed_create_after_delete_reports_the_deletion` to match "Windows system reinstall fails after deleting the old service"
+- [x] 2.1 Add a test where the started service stops by itself before running: applied effects are enabled, started, disabled, with no stopped (scenario "Windows system install rolls back a service that stopped by itself")
+- [x] 2.2 Rename `rolled_back_install_records_the_rollback` to match scenario "Windows system install rolls back a service stuck starting" and `failed_create_after_delete_reports_the_deletion` to match "Windows system reinstall fails after deleting the old service"
 
 ## 3. Verification and traceability
 
