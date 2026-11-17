@@ -46,7 +46,9 @@ impl PeerFlowSlots {
     fn lock(&self) -> MutexGuard<'_, HashMap<EndpointId, usize>> {
         // The map stays consistent even if a holder panicked: every update
         // is a single step.
-        self.held.lock().unwrap_or_else(|p| p.into_inner())
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

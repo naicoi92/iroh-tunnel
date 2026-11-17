@@ -13,6 +13,10 @@ use crate::role::Role;
 /// Unlocked pre-check used to decide whether to ask before taking the lock.
 /// A missing or unparsable file reads as [`IdentityState::NoKey`]; a read
 /// error propagates.
+///
+/// # Errors
+///
+/// Fails when the config path cannot be resolved or the file cannot be read.
 pub fn identity_state(role: Role, config: Option<&Path>) -> Result<IdentityState> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     let has_key = read_optional(&path)?

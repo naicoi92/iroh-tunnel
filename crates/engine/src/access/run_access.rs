@@ -533,7 +533,7 @@ impl ServiceDialer {
             .await
             .conn
             .as_ref()
-            .map(|conn| conn.stable_id())
+            .map(iroh::endpoint::Connection::stable_id)
     }
 
     /// Fresh connection-path report for the cached multiplexed connection,
@@ -546,7 +546,10 @@ impl ServiceDialer {
     async fn path_report(&self) -> Option<crate::observation::PeerPathObservation> {
         let peer = {
             let guard = self.state.lock().await;
-            guard.conn.as_ref().map(|conn| conn.remote_id())?
+            guard
+                .conn
+                .as_ref()
+                .map(iroh::endpoint::Connection::<iroh::endpoint::HandshakeCompleted>::remote_id)?
         };
         crate::conn_path::peer_path_report(&self.ep, peer).await
     }
@@ -779,7 +782,10 @@ async fn udp_forward_loop(ctx: UdpForwardCtx, socket: Arc<UdpSocket>, mut stop: 
 
 impl UdpSession {
     fn expire_idle(&self, ctx: &UdpForwardCtx) {
-        let mut flows = self.flows.lock().unwrap_or_else(|p| p.into_inner());
+        let mut flows = self
+            .flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ended = flows.expire(
             std::time::Instant::now(),
             ctx.dialer.udp_limits.idle_timeout,
@@ -857,7 +863,11 @@ impl UdpSession {
     async fn retire(&mut self) {
         self.readers.abort_all();
         while self.readers.join_next().await.is_some() {}
-        *self.flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
+        *self
+            .flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            crate::udp::ClientFlows::default();
         self.current = None;
     }
 
@@ -897,11 +907,15 @@ impl UdpSession {
                 return;
             }
         }
-        let flow = self.flows.lock().unwrap_or_else(|p| p.into_inner()).touch(
-            client,
-            std::time::Instant::now(),
-            dialer.udp_limits.max_flows,
-        );
+        let flow = self
+            .flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .touch(
+                client,
+                std::time::Instant::now(),
+                dialer.udp_limits.max_flows,
+            );
         let flow = match flow {
             Ok(flow) => flow,
             Err(crate::udp::Refused::Cap) => {
@@ -923,7 +937,12 @@ impl UdpSession {
                 return;
             }
         };
-        stats.set_active_flows(self.flows.lock().unwrap_or_else(|p| p.into_inner()).len());
+        stats.set_active_flows(
+            self.flows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+        );
         if let Err(error) = conn.send_datagram(crate::udp::encode(flow, payload)) {
             tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
             // A lost connection never recovers. Evict it so the next datagram
@@ -968,7 +987,9 @@ async fn reject_unusable(
 
 impl UdpForwardCtx {
     fn lock_backoff(&self) -> std::sync::MutexGuard<'_, RedialBackoff> {
-        self.backoff.lock().unwrap_or_else(|p| p.into_inner())
+        self.backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether the back-off lets this datagram dial; logs the drop if not.
@@ -1054,7 +1075,7 @@ async fn relay_peer_replies(
         };
         let client = flows
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .client_of(flow, std::time::Instant::now());
         match client {
             Some(client) => {
@@ -1518,7 +1539,12 @@ mod tests {
 
     impl Drop for ChildrenGuard {
         fn drop(&mut self) {
-            for handle in self.0.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+            for handle in self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
                 handle.abort();
             }
         }
@@ -1534,11 +1560,18 @@ mod tests {
     /// for the next caller. Only the harness (never the
     /// supervisor) drains, so the supervisor's cancellation cannot lose it.
     async fn drain_children(children: &PeerChildren) {
-        for handle in children.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+        for handle in children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
             handle.abort();
         }
         loop {
-            let next = children.lock().unwrap_or_else(|p| p.into_inner()).pop();
+            let next = children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop();
             let Some(handle) = next else { break };
             let _ = handle.await;
         }
@@ -1634,7 +1667,7 @@ mod tests {
                             let _ = conn.send_datagram(datagram);
                         }
                     });
-                    children.lock().unwrap_or_else(|p| p.into_inner()).push(child);
+                    children.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(child);
                 }
             }
         }
@@ -1773,7 +1806,7 @@ mod tests {
         fn waiting_until(&self) -> Option<std::time::Instant> {
             self.backoff
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .waiting_until()
         }
 

@@ -128,7 +128,7 @@ fn write_environment(name: &str, env: &[(String, String)]) -> Result<()> {
         )
     };
     if status != 0 {
-        return Err(std::io::Error::from_raw_os_error(status as i32))
+        return Err(std::io::Error::from_raw_os_error(status.cast_signed()))
             .with_context(|| format!("cannot write the environment of service `{name}`"));
     }
     Ok(())
@@ -156,7 +156,7 @@ fn read_service_string(name: &str, value: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     if status != 0 {
-        return Err(std::io::Error::from_raw_os_error(status as i32))
+        return Err(std::io::Error::from_raw_os_error(status.cast_signed()))
             .with_context(|| format!("cannot read `{value}` of service `{name}`"));
     }
     let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
@@ -175,7 +175,7 @@ fn read_service_string(name: &str, value: &str) -> Result<Option<String>> {
         )
     };
     if status != 0 {
-        return Err(std::io::Error::from_raw_os_error(status as i32))
+        return Err(std::io::Error::from_raw_os_error(status.cast_signed()))
             .with_context(|| format!("cannot read `{value}` of service `{name}`"));
     }
     let units = capacity as usize / 2;

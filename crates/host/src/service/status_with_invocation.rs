@@ -3,6 +3,10 @@ use super::types::{Environment, ServiceFailure, ServiceScope, ServiceStatusRepor
 use crate::role::Role;
 
 /// Query status using the supplied executable identity for guidance.
+///
+/// # Errors
+///
+/// A [`ServiceFailure`] when the service manager cannot be queried.
 pub fn status_with_invocation(
     role: Role,
     scope: ServiceScope,

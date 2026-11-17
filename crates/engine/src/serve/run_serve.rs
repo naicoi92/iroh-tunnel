@@ -100,7 +100,7 @@ pub async fn run_serve(
                 local_addr: support::format_local_addr(&s.host, s.port),
                 active_streams: targets
                     .get(&proto::alpn_for(&s.name))
-                    .map(|t| t.active_streams())
+                    .map(ServiceTarget::active_streams)
                     .unwrap_or_default(),
                 udp_stats: (s.protocol == Protocol::Udp)
                     .then(|| {
@@ -783,7 +783,7 @@ async fn handle_udp_connection(
             _ = sweep.tick() => {
                 let ended = flows
                     .lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .expire(std::time::Instant::now(), idle);
                 if !ended.is_empty() {
                     tracing::debug!(count = ended.len(), "udp upstream flows expired");
@@ -821,7 +821,7 @@ async fn handle_udp_connection(
         let now = std::time::Instant::now();
         let admission = flows
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .admit(flow, now);
         let upstream = match admission {
             Admission::Unknown => {
@@ -830,7 +830,9 @@ async fn handle_udp_connection(
                 continue;
             }
             Admission::Live => {
-                let table = flows.lock().unwrap_or_else(|p| p.into_inner());
+                let table = flows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match table.get(flow) {
                     Some(upstream) => upstream.queue.clone(),
                     None => continue,
@@ -854,7 +856,10 @@ async fn handle_udp_connection(
                 let peer_slot = match reserved {
                     Ok(slot) => slot,
                     Err(cap) => {
-                        flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
+                        flows
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .refuse(flow);
                         stats.record_drop(DropReason::Cap);
                         tracing::debug!(flow = flow.0, cap, "udp flow refused: flow cap reached");
                         continue;
@@ -875,7 +880,10 @@ async fn handle_udp_connection(
                         // Bind or descriptor exhaustion refuses the flow; the
                         // process keeps running (contract: counter `cap`).
                         stats.flows_closed(1);
-                        flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
+                        flows
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .refuse(flow);
                         stats.record_drop(DropReason::Cap);
                         tracing::warn!(flow = flow.0, "cannot open udp upstream: {error}");
                         continue;
@@ -906,17 +914,20 @@ async fn handle_udp_connection(
                     }
                 }));
                 let entry = queue.clone();
-                flows.lock().unwrap_or_else(|p| p.into_inner()).insert(
-                    flow,
-                    UdpUpstream {
-                        socket,
-                        queue,
-                        relay,
-                        writer,
-                        peer_slot,
-                    },
-                    now,
-                );
+                flows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        flow,
+                        UdpUpstream {
+                            socket,
+                            queue,
+                            relay,
+                            writer,
+                            peer_slot,
+                        },
+                        now,
+                    );
                 entry
             }
         };
@@ -934,7 +945,10 @@ async fn handle_udp_connection(
     }
     // The connection's flows end with it, but their sockets are quarantined
     // like any expired flow: they outlive the incarnation as sinks only.
-    let ended = flows.lock().unwrap_or_else(|p| p.into_inner()).drain_all();
+    let ended = flows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain_all();
     for upstream in ended {
         quarantine(upstream, &stats, &stop, sinks);
     }
@@ -1064,7 +1078,7 @@ async fn relay_upstream_replies(
         };
         flows
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .refresh(flow, std::time::Instant::now());
         let max = conn.max_datagram_size();
         let limit = crate::udp::payload_limit(max);
@@ -1244,7 +1258,7 @@ mod tests {
             .map(|p| tracker.track(*p, "echo").unwrap())
             .collect();
 
-        let mut expected: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
+        let mut expected: Vec<String> = peers.iter().map(ToString::to_string).collect();
         expected.sort();
         let got: Vec<String> = tracker
             .snapshot()

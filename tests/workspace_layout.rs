@@ -125,7 +125,10 @@ fn workspace_has_exactly_three_members_all_default() {
     let meta = metadata();
     let members = names_of(&meta, &meta["workspace_members"]);
     let defaults = names_of(&meta, &meta["workspace_default_members"]);
-    let expected: BTreeSet<String> = MEMBERS.iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = MEMBERS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     assert_eq!(members, expected);
     assert_eq!(defaults, expected);
     let manifest = std::fs::read_to_string(Path::new(ROOT).join("Cargo.toml")).unwrap();

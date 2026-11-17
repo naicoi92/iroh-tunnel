@@ -6,6 +6,7 @@ use iroh::{Endpoint, RelayUrl};
 /// relay server, so this may return `None` right after bind. Serve prints it for
 /// operator convenience (Page 06 v5 §1.1); access uses the config's
 /// `relay_urls` to dial, so this is display-only.
+#[must_use]
 pub fn home_relay(ep: &Endpoint) -> Option<RelayUrl> {
     ep.addr().relay_urls().next().cloned()
 }

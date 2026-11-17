@@ -15,8 +15,6 @@ use crate::error::CliError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WinTarget {
     pub sid: Sid,
-    /// `DOMAIN\name`, or `?` when the SID cannot be named.
-    pub account: String,
     /// Config file path.
     pub config: PathBuf,
     /// State directory.
@@ -107,7 +105,6 @@ pub(crate) fn resolve_target(
     };
     Ok(WinTarget {
         sid: token.clone(),
-        account: account_of(token).unwrap_or_else(|| "?".into()),
         config,
         state,
     })
@@ -164,7 +161,6 @@ mod tests {
         let t = resolve(None, None, None).unwrap();
         let root = Path::new("C:\\Users\\alice\\AppData\\Local");
         assert_eq!(t.sid, sid(ALICE));
-        assert_eq!(t.account, "PC\\alice");
         assert_eq!(
             t.config,
             root.join("iroh-tunnel").join("config").join("serve.toml")

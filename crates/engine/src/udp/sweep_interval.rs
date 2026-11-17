@@ -2,6 +2,7 @@ use super::types::SWEEP_INTERVAL;
 
 /// The sweep period for a service with this idle timeout: never longer than
 /// the timeout itself, so a short timeout is honoured promptly.
+#[must_use]
 pub fn sweep_interval(idle: std::time::Duration) -> std::time::Duration {
     SWEEP_INTERVAL
         .min(idle)

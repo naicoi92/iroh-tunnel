@@ -66,7 +66,10 @@ impl Role {
         #[cfg(unix)]
         // SAFETY: kill(2) on our own live child pid.
         unsafe {
-            libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+            libc::kill(
+                libc::pid_t::try_from(self.child.id()).unwrap(),
+                libc::SIGTERM,
+            );
         }
         #[cfg(not(unix))]
         let _ = self.child.kill();

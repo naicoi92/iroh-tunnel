@@ -25,6 +25,10 @@ use iroh_tunnel_host::status::{AccessStatusFile, StatusFile, StatusPayload, Tran
 use iroh_tunnel_host::Role;
 
 /// Entry point for `iroh-tunnel <role> status [--json]`.
+///
+/// # Errors
+///
+/// Fails when the status file cannot be read or decoded, or stdout fails.
 pub fn run(role: Role, json: bool) -> Result<()> {
     let status = read_role_status(role)?;
     let path = &status.path;
@@ -135,6 +139,7 @@ fn describe_running(role: Role, tier: Tier, owner: Option<&OwnerRecord>, path: &
 /// (name, protocol, local address, live stream count) and the connected
 /// peers with their transports — so an operator sees both "what am I
 /// exposing" and "who is connected" without reaching for `--json`.
+#[must_use]
 pub fn render_serve_status(file: &StatusFile) -> String {
     let mut out = format!("node_id: {}\n", file.node_id);
     match &file.home_relay {
@@ -191,6 +196,7 @@ pub fn render_serve_status(file: &StatusFile) -> String {
 /// still gets a row — its configured peer with `(no connection)` — because
 /// "which peer is this service supposed to reach" is exactly what an
 /// operator troubleshooting a tunnel wants to see.
+#[must_use]
 pub fn render_access_status(file: &AccessStatusFile) -> String {
     let mut out = format!("node_id: {}\n", file.node_id);
     out.push_str(&format!(

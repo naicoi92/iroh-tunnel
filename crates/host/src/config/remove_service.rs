@@ -13,6 +13,10 @@ use crate::error::CliError;
 use crate::role::Role;
 
 /// Delete the `[[services]]` entry whose `name` matches.
+///
+/// # Errors
+///
+/// Fails when the config is missing or unreadable, has no such service, or cannot be written.
 pub fn remove_service(role: Role, config: Option<&Path>, name: &str) -> Result<Mutation> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     // Nothing to remove from a missing config: fail without creating files.

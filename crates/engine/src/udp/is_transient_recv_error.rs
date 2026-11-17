@@ -4,6 +4,7 @@
 /// later receive. Windows reports it on unconnected sockets too, as
 /// `WSAECONNRESET` (os error 10054), after a send to a port nobody listens on.
 /// Neither means the socket is dead.
+#[must_use]
 pub fn is_transient_recv_error(error: &std::io::Error) -> bool {
     use std::io::ErrorKind::{
         ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted, WouldBlock,

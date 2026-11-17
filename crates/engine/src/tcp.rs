@@ -305,7 +305,9 @@ mod tests {
         ));
 
         // peer -> remote: 50 KiB payload.
-        let payload_out: Vec<u8> = (0..50_000).map(|i| (i % 251) as u8).collect();
+        let payload_out: Vec<u8> = (0..50_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
         peer.write_all(&payload_out).await.unwrap();
         peer.shutdown().await.unwrap();
         let mut got_remote = vec![0u8; payload_out.len()];
@@ -313,7 +315,9 @@ mod tests {
         assert_eq!(got_remote, payload_out);
 
         // remote -> peer: 50 KiB payload (different pattern).
-        let payload_back: Vec<u8> = (0..50_000).map(|i| ((i + 7) % 251) as u8).collect();
+        let payload_back: Vec<u8> = (0..50_000u32)
+            .map(|i| u8::try_from((i + 7) % 251).unwrap())
+            .collect();
         remote_b.write_all(&payload_back).await.unwrap();
         let _ = remote_b.shutdown().await;
         let mut got_peer = vec![0u8; payload_back.len()];

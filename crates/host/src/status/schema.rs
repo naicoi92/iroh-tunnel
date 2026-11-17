@@ -306,6 +306,7 @@ pub enum StatusPayload {
 
 impl StatusPayload {
     /// Pid recorded in the snapshot.
+    #[must_use]
     pub fn pid(&self) -> u32 {
         match self {
             StatusPayload::Serve(file) => file.pid,
@@ -314,6 +315,7 @@ impl StatusPayload {
     }
 
     /// Start time (epoch seconds) recorded in the snapshot.
+    #[must_use]
     pub fn started_at(&self) -> u64 {
         match self {
             StatusPayload::Serve(file) => file.started_at,
@@ -322,6 +324,7 @@ impl StatusPayload {
     }
 
     /// The role whose schema this payload carries.
+    #[must_use]
     pub fn role(&self) -> Role {
         match self {
             StatusPayload::Serve(_) => Role::Serve,

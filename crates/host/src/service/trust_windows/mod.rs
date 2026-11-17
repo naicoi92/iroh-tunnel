@@ -40,7 +40,9 @@ pub(crate) mod test_env {
     impl EnvGuard {
         /// Set (`Some`) or unset (`None`) each variable until dropped.
         pub(crate) fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
-            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let saved = vars
                 .iter()
                 .map(|(k, v)| {

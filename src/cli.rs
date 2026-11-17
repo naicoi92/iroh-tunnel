@@ -108,6 +108,7 @@ pub struct ServeCli {
 
 impl ServeCli {
     /// Equivalent all-in-one invocation, so both paths share one dispatcher.
+    #[must_use]
     pub fn into_cli(self) -> Cli {
         Cli {
             verbose: self.verbose,
@@ -142,6 +143,7 @@ pub struct AccessCli {
 
 impl AccessCli {
     /// Equivalent all-in-one invocation, so both paths share one dispatcher.
+    #[must_use]
     pub fn into_cli(self) -> Cli {
         Cli {
             verbose: self.verbose,
@@ -197,6 +199,7 @@ pub enum Binary {
 
 impl Binary {
     /// True for the single-role executables.
+    #[must_use]
     pub fn is_standalone(self) -> bool {
         !matches!(self, Binary::AllInOne)
     }
@@ -263,6 +266,7 @@ const ACCESS_QUICK: &[&str] = &["name", "listen", "node_id"];
 
 /// Build the clap command tree of `binary` with the runtime adjustments the
 /// derive cannot express (required quick flags, protocol default).
+#[must_use]
 pub fn build_command(binary: Binary) -> clap::Command {
     let cmd = match binary {
         Binary::AllInOne => Cli::command()
@@ -300,6 +304,10 @@ pub fn build_command(binary: Binary) -> clap::Command {
 
 /// Parse `argv` against the tree of `binary`; standalone results are
 /// converted to the all-in-one [`Cli`] shape.
+///
+/// # Errors
+///
+/// The clap error for invalid arguments, `--help` or `--version`.
 pub fn parse_cli(
     binary: Binary,
     argv: impl IntoIterator<Item = OsString>,
@@ -319,6 +327,10 @@ pub trait ServiceArgs: Args + FromArgMatches {
 
     /// Build the `config set` request. A missing name never gets here because
     /// [`build_command`] makes `-n` required; it is an internal error if it does.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the service name is missing.
     fn into_set(self, config: Option<PathBuf>) -> anyhow::Result<SetService>;
 }
 

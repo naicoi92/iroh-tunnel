@@ -5,8 +5,6 @@
 //! The binaries are thin wrappers so each one is a self-contained executable
 //! that never needs another binary at runtime.
 
-use std::path::PathBuf;
-
 use crate::cli;
 use crate::cli::{Binary, Cli, ConfigAction, Role, RoleCmd, ServiceArgs};
 use crate::cli_args::ProtocolArg;
@@ -368,10 +366,9 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
     ctx: RunContext,
     ready: ReadyHook,
 ) -> anyhow::Result<()> {
-    let role = status_role.name();
     match cmd {
         RoleCmd::Run { config } => {
-            let path = resolve_config_path(role, config)?;
+            let path = config_ops::resolve_config_path(status_role, config.as_deref())?;
             // Existence only: the config is read once, by `load_config`,
             // which under a system service reads it through the trust check.
             config_ops::require_present(status_role, &path)?;
@@ -400,7 +397,7 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
         }
         RoleCmd::Update(args) => match binary.is_standalone() {
             true => {
-                let exe = format!("iroh-tunnel-{role}");
+                let exe = format!("iroh-tunnel-{}", status_role.name());
                 run_update_cli(&args, &exe).await
             }
             false => Err(CliError::Config(
@@ -422,21 +419,6 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
         })
         .await
         .context("service command task failed")?,
-    }
-}
-
-/// Resolve the config path: explicit `--config` wins, otherwise the
-/// platform default from [`config_ops::resolve_config_path`].
-fn resolve_config_path(role: &str, config: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    config_ops::resolve_config_path(role_named(role)?, config.as_deref())
-}
-
-/// The typed role for a CLI role name.
-fn role_named(name: &str) -> anyhow::Result<StatusRole> {
-    match name {
-        "serve" => Ok(StatusRole::Serve),
-        "access" => Ok(StatusRole::Access),
-        other => anyhow::bail!("unknown role {other:?}"),
     }
 }
 

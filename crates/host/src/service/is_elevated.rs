@@ -3,6 +3,7 @@
 /// Whether the process runs with root privileges. Always `false` on targets
 /// without a service backend (where every operation is refused anyway).
 #[cfg(unix)]
+#[must_use]
 pub fn is_elevated() -> bool {
     // SAFETY: geteuid(2) has no preconditions and no failure mode.
     unsafe { libc::geteuid() == 0 }
@@ -10,6 +11,7 @@ pub fn is_elevated() -> bool {
 
 /// See the Unix variant; there is no root account to compare against here.
 #[cfg(all(not(unix), not(windows)))]
+#[must_use]
 pub fn is_elevated() -> bool {
     false
 }
@@ -22,6 +24,7 @@ pub fn is_elevated() -> bool {
 /// `CheckTokenMembership` respects deny-only SIDs. Any failure reads as "not
 /// elevated".
 #[cfg(windows)]
+#[must_use]
 pub fn is_elevated() -> bool {
     token_is_elevated() && is_administrators_member()
 }
@@ -67,7 +70,6 @@ fn is_administrators_member() -> bool {
 /// Whether the process token reports `TokenElevation`.
 #[cfg(windows)]
 fn token_is_elevated() -> bool {
-    use std::mem::size_of;
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
 
     use windows_sys::Win32::Foundation::HANDLE;
@@ -96,7 +98,7 @@ fn token_is_elevated() -> bool {
             token.as_raw_handle(),
             TokenElevation,
             (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            size_of::<TOKEN_ELEVATION>() as u32,
+            crate::service::trust_windows::win32::win32_size_of::<TOKEN_ELEVATION>(),
             &mut returned,
         )
     };

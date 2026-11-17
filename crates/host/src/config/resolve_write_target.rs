@@ -7,6 +7,7 @@ use super::store::resolve_target;
 /// Follow symlinks from `path` to the file a write would actually replace
 /// (a dangling link resolves to its target). Pure path arithmetic: nothing is
 /// created or locked.
+#[must_use]
 pub fn resolve_write_target(path: &Path) -> PathBuf {
     resolve_target(path)
 }

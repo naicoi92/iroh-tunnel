@@ -3,6 +3,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use super::types::{FlowId, HEADER_LEN};
 
 /// Frame `payload` for `flow`.
+#[must_use]
 pub fn encode(flow: FlowId, payload: &[u8]) -> Bytes {
     let mut out = BytesMut::with_capacity(HEADER_LEN + payload.len());
     out.put_u32(flow.0);

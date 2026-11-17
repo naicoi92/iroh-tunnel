@@ -15,6 +15,7 @@ pub enum Role {
 
 impl Role {
     /// File name of this role's status file.
+    #[must_use]
     pub fn status_file_name(self) -> &'static str {
         match self {
             Role::Serve => "serve-status.json",
@@ -23,6 +24,7 @@ impl Role {
     }
 
     /// The role's CLI name (`"serve"` / `"access"`).
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Role::Serve => "serve",

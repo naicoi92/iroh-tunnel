@@ -47,7 +47,9 @@ struct Shared {
 
 impl Shared {
     fn machine(&self) -> MutexGuard<'_, ScmMachine> {
-        self.machine.lock().unwrap_or_else(|e| e.into_inner())
+        self.machine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn send(&self, status: ServiceStatus) {
@@ -140,11 +142,12 @@ fn spawn_ticker(shared: Arc<Shared>) {
     });
 }
 
-/// Log writer of the service: the capped machine log, or nowhere.
+/// Log writer of the service: the capped machine log, or nowhere when the
+/// machine directory does not resolve or fails its trust check. A log file
+/// that cannot be opened yet is retried by [`CappedLog`] itself.
 fn log_writer(role: &str) -> BoxMakeWriter {
-    let log = machine_log_dir().and_then(|dir| CappedLog::open(&dir, role, LOG_CAP));
-    match log {
-        Some(log) => BoxMakeWriter::new(Mutex::new(log)),
+    match machine_log_dir() {
+        Some(dir) => BoxMakeWriter::new(Mutex::new(CappedLog::open(&dir, role, LOG_CAP))),
         None => BoxMakeWriter::new(std::io::sink),
     }
 }
@@ -167,7 +170,9 @@ pub(crate) fn run_as_service(parsed: Cli, binary: Binary) -> ! {
     };
     let name = system_service_name(role);
     let slot = START.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((parsed, binary));
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((parsed, binary));
     match service_dispatcher::start(name, ffi_service_main) {
         Ok(()) => std::process::exit(0),
         Err(e) => {
@@ -184,9 +189,11 @@ pub(crate) fn run_as_service(parsed: Cli, binary: Binary) -> ! {
 }
 
 fn service_main(_arguments: Vec<OsString>) {
-    let taken = START
-        .get()
-        .and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
+    let taken = START.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    });
     let Some((parsed, binary)) = taken else {
         crate::output::report("error: service started without a pending command\n");
         return;

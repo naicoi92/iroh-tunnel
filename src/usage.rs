@@ -26,6 +26,7 @@ impl std::error::Error for UsageError {}
 
 /// The clap message without the `error: ` prefix, `Usage:` paragraph and
 /// `For more information` tail; continuation lines are kept.
+#[must_use]
 pub fn clap_error_summary(e: &clap::Error) -> String {
     // `StyledStr`'s Display never emits ANSI escapes.
     let rendered = e.render().to_string();
@@ -58,6 +59,7 @@ pub fn print_usage_error_to(
 }
 
 /// [`print_usage_error_to`] on stderr.
+#[must_use]
 pub fn print_usage_error(binary: Binary, path: &[String], message: &str) -> i32 {
     print_usage_error_to(&mut std::io::stderr().lock(), binary, path, message)
 }
@@ -75,6 +77,7 @@ fn takes_value(chain: &[&clap::Command], long: Option<&str>, short: Option<char>
 
 /// Names of the subcommands below `root` that `argv` selected, ignoring flags
 /// and their values; stops at the first token that is no subcommand.
+#[must_use]
 pub fn deepest_command_path(root: &clap::Command, argv: &[OsString]) -> Vec<String> {
     let mut chain: Vec<&clap::Command> = vec![root];
     let mut path = Vec::new();
@@ -131,7 +134,7 @@ mod tests {
     }
 
     fn strs(p: &[&str]) -> Vec<String> {
-        p.iter().map(|s| s.to_string()).collect()
+        p.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

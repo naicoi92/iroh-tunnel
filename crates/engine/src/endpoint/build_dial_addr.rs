@@ -11,6 +11,7 @@ use iroh::RelayUrl;
 ///
 /// Lifted out of `access::handle_local_connection` so `iroh::EndpointAddr`
 /// construction stops leaking across the seam.
+#[must_use]
 pub fn build_dial_addr(node_id: iroh::EndpointId, relay_urls: &[RelayUrl]) -> iroh::EndpointAddr {
     let mut addr = iroh::EndpointAddr::new(node_id);
     for url in relay_urls {
@@ -38,7 +39,7 @@ mod tests {
         let addr = build_dial_addr(node_id, &urls);
 
         // Every URL must be attached so iroh can try each in turn.
-        let attached: Vec<String> = addr.relay_urls().map(|u| u.to_string()).collect();
+        let attached: Vec<String> = addr.relay_urls().map(ToString::to_string).collect();
         for u in &urls {
             let s = u.to_string();
             assert!(
