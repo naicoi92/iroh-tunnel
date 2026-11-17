@@ -387,6 +387,20 @@ impl<T> PeerFlows<T> {
         self.live.insert(flow, (upstream, now));
     }
 
+    /// Swap the upstream of a flow still in the table, keeping its idle timer;
+    /// returns the previous upstream, or `None` (and stores nothing) when the
+    /// flow has ended.
+    pub fn replace(&mut self, flow: FlowId, upstream: T) -> Option<T> {
+        self.live
+            .get_mut(&flow)
+            .map(|entry| std::mem::replace(&mut entry.0, upstream))
+    }
+
+    /// End one flow, returning its upstream. Its identifier stays spent.
+    pub fn remove(&mut self, flow: FlowId) -> Option<T> {
+        self.live.remove(&flow).map(|(upstream, _)| upstream)
+    }
+
     /// Flows currently live.
     pub fn len(&self) -> usize {
         self.live.len()
@@ -635,6 +649,32 @@ mod tests {
             stats.try_open_flow(1),
             "the slot is free once quarantine ends"
         );
+    }
+
+    #[test]
+    fn replace_swaps_a_flows_upstream_and_keeps_its_idle_timer() {
+        let t0 = Instant::now();
+        let mut flows: PeerFlows<&str> = PeerFlows::default();
+        flows.insert(FlowId(1), "opening", t0);
+        assert_eq!(flows.replace(FlowId(1), "live"), Some("opening"));
+        assert_eq!(flows.get(FlowId(1)), Some(&"live"));
+        assert_eq!(flows.replace(FlowId(2), "none"), None, "no flow, no insert");
+        assert!(flows.get(FlowId(2)).is_none());
+        assert_eq!(
+            flows.expire(t0 + Duration::from_secs(1), Duration::from_secs(1)),
+            vec!["live"]
+        );
+    }
+
+    #[test]
+    fn a_removed_flow_stays_spent() {
+        let t0 = Instant::now();
+        let mut flows: PeerFlows<&str> = PeerFlows::default();
+        flows.insert(FlowId(3), "one", t0);
+        assert_eq!(flows.remove(FlowId(3)), Some("one"));
+        assert!(flows.is_empty());
+        assert_eq!(flows.admit(FlowId(3), t0), Admission::Unknown);
+        assert_eq!(flows.admit(FlowId(4), t0), Admission::New);
     }
 
     #[test]
