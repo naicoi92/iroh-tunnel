@@ -9,6 +9,15 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
 
 ## [Unreleased]
 
+### Fixed
+
+- Role ownership fails closed (#221): a start is refused (exit code 6) when
+  the other role is running and its owner record exists but cannot be read,
+  naming the record path; a start fails when its own owner record cannot be
+  written; on Windows, `run`, `status` and `service install` report an error
+  when `%ProgramData%` cannot be resolved instead of silently skipping the
+  system-service conflict check.
+
 ## [0.6.0] - 2026-11-12
 
 ### BREAKING

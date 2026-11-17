@@ -509,7 +509,7 @@ fn plan_system_install(
         &account_of,
     )?;
 
-    if let Some(machine) = crate::ownership::machine_dir() {
+    if let Some(machine) = crate::ownership::machine_dir()? {
         if machine.verify && machine.path.exists() {
             verify_machine_dir(&machine.path).map_err(|e| machine_dir_refusal(e, &machine.path))?;
         }

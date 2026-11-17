@@ -273,6 +273,36 @@ async fn roles_with_distinct_keys_coexist_but_a_shared_key_is_rejected() -> Resu
 }
 
 #[tokio::test]
+async fn access_is_refused_when_the_running_serve_record_is_corrupt() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (serve_key, serve_id) = write_key(world.root.path(), "serve.key")?;
+    let (access_key, _) = write_key(world.root.path(), "access.key")?;
+    let _serve = start_serve(
+        &world,
+        SERVE,
+        None,
+        &relay,
+        &serve_key,
+        &world.state("serve"),
+    )?;
+    std::fs::write(
+        world
+            .home()
+            .join(".local/state/iroh-tunnel/serve.owner.json"),
+        "{not json",
+    )?;
+    let access = spawn(
+        world.command(ACCESS, None, &world.state("access")),
+        &access_args(&relay, &access_key, &serve_id),
+    )?;
+    let (code, stderr) = wait_refused(access)?;
+    assert_refused((code, stderr.clone()), "identity cannot be determined");
+    assert!(stderr.contains("serve.owner.json"), "{stderr}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn concurrent_starts_admit_exactly_one_owner() -> Result<()> {
     let (relay, _server) = relay().await?;
     let world = World::new()?;
