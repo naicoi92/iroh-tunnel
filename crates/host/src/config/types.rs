@@ -167,12 +167,17 @@ pub enum EditOutcome {
 
 /// A private scratch copy of the config, ready to be edited by any editor.
 ///
-/// Dropping it removes the scratch file. No lock is held while it exists.
+/// Dropping it removes the scratch file unless a failed commit kept it. No
+/// lock is held while it exists.
 pub struct EditAttempt {
     pub(super) role: Role,
     pub(super) path: PathBuf,
     pub(super) scratch: PathBuf,
     pub(super) original: Option<String>,
+    /// Set by a commit when the scratch copy is the only place the edited
+    /// text may be: the sidecar could not be written, or the copy could not
+    /// be read.
+    pub(super) keep_scratch: bool,
 }
 
 impl std::fmt::Debug for EditAttempt {
@@ -182,12 +187,16 @@ impl std::fmt::Debug for EditAttempt {
             .field("path", &self.path)
             .field("scratch", &self.scratch)
             .field("original", &"<redacted>")
+            .field("keep_scratch", &self.keep_scratch)
             .finish()
     }
 }
 
 impl Drop for EditAttempt {
     fn drop(&mut self) {
+        if self.keep_scratch {
+            return;
+        }
         let _ = std::fs::remove_file(&self.scratch);
     }
 }
