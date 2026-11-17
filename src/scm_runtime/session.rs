@@ -245,11 +245,11 @@ impl<S: StatusSink> Session<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::PendingState;
+    use super::super::{PendingState, STOP_HINT};
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
 
     /// Decides whether the fake refuses a status.
     type Refusal = fn(Status) -> bool;
@@ -260,6 +260,9 @@ mod tests {
         attempts: Vec<Status>,
         /// Each matching attempt consumes the front refusal.
         refuse: VecDeque<Refusal>,
+        /// One-shot pause of the first `Running` attempt: wait on the first
+        /// barrier ("inside the retry"), then on the second ("released").
+        gate: Option<(Arc<Barrier>, Arc<Barrier>)>,
     }
 
     /// Records every attempted and accepted status; refuses an attempt that
@@ -272,6 +275,16 @@ mod tests {
             let handle = Self::default();
             handle.log().refuse.extend(refusals.iter().copied());
             handle
+        }
+
+        /// Like [`Self::refusing`], and the first `Running` attempt pauses
+        /// until the test thread passes both returned barriers.
+        fn gated_on_first_running(refusals: &[Refusal]) -> (Self, Arc<Barrier>, Arc<Barrier>) {
+            let handle = Self::refusing(refusals);
+            let inside = Arc::new(Barrier::new(2));
+            let released = Arc::new(Barrier::new(2));
+            handle.log().gate = Some((Arc::clone(&inside), Arc::clone(&released)));
+            (handle, inside, released)
         }
 
         fn log(&self) -> MutexGuard<'_, FakeLog> {
@@ -290,6 +303,14 @@ mod tests {
     impl StatusSink for FakeHandle {
         type Error = &'static str;
         fn set(&self, status: Status) -> Result<(), Self::Error> {
+            if status == Status::Running {
+                // Wait outside the log lock so the test thread can inspect it.
+                let gate = self.0.lock().map_err(|_| "fake poisoned")?.gate.take();
+                if let Some((inside, released)) = gate {
+                    inside.wait();
+                    released.wait();
+                }
+            }
             let mut log = self.0.lock().map_err(|_| "fake poisoned")?;
             log.attempts.push(status);
             if log.refuse.front().is_some_and(|refused| refused(status)) {
@@ -309,6 +330,66 @@ mod tests {
         matches!(status, Status::Stopped(_))
     }
 
+    fn is_pending(status: Status) -> bool {
+        matches!(status, Status::Pending(_))
+    }
+
+    fn is_start_pending(status: &Status) -> bool {
+        matches!(
+            status,
+            Status::Pending(Report {
+                state: PendingState::StartPending,
+                ..
+            })
+        )
+    }
+
+    fn stop_pending(checkpoint: u32) -> Status {
+        Status::Pending(Report {
+            state: PendingState::StopPending,
+            wait_hint: STOP_HINT,
+            checkpoint,
+        })
+    }
+
+    /// Log text written by the fmt subscriber.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("log buffer poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = LogBuffer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `f` on this thread under a fmt subscriber and return what it logged.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
     fn session(handle: &FakeHandle) -> (Session<FakeHandle>, Arc<AtomicUsize>) {
         let stops = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&stops);
@@ -323,34 +404,39 @@ mod tests {
     }
 
     #[test]
-    fn running_refused_once_is_retried() {
+    fn refused_pending_report_is_logged_with_state_and_checkpoint() {
+        let handle = FakeHandle::refusing(&[is_pending]);
+        let (session, _) = session(&handle);
+        let logs = capture_logs(|| session.on_stop_control().unwrap());
+        assert_eq!(handle.attempts(), [stop_pending(1)]);
+        assert!(logs.contains("StopPending"), "{logs}");
+        assert!(logs.contains("checkpoint 1"), "{logs}");
+    }
+
+    #[test]
+    fn running_report_refused_once_is_retried() {
         let handle = FakeHandle::refusing(&[is_running]);
         let (session, stops) = session(&handle);
-        session.on_ready().unwrap();
+        let logs = capture_logs(|| session.on_ready().unwrap());
         assert_eq!(handle.attempts(), [Status::Running, Status::Running]);
         assert_eq!(handle.sent(), [Status::Running]);
         assert_eq!(stops.load(Ordering::SeqCst), 0);
+        assert!(logs.contains("Running"), "{logs}");
         session.on_finished(0).unwrap();
         assert_eq!(handle.sent().last(), Some(&Status::Stopped(ScmExit::Clean)));
     }
 
     #[test]
-    fn running_always_refused_stops_with_a_failure_code() {
+    fn running_report_always_refused_ends_with_101() {
         let handle = FakeHandle::refusing(&[is_running as Refusal; 3]);
         let (session, stops) = session(&handle);
         session.on_ready().unwrap();
         assert_eq!(stops.load(Ordering::SeqCst), 1, "the drain was requested");
-        let pending = handle.sent();
-        assert!(
-            matches!(
-                pending.as_slice(),
-                [Status::Pending(Report {
-                    state: PendingState::StopPending,
-                    ..
-                })]
-            ),
-            "{pending:?}"
-        );
+        assert_eq!(handle.sent(), [stop_pending(1)]);
+        assert!(!session.tick().unwrap());
+        let sent = handle.sent();
+        assert!(!sent.iter().any(is_start_pending), "{sent:?}");
+        assert_eq!(sent, [stop_pending(1), stop_pending(2)]);
         // The drained run exits cleanly, yet the SCM learns of the failure.
         session.on_finished(0).unwrap();
         assert_eq!(
@@ -363,7 +449,71 @@ mod tests {
     }
 
     #[test]
-    fn stopped_refused_once_is_retried() {
+    fn stop_request_while_running_is_retried_then_stops_cleanly() {
+        let (handle, inside, released) = FakeHandle::gated_on_first_running(&[is_running]);
+        let (session, stops) = session(&handle);
+        std::thread::scope(|scope| {
+            scope.spawn(|| session.on_ready().unwrap());
+            inside.wait();
+            assert!(
+                session.machine.try_lock().is_err(),
+                "the retry holds the state lock"
+            );
+            scope.spawn(|| session.on_stop_control().unwrap());
+            released.wait();
+        });
+        assert!(!session.tick().unwrap());
+        session.on_finished(0).unwrap();
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            handle.attempts(),
+            [
+                Status::Running,
+                Status::Running,
+                stop_pending(1),
+                stop_pending(2),
+                Status::Stopped(ScmExit::Clean),
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_request_while_running_keeps_failing_ends_with_101() {
+        let (handle, inside, released) =
+            FakeHandle::gated_on_first_running(&[is_running as Refusal; 3]);
+        let (session, stops) = session(&handle);
+        std::thread::scope(|scope| {
+            scope.spawn(|| session.on_ready().unwrap());
+            inside.wait();
+            scope.spawn(|| session.on_stop_control().unwrap());
+            released.wait();
+        });
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            1,
+            "the drain was requested once"
+        );
+        assert_eq!(
+            handle.sent(),
+            [stop_pending(1)],
+            "the stop control adds no report"
+        );
+        assert!(!session.tick().unwrap());
+        let sent = handle.sent();
+        assert!(!sent.iter().any(is_start_pending), "{sent:?}");
+        assert_eq!(sent, [stop_pending(1), stop_pending(2)]);
+        // A requested stop's exit code still yields the fault's code.
+        session.on_finished(130).unwrap();
+        assert_eq!(
+            handle.sent().last(),
+            Some(&Status::Stopped(ScmExit::Specific(
+                Fault::StatusReport.code()
+            )))
+        );
+    }
+
+    #[test]
+    fn stopped_report_refused_once_is_retried() {
         let handle = FakeHandle::refusing(&[is_stopped]);
         let (session, _) = session(&handle);
         session.on_finished(2).unwrap();
@@ -372,10 +522,14 @@ mod tests {
     }
 
     #[test]
-    fn stopped_always_refused_is_a_fault() {
+    fn stopped_report_always_refused_exits_with_101() {
         let handle = FakeHandle::refusing(&[is_stopped as Refusal; 3]);
         let (session, _) = session(&handle);
-        assert_eq!(session.on_finished(0), Err(Fault::StatusReport));
+        let logs = capture_logs(|| {
+            assert_eq!(session.on_finished(0), Err(Fault::StatusReport));
+        });
+        assert!(logs.contains("Stopped"), "{logs}");
+        assert!(logs.contains("giving up"), "{logs}");
         assert_eq!(session.abandon(Fault::StatusReport), 101);
         assert!(handle.sent().is_empty());
         assert_eq!(handle.attempts().len(), 3, "abandon does not resend");
@@ -403,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn ticker_spawn_failure_stops_with_its_code() {
+    fn status_ticker_cannot_start_ends_with_102() {
         let handle = FakeHandle::default();
         let (session, _) = session(&handle);
         session.fail_start(Fault::TickerSpawn).unwrap();
@@ -416,17 +570,23 @@ mod tests {
     }
 
     #[test]
-    fn pending_reports_are_not_retried() {
-        let handle = FakeHandle::refusing(&[|s| matches!(s, Status::Pending(_))]);
+    fn pending_report_refused_is_not_resent_and_next_tick_advances() {
+        let handle = FakeHandle::refusing(&[is_pending]);
         let (session, _) = session(&handle);
         assert!(!session.tick().unwrap());
-        assert_eq!(handle.attempts().len(), 1);
+        assert_eq!(handle.attempts().len(), 1, "not resent");
         assert!(!session.tick().unwrap());
-        assert_eq!(handle.sent().len(), 1, "the next tick reports again");
+        let attempts = handle.attempts();
+        let [Status::Pending(first), Status::Pending(second)] = attempts.as_slice() else {
+            panic!("two pending attempts expected: {attempts:?}");
+        };
+        assert_eq!(first.state, PendingState::StartPending);
+        assert!(second.checkpoint > first.checkpoint, "{attempts:?}");
+        assert_eq!(handle.sent(), [attempts[1]], "the next tick reports again");
     }
 
     #[test]
-    fn poisoned_state_is_a_fault_not_recovered() {
+    fn poisoned_service_state_ends_with_100() {
         let handle = FakeHandle::default();
         let (session, _) = session(&handle);
         let session = Arc::new(session);
