@@ -1252,7 +1252,7 @@ impl UpstreamResolver {
     async fn resolve(&self, local_addr: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
         if self.permits.available_permits() == 0 {
             tracing::debug!(
-                target = local_addr,
+                local_addr,
                 "udp target lookups at their bound, waiting for one to end"
             );
         }
@@ -2076,6 +2076,12 @@ mod tests {
         let mut waiters = JoinSet::new();
         spawn_opens(&mut waiters, &resolver, MAX_RESOLVES_PER_SERVICE);
         settle().await;
+        assert_eq!(
+            started.load(Ordering::Relaxed),
+            MAX_RESOLVES_PER_SERVICE,
+            "the waiters must be blocked on the bound before the cancel"
+        );
+        assert_eq!(resolver.permits.available_permits(), 0);
         waiters.abort_all();
         while waiters.join_next().await.is_some() {}
 
