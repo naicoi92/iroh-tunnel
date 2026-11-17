@@ -7,7 +7,8 @@ use std::path::Path;
 ///
 /// On unix the file is created `0600`, so a permissive umask never opens a
 /// window for another user to grab a write fd before the caller sets the
-/// final mode on the returned handle.
+/// final mode on the returned handle. Elsewhere the file inherits the
+/// parent directory's permissions.
 ///
 /// # Errors
 ///

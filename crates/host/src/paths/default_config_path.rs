@@ -9,6 +9,7 @@ use super::locations::default_config_dir;
 use super::locations::APP_DIR;
 use super::set_migration_notice::notify_migrated;
 use crate::error::CliError;
+use crate::fs_util::create_private_new;
 
 /// Default config file for `role`. On macOS a legacy configuration is first
 /// copied into place when the new one does not exist yet; that performs
@@ -86,7 +87,7 @@ fn copy_no_overwrite(legacy: &Path, dest: &Path) -> std::io::Result<()> {
         std::process::id()
     ));
     let result = (|| {
-        let mut file = crate::fs_util::create_private_new(&tmp)?;
+        let mut file = create_private_new(&tmp)?;
         file.write_all(&content)?;
         file.sync_all()?;
         // hard_link fails if `dest` exists: an atomic create-if-absent that
