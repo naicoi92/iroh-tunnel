@@ -2,7 +2,7 @@
 //! (T-02.1, T-02.2, T-02.4; Page 05 v3 §2–§4). File effects live in `store`.
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use anyhow::Result;
 use regex::Regex;
@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 pub use iroh_tunnel_engine::settings::{Protocol, UdpLimits};
 
 // Service names are lowercased dns-label-like identifiers (ALPN-safe).
-fn name_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[a-z0-9-]+$").expect("valid static regex"))
-}
+#[expect(
+    clippy::expect_used,
+    reason = "invariant: the pattern is a constant and covered by the name tests"
+)]
+static NAME_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9-]+$").expect("valid static regex"));
 
 /// Maximum service-name length: ALPN must stay ≤ 255 bytes, minus the
 /// the engine ALPN prefix prefix (see T-03). 63 keeps names dns-label friendly.
@@ -339,7 +341,7 @@ impl NodeConfig {
 }
 
 fn validate_name(name: &str) -> Result<()> {
-    if !name_regex().is_match(name) {
+    if !NAME_REGEX.is_match(name) {
         anyhow::bail!("invalid service name '{name}': must match ^[a-z0-9-]+$");
     }
     if name.len() > MAX_NAME_LEN {

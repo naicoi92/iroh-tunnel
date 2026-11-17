@@ -114,11 +114,16 @@ pub async fn update(req: &UpdateRequest, ctx: &UpdateContext<'_>) -> anyhow::Res
 /// Accepts `1.2.3` or `v1.2.3` (plus pre-release/build suffix); the result is
 /// embedded in URLs and file names, so anything else is rejected.
 fn parse_version(raw: &str) -> anyhow::Result<String> {
+    #[expect(
+        clippy::expect_used,
+        reason = "invariant: the pattern is a constant and covered by the version tests"
+    )]
+    static VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.\-]+)?$")
+            .expect("valid static regex")
+    });
     let v = raw.strip_prefix('v').unwrap_or(raw);
-    let valid = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.\-]+)?$")
-        .expect("static regex")
-        .is_match(v);
-    if !valid {
+    if !VERSION.is_match(v) {
         bail!("invalid version {raw:?}; expected e.g. 0.4.2");
     }
     Ok(v.to_owned())

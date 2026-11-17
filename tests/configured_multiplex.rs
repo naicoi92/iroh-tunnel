@@ -1,6 +1,11 @@
 //! #83 / CFG-RUN-01 / CFG-MULTIPLEX-01: configured processes, real TCP
 //! clients/target, isolated local relay. `test-utils` disables certificate
 //! verification: never use this artifact with public relays or real secrets.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use anyhow::{Context, Result};
 use iroh_tunnel_host::config::encode_secret_key;

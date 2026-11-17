@@ -7,7 +7,13 @@
 //! Time and the role-lock wait are injected so tests never sleep.
 
 // Pure and compiled everywhere for its tests, but only Windows consumes it.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "pure and compiled everywhere for its tests, but only Windows consumes it"
+    )
+)]
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -108,7 +114,6 @@ impl ServiceSpec {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_with_invocation(
         role: &str,
         executable: &Path,
@@ -466,11 +471,11 @@ pub(crate) fn first_command_line_arg(cmd: &str) -> Option<String> {
         return None;
     }
     if let Some(rest) = cmd.strip_prefix('"') {
-        let end = rest.find('"').unwrap_or(rest.len());
-        return Some(rest[..end].to_owned());
+        let quoted = rest.split_once('"').map_or(rest, |(arg, _)| arg);
+        return Some(quoted.to_owned());
     }
-    let end = cmd.find(char::is_whitespace).unwrap_or(cmd.len());
-    Some(cmd[..end].to_owned())
+    let unquoted = cmd.split(char::is_whitespace).next().unwrap_or(cmd);
+    Some(unquoted.to_owned())
 }
 
 /// Scriptable in-memory SCM shared by this module's and the system verb glue's tests.

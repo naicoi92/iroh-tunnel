@@ -1,4 +1,5 @@
 //! Root CLI packaging invariants: three binaries and one shared version (Task 21).
+#![cfg(test)]
 
 use std::collections::BTreeSet;
 use std::process::Command;

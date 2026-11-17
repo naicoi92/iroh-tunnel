@@ -37,7 +37,10 @@ pub fn default_config_path(role: &str) -> Result<PathBuf> {
 /// directory may have been created, owner-only).
 // Only called from the macOS branch of `default_config_path`; other targets
 // keep it compiled (for the shared code path) without a caller.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), not(target_os = "macos")),
+    expect(dead_code, reason = "only macOS migrates a legacy config")
+)]
 fn migrate_legacy(legacy: &Path, dest: &Path) -> Result<()> {
     // New configuration wins without consulting the legacy location.
     match std::fs::symlink_metadata(dest) {

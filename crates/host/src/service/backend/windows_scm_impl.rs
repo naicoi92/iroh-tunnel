@@ -178,8 +178,8 @@ fn read_service_string(name: &str, value: &str) -> Result<Option<String>> {
         return Err(std::io::Error::from_raw_os_error(status as i32))
             .with_context(|| format!("cannot read `{value}` of service `{name}`"));
     }
-    let units = (capacity as usize / 2).min(buf.len());
-    let text = OsString::from_wide(&buf[..units]);
+    let units = capacity as usize / 2;
+    let text = OsString::from_wide(buf.get(..units).unwrap_or(&buf));
     Ok(Some(
         text.to_string_lossy().trim_end_matches('\0').to_string(),
     ))

@@ -231,7 +231,7 @@ unsafe fn read_dacl(acl: *const ACL) -> Option<Vec<Ace>> {
             std::slice::from_raw_parts(raw.cast::<u8>(), usize::from(header.AceSize))
         };
         let layout = ace_layout(bytes)?;
-        let sid_bytes = &bytes[layout.sid_offset..layout.sid_offset + layout.sid_len];
+        let sid_bytes = bytes.get(layout.sid_offset..layout.sid_offset + layout.sid_len)?;
         // SAFETY: `sid_bytes` lies inside the live ACE and holds a whole SID
         // of the length its sub-authority count announces.
         let sid = unsafe { sid_string(sid_bytes.as_ptr().cast_mut().cast()) }.ok()?;
@@ -447,7 +447,14 @@ fn read_all(handle: &OwnedHandle, path: &Path) -> Result<Vec<u8>> {
                 model::MAX_VERIFIED_READ
             )));
         }
-        out.extend_from_slice(&buf[..read as usize]);
+        let chunk = buf.get(..read as usize).ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to read {}: ReadFile reported {read} bytes for a {} byte buffer",
+                path.display(),
+                buf.len()
+            )
+        })?;
+        out.extend_from_slice(chunk);
     }
 }
 
@@ -650,7 +657,11 @@ fn write_all(file: &OwnedHandle, mut bytes: &[u8]) -> io::Result<()> {
         if written == 0 {
             return Err(io::ErrorKind::WriteZero.into());
         }
-        bytes = &bytes[written as usize..];
+        bytes = bytes.get(written as usize..).ok_or_else(|| {
+            io::Error::other(format!(
+                "WriteFile reported {written} bytes written for a {chunk} byte chunk"
+            ))
+        })?;
     }
     // SAFETY: `file` is an open, writable handle.
     if unsafe { FlushFileBuffers(file.as_raw_handle()) } == 0 {
@@ -704,7 +715,7 @@ fn publish_with(
         .and_then(|()| {
             let to = child_path(d, name);
             // `chain` is still held here, so `d` cannot be swapped.
-            let to = &to[..to.len() - 1];
+            let to = to.strip_suffix(&[0]).unwrap_or(&to);
             rename_into(&file, to, rename)
                 .and_then(|()| ensure_regular_file(&wide_nul(to)))
                 .with_context(|| format!("failed to finalize {name} in {}", dir.display()))
@@ -886,8 +897,8 @@ pub(crate) fn account_of(sid: &Sid) -> Option<String> {
     if ok == 0 {
         return None;
     }
-    let name = String::from_utf16(&name[..name_len as usize]).ok()?;
-    let domain = String::from_utf16(&domain[..domain_len as usize]).ok()?;
+    let name = String::from_utf16(name.get(..name_len as usize)?).ok()?;
+    let domain = String::from_utf16(domain.get(..domain_len as usize)?).ok()?;
     Some(if domain.is_empty() {
         name
     } else {
@@ -918,7 +929,10 @@ pub(crate) fn owner_of(path: &Path) -> Result<Sid> {
 /// # Errors
 ///
 /// An error naming the HRESULT when the shell cannot resolve the folder.
-#[cfg_attr(feature = "test-utils", allow(dead_code))] // test builds use a temp machine dir
+#[cfg_attr(
+    all(feature = "test-utils", not(test)),
+    expect(dead_code, reason = "test-utils builds use a temp machine dir")
+)]
 pub(crate) fn program_data_dir() -> Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;

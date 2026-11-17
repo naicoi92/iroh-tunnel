@@ -23,8 +23,8 @@ fn unknown(why: &str) -> EffectiveBinary {
 
 /// Parse `systemctl show -p LoadState -p ExecStart <unit>` output.
 #[cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, reason = "only the Linux backends parse this")
+    all(not(test), not(target_os = "linux")),
+    expect(dead_code, reason = "only the Linux backends parse this")
 )]
 pub(crate) fn parse_systemd_show(stdout: &str) -> EffectiveBinary {
     let value = |key: &str| {
@@ -46,14 +46,13 @@ pub(crate) fn parse_systemd_show(stdout: &str) -> EffectiveBinary {
         return unknown("the unit does not have exactly one ExecStart command");
     };
     let block = exec.trim();
-    let single_block = block.starts_with("{ path=")
-        && block.ends_with(" }")
-        && block.matches('{').count() == 1
-        && block.matches('}').count() == 1;
-    if !single_block {
+    let fields = block.strip_prefix("{ path=").filter(|_| {
+        block.ends_with(" }") && block.matches('{').count() == 1 && block.matches('}').count() == 1
+    });
+    let Some(fields) = fields else {
         return unknown("the unit does not have exactly one well-formed ExecStart command");
-    }
-    match block["{ path=".len()..].split_once(" ;") {
+    };
+    match fields.split_once(" ;") {
         Some((path, _)) if !path.is_empty() => EffectiveBinary::Binary(PathBuf::from(path)),
         _ => unknown("unrecognized ExecStart format"),
     }
@@ -61,8 +60,8 @@ pub(crate) fn parse_systemd_show(stdout: &str) -> EffectiveBinary {
 
 /// Parse `launchctl print <target>` output.
 #[cfg_attr(
-    not(target_os = "macos"),
-    allow(dead_code, reason = "only the macOS backend parses this")
+    all(not(test), not(target_os = "macos")),
+    expect(dead_code, reason = "only the macOS backend parses this")
 )]
 pub(crate) fn parse_launchctl_print(success: bool, stdout: &str, stderr: &str) -> EffectiveBinary {
     if !success {
@@ -94,8 +93,8 @@ pub(crate) fn parse_launchctl_print(success: bool, stdout: &str, stderr: &str) -
 
 /// Parse the installed BusyBox init script (`None` when it does not exist).
 #[cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, reason = "only the Linux backends parse this")
+    all(not(test), not(target_os = "linux")),
+    expect(dead_code, reason = "only the Linux backends parse this")
 )]
 pub(crate) fn parse_busybox_script(script: Option<&str>) -> EffectiveBinary {
     let Some(script) = script else {

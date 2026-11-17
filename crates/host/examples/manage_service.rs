@@ -118,13 +118,15 @@ fn run() -> Result<String> {
 }
 
 fn main() -> ExitCode {
+    use std::io::Write;
+    // Write errors (e.g. a closed pipe) end the example without a panic.
     match run() {
-        Ok(outcome) => {
-            println!("{outcome}");
-            ExitCode::SUCCESS
-        }
+        Ok(outcome) => match writeln!(std::io::stdout(), "{outcome}") {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        },
         Err(err) => {
-            eprintln!("{err:#}");
+            let _ = writeln!(std::io::stderr(), "{err:#}");
             ExitCode::FAILURE
         }
     }

@@ -44,6 +44,11 @@
 //! in-process relay is used, never public relays or real secrets.
 
 #![cfg(windows)]
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use anyhow::{ensure, Result};
 use std::path::{Path, PathBuf};

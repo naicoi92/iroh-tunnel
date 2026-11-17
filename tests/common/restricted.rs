@@ -399,7 +399,9 @@ pub fn run_non_elevated(cmd: &mut Command) -> Result<Output> {
         );
         "CreateProcessWithTokenW"
     };
-    *LAUNCH_API.lock().unwrap() = api;
+    *LAUNCH_API
+        .lock()
+        .map_err(|_| anyhow::anyhow!("launch API lock poisoned"))? = api;
     let process = owned(info.hProcess);
     drop(owned(info.hThread));
     // Close our copies of the child's ends so the readers see EOF at exit.

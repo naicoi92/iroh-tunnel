@@ -3,6 +3,7 @@
 //! editors are Unix-only and live in `config_lifecycle.rs`; owner-only ACLs on
 //! Windows are not asserted here and stay UNVERIFIED.
 #![cfg(windows)]
+#![cfg(test)]
 
 use std::fs::File;
 use std::path::{Path, PathBuf};

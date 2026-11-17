@@ -11,6 +11,7 @@ pub mod cli_args;
 pub(crate) mod cli_service;
 pub mod config_cmd;
 pub(crate) mod lifecycle;
+pub(crate) mod output;
 pub(crate) mod render;
 pub(crate) mod scm_runtime;
 pub mod status_cmd;

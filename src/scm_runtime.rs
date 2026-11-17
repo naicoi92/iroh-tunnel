@@ -5,7 +5,10 @@
 //! [`dispatcher`] touches Windows APIs.
 
 // Consumed only by the Windows dispatcher; the tests cover them elsewhere.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "consumed only by the Windows dispatcher")
+)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

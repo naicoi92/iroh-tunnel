@@ -5,12 +5,13 @@
 //! [`iroh_tunnel_host::config`] and does the prompting and printing; the
 //! `$EDITOR` invocation of `edit` lives here too.
 
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use crate::cli::ServiceArgs;
+use crate::output;
 use crate::render;
 use iroh_tunnel_host::config::{
     check_config, identity_state, keygen, list_services, prepare_edit, random_identity,
@@ -41,8 +42,7 @@ pub fn keygen_cli(role: Role, config: Option<&Path>, yes: bool) -> Result<()> {
     if let KeygenOutcome::ConsentNeeded { path, .. } = &outcome {
         return Err(rotation_refused(path));
     }
-    print!("{}", render::render_keygen(&outcome));
-    Ok(())
+    output::stdout(&render::render_keygen(&outcome))
 }
 
 fn rotation_refused(path: &Path) -> anyhow::Error {
@@ -64,12 +64,11 @@ fn confirm_rotation(path: &Path) -> Result<()> {
     if !crate::cli_service::is_interactive() {
         return Err(rotation_refused(path));
     }
-    eprint!(
+    output::stderr(&format!(
         "{} already holds a secret_key. Replacing it changes this node's NodeId and breaks \
          peers that pin it. Replace it? [y/N] ",
         path.display()
-    );
-    std::io::stderr().flush().ok();
+    ))?;
     let mut answer = String::new();
     std::io::stdin()
         .lock()
@@ -85,36 +84,31 @@ fn confirm_rotation(path: &Path) -> Result<()> {
 /// `config keygen --print`: print the identity. The secret goes to stdout only,
 /// so it can be captured (`$(…)`, pipes).
 pub fn keygen_random() -> Result<()> {
-    print!("{}", render::render_identity(&random_identity()));
-    Ok(())
+    output::stdout(&render::render_identity(&random_identity()))
 }
 
 /// `config set`: create or update the service and print the change report.
 pub fn set<S: ServiceArgs>(args: S, config: Option<PathBuf>) -> Result<()> {
     let outcome = set_service(S::ROLE, &args.into_set(config)?)?;
-    print!("{}", render::render_set(S::ROLE, &outcome));
-    Ok(())
+    output::stdout(&render::render_set(S::ROLE, &outcome))
 }
 
 /// `config check`: validate the config and print the confirmation.
 pub fn check(role: Role, config: Option<&Path>) -> Result<()> {
     let path = check_config(role, config)?;
-    print!("{}", render::render_checked(role, &path));
-    Ok(())
+    output::stdout(&render::render_checked(role, &path))
 }
 
 /// `config rm`: remove the service and print the confirmation.
 pub fn rm(role: Role, config: Option<&Path>, name: &str) -> Result<()> {
     let outcome = remove_service(role, config, name)?;
-    print!("{}", render::render_removed(&outcome));
-    Ok(())
+    output::stdout(&render::render_removed(&outcome))
 }
 
 /// `config list`: print a compact table of the configured services.
 pub fn list(role: Role, config: Option<&Path>) -> Result<()> {
     let list = list_services(role, config)?;
-    print!("{}", render::render_service_list(role, &list));
-    Ok(())
+    output::stdout(&render::render_service_list(role, &list))
 }
 
 /// `config show`: print the config, redacted unless `reveal`.
@@ -124,8 +118,7 @@ pub fn show(role: Role, config: Option<&Path>, reveal: bool) -> Result<()> {
     } else {
         Disclosure::Redacted
     };
-    print!("{}", show_config(role, config, disclosure)?.text());
-    Ok(())
+    output::stdout(show_config(role, config, disclosure)?.text())
 }
 
 /// `config edit` (CLI): open the config in `$EDITOR`, then validate and save it.
@@ -136,14 +129,8 @@ pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
     let attempt = prepare_edit(role, config)?;
     edit::edit_file(attempt.scratch_path()).map_err(anyhow::Error::from)?;
     match attempt.commit()? {
-        EditOutcome::Unchanged => {
-            println!("No changes.");
-            Ok(())
-        }
-        EditOutcome::Saved { path } => {
-            println!("Saved {}.", path.display());
-            Ok(())
-        }
+        EditOutcome::Unchanged => output::stdout("No changes.\n"),
+        EditOutcome::Saved { path } => output::stdout(&format!("Saved {}.\n", path.display())),
         EditOutcome::Rejected { message, .. } => Err(CliError::Config(message).into()),
     }
 }
@@ -151,6 +138,5 @@ pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
 /// `config path`: print the resolved config file path.
 pub fn path(role: Role, config: Option<&Path>) -> Result<()> {
     let path = iroh_tunnel_host::config::resolve_config_path(role, config)?;
-    print!("{}", render::render_path(&path));
-    Ok(())
+    output::stdout(&render::render_path(&path))
 }

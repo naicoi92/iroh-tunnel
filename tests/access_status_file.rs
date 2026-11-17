@@ -19,6 +19,11 @@
 //! 4. The CLI table renderers run on structs parsed from the REAL files —
 //!    the pure functions `iroh-tunnel access status` prints — without
 //!    spawning the binary.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -245,7 +250,7 @@ multiplex = true
     assert!(access_table.contains("echo"));
     assert!(access_table.contains(&format!("127.0.0.1:{}", access_addr.port())));
     assert!(
-        access_table.contains(&format!("{}…", &serve_node_id[..8])),
+        access_table.contains(&format!("{}…", serve_node_id.get(..8).unwrap())),
         "access table must show the serve peer's exact short id"
     );
 
@@ -273,7 +278,7 @@ multiplex = true
     println!("iroh-tunnel serve status:\n{serve_table}");
     assert!(serve_table.contains("node_id: "));
     assert!(
-        serve_table.contains(&format!("{}…", &access_node_id[..8])),
+        serve_table.contains(&format!("{}…", access_node_id.get(..8).unwrap())),
         "serve table must list the connected access peer's exact short id"
     );
     assert!(serve_table.contains("echo"));

@@ -4,10 +4,10 @@ use super::types::{DecodeError, FlowId, HEADER_LEN};
 
 /// Split a tunnel datagram into its flow and payload.
 pub fn decode(datagram: &Bytes) -> Result<(FlowId, Bytes), DecodeError> {
-    if datagram.len() < HEADER_LEN {
+    let Some(header) = datagram.first_chunk::<HEADER_LEN>() else {
         return Err(DecodeError::Malformed);
-    }
-    let flow = u32::from_be_bytes([datagram[0], datagram[1], datagram[2], datagram[3]]);
+    };
+    let flow = u32::from_be_bytes(*header);
     Ok((FlowId(flow), datagram.slice(HEADER_LEN..)))
 }
 

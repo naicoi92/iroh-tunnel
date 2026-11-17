@@ -13,6 +13,11 @@
 //! active transport (`relay=` — via the in-process relay the relay path is
 //! active from the handshake on; `direct=` accepted as the flexible
 //! fallback).
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -55,7 +60,10 @@ struct LogSink(Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("log sink poisoned"))?
+            .extend_from_slice(buf);
         Ok(buf.len())
     }
 

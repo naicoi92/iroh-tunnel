@@ -118,7 +118,7 @@ pub(crate) fn existing_registration(role: &str) -> Option<String> {
     super::super::registration::read_registration(&script_path(role))
 }
 
-#[allow(clippy::too_many_arguments)] // one registration's inputs
+#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),

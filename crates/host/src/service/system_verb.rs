@@ -5,7 +5,13 @@
 //! exists on Windows only.
 
 // Pure seam compiled everywhere for its tests, but only Windows consumes it.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(
+    all(not(test), not(windows)),
+    expect(
+        dead_code,
+        reason = "pure seam compiled everywhere for its tests, but only Windows consumes it"
+    )
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -38,13 +38,19 @@ pub(crate) fn local_app_data() -> Result<PathBuf> {
 }
 
 /// Config directory under a Windows LocalAppData `root`.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), not(windows)),
+    expect(dead_code, reason = "Windows paths, used only by Windows builds")
+)]
 pub(super) fn windows_config_dir(root: &Path) -> PathBuf {
     root.join(APP_DIR).join("config")
 }
 
 /// State directory under a Windows LocalAppData `root`.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), not(windows)),
+    expect(dead_code, reason = "Windows paths, used only by Windows builds")
+)]
 pub(super) fn windows_state_dir(root: &Path) -> PathBuf {
     root.join(APP_DIR).join("state")
 }

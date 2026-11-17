@@ -7,7 +7,13 @@
 //! `windows.rs`.
 
 // Only the Windows backend and the tests call into this module.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(
+    all(not(test), not(windows)),
+    expect(
+        dead_code,
+        reason = "only the Windows backend and the tests call into this module"
+    )
+)]
 
 use std::path::Path;
 

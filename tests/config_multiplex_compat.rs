@@ -1,5 +1,10 @@
 //! #83 / CFG-03: legacy multiplex has no configuration effect and disappears
 //! on app-owned saves. Exercise real commands; serialization rules are host unit tests.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use anyhow::Result;
 use iroh_tunnel_host::config::{encode_secret_key, AccessConfig};

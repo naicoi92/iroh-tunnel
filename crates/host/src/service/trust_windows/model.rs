@@ -239,6 +239,14 @@ impl From<Refusal> for CliError {
     }
 }
 
+/// `C:\rest` → (`'C'`, `rest`); `None` without an ASCII drive letter root.
+fn split_drive(body: &str) -> Option<(char, &str)> {
+    let rest = body.get(3..)?;
+    let mut chars = body.chars();
+    let drive = chars.next().filter(char::is_ascii_alphabetic)?;
+    (chars.next() == Some(':') && chars.next() == Some('\\')).then_some((drive, rest))
+}
+
 /// Split an absolute local path into root → target prefixes.
 ///
 /// Takes `&str` so the logic runs on every host. Strips `\\?\`; refuses UNC
@@ -253,14 +261,13 @@ pub(crate) fn components(path: &str) -> Result<Vec<String>, Refusal> {
         Some(rest) => rest.to_string(),
         None => norm.clone(),
     };
-    let b = body.as_bytes();
-    if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'\\' {
+    let Some((drive, rest)) = split_drive(&body) else {
         return Err(remote());
-    }
-    let root = format!("{}:\\", body[..1].to_ascii_uppercase());
+    };
+    let root = format!("{}:\\", drive.to_ascii_uppercase());
     let mut out = vec![root.clone()];
     let mut acc = root;
-    for seg in body[3..].split('\\') {
+    for seg in rest.split('\\') {
         match seg {
             "" | "." => continue,
             ".." => return Err(remote()),
@@ -785,6 +792,9 @@ mod tests {
             "\\\\.\\C:\\a",
             "\\\\?\\UNC\\server\\share",
             "C:\\a\\..\\b",
+            "é:\\a",
+            "Cé\\a",
+            "C:é",
         ] {
             assert!(
                 matches!(components(bad), Err(Refusal::Remote { .. })),

@@ -6,6 +6,11 @@
 //! - The locked-executable tests run on Windows only. Policy #80: replacing a
 //!   file the OS keeps locked reports the OS error and keeps the old binary;
 //!   no rollback is promised.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 mod common;
 

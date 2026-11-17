@@ -20,6 +20,11 @@
 //! - RO-03: `service start` is refused while the role runs.
 
 #![cfg(unix)]
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use anyhow::Result;
 use std::fs::File;

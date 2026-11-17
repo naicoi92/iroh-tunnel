@@ -14,6 +14,11 @@
 //! - 82.AC2 / CL2 (CLI-HELP-01): help lists options, aliases and defaults;
 //!   parsers have no conflicting short options (unit test in `src/cli.rs`).
 //! - 82.CL3: role-specific invalid options and key-file diagnostics.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 mod common;
 

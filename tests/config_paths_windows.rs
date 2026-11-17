@@ -7,6 +7,7 @@
 //! path`, `status`) and compares it with the installing user's LocalAppData
 //! folder, so the developer's real configuration is never written.
 #![cfg(windows)]
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

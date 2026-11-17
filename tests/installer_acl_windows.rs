@@ -7,6 +7,11 @@
 //! `%ProgramFiles%` and needs an elevated session.
 
 #![cfg(windows)]
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 mod common;
 

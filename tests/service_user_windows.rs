@@ -20,6 +20,11 @@
 //! in-process relay is used, never public relays or real secrets.
 
 #![cfg(windows)]
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 mod common;
 
@@ -46,7 +51,10 @@ fn captured_native(report: &str) -> String {
     let start = compact
         .find("native:Some(NativeOutput{")
         .unwrap_or_else(|| panic!("no captured native output in: {report}"));
-    compact[start + "native:Some(".len()..].to_owned()
+    compact
+        .get(start + "native:Some(".len()..)
+        .unwrap()
+        .to_owned()
 }
 
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) -> Result<()> {

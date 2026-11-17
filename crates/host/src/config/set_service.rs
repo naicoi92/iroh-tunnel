@@ -28,7 +28,7 @@ pub fn set_service(role: Role, req: &SetService) -> Result<SetOutcome> {
         let service = req.name.clone();
         match find_service_index(doc, &req.name, &path)? {
             None => {
-                create(doc, role, req)?;
+                create(doc, role, req, &path)?;
                 Ok(Edit::Apply(SetOutcome::Created {
                     service,
                     path: path.clone(),
@@ -53,7 +53,12 @@ pub fn set_service(role: Role, req: &SetService) -> Result<SetOutcome> {
     })
 }
 
-fn create(doc: &mut DocumentMut, role: Role, req: &SetService) -> Result<()> {
+fn create(
+    doc: &mut DocumentMut,
+    role: Role,
+    req: &SetService,
+    path: &std::path::Path,
+) -> Result<()> {
     let mut missing = Vec::new();
     if req.port.is_none() {
         missing.push(match role {
@@ -73,19 +78,26 @@ fn create(doc: &mut DocumentMut, role: Role, req: &SetService) -> Result<()> {
     };
 
     let mut entry = Table::new();
-    entry["name"] = toml_edit::value(req.name.as_str());
-    entry["protocol"] = toml_edit::value(req.protocol.map_or(DEFAULT_PROTOCOL, |p| p.as_str()));
-    entry["host"] = toml_edit::value(req.host.as_deref().unwrap_or(DEFAULT_HOST));
-    entry["port"] = toml_edit::value(i64::from(port));
+    entry.insert("name", toml_edit::value(req.name.as_str()));
+    entry.insert(
+        "protocol",
+        toml_edit::value(req.protocol.map_or(DEFAULT_PROTOCOL, |p| p.as_str())),
+    );
+    entry.insert(
+        "host",
+        toml_edit::value(req.host.as_deref().unwrap_or(DEFAULT_HOST)),
+    );
+    entry.insert("port", toml_edit::value(i64::from(port)));
     if role == Role::Access {
         if let Some(node_id) = req.node_id.as_deref() {
-            entry["node_id"] = toml_edit::value(node_id);
+            entry.insert("node_id", toml_edit::value(node_id));
         }
     }
-    doc["services"].or_insert(Item::ArrayOfTables(Default::default()));
-    if let Some(services) = doc["services"].as_array_of_tables_mut() {
-        services.push(entry);
-    }
+    doc.entry("services")
+        .or_insert_with(|| Item::ArrayOfTables(Default::default()))
+        .as_array_of_tables_mut()
+        .ok_or_else(|| CliError::Config(shape_message(path)))?
+        .push(entry);
     Ok(())
 }
 
@@ -95,8 +107,9 @@ fn update(
     req: &SetService,
     path: &std::path::Path,
 ) -> Result<Vec<FieldChange>> {
-    let entry = doc["services"]
-        .as_array_of_tables_mut()
+    let entry = doc
+        .get_mut("services")
+        .and_then(Item::as_array_of_tables_mut)
         .and_then(|s| s.get_mut(index))
         .ok_or_else(|| CliError::Config(shape_message(path)))?;
     let mut changes = Vec::new();
