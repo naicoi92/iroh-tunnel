@@ -88,6 +88,46 @@ fn small_outputs_stop_cleanly_when_the_reader_is_gone() {
     }
 }
 
+/// Run with stdout connected to a pipe whose reader is closed before the
+/// child writes anything.
+fn run_with_reader_gone(dir: &Path, args: &[&str]) -> Output {
+    let mut child = command(dir, args)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn iroh-tunnel");
+    drop(child.stdout.take());
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn status_output_stops_cleanly_when_the_reader_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("serve-status.json"),
+        r#"{"node_id":"abc","home_relay":null,"pid":999999,"started_at":1700000000,"services":[],"connections":[]}"#,
+    )
+    .unwrap();
+    for args in [vec!["serve", "status"], vec!["serve", "status", "--json"]] {
+        let out = run_with_reader_gone(dir.path(), &args);
+        assert_clean_stop(&out, &args.join(" "));
+    }
+}
+
+/// `--insecure --to <installed version>` needs no network: the release is
+/// already current, so `update` only prints its outcome.
+#[test]
+fn update_output_stops_cleanly_when_the_reader_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let version =
+        String::from_utf8(Command::new(BIN).arg("--version").output().unwrap().stdout).unwrap();
+    let version = version.trim().rsplit(' ').next().unwrap().to_owned();
+    let args = ["update", "--insecure", "--to", &version];
+    let out = run_with_reader_gone(dir.path(), &args);
+    assert_clean_stop(&out, &args.join(" "));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_full_device_is_an_error_not_a_panic() {
