@@ -508,7 +508,7 @@ fn plan_system_install(
             state: state_abs.as_deref(),
         },
         &token,
-        &|dir| owner_of(dir).ok(),
+        &owner_of,
         &|_| crate::paths::local_app_data(),
         &account_of,
     )?;
@@ -710,20 +710,22 @@ fn check_installable_text(role: Role, text: &str, config: &Path) -> Result<()> {
 }
 
 fn installable(role: Role, config: &Path, loaded: Result<()>) -> Result<()> {
+    let advice = format!(
+        "Create or fix the config first (`iroh-tunnel {role} config keygen --config {path}`), \
+         or pass --config",
+        role = role.name(),
+        path = config.display()
+    );
     loaded.map_err(|e| {
-        // Re-wrap a config error by its message so the category prefix is
-        // not repeated; other failures (I/O) keep their full chain.
-        let cause = match e.downcast_ref::<CliError>() {
-            Some(CliError::Config(msg)) => msg.clone(),
-            _ => format!("{e:#}"),
-        };
-        CliError::Config(format!(
-            "cannot install the service: {cause}. Create or fix the config first \
-             (`iroh-tunnel {role} config keygen --config {path}`), or pass --config",
-            role = role.name(),
-            path = config.display()
-        ))
-        .into()
+        // A config error is re-wrapped by its (already sanitized) message so
+        // the category prefix is not repeated; other failures (I/O) stay the
+        // source, so their `io::Error` remains reachable.
+        if let Some(CliError::Config(msg)) = e.downcast_ref::<CliError>() {
+            return CliError::Config(format!("cannot install the service: {msg}. {advice}")).into();
+        }
+        e.context(CliError::Config(format!(
+            "cannot install the service ({advice})"
+        )))
     })
 }
 
@@ -1231,6 +1233,22 @@ mod tests {
         assert!(
             msg.starts_with("cannot install the service: failed to parse config: "),
             "{msg}"
+        );
+    }
+
+    #[test]
+    fn uninstallable_config_keeps_an_io_cause_in_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the config file should be: reading it fails with
+        // an I/O error, not a parse error.
+        let err = check_installable_config(Role::Serve, dir.path()).unwrap_err();
+        assert!(
+            matches!(err.downcast_ref::<CliError>(), Some(CliError::Config(_))),
+            "{err:?}"
+        );
+        assert!(
+            err.chain().any(|c| c.is::<std::io::Error>()),
+            "the I/O error must stay reachable: {err:?}"
         );
     }
 

@@ -415,14 +415,19 @@ pub fn read_verified(path: &Path, trusted_uid: u32) -> Result<String> {
 ///
 /// # Errors
 ///
-/// [`CliError::Config`] when the path does not exist.
+/// [`CliError::Config`] when the path cannot be resolved, with the
+/// [`std::io::Error`] kept in the chain.
 pub fn canonical(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(|e| {
-        CliError::Config(format!(
-            "cannot resolve {}: {e}. Create it first or pass the right path",
+        let hint = if e.kind() == std::io::ErrorKind::NotFound {
+            "Create it first or pass the right path"
+        } else {
+            "Check its permissions or pass the right path"
+        };
+        anyhow::Error::new(e).context(CliError::Config(format!(
+            "cannot resolve {}. {hint}",
             path.display()
-        ))
-        .into()
+        )))
     })
 }
 

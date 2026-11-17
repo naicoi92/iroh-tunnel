@@ -22,7 +22,10 @@ pub(super) fn read_key_file(path: Option<&Path>) -> Result<String> {
         return Ok(String::new());
     };
     let text = std::fs::read_to_string(path).map_err(|e| {
-        CliError::Config(format!("--key-file {}: cannot read: {e}", path.display()))
+        anyhow::Error::new(e).context(CliError::Config(format!(
+            "--key-file {}: cannot read",
+            path.display()
+        )))
     })?;
     let key = text.trim();
     if key.is_empty() {
@@ -73,9 +76,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.key");
         let msg = config_error(&path);
-        assert!(
-            msg.starts_with(&format!("--key-file {}: cannot read:", path.display())),
-            "{msg}"
+        assert_eq!(msg, format!("--key-file {}: cannot read", path.display()));
+    }
+
+    #[test]
+    fn a_read_failure_keeps_the_io_error_in_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_key_file(Some(&dir.path().join("missing.key"))).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<CliError>(),
+            Some(CliError::Config(_))
+        ));
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound),
+            "{err:?}"
         );
     }
 

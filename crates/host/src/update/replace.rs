@@ -38,7 +38,8 @@ pub(super) fn windows_locked_hint(exe_name: &str) -> String {
 const REPLACE_DENIED_HINT: &str = "rerun with sufficient privileges (for example sudo)";
 
 /// A permission failure while replacing is reported as [`CliError::Permission`]
-/// (exit 3, RS-06); everything else keeps its unclassified exit 1.
+/// (exit 3, RS-06) wrapped around the original chain, so the `io::Error` stays
+/// reachable; everything else keeps its unclassified exit 1.
 pub(super) fn classify_replace_error(err: anyhow::Error, exe_name: &str) -> anyhow::Error {
     let denied = err.chain().any(|cause| {
         cause
@@ -51,7 +52,9 @@ pub(super) fn classify_replace_error(err: anyhow::Error, exe_name: &str) -> anyh
         } else {
             String::new()
         };
-        CliError::Permission(format!("{err:#}; {REPLACE_DENIED_HINT}{extra}")).into()
+        err.context(CliError::Permission(format!(
+            "{REPLACE_DENIED_HINT}{extra}"
+        )))
     } else {
         err
     }
@@ -232,8 +235,31 @@ mod tests {
             err.downcast_ref::<CliError>(),
             Some(CliError::Permission(_))
         ));
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("cannot stage"), "{rendered}");
+        assert!(rendered.contains(REPLACE_DENIED_HINT), "{rendered}");
         let other = classify_replace_error(anyhow::anyhow!("boom"), "iroh-tunnel");
         assert!(other.downcast_ref::<CliError>().is_none());
+    }
+
+    #[test]
+    fn permission_denied_keeps_the_io_error_in_the_chain() {
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let err = classify_replace_error(
+            anyhow::Error::new(io).context("cannot stage"),
+            "iroh-tunnel",
+        );
+        let source = err.chain().find_map(|c| c.downcast_ref::<std::io::Error>());
+        assert_eq!(
+            source.map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
     }
 
     #[test]

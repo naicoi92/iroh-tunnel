@@ -125,7 +125,7 @@ pub async fn run_access(
         Some(sink) => match sink.save(initial.clone()).await {
             Ok(()) => Some(initial),
             Err(e) => {
-                tracing::warn!("failed to write status file: {e}");
+                tracing::warn!("failed to write status file: {e:#}");
                 None
             }
         },
@@ -190,7 +190,7 @@ fn ready_services(cfg: &AccessSettings) -> ReadyServices {
     // spawned listeners.
     let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)
         .unwrap_or_else(|e| {
-            tracing::warn!("failed to resolve relay_urls, will fail at dial time: {e}");
+            tracing::warn!("failed to resolve relay_urls, will fail at dial time: {e:#}");
             Vec::new()
         });
     if cfg.node.relay_urls.is_empty() {
@@ -369,7 +369,7 @@ async fn access_status_flush_loop(
         // until the next change.
         match sink.save(observation.clone()).await {
             Ok(()) => last = Some(observation),
-            Err(e) => tracing::warn!("failed to write status file: {e}"),
+            Err(e) => tracing::warn!("failed to write status file: {e:#}"),
         }
     }
 }
@@ -587,7 +587,7 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
                     clients.spawn(async move {
                         match handle_local_connection(&dialer, local_stream, deadline, stop).await {
                             Ok(()) => tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed"),
-                            Err(error) => tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {error}"),
+                            Err(error) => tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {error:#}"),
                         }
                     });
                 }
@@ -1085,14 +1085,8 @@ async fn handle_local_connection(
     let streams = tokio::select! {
         biased;
         _ = shutdown::stopped(&mut stop) => anyhow::bail!("client connection cancelled on shutdown"),
-        result = tokio::time::timeout_at(deadline, open_client_stream(dialer, deadline)) => match result {
-            Ok(Ok(streams)) => streams,
-            // The dial loop stops at the same deadline; report one message.
-            Ok(Err(_)) if tokio::time::Instant::now() >= deadline => {
-                anyhow::bail!("client connection deadline expired")
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => anyhow::bail!("client connection deadline expired"),
+        result = tokio::time::timeout_at(deadline, open_client_stream(dialer, deadline)) => {
+            client_stream_outcome(result, deadline)?
         }
     };
     // QUIC shutdown queues FIN; pipe completion alone does not prove final
@@ -1115,6 +1109,23 @@ async fn handle_local_connection(
         crate::tcp::Delivery::Lost(error) => {
             Err(anyhow::Error::new(error).context("client stream delivery failed"))
         }
+    }
+}
+
+/// Map a deadline-bounded stream open to its result.
+///
+/// The dial loop stops at the same deadline, so a failure at or after it is
+/// reported as the client deadline, with the dial failure kept as its cause.
+fn client_stream_outcome<T>(
+    result: Result<Result<T>, tokio::time::error::Elapsed>,
+    deadline: tokio::time::Instant,
+) -> Result<T> {
+    const EXPIRED: &str = "client connection deadline expired";
+    match result {
+        Ok(Ok(streams)) => Ok(streams),
+        Ok(Err(error)) if tokio::time::Instant::now() >= deadline => Err(error.context(EXPIRED)),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(anyhow::anyhow!(EXPIRED)),
     }
 }
 
@@ -1274,6 +1285,22 @@ fn spawn_path_change_poller(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A dial that failed at the client deadline is reported under the
+    /// deadline message, keeping the dial failure as its cause.
+    #[tokio::test(start_paused = true)]
+    async fn client_deadline_keeps_the_dial_failure() {
+        let deadline = tokio::time::Instant::now();
+        let dial =
+            Err::<(), _>(anyhow::anyhow!("no route to peer").context("dial deadline expired"));
+        let err = client_stream_outcome(Ok(dial), deadline).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.starts_with("client connection deadline expired"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("no route to peer"), "{rendered}");
+    }
 
     /// PR #62 run 4, acceptance A — the shutdown race, driven directly.
     ///
