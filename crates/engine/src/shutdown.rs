@@ -130,6 +130,12 @@ impl QuarantineSinks {
         }
     }
 
+    /// Poison the set by panicking inside its section.
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        let _ = self.tasks.with(|_| panic!("poison the quarantine sinks"));
+    }
+
     fn check<T>(&self, result: Result<T, crate::locked::Poisoned>) -> Option<T> {
         result
             .map_err(|poisoned| {

@@ -116,7 +116,7 @@ impl AccessRole {
         ep: &iroh::Endpoint,
         dialers: Vec<Arc<ServiceDialer>>,
         services: Vec<AccessStatusServiceRow>,
-        sink: Option<StatusSink<AccessObservation>>,
+        mut sink: Option<StatusSink<AccessObservation>>,
         fault: Fault,
     ) -> Self {
         // Operator-facing status snapshot (issue #59), refreshed by the
@@ -128,7 +128,6 @@ impl AccessRole {
             started_at: support::unix_now_secs(),
             services,
         };
-        let mut sink = sink;
         let initial = render_access_status(&status, &dialers).await;
         let seeded = support::save_initial(sink.as_mut(), initial).await;
 
@@ -1813,6 +1812,7 @@ mod tests {
         backoff: Arc<Locked<RedialBackoff>>,
         gate: UdpDialGate,
         hooks: Arc<UdpTestHooks>,
+        faults: crate::fault::Faults,
         stop: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
         task: OwnedTask,
     }
@@ -1822,11 +1822,12 @@ mod tests {
         let access_addr = socket.local_addr().expect("access addr");
         let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind client");
         let hooks = Arc::new(UdpTestHooks::default());
+        let (fault, faults) = fault::channel();
         let ctx = UdpForwardCtx {
             dialer: dialer.clone(),
             backoff: Arc::new(Locked::new(RedialBackoff::with_window(window))),
             gate: UdpDialGate::default(),
-            fault: Fault::detached(),
+            fault,
             hooks: Some(hooks.clone()),
         };
         let (backoff, gate) = (ctx.backoff.clone(), ctx.gate.clone());
@@ -1839,6 +1840,7 @@ mod tests {
             backoff,
             gate,
             hooks,
+            faults,
             stop,
             task: OwnedTask(Some(task)),
         }
@@ -2021,6 +2023,38 @@ mod tests {
             }
             other => panic!("expected the dedicated application close, got {other:?}"),
         }
+    }
+
+    /// #226: a poisoned back-off is never recovered: the forwarding loop
+    /// ends at once and raises the role fault with the service named.
+    #[tokio::test]
+    async fn a_poisoned_back_off_ends_the_loop_with_a_role_fault() {
+        let peer = test_peer(true).await;
+        let mut h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        let backoff = h.backoff.clone();
+        let poisoner = std::thread::spawn(move || {
+            backoff.with(|_| panic!("poison the back-off")).ok();
+        });
+        assert!(poisoner.join().is_err(), "the holder panicked");
+
+        h.send(b"after-poison").await;
+        let fault = tokio::time::timeout(POLL_LIMIT, h.faults.first())
+            .await
+            .expect("the role fault is raised");
+        assert!(
+            format!("{fault:#}").contains("udp redial back-off"),
+            "{fault:#}"
+        );
+        let task = h.task.take();
+        tokio::time::timeout(POLL_LIMIT, task)
+            .await
+            .expect("the loop ends without a stop signal")
+            .expect("the loop does not panic");
+        // The loop is joined; the shared cleanup still checks its readers.
+        h.task = OwnedTask(Some(tokio::spawn(async {})));
+
+        h.shutdown().await;
+        peer.shutdown().await;
     }
 
     #[tokio::test]

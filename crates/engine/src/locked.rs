@@ -10,6 +10,11 @@ use std::sync::Mutex;
 /// value's invariants broken; every later section fails with [`Poisoned`]
 /// and the owning connection or role ends with that error (see
 /// [`crate::fault::Fault`]).
+///
+/// Ending is best-effort cleanup: state behind a poisoned lock is dropped,
+/// not walked. For a UDP flow table that means its sockets close at once
+/// instead of being quarantined, and a poisoned quarantine set aborts its
+/// sinks when the role drops it instead of joining them.
 #[derive(Debug, Default)]
 pub(crate) struct Locked<T>(Mutex<T>);
 

@@ -86,12 +86,11 @@ impl ServeRole {
     async fn start(
         ep: &iroh::Endpoint,
         settings: &ServeSettings,
-        sink: Option<StatusSink<ServeObservation>>,
+        mut sink: Option<StatusSink<ServeObservation>>,
         fault: Fault,
     ) -> Self {
         let targets = service_targets(settings, &fault);
         let status = StatusSnapshot::new(ep, settings, &targets);
-        let mut sink = sink;
         let initial = status.render(current_home_relay(ep), Vec::new());
         let seeded = support::save_initial(sink.as_mut(), initial).await;
 
@@ -330,9 +329,9 @@ impl PeerTracker {
     /// fault and fails the caller.
     fn with<R>(&self, section: impl FnOnce(&mut PeerRegistry) -> R) -> Result<R> {
         self.registry.with(section).map_err(|poisoned| {
-            let error = || anyhow::Error::new(poisoned).context("peer tracker");
-            self.fault.raise(error());
-            error()
+            self.fault
+                .raise(anyhow::Error::new(poisoned).context("peer tracker"));
+            anyhow::Error::new(poisoned).context("peer tracker")
         })
     }
 
@@ -521,17 +520,22 @@ async fn accept_loop(
     sinks: Arc<shutdown::QuarantineSinks>,
     mut stop: shutdown::Stop,
 ) {
-    let mut connections = JoinSet::new();
-    let mut watchers = JoinSet::new();
+    let mut admission = ServeAdmission {
+        targets,
+        peers,
+        sinks,
+        connections: JoinSet::new(),
+        watchers: JoinSet::new(),
+    };
     loop {
         let incoming = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
-            Some(result) = connections.join_next(), if !connections.is_empty() => {
+            Some(result) = admission.connections.join_next(), if !admission.connections.is_empty() => {
                 shutdown::observe(result);
                 continue;
             }
-            Some(result) = watchers.join_next(), if !watchers.is_empty() => {
+            Some(result) = admission.watchers.join_next(), if !admission.watchers.is_empty() => {
                 shutdown::observe(result);
                 continue;
             }
@@ -553,19 +557,9 @@ async fn accept_loop(
                 }
             }
         };
-
-        // Demultiplex by the negotiated ALPN to find the service target.
-        let alpn = conn.alpn().to_vec();
-        let name = service_name(&alpn);
-        let Some(target) = targets.get(&alpn).cloned() else {
-            tracing::warn!("connection with unknown ALPN for service '{name}', dropping");
+        let Some(accepted) = admission.demultiplex(conn) else {
             continue;
         };
-
-        // The access peer's NodeId, from its cert. Logged on connect and
-        // (via the watcher below) on disconnect, so operators can see who is
-        // tunneling in and correlate with access-side logs.
-        let remote_id = conn.remote_id();
         // Query the fresh path so the connect line carries it — symmetric
         // with the access role's established lines (`via relay=…`). Right
         // after the handshake iroh may not have an active-path snapshot
@@ -574,49 +568,106 @@ async fn accept_loop(
         let report = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
-            report = crate::conn_path::peer_path_report(ep, remote_id) => report,
+            report = crate::conn_path::peer_path_report(ep, accepted.conn.remote_id()) => report,
         };
+        admission.admit(accepted, report.as_ref(), stop.clone());
+    }
+    admission.close().await;
+}
+
+/// The connections the accept loop owns and what it hands each of them.
+struct ServeAdmission {
+    targets: HashMap<Vec<u8>, ServiceTarget>,
+    peers: PeerTracker,
+    sinks: Arc<shutdown::QuarantineSinks>,
+    connections: JoinSet<()>,
+    /// Disconnect loggers, one per admitted connection.
+    watchers: JoinSet<()>,
+}
+
+/// A handshaken connection matched to its service.
+struct AcceptedConnection {
+    conn: Connection,
+    target: ServiceTarget,
+    service: String,
+}
+
+impl ServeAdmission {
+    /// Match `conn` to its service by the negotiated ALPN; an unknown ALPN
+    /// is logged and the connection dropped.
+    fn demultiplex(&self, conn: Connection) -> Option<AcceptedConnection> {
+        let alpn = conn.alpn();
+        let service = service_name(alpn);
+        let Some(target) = self.targets.get(alpn).cloned() else {
+            tracing::warn!("connection with unknown ALPN for service '{service}', dropping");
+            return None;
+        };
+        Some(AcceptedConnection {
+            conn,
+            target,
+            service,
+        })
+    }
+
+    /// Log the connection and spawn its owner and disconnect watcher.
+    fn admit(
+        &mut self,
+        accepted: AcceptedConnection,
+        report: Option<&crate::observation::PeerPathObservation>,
+        stop: shutdown::Stop,
+    ) {
+        let AcceptedConnection {
+            conn,
+            target,
+            service,
+        } = accepted;
+        // The access peer's NodeId, from its cert. Logged on connect and
+        // (via the watcher below) on disconnect, so operators can see who is
+        // tunneling in and correlate with access-side logs.
+        let remote_id = conn.remote_id();
         tracing::info!(
             peer = %remote_id,
-            service = %name,
+            service = %service,
             "peer connected via {}",
-            crate::conn_path::render_established_paths(report.as_ref())
+            crate::conn_path::render_established_paths(report)
         );
-
         // Watcher: emit a disconnect line when the QUIC connection closes. The
         // weak handle is registered while `conn` is still alive (before the
         // stream-handling task takes it), so iroh guarantees the close event is
         // delivered even if the connection drops before this resolves.
-        watchers.spawn(support::disconnect_watcher(
+        self.watchers.spawn(support::disconnect_watcher(
             &conn,
             remote_id.to_string(),
-            format!("peer disconnected (service {name})"),
+            format!("peer disconnected (service {service})"),
         ));
-        let conn_peers = peers.clone();
-        let conn_stop = stop.clone();
-        let conn_sinks = sinks.clone();
-
-        connections.spawn(async move {
+        let (peers, sinks) = (self.peers.clone(), self.sinks.clone());
+        self.connections.spawn(async move {
             // Track the peer for the status file's `connections` array for
             // as long as this connection lives (issue #57). The guard
             // untracks on drop — normal return or panic unwind alike — so
             // the refcount can never leak.
-            let _tracked = match conn_peers.track(remote_id, &name) {
+            let _tracked = match peers.track(remote_id, &service) {
                 Ok(tracked) => tracked,
                 Err(error) => {
-                    // A poisoned tracker ends this connection (#216).
-                    tracing::error!(peer = %remote_id, "connection refused: {error:#}");
+                    // A poisoned tracker raised the role fault (#226), which
+                    // logs it; this connection ends.
+                    tracing::debug!(peer = %remote_id, "connection refused: {error:#}");
                     return;
                 }
             };
-            handle_connection(&conn, target, &conn_sinks, conn_stop).await;
+            handle_connection(&conn, target, &sinks, stop).await;
         });
     }
-    // Supervisors are not aborted: each joins its own stream children using
-    // the same absolute deadline. Idle connections do not consume grace.
-    shutdown::join(&mut connections).await;
-    watchers.abort_all();
-    shutdown::join(&mut watchers).await;
+
+    /// Join every connection owner, then end the watchers.
+    async fn close(mut self) {
+        // Supervisors are not aborted: each joins its own stream children
+        // using the same absolute deadline. Idle connections do not consume
+        // grace.
+        shutdown::join(&mut self.connections).await;
+        self.watchers.abort_all();
+        shutdown::join(&mut self.watchers).await;
+    }
 }
 
 /// Bound on one stream's local target connect; see `handle_connection`.
@@ -1076,8 +1127,8 @@ impl<'conn> UdpConnectionFlows<'conn> {
         // The connection's flows end with it, but their sockets are
         // quarantined like any expired flow: they outlive the incarnation
         // as sinks only. A poisoned table already ended the connection with
-        // its fault; its flows are dropped (releasing their slots) when the
-        // aborted relays drop their table handles.
+        // its fault; its flows are dropped, releasing their slots, when the
+        // last table handle goes (this owner, after the relays are joined).
         let ended = self
             .table
             .with(crate::udp::PeerFlows::drain_all)
@@ -2216,6 +2267,42 @@ mod tests {
             reservation,
         };
         quarantine(upstream, stats, stop, sinks);
+    }
+
+    /// #226: a poisoned flow table is never recovered; it raises the fault of
+    /// its own connection only.
+    #[test]
+    fn a_poisoned_flow_table_raises_its_connection_fault() {
+        let table = UdpFlowTable::default();
+        let poisoner = table.clone();
+        let panicked = std::thread::spawn(move || {
+            poisoner.with(|_| panic!("poison the flow table")).ok();
+        })
+        .join();
+        assert!(panicked.is_err());
+        let (fault, mut faults) = fault::channel();
+        assert!(flow_table_section(&table, &fault, |flows| flows.len()).is_none());
+        let raised = faults.take().expect("the connection fault is raised");
+        assert!(
+            format!("{raised:#}").contains("udp flow table"),
+            "{raised:#}"
+        );
+    }
+
+    /// #226: once the sink set is poisoned a new sink is not tracked: it is
+    /// dropped unpolled, releasing its slot, and the role fault is raised.
+    #[tokio::test(start_paused = true)]
+    async fn poisoned_quarantine_sinks_drop_new_sinks_and_raise_a_role_fault() {
+        let stats = Arc::new(crate::udp::UdpStats::default());
+        let (fault, mut faults) = fault::channel();
+        let sinks = Arc::new(shutdown::QuarantineSinks::new(fault));
+        let poisoner = sinks.clone();
+        let panicked = std::thread::spawn(move || poisoner.poison_for_test()).join();
+        assert!(panicked.is_err());
+        let (_stop, stop_rx) = shutdown::channel();
+        quarantined_upstream(&stats, &stop_rx, &sinks).await;
+        assert_eq!(stats.snapshot().quarantined_flows, 0, "slot released");
+        assert!(faults.take().is_some(), "the role fault is raised");
     }
 
     #[tokio::test(start_paused = true)]

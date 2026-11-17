@@ -28,10 +28,14 @@ impl Fault {
     /// Log `error` and end the owner with it unless an earlier fault already
     /// does.
     pub(crate) fn raise(&self, error: anyhow::Error) {
-        tracing::error!("fatal: {error:#}");
-        // A full slot already holds the first fault; a closed channel means
-        // the owner has finished.
-        let _ = self.0.try_send(error);
+        // Only the fault that ends the owner is an error; later ones (more
+        // users of the same poisoned state before the owner stops) and those
+        // raised after it finished are noise.
+        let message = format!("{error:#}");
+        match self.0.try_send(error) {
+            Ok(()) => tracing::error!("ending on unrecoverable state: {message}"),
+            Err(_) => tracing::debug!("further unrecoverable state: {message}"),
+        }
     }
 
     /// A fault whose owner is gone, for tests of a single unit.
