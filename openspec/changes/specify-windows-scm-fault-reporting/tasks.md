@@ -25,6 +25,6 @@ Blocked by: 1, 2
 
 Owns `CHANGELOG.md` only if wording needs the codes; otherwise no file. Platform: macOS run plus Windows cross-target clippy; Windows e2e left to CI.
 
-- [ ] 3.1 Run `openspec validate specify-windows-scm-fault-reporting --strict`
-- [ ] 3.2 Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, `cargo xwin clippy --workspace --all-targets --all-features --locked --target x86_64-pc-windows-msvc -- -D warnings`, and `cargo test --all-features --locked` (with `RUBY` set to the Homebrew portable Ruby)
-- [ ] 3.3 Confirm every scenario in `specs/` maps to a passing test per plan.md "Scenario → test", and record in the apply receipt the parts covered only by review (dispatcher process exit, ticker-spawn skip, log-open conditions), the indirect recovery coverage, and the `#[cfg(unix)]` tests
+- [x] 3.1 Run `openspec validate specify-windows-scm-fault-reporting --strict`
+- [x] 3.2 Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, `cargo xwin clippy --workspace --all-targets --all-features --locked --target x86_64-pc-windows-msvc -- -D warnings`, and `cargo test --all-features --locked` (with `RUBY` set to the Homebrew portable Ruby)
+- [x] 3.3 Confirm every scenario in `specs/` maps to a passing test per plan.md "Scenario → test", and record in the apply receipt the parts covered only by review (dispatcher process exit, ticker-spawn skip, log-open conditions), the indirect recovery coverage, and the `#[cfg(unix)]` tests
