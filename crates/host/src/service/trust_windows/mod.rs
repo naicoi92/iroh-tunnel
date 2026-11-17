@@ -11,16 +11,7 @@
 )]
 
 mod ace;
-// On Windows `win32` consumes the model; only `EVERYONE`, `CREATOR_OWNER`
-// (test fixtures) and `TrustedSet::{for_user_files, machine}` (service
-// runtime and machine dir, later tasks) remain unused there.
-#[cfg_attr(
-    windows,
-    expect(
-        dead_code,
-        reason = "test fixtures and later-task items of the model stay unused on Windows"
-    )
-)]
+// On Windows `win32` consumes the model.
 pub(crate) mod model;
 #[cfg(windows)]
 pub(crate) mod win32;

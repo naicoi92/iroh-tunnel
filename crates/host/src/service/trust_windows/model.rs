@@ -15,7 +15,9 @@ pub(crate) const SYSTEM: &str = "S-1-5-18";
 pub(crate) const ADMINISTRATORS: &str = "S-1-5-32-544";
 pub(crate) const TRUSTED_INSTALLER: &str =
     "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+#[cfg(test)]
 pub(crate) const EVERYONE: &str = "S-1-1-0";
+#[cfg(test)]
 pub(crate) const CREATOR_OWNER: &str = "S-1-3-0";
 
 pub(crate) const FILE_WRITE_DATA: u32 = 0x2;

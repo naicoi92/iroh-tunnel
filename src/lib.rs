@@ -13,6 +13,8 @@ pub mod config_cmd;
 pub(crate) mod lifecycle;
 pub(crate) mod output;
 pub(crate) mod render;
+// Consumed only by the Windows dispatcher; compiled elsewhere for its tests.
+#[cfg(any(windows, test))]
 pub(crate) mod scm_runtime;
 pub mod status_cmd;
 pub(crate) mod test_fault;

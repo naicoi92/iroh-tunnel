@@ -241,13 +241,6 @@ pub(crate) struct RestartPolicy {
     pub on_failure: bool,
     /// Delay between restart attempts, in seconds. Read by systemd; ignored
     /// by launchd (which uses an internal ThrottleInterval).
-    #[cfg_attr(
-        all(not(test), target_os = "macos"),
-        expect(
-            dead_code,
-            reason = "unread on macOS builds (launchd has no equivalent knob)"
-        )
-    )]
     pub delay_secs: u64,
 }
 

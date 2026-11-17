@@ -3,15 +3,6 @@
 //! Pure: the token user, the owner lookup, the LocalAppData lookup and the
 //! account-name lookup are injected, so every rule runs on any platform.
 
-// Pure and compiled everywhere for its tests, but only Windows consumes it.
-#![cfg_attr(
-    all(not(test), not(windows)),
-    expect(
-        dead_code,
-        reason = "pure and compiled everywhere for its tests, but only Windows consumes it"
-    )
-)]
-
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;

@@ -4,15 +4,6 @@
 //! the glue that binds it to the real [`Scm`](super::backend::windows_scm_impl::Scm)
 //! exists on Windows only.
 
-// Pure seam compiled everywhere for its tests, but only Windows consumes it.
-#![cfg_attr(
-    all(not(test), not(windows)),
-    expect(
-        dead_code,
-        reason = "pure seam compiled everywhere for its tests, but only Windows consumes it"
-    )
-)]
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

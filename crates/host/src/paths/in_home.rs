@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use super::locations::APP_DIR;
+#[cfg(any(windows, test))]
 use super::locations::{windows_config_dir, windows_state_dir};
 
 /// Config file of `role` under an explicit `home`, without consulting `HOME`
@@ -25,19 +26,13 @@ pub(crate) fn state_dir_in(home: &Path) -> PathBuf {
 
 /// Config file of `role` under a Windows LocalAppData `root` (system-service
 /// install for the token user, whose own folder is not the caller's).
-#[cfg_attr(
-    all(not(test), not(windows)),
-    expect(dead_code, reason = "Windows paths, used only by Windows builds")
-)]
+#[cfg(any(windows, test))]
 pub(crate) fn windows_config_path_in(root: &Path, role: &str) -> PathBuf {
     windows_config_dir(root).join(format!("{role}.toml"))
 }
 
 /// State directory under a Windows LocalAppData `root`.
-#[cfg_attr(
-    all(not(test), not(windows)),
-    expect(dead_code, reason = "Windows paths, used only by Windows builds")
-)]
+#[cfg(any(windows, test))]
 pub(crate) fn windows_state_path_in(root: &Path) -> PathBuf {
     windows_state_dir(root)
 }
