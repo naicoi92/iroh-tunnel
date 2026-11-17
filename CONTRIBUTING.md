@@ -49,7 +49,8 @@ when it is relevant to a change.
 Follow the [Rust coding standards](docs/agents/rust-coding-standards.md) for
 changes and cite applicable rule IDs in Standards reviews.
 
-PRs run `lint`, `unit (linux|macos|windows)` and a `scripts` job (shellcheck,
+PRs run `lint (linux|macos|windows)` (clippy on every OS; rustfmt and rustdoc
+on Linux), `unit (linux|macos|windows)` and a `scripts` job (shellcheck,
 PSScriptAnalyzer, actionlint) when scripts or workflows change. The e2e tests
 run on every push to `main` (`e2e.yml`), and releases require its `e2e-ok`.
 Before merge, run them on your branch with `gh workflow run e2e.yml --ref <branch>`
