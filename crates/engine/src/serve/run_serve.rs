@@ -936,7 +936,10 @@ impl<'conn> UdpConnectionFlows<'conn> {
     /// upstream could not be opened.
     fn finish_open(&mut self, attempt: OpenAttempt) {
         let OpenAttempt { flow, rx, opened } = attempt;
-        let queue = match self.flows().get(flow) {
+        // One lock from the check to the swap: the flow cannot end between.
+        let table = self.table.clone();
+        let mut flows = table.lock().unwrap_or_else(|p| p.into_inner());
+        let queue = match flows.get(flow) {
             Some(UdpFlow::Opening { queue, .. }) => queue.clone(),
             // The flow ended while its open finished: drop the result.
             _ => return,
@@ -944,13 +947,15 @@ impl<'conn> UdpConnectionFlows<'conn> {
         match opened {
             Ok((socket, reservation)) => {
                 let upstream = self.spawn_live(flow, Arc::new(socket), queue, rx, reservation);
-                self.flows().replace(flow, UdpFlow::Live(upstream));
+                // The finished opener's handle is all the old entry holds.
+                drop(flows.replace(flow, UdpFlow::Live(upstream)));
             }
             Err(error) => {
                 // Resolve, bind or descriptor failure refuses the flow and
                 // drops what it queued; the process keeps running (contract:
                 // counter `cap`).
-                self.flows().remove(flow);
+                flows.remove(flow);
+                drop(flows);
                 // The queue holds at least the datagram that admitted it.
                 for _ in 0..rx.len() {
                     self.stats().record_drop(crate::udp::DropReason::Cap);
@@ -1040,6 +1045,9 @@ fn end_flow(
     sinks: &shutdown::QuarantineSinks,
 ) {
     match flow {
+        // An opening flow idle past its timeout (only when the idle timeout
+        // is shorter than the resolve timeout) ends like a live one: its
+        // queued datagrams are discarded uncounted.
         UdpFlow::Opening { opener, .. } => opener.abort(),
         UdpFlow::Live(upstream) => quarantine(upstream, stats, stop, sinks),
     }
@@ -1098,6 +1106,8 @@ async fn handle_udp_connection(
             Some(result) = flows.openers.join_next(), if !flows.openers.is_empty() => {
                 match result {
                     Ok(attempt) => flows.finish_open(attempt),
+                    // A failed opener released its reservation on unwind;
+                    // its flow stays `Opening` until it expires.
                     Err(error) => shutdown::observe(Err(error)),
                 }
             }
@@ -1923,18 +1933,13 @@ mod tests {
             .expect("flow 0 opens");
 
         send_flow(&conn, 1);
-        // Let Serve start opening flow 1 before flow 0 sends again.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let sent = tokio::time::Instant::now();
+        // Flow 1 holds its slot once Serve has started opening it.
+        serve.stats_when(|s| s.active_flows == 2).await;
         send_flow(&conn, 0);
+        // Flow 1's resolver never answers, so any reply proves no wait on it.
         tokio::time::timeout(Duration::from_secs(1), read_flow_reply(&conn, 0))
             .await
             .expect("live flow 0 must keep relaying while flow 1 opens");
-        assert!(
-            sent.elapsed() < Duration::from_millis(500),
-            "live flow delayed by {:?}",
-            sent.elapsed()
-        );
 
         client.close().await;
         serve.stop().await;
