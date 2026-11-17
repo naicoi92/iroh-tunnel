@@ -244,7 +244,14 @@ pub(crate) fn set_node_secret_key(doc: &mut DocumentMut, path: &Path, key: &str)
                 path.display()
             ))
         })?;
-    node.insert("secret_key", toml_edit::value(key));
+    // Assign in place when present: `insert` would reset the key's decor
+    // and drop the operator's comment above it.
+    match node.get_mut("secret_key") {
+        Some(item) => *item = toml_edit::value(key),
+        None => {
+            node.insert("secret_key", toml_edit::value(key));
+        }
+    }
     Ok(())
 }
 
@@ -378,6 +385,14 @@ mod tests {
         assert_eq!(
             with_key("node = { relay_urls = [] }\n").unwrap(),
             "node = { relay_urls = [] , secret_key = \"k\" }\n"
+        );
+    }
+
+    #[test]
+    fn set_node_secret_key_keeps_the_comment_above_an_existing_key() {
+        assert_eq!(
+            with_key("[node]\n# rotated 2024\nsecret_key   = \"\"\n").unwrap(),
+            "[node]\n# rotated 2024\nsecret_key   = \"k\"\n"
         );
     }
 

@@ -8,8 +8,8 @@
 //! The OS-touching functions exist on Linux and macOS only; other targets
 //! always register the resolved binary.
 #![cfg_attr(
-    not(any(target_os = "linux", target_os = "macos")),
-    allow(
+    all(not(test), not(any(target_os = "linux", target_os = "macos"))),
+    expect(
         dead_code,
         reason = "other targets always register the resolved binary, never a managed copy"
     )

@@ -15,7 +15,16 @@ use anyhow::{Context, Result};
 ///
 /// Any write failure other than [`io::ErrorKind::BrokenPipe`].
 pub(crate) fn stdout(text: &str) -> Result<()> {
-    write_tolerating_closed_pipe(&mut io::stdout().lock(), text)
+    stdout_with_context(text, "failed to write to stdout")
+}
+
+/// [`stdout`] with a command-specific error `context`.
+///
+/// # Errors
+///
+/// Any write failure other than [`io::ErrorKind::BrokenPipe`].
+pub(crate) fn stdout_with_context(text: &str, context: &'static str) -> Result<()> {
+    write_tolerating_closed_pipe(&mut io::stdout().lock(), text, context)
 }
 
 /// Write text to stdout that must be delivered, e.g. the ready line a
@@ -49,10 +58,14 @@ fn write_text(out: &mut impl Write, text: &str) -> io::Result<()> {
     out.flush()
 }
 
-fn write_tolerating_closed_pipe(out: &mut impl Write, text: &str) -> Result<()> {
+fn write_tolerating_closed_pipe(
+    out: &mut impl Write,
+    text: &str,
+    context: &'static str,
+) -> Result<()> {
     match write_text(out, text) {
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        result => result.context("failed to write to stdout"),
+        result => result.context(context),
     }
 }
 
@@ -74,15 +87,17 @@ mod tests {
 
     #[test]
     fn a_closed_pipe_is_a_clean_stop_for_command_output() {
-        let result = write_tolerating_closed_pipe(&mut Failing(io::ErrorKind::BrokenPipe), "x");
+        let result =
+            write_tolerating_closed_pipe(&mut Failing(io::ErrorKind::BrokenPipe), "x", "ctx");
         assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
     fn other_write_errors_propagate_with_context() {
-        let err = write_tolerating_closed_pipe(&mut Failing(io::ErrorKind::StorageFull), "x")
-            .unwrap_err();
-        assert_eq!(format!("{err}"), "failed to write to stdout");
+        let err =
+            write_tolerating_closed_pipe(&mut Failing(io::ErrorKind::StorageFull), "x", "ctx")
+                .unwrap_err();
+        assert_eq!(format!("{err}"), "ctx");
         assert_eq!(
             err.downcast_ref::<io::Error>().map(io::Error::kind),
             Some(io::ErrorKind::StorageFull)
@@ -98,7 +113,7 @@ mod tests {
     #[test]
     fn text_is_written_verbatim() {
         let mut buf = Vec::new();
-        write_tolerating_closed_pipe(&mut buf, "a\nb\n").unwrap();
+        write_tolerating_closed_pipe(&mut buf, "a\nb\n", "ctx").unwrap();
         assert_eq!(buf, b"a\nb\n");
     }
 }

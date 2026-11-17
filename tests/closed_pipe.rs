@@ -118,3 +118,47 @@ fn a_full_device_is_an_error_not_a_panic() {
         "{stderr}"
     );
 }
+
+/// The ready line is the supervisor's start signal: when it cannot be
+/// written the start fails (exit 1, `error:` line), it is never reported as
+/// success and never panics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unwritable_ready_line_fails_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await.unwrap();
+    let relay = relay.to_string();
+    let mut child = command(
+        dir.path(),
+        &[
+            "serve",
+            "--name",
+            "echo",
+            "--target",
+            "127.0.0.1:9",
+            "--relay-url",
+            &relay,
+        ],
+    )
+    .env("IROH_TUNNEL_TEST_CONFIG_DIR", dir.path())
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn iroh-tunnel");
+    drop(child.stdout.take());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve kept running after its ready line failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("error: ") && stderr.contains("failed to write to stdout"),
+        "{stderr}"
+    );
+}

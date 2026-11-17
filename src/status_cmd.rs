@@ -57,7 +57,7 @@ pub fn run(role: Role, json: bool) -> Result<()> {
             // A graceful shutdown removes the file, but a crash or `kill -9`
             // leaves it behind — stale, yet often still useful. Warn on
             // stderr, keep printing on stdout.
-            warn_for_freshness(role, &freshness, &payload)?;
+            warn_for_freshness(role, &freshness, &payload);
             if json {
                 // Verbatim file contents, not a re-serialization: anything
                 // piping this command must get byte-identical JSON to
@@ -77,18 +77,14 @@ pub fn run(role: Role, json: bool) -> Result<()> {
 /// early (`iroh-tunnel serve status | head`) is a normal exit for this
 /// command, not an error. Any other write failure propagates.
 fn print_line(line: &str) -> Result<()> {
-    crate::output::stdout(&format!("{line}\n"))
+    crate::output::stdout_with_context(&format!("{line}\n"), "failed to write status output")
 }
 
-/// Print the stale-snapshot warning for `freshness`, if any.
-///
-/// # Errors
-///
-/// The warning could not be written to stderr.
-fn warn_for_freshness(role: Role, freshness: &Freshness, payload: &StatusPayload) -> Result<()> {
-    match freshness_warning(role, freshness, payload) {
-        Some(warning) => crate::output::stderr(&format!("{warning}\n")),
-        None => Ok(()),
+/// Print the stale-snapshot warning for `freshness`, if any. Advisory: a
+/// failed write must not block the snapshot on stdout.
+fn warn_for_freshness(role: Role, freshness: &Freshness, payload: &StatusPayload) {
+    if let Some(warning) = freshness_warning(role, freshness, payload) {
+        crate::output::report(&format!("{warning}\n"));
     }
 }
 
