@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 /// What the init script runs: one role's registration.
 pub(super) struct InitScript<'a> {
+    /// Invariant: a `Role::name()` (`serve`/`access`), a plain identifier, so
+    /// it may appear unquoted in the header comment and runtime file names.
     pub(super) role: &'a str,
     pub(super) invocation: ServiceInvocation,
     pub(super) binary: &'a Path,
@@ -58,6 +60,7 @@ impl InitScript<'_> {
     ///
     /// [`crate::error::CliError::Config`] when a path is not valid UTF-8.
     pub(super) fn render(&self, layout: &ScriptLayout) -> Result<String> {
+        // Header comment only; the script reads the role from `ROLE`.
         let role = self.role;
         let role_arg = if self.invocation == ServiceInvocation::Combined {
             "\"$ROLE\" "
@@ -92,37 +95,99 @@ export IROH_TUNNEL_STATE_DIR={state}
 LOG={logfile}
 PROC={proc_root}
 
-start() {{
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-        echo "iroh-tunnel ($ROLE) already running (pid $(cat "$PIDFILE"))"
-        return 0
+# The PID file: the daemon's PID, then the launched DAEMON path and a `.`
+# sentinel (so trailing characters of the path survive `$(...)`). A file
+# with no second line was written by an earlier script (legacy).
+SEP=$(printf '\001')
+
+read_pidfile() {{
+    PID=$(head -n 1 "$PIDFILE" 2>/dev/null)
+    REC=$(tail -n +2 "$PIDFILE" 2>/dev/null)
+    REC=${{REC%.}}
+}}
+
+# $1 the process's exe, $2 the expected path: equal, or replaced on disk.
+exe_matches() {{
+    [ -n "$2" ] && {{ [ "$1" = "$2" ] || [ "$1" = "$2 (deleted)" ]; }}
+}}
+
+# A legacy PID file: 0 = the current DAEMON, or an iroh-tunnel executable
+# running this role with this config; 1 = another process; 2 = unreadable.
+legacy_match() {{
+    exe_matches "$1" "$DAEMON" && return 0
+    NAME=${{1%" (deleted)"}}; NAME=${{NAME##*/}}
+    case "$NAME" in iroh-tunnel*) ;; *) return 1 ;; esac
+    CMD=$(tr '\000' '\001' 2>/dev/null < "$PROC/$PID/cmdline") || return 2
+    TAIL="${{SEP}}run${{SEP}}--config$SEP$CONFIG$SEP"
+    case "$CMD" in
+        *"$SEP$ROLE$TAIL") return 0 ;;
+        *"$TAIL") [ "$NAME" = "iroh-tunnel-$ROLE" ] && return 0 ;;
+    esac
+    return 1
+}}
+
+# Whether the PID file names the daemon: 0 = ours, 1 = stale (no file, no
+# such process, or another executable), 2 = unverifiable (alive but its
+# executable cannot be read).
+identity() {{
+    [ -f "$PIDFILE" ] || return 1
+    read_pidfile
+    case "$PID" in ''|0*|*[!0-9]*) return 1 ;; esac
+    if ! kill -0 "$PID" 2>/dev/null; then
+        # Alive but not ours to signal (EPERM), or dead.
+        [ -e "$PROC/$PID" ] && return 2
+        return 1
     fi
+    [ -e "$PROC/$PID" ] || return 2
+    EXE=$(readlink "$PROC/$PID/exe" 2>/dev/null) || return 2
+    if [ -n "$REC" ]; then
+        exe_matches "$EXE" "$REC"
+        return
+    fi
+    legacy_match "$EXE"
+}}
+
+unverifiable() {{
+    echo "iroh-tunnel ($ROLE): cannot verify that pid $PID is the daemon; $PIDFILE kept" >&2
+}}
+
+start() {{
+    identity
+    case $? in
+        0) echo "iroh-tunnel ($ROLE) already running (pid $PID)"; return 0 ;;
+        2) unverifiable; return 1 ;;
+    esac
+    rm -f "$PIDFILE"
     echo "Starting iroh-tunnel ($ROLE)"
     "$DAEMON" {role_arg}run --config "$CONFIG" >> "$LOG" 2>&1 &
-    echo $! > "$PIDFILE"
+    printf '%s\n%s.' "$!" "$DAEMON" > "$PIDFILE"
 }}
 
 stop() {{
-    if [ ! -f "$PIDFILE" ]; then return 0; fi
-    PID="$(cat "$PIDFILE" 2>/dev/null)"
-    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-        echo "Stopping iroh-tunnel ($ROLE) (pid $PID)"
-        kill -TERM "$PID" 2>/dev/null || true
-        # Give iroh-tunnel up to 5s to drain on SIGTERM, then force-kill.
-        i=0
-        while [ "$i" -lt 5 ] && kill -0 "$PID" 2>/dev/null; do
-            sleep 1; i=$((i + 1))
-        done
-        kill -0 "$PID" 2>/dev/null && kill -KILL "$PID" 2>/dev/null || true
-    fi
+    identity
+    case $? in
+        2) unverifiable; return 1 ;;
+        0)
+            echo "Stopping iroh-tunnel ($ROLE) (pid $PID)"
+            kill -TERM "$PID" 2>/dev/null
+            # Give iroh-tunnel up to 5s to drain on SIGTERM, then force-kill
+            # only if the PID still runs the daemon.
+            i=0
+            while [ "$i" -lt 5 ] && identity; do
+                sleep 1; i=$((i + 1))
+            done
+            if identity; then kill -KILL "$PID" 2>/dev/null; fi
+            ;;
+    esac
     rm -f "$PIDFILE"
 }}
 
 status() {{
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-        echo "iroh-tunnel ($ROLE) is running (pid $(cat "$PIDFILE"))"
-        return 0
-    fi
+    identity
+    case $? in
+        0) echo "iroh-tunnel ($ROLE) is running (pid $PID)"; return 0 ;;
+        2) echo "iroh-tunnel ($ROLE) status unknown: cannot verify pid $PID"; return 4 ;;
+    esac
     echo "iroh-tunnel ($ROLE) is not running"
     return 3
 }}
@@ -130,7 +195,7 @@ status() {{
 case "$1" in
     start) start ;;
     stop) stop ;;
-    restart) stop; start ;;
+    restart) stop && start ;;
     status) status ;;
     *) echo "Usage: $0 {{start|stop|restart|status}}"; exit 1 ;;
 esac
@@ -195,7 +260,7 @@ mod tests {
         for arm in [
             "start) start",
             "stop) stop",
-            "restart) stop; start",
+            "restart) stop && start",
             "status) status",
         ] {
             assert!(s.contains(arm), "missing case arm `{arm}`:\n{s}");
@@ -292,6 +357,10 @@ mod tests {
             pub(super) script: PathBuf,
             pub(super) layout: ScriptLayout,
             pub(super) record: PathBuf,
+            /// The fake daemon executable (`DAEMON`).
+            pub(super) daemon: PathBuf,
+            /// The config path (`CONFIG`).
+            pub(super) config: PathBuf,
             seen: RefCell<Vec<u32>>,
         }
 
@@ -373,8 +442,53 @@ mod tests {
                     script,
                     layout,
                     record,
+                    daemon: binary,
+                    config,
                     seen: RefCell::new(Vec::new()),
                 }
+            }
+
+            /// The daemon path as text.
+            pub(super) fn daemon_str(&self) -> &str {
+                self.daemon.to_str().unwrap()
+            }
+
+            /// The config path as text.
+            pub(super) fn config_str(&self) -> &str {
+                self.config.to_str().unwrap()
+            }
+
+            /// Run the script with `verb` in the background.
+            pub(super) fn spawn(&self, verb: &str) -> std::process::Child {
+                Command::new("/bin/sh")
+                    .arg(&self.script)
+                    .arg(verb)
+                    .current_dir(self.dir.path())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            }
+
+            /// Replace the PID file's content.
+            pub(super) fn write_pidfile(&self, text: &str) {
+                std::fs::write(&self.layout.pidfile, text).unwrap();
+            }
+
+            /// The PID file's content, `None` when absent.
+            pub(super) fn pidfile_text(&self) -> Option<String> {
+                std::fs::read_to_string(&self.layout.pidfile).ok()
+            }
+
+            /// The new-format PID file naming `pid` as this daemon.
+            pub(super) fn record_line(&self, pid: u32) -> String {
+                format!("{pid}\n{}.", self.daemon_str())
+            }
+
+            /// Forget the daemon's record so the next launch is observable.
+            pub(super) fn clear_record(&self) {
+                let _ = std::fs::remove_file(&self.record);
             }
 
             /// Run the script with `verb`; remembers the PID it leaves behind.
@@ -394,7 +508,13 @@ mod tests {
 
             fn read_pid(&self) -> Option<u32> {
                 let text = std::fs::read_to_string(&self.layout.pidfile).ok()?;
-                text.lines().next()?.trim().parse().ok()
+                // Never 0: `kill 0` would signal the test's process group.
+                text.lines()
+                    .next()?
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|&pid| pid != 0)
             }
 
             /// The PID on the PID file's first line.
@@ -456,9 +576,22 @@ mod tests {
             }
         }
 
+        /// A PID with no live process: a reaped `true`.
+        pub(super) fn dead_pid() -> u32 {
+            let mut child = Command::new("true").spawn().unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            pid
+        }
+
+        /// The exit code of a script run.
+        pub(super) fn code(output: &Output) -> i32 {
+            output.status.code().expect("script exited normally")
+        }
+
         impl Drop for ScriptHarness {
             fn drop(&mut self) {
-                for pid in self.seen.borrow().iter() {
+                for pid in self.seen.borrow().iter().filter(|&&pid| alive(pid)) {
                     let _ = Command::new("kill")
                         .arg("-9")
                         .arg(pid.to_string())
@@ -504,46 +637,362 @@ mod tests {
             assert!(alive(h.pidfile_pid()));
         }
 
-        /// The harness itself: a TERM-ignoring daemon survives SIGTERM, fake
-        /// proc entries read back, and an unrelated process is independent.
-        #[test]
-        fn harness_controls_daemon_and_fake_proc() {
-            let h = ScriptHarness::new(
+        /// `kill -9 pid` and wait until it is gone.
+        fn kill9(pid: u32) {
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .stderr(Stdio::null())
+                .status();
+            assert!(wait_gone(pid, Duration::from_secs(5)), "{pid} survived -9");
+        }
+
+        fn harness(daemon: DaemonKind) -> ScriptHarness {
+            ScriptHarness::new(
                 "iroh-tunnel",
                 "c.toml",
                 "state",
                 ServiceInvocation::Combined,
-                DaemonKind::IgnoresTerm,
-            );
+                daemon,
+            )
+        }
+
+        /// `start`, wait for the daemon, and register it as ours in `PROC`.
+        fn started(h: &ScriptHarness) -> u32 {
             h.run("start");
             h.wait_record();
             let pid = h.pidfile_pid();
-            Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status()
-                .unwrap();
-            assert!(!wait_gone(pid, Duration::from_millis(300)), "TERM ignored");
+            h.fake_proc(pid, h.daemon_str(), &[h.daemon_str(), "serve", "run"]);
+            pid
+        }
 
-            let other = h.spawn_unrelated();
+        /// An unrelated live `sleep` named by a new-format PID file.
+        fn stale(h: &ScriptHarness) -> u32 {
+            let pid = h.spawn_unrelated();
+            h.write_pidfile(&h.record_line(pid));
+            h.fake_proc(pid, "/bin/sleep", &["sleep", "30"]);
+            pid
+        }
+
+        fn stdout(output: &Output) -> String {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+
+        #[test]
+        fn start_records_pid_and_daemon() {
+            let h = harness(DaemonKind::Exits);
+            h.run("start");
+            h.wait_record();
+            let pid = h.pidfile_pid();
+            assert!(alive(pid));
+            assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid));
+        }
+
+        #[test]
+        fn stop_terminates_the_recorded_daemon() {
+            let h = harness(DaemonKind::Exits);
+            let pid = started(&h);
+            let out = h.run("stop");
+            assert_eq!(code(&out), 0, "{out:?}");
+            assert!(wait_gone(pid, Duration::from_secs(2)));
+            assert!(h.pidfile_text().is_none());
+        }
+
+        #[test]
+        fn stubborn_daemon_is_killed_after_grace() {
+            let h = harness(DaemonKind::IgnoresTerm);
+            let pid = started(&h);
+            let begin = Instant::now();
+            let out = h.run("stop");
+            let took = begin.elapsed();
+            assert_eq!(code(&out), 0, "{out:?}");
+            assert!(took >= Duration::from_secs(4), "returned after {took:?}");
+            assert!(wait_gone(pid, Duration::from_secs(2)));
+            assert!(h.pidfile_text().is_none());
+        }
+
+        #[test]
+        fn status_without_pid_file_is_not_running() {
+            let h = harness(DaemonKind::Exits);
+            assert_eq!(code(&h.run("status")), 3);
+        }
+
+        #[test]
+        fn stale_pid_of_unrelated_process_is_not_signalled() {
+            let h = harness(DaemonKind::Exits);
+            let pid = stale(&h);
+            assert_eq!(code(&h.run("stop")), 0);
+            assert!(alive(pid), "unrelated process was signalled");
+            assert!(h.pidfile_text().is_none());
+        }
+
+        #[test]
+        fn start_with_stale_pid_launches_daemon() {
+            let h = harness(DaemonKind::Exits);
+            let other = stale(&h);
+            let out = h.run("start");
+            assert_eq!(code(&out), 0, "{out:?}");
+            assert!(!stdout(&out).contains("already running"), "{out:?}");
+            h.wait_record();
+            let pid = h.pidfile_pid();
+            assert_ne!(pid, other);
+            assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid));
             assert!(alive(other));
-            h.fake_proc(other, "/bin/sleep", &["sleep", "30"]);
-            h.set_exe(other, "/elsewhere");
-            let entry = h.layout.proc_root.join(other.to_string());
-            assert_eq!(
-                std::fs::read_link(entry.join("exe")).unwrap(),
-                PathBuf::from("/elsewhere")
-            );
-            assert_eq!(
-                std::fs::read(entry.join("cmdline")).unwrap(),
-                b"sleep\x0030\x00"
-            );
-            Command::new("kill")
-                .arg("-9")
-                .arg(other.to_string())
+        }
+
+        #[test]
+        fn status_with_stale_pid_reports_not_running() {
+            let h = harness(DaemonKind::Exits);
+            let pid = stale(&h);
+            assert_eq!(code(&h.run("status")), 3);
+            assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid));
+        }
+
+        #[test]
+        fn stale_garbage_pid_file_is_removed_without_signal() {
+            let h = harness(DaemonKind::Exits);
+            let dead = format!("{}\n", dead_pid());
+            for text in ["", "abc", "-1", "1 2", "0", "00", dead.as_str()] {
+                h.write_pidfile(text);
+                assert_eq!(code(&h.run("status")), 3, "{text:?}");
+                assert_eq!(h.pidfile_text().unwrap(), text, "status changed it");
+                h.clear_record();
+                let out = h.run("start");
+                assert_eq!(code(&out), 0, "{text:?}: {out:?}");
+                h.wait_record();
+                let pid = h.pidfile_pid();
+                assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid), "{text:?}");
+                kill9(pid);
+            }
+        }
+
+        #[test]
+        fn replaced_daemon_with_deleted_suffix_is_ours() {
+            let h = harness(DaemonKind::Exits);
+            let pid = started(&h);
+            h.set_exe(pid, &format!("{} (deleted)", h.daemon_str()));
+            let out = h.run("start");
+            assert_eq!(code(&out), 0, "{out:?}");
+            assert!(stdout(&out).contains("already running"), "{out:?}");
+            assert_eq!(h.pidfile_pid(), pid);
+            assert_eq!(code(&h.run("stop")), 0);
+            assert!(wait_gone(pid, Duration::from_secs(2)));
+        }
+
+        #[test]
+        fn unverifiable_identity_fails_loud() {
+            let h = harness(DaemonKind::Exits);
+            let pid = h.spawn_unrelated();
+            let text = h.record_line(pid);
+            h.write_pidfile(&text);
+            for (verb, expected) in [("stop", 1), ("start", 1), ("status", 4)] {
+                let out = h.run(verb);
+                assert_eq!(code(&out), expected, "{verb}: {out:?}");
+                assert!(alive(pid), "{verb} signalled it");
+                assert_eq!(h.pidfile_text().unwrap(), text, "{verb} changed it");
+            }
+            assert!(!h.record.exists(), "start launched a daemon");
+        }
+
+        #[test]
+        fn unsignalable_pid_with_proc_entry_is_unverifiable() {
+            let h = harness(DaemonKind::Exits);
+            let pid = dead_pid();
+            h.fake_proc(pid, h.daemon_str(), &[h.daemon_str()]);
+            let text = h.record_line(pid);
+            h.write_pidfile(&text);
+            assert_eq!(code(&h.run("status")), 4);
+            assert_eq!(code(&h.run("stop")), 1);
+            assert_eq!(h.pidfile_text().unwrap(), text);
+        }
+
+        #[test]
+        fn pid_reused_during_grace_is_not_killed() {
+            let h = harness(DaemonKind::IgnoresTerm);
+            let pid = started(&h);
+            let mut stop = h.spawn("stop");
+            std::thread::sleep(Duration::from_secs(1));
+            h.set_exe(pid, "/bin/sleep");
+            assert!(stop.wait().unwrap().success());
+            assert!(alive(pid), "SIGKILL reached a reused PID");
+            assert!(h.pidfile_text().is_none());
+        }
+
+        #[test]
+        fn legacy_pid_of_current_daemon_is_restarted() {
+            let h = harness(DaemonKind::Exits);
+            let old = h.spawn_unrelated();
+            h.write_pidfile(&format!("{old}\n"));
+            h.fake_proc(old, h.daemon_str(), &[h.daemon_str(), "serve", "run"]);
+            let out = h.run("restart");
+            assert_eq!(code(&out), 0, "{out:?}");
+            assert!(wait_gone(old, Duration::from_secs(2)), "old daemon kept");
+            h.wait_record();
+            let pid = h.pidfile_pid();
+            assert_ne!(pid, old);
+            assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid));
+        }
+
+        #[test]
+        fn legacy_pid_after_binary_change_is_stopped() {
+            for invocation in [ServiceInvocation::Combined, ServiceInvocation::Standalone] {
+                for combined in [true, false] {
+                    let h = ScriptHarness::new(
+                        "iroh-tunnel",
+                        "c.toml",
+                        "state",
+                        invocation,
+                        DaemonKind::Exits,
+                    );
+                    let config = h.config_str();
+                    let (exe, argv) = if combined {
+                        let exe = "/old/iroh-tunnel";
+                        (exe, vec![exe, "serve", "run", "--config", config])
+                    } else {
+                        let exe = "/old/iroh-tunnel-serve";
+                        (exe, vec![exe, "run", "--config", config])
+                    };
+                    let old = h.spawn_unrelated();
+                    h.write_pidfile(&format!("{old}\n"));
+                    h.fake_proc(old, exe, &argv);
+                    let out = h.run("restart");
+                    assert_eq!(code(&out), 0, "{out:?}");
+                    assert!(
+                        wait_gone(old, Duration::from_secs(2)),
+                        "{invocation:?} over {exe} kept the old daemon"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn legacy_pid_of_unrelated_process_is_kept() {
+            let h = harness(DaemonKind::Exits);
+            let config = h.config_str().to_owned();
+            let cases: [(&str, Vec<&str>); 3] = [
+                ("/usr/bin/sleep", vec!["sleep", "30"]),
+                (
+                    "/x/iroh-tunnel",
+                    vec!["/x/iroh-tunnel", "serve", "run", "--config", "/other.toml"],
+                ),
+                (
+                    "/x/iroh-tunnel",
+                    vec!["/x/iroh-tunnel", "access", "run", "--config", &config],
+                ),
+            ];
+            for (exe, argv) in cases {
+                let other = h.spawn_unrelated();
+                h.write_pidfile(&format!("{other}\n"));
+                h.fake_proc(other, exe, &argv);
+                assert_eq!(code(&h.run("stop")), 0, "{argv:?}");
+                assert!(alive(other), "{argv:?} was signalled");
+                h.write_pidfile(&format!("{other}\n"));
+                h.clear_record();
+                let out = h.run("start");
+                assert_eq!(code(&out), 0, "{argv:?}: {out:?}");
+                assert!(!stdout(&out).contains("already running"), "{argv:?}");
+                h.wait_record();
+                let pid = h.pidfile_pid();
+                assert_ne!(pid, other);
+                assert!(alive(other));
+                kill9(pid);
+            }
+        }
+
+        /// The init script as written before this change (commit b35bde1,
+        /// `format_script_invocation`), with `{daemon}`, `{config}`,
+        /// `{state}`, `{pidfile}` and `{log}` placeholders.
+        const LEGACY_SCRIPT: &str = r#"#!/bin/sh
+# Auto-generated by `iroh-tunnel service install` — do not edit by hand.
+# BusyBox/SysV init script for iroh-tunnel (serve).
+
+DAEMON="{daemon}"
+ROLE="serve"
+CONFIG="{config}"
+export IROH_TUNNEL_STATE_DIR="{state}"
+PIDFILE="{pidfile}"
+LOG="{log}"
+
+start() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+        echo "iroh-tunnel ($ROLE) already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "Starting iroh-tunnel ($ROLE)"
+    "$DAEMON" "$ROLE" run --config "$CONFIG" >> "$LOG" 2>&1 &
+    echo $! > "$PIDFILE"
+}
+
+stop() {
+    if [ ! -f "$PIDFILE" ]; then return 0; fi
+    PID="$(cat "$PIDFILE" 2>/dev/null)"
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        echo "Stopping iroh-tunnel ($ROLE) (pid $PID)"
+        kill -TERM "$PID" 2>/dev/null || true
+        # Give iroh-tunnel up to 5s to drain on SIGTERM, then force-kill.
+        i=0
+        while [ "$i" -lt 5 ] && kill -0 "$PID" 2>/dev/null; do
+            sleep 1; i=$((i + 1))
+        done
+        kill -0 "$PID" 2>/dev/null && kill -KILL "$PID" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+}
+
+status() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+        echo "iroh-tunnel ($ROLE) is running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "iroh-tunnel ($ROLE) is not running"
+    return 3
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status) status ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
+exit $?
+"#;
+
+        #[test]
+        fn reinstall_over_legacy_registration_replaces_old_daemon() {
+            let h = harness(DaemonKind::Exits);
+            let root = h.dir.path();
+            let legacy = LEGACY_SCRIPT
+                .replace("{daemon}", h.daemon_str())
+                .replace("{config}", h.config_str())
+                .replace("{state}", root.join("state").to_str().unwrap())
+                .replace("{pidfile}", h.layout.pidfile.to_str().unwrap())
+                .replace("{log}", h.layout.logfile.to_str().unwrap());
+            let legacy_path = root.join("legacy.sh");
+            write_executable(&legacy_path, &legacy);
+            let status = Command::new("/bin/sh")
+                .arg(&legacy_path)
+                .arg("start")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
                 .status()
                 .unwrap();
-            assert!(wait_gone(other, Duration::from_secs(5)));
+            assert!(status.success());
+            h.wait_record();
+            let old = h.pidfile_pid();
+            h.seen.borrow_mut().push(old);
+            assert_eq!(h.pidfile_text().unwrap(), format!("{old}\n"));
+            h.fake_proc(old, h.daemon_str(), &[h.daemon_str(), "serve", "run"]);
+            h.clear_record();
+
+            let out = h.run("restart");
+            assert_eq!(code(&out), 0, "{out:?}");
+            assert!(wait_gone(old, Duration::from_secs(2)), "old daemon kept");
+            h.wait_record();
+            let pid = h.pidfile_pid();
+            assert_ne!(pid, old);
+            assert!(alive(pid));
+            assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid));
         }
     }
 }
