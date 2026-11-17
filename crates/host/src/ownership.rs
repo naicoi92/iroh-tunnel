@@ -826,6 +826,8 @@ fn running_owner(dir: &Path, role: Role) -> Result<Option<OwnerRecord>> {
             OwnerRead::Present(owner) => return Ok(Some(owner)),
             OwnerRead::Unreadable { .. } if attempt < ATTEMPTS => {
                 attempt += 1;
+                // Blocks at most ~75 ms, only on the unreadable-record path and
+                // once per start, like the surrounding synchronous file I/O.
                 std::thread::sleep(PAUSE);
             }
             OwnerRead::Unreadable { path, error } => {
@@ -1463,7 +1465,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn machine_owner_record_is_world_readable_under_umask_077() {
+    // Stands in for the spec scenario "Machine record readable under a restrictive umask": umask is process-global and a child-process test inherits concurrent tests' lock fds.
+    fn machine_owner_record_mode_ignores_the_creation_mode() {
         let mode = published_mode(0o600, MACHINE_RECORD_MODE);
         assert_eq!(mode, 0o644, "mode {mode:o}");
     }

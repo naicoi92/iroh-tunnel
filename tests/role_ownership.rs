@@ -297,8 +297,8 @@ async fn access_is_refused_when_the_running_serve_record_is_corrupt() -> Result<
         &access_args(&relay, &access_key, &serve_id),
     )?;
     let (code, stderr) = wait_refused(access)?;
+    assert_refused((code, stderr.clone()), "identity cannot be determined");
     assert!(stderr.contains("serve.owner.json"), "{stderr}");
-    assert_refused((code, stderr), "identity cannot be determined");
     Ok(())
 }
 
