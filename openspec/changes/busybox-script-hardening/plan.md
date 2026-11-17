@@ -216,7 +216,7 @@ identity() {
 - Start with a stale PID file → `start_with_stale_pid_launches_daemon`
 - Status with a stale PID file → `status_with_stale_pid_reports_not_running`
 - Dead or malformed PID file → `stale_garbage_pid_file_is_removed_without_signal`
-- Unverifiable identity → `unverifiable_identity_fails_loud`
+- Unverifiable identity → `unverifiable_identity_fails_loud`, `missing_exe_link_is_unverifiable`, `unreadable_pid_file_is_unverifiable`, `legacy_pid_with_unreadable_cmdline_is_unverifiable`
 - Status of a root daemon by a non-root user → `unsignalable_pid_with_proc_entry_is_unverifiable` (simulates EPERM: `kill -0` fails while the proc entry exists)
 - Running daemon replaced on disk → `replaced_daemon_with_deleted_suffix_is_ours`
 - Legacy PID file of the same binary → `legacy_pid_of_current_daemon_is_restarted`
