@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use super::backend::Backend;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::effective_binary::EffectiveBinary;
 use super::execute::execute;
@@ -98,7 +99,7 @@ pub(crate) fn verb_via(
             notes,
             verb,
             |native| guard_root_run(native, role.name(), root_run, invocation),
-            |native, notes| backend_verb(verb, native, notes, role, scope),
+            |native, notes| Backend::select(scope)?.verb(verb, native, notes, role, scope),
             |native| release_unreferenced_copy(native, role.name(), root_run),
         )
     })
@@ -219,62 +220,6 @@ fn check_effective(
         "{reason}. To register a root-owned binary, {guidance}."
     ))
     .into())
-}
-
-fn backend_verb(
-    verb: Verb,
-    native: &mut Native,
-    notes: &mut dyn FnMut(&ServiceNote),
-    role_id: Role,
-    scope: ServiceScope,
-) -> Result<()> {
-    let role = role_id.name();
-    #[cfg(target_os = "linux")]
-    {
-        use super::backend::{busybox, systemd};
-        if super::platform::linux_is_systemd() {
-            match verb {
-                Verb::Uninstall => systemd::uninstall(native, notes, role, scope),
-                Verb::Start => systemd::start(native, role, scope),
-                Verb::Stop => systemd::stop(native, notes, role, scope),
-                Verb::Restart => systemd::restart(native, notes, role, scope),
-            }
-        } else {
-            match verb {
-                Verb::Uninstall => busybox::uninstall(native, notes, role, scope),
-                Verb::Start => busybox::start(native, role, scope),
-                Verb::Stop => busybox::stop(native, notes, role, scope),
-                Verb::Restart => busybox::restart(native, notes, role, scope),
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use super::backend::launchd;
-        match verb {
-            Verb::Uninstall => launchd::uninstall(native, notes, role, scope),
-            Verb::Start => launchd::start(native, role, scope),
-            Verb::Stop => launchd::stop(native, notes, role, scope),
-            Verb::Restart => launchd::restart(native, notes, role, scope),
-        }
-    }
-    #[cfg(windows)]
-    {
-        use super::backend::windows;
-        if scope == ServiceScope::System {
-            return super::system_verb::system_verb(verb, role_id, notes);
-        }
-        match verb {
-            Verb::Uninstall => windows::uninstall(native, notes, role, scope),
-            Verb::Start => windows::start(native, role, scope),
-            Verb::Stop => windows::stop(native, notes, role, scope),
-            Verb::Restart => windows::restart(native, notes, role, scope),
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        super::platform::unsupported()
-    }
 }
 
 #[cfg(test)]
@@ -1140,7 +1085,7 @@ mod guard_tests {
                     )
                 },
                 |native, notes| {
-                    backend_verb(
+                    Backend::select(ServiceScope::System)?.verb(
                         Verb::Restart,
                         native,
                         notes,

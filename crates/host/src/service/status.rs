@@ -3,7 +3,8 @@
 
 use anyhow::Result;
 
-use super::native::{system_runner, Native, NativeOutput, Runner, ServiceCall, ServiceNote};
+use super::backend::Backend;
+use super::native::{system_runner, Native, Runner, ServiceCall, ServiceNote};
 use super::types::{
     Environment, Fact, Registration, ServiceFailure, ServiceInvocation, ServiceScope,
     ServiceStatusReport,
@@ -61,13 +62,15 @@ pub(crate) fn status_via(
     #[cfg(not(windows))]
     let liveness_note: Option<ServiceNote> = None;
     let mut native = Native::new(call.output, runner);
-    let output = backend_status(
-        &mut native,
-        &mut *call.notes,
-        liveness_note.as_ref(),
-        role,
-        scope,
-    );
+    let output = Backend::select(scope).and_then(|backend| {
+        backend.status(
+            &mut native,
+            &mut *call.notes,
+            liveness_note.as_ref(),
+            role,
+            scope,
+        )
+    });
     let (applied, outputs) = native.finish();
     let output = output.map_err(|error| ServiceFailure {
         applied,
@@ -115,16 +118,7 @@ fn owner_fact(
 /// Whether the platform's registration file exists (Unix backends).
 #[cfg(not(windows))]
 fn registration_of(role: &str, scope: ServiceScope) -> Result<Registration> {
-    #[cfg(target_os = "linux")]
-    let path = if super::platform::linux_is_systemd() {
-        super::backend::systemd::registration_path(role, scope)?
-    } else {
-        super::backend::busybox::registration_path(role)
-    };
-    #[cfg(target_os = "macos")]
-    let path = super::backend::launchd::registration_path(role, scope)?;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let path = std::path::PathBuf::new();
+    let path = Backend::select(scope)?.registration_path(role, scope)?;
     Ok(if path.exists() {
         Registration::Present {
             location: path.display().to_string(),
@@ -145,46 +139,6 @@ fn role_note(role: Role, liveness: &crate::ownership::Liveness) -> ServiceNote {
         crate::ownership::Liveness::NotRunning => ServiceNote::RoleNotRunning {
             role: role.name().to_owned(),
         },
-    }
-}
-
-#[cfg_attr(
-    not(windows),
-    expect(unused_variables, reason = "only the Windows backend reports liveness")
-)]
-fn backend_status(
-    native: &mut Native,
-    notes: &mut dyn FnMut(&ServiceNote),
-    liveness_note: Option<&ServiceNote>,
-    role_id: Role,
-    scope: ServiceScope,
-) -> Result<NativeOutput> {
-    let role = role_id.name();
-    #[cfg(target_os = "linux")]
-    {
-        if super::platform::linux_is_systemd() {
-            super::backend::systemd::status(native, notes, role, scope)
-        } else {
-            super::backend::busybox::status(native, notes, role, scope)
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        super::backend::launchd::status(native, notes, role, scope)
-    }
-    #[cfg(windows)]
-    {
-        if scope == ServiceScope::System {
-            if let Some(note) = liveness_note {
-                notes(note);
-            }
-            return Ok(NativeOutput::none());
-        }
-        super::backend::windows::status(native, notes, liveness_note, role, scope)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        super::platform::unsupported()
     }
 }
 

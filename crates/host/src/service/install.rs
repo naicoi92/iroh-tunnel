@@ -5,11 +5,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use super::backend::Backend;
 use super::decide_install_scope::decide_install_scope;
 use super::execute::execute;
 use super::native::system_runner;
-#[cfg(windows)]
-use super::native::InstalledAt;
 #[cfg(windows)]
 use super::native::OutputMode;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
@@ -86,7 +85,7 @@ pub(crate) fn install_via(
             &plan,
             materialize_root_only,
             |native, notes, binary| {
-                backend_install(
+                Backend::select(plan.scope)?.install(
                     native,
                     notes,
                     &RegistrationInput {
@@ -733,57 +732,6 @@ fn installable(role: Role, config: &Path, loaded: Result<()>) -> Result<()> {
             "cannot install the service ({advice})"
         )))
     })
-}
-
-/// Write, enable and start `reg` with this host's service manager.
-fn backend_install(
-    native: &mut Native,
-    notes: &mut dyn FnMut(&ServiceNote),
-    reg: &RegistrationInput<'_>,
-) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        // Same BusyBox-vs-systemd condition as `platform::system_wide_only`.
-        if super::platform::linux_is_systemd() {
-            super::backend::systemd::install(native, notes, reg)
-        } else {
-            super::backend::busybox::install(native, notes, reg)
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        super::backend::launchd::install(native, notes, reg)
-    }
-    #[cfg(windows)]
-    {
-        match reg.scope {
-            ServiceScope::User => super::backend::windows::install(native, notes, reg),
-            ServiceScope::System => install_windows_service(notes, reg),
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = (native, notes, reg);
-        super::platform::unsupported()
-    }
-}
-
-/// Register, start and announce the SCM service of `reg` (system scope).
-#[cfg(windows)]
-fn install_windows_service(
-    notes: &mut dyn FnMut(&ServiceNote),
-    reg: &RegistrationInput<'_>,
-) -> Result<()> {
-    use super::backend::windows_scm::{install_with, ServiceSpec, SystemClock};
-    use super::backend::windows_scm_impl::Scm;
-
-    let spec = ServiceSpec::render(reg)?;
-    install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
-    notes(&ServiceNote::Installed {
-        name: spec.name,
-        at: InstalledAt::WindowsService,
-    });
-    Ok(())
 }
 
 #[cfg(test)]

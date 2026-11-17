@@ -90,24 +90,9 @@ fn empty_key_text(path: &Path) -> String {
 /// system installs read it, and those exist on Unix only.
 #[cfg(unix)]
 pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            super::backend::systemd::existing_registration(role, scope)
-        } else {
-            let _ = scope;
-            super::backend::busybox::existing_registration(role)
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        super::backend::launchd::existing_registration(role, scope)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (role, scope);
-        None
-    }
+    super::backend::Backend::select(scope)
+        .ok()?
+        .existing_registration(role, scope)
 }
 
 /// Whether the service of `scope` runs as root: a system service always, and
@@ -121,18 +106,9 @@ pub(crate) fn root_run(scope: ServiceScope, system_wide_only: bool) -> bool {
 /// service, from the loaded definition.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn effective_binary(native: &mut super::native::Native, role: &str) -> EffectiveBinary {
-    #[cfg(target_os = "linux")]
-    {
-        if linux_is_systemd() {
-            super::backend::systemd::effective_binary(native, role)
-        } else {
-            let _ = native;
-            super::backend::busybox::effective_binary(role)
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        super::backend::launchd::effective_binary(native, role)
+    match super::backend::Backend::select(ServiceScope::System) {
+        Ok(backend) => backend.effective_binary(native, role),
+        Err(error) => EffectiveBinary::Unknown(format!("{error:#}")),
     }
 }
 
@@ -236,7 +212,7 @@ pub(crate) fn linux_is_systemd() -> bool {
 /// Whether every registration on this host is system-wide: a Linux host whose
 /// init is not systemd (BusyBox), which has no per-user services.
 ///
-/// `backend_install` picks its backend on the same condition.
+/// `Backend::select` picks its backend on the same condition.
 #[cfg(target_os = "linux")]
 pub(crate) fn system_wide_only() -> bool {
     !linux_is_systemd()
