@@ -22,7 +22,7 @@
 
 ## Commits
 
-- **Range**: `5809ac7..<receipt commit>` (implementation `5809ac7..7703f1f`, then this receipt)
+- **Range**: `5809ac7..353b427` (implementation `5809ac7..7703f1f`, receipt `353b427`; this range note amended in the following commit)
 - **Count**: `7`
 
 ---
