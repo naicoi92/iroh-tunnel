@@ -1124,11 +1124,13 @@ impl Drop for ActiveStream {
 mod tests {
     use super::*;
     use crate::serve::bind_serve;
+    use crate::settings::{NodeSettings, ServeServiceSettings};
 
     /// A failed upstream connect names the target and keeps the OS error.
     #[tokio::test]
     async fn open_upstream_failure_names_the_target() {
-        // macOS and Windows refuse a connect to port 0; Linux may accept it.
+        // macOS and Windows refuse a udp connect to port 0, so CI on those runners
+        // asserts this; Linux accepts it, and there is nothing to check there.
         let Err(err) = open_upstream("0.0.0.0:0").await else {
             return;
         };
@@ -1136,7 +1138,6 @@ mod tests {
         assert!(rendered.contains("0.0.0.0:0"), "{rendered}");
         assert!(err.chain().any(|c| c.is::<std::io::Error>()), "{err:?}");
     }
-    use crate::settings::{NodeSettings, ServeServiceSettings};
 
     #[tokio::test]
     async fn connect_local_timeout_resets_only_that_channel() {

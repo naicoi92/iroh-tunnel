@@ -319,7 +319,7 @@ pub(crate) fn open_chain(path: &Path, last: LastAccess) -> Result<Chain> {
         }
         let handle = open_element(component, access).map_err(|e| {
             let msg = format!(
-                "cannot open {component} to verify {} ({e}); nothing was changed",
+                "cannot open {component} to verify {} (nothing was changed)",
                 path.display()
             );
             // Keep the io::Error reachable for callers that map error codes.

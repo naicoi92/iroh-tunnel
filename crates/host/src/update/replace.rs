@@ -53,7 +53,7 @@ pub(super) fn classify_replace_error(err: anyhow::Error, exe_name: &str) -> anyh
             String::new()
         };
         err.context(CliError::Permission(format!(
-            "{REPLACE_DENIED_HINT}{extra}"
+            "cannot update the executable ({REPLACE_DENIED_HINT}{extra})"
         )))
     } else {
         err

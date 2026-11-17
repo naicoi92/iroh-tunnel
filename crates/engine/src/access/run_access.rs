@@ -814,7 +814,7 @@ impl UdpSession {
         let conn = match ctx.dialer.get_or_dial(deadline).await {
             Ok(conn) => conn,
             Err(error) => {
-                tracing::warn!(svc = %ctx.dialer.svc_name, "udp datagram dropped, no connection: {error}");
+                tracing::warn!(svc = %ctx.dialer.svc_name, "udp datagram dropped, no connection: {error:#}");
                 return None;
             }
         };

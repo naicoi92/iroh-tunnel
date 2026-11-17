@@ -718,8 +718,10 @@ fn installable(role: Role, config: &Path, loaded: Result<()>) -> Result<()> {
     );
     loaded.map_err(|e| {
         // A config error is re-wrapped by its (already sanitized) message so
-        // the category prefix is not repeated; other failures (I/O) stay the
-        // source, so their `io::Error` remains reachable.
+        // the category prefix is not repeated. The loaders' config errors are
+        // leaf diagnostics without a source, so nothing is lost; other
+        // failures (I/O) stay the source, so their `io::Error` remains
+        // reachable.
         if let Some(CliError::Config(msg)) = e.downcast_ref::<CliError>() {
             return CliError::Config(format!("cannot install the service: {msg}. {advice}")).into();
         }

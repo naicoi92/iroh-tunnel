@@ -169,17 +169,15 @@ pub fn resolve_target_account(
     }))
 }
 
-/// [`trust::canonical`], replacing its message with `missing` only when the
-/// path does not exist; any other failure keeps its own diagnostic and cause.
+/// [`trust::canonical`], reporting a path that does not exist as `missing`;
+/// any other failure keeps the generic diagnostic. Either way the
+/// `io::Error` stays the source.
 fn canonical_or(path: &Path, missing: impl FnOnce() -> CliError) -> Result<PathBuf> {
-    trust::canonical(path).map_err(|err| {
-        let not_found = err
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
-        if not_found {
-            err.context(missing())
+    std::fs::canonicalize(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::Error::new(e).context(missing())
         } else {
-            err
+            trust::canonical_error(path, e)
         }
     })
 }
@@ -368,6 +366,32 @@ mod tests {
                 .map(std::io::Error::kind),
             Some(std::io::ErrorKind::PermissionDenied),
             "{err:?}"
+        );
+    }
+
+    /// A missing state directory gets one config diagnostic with one piece of
+    /// advice, followed by the OS cause.
+    #[test]
+    fn a_missing_state_dir_is_reported_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        std::fs::write(&config, "x").unwrap();
+        let state = tmp.path().join("absent");
+        let request = Request {
+            role: "serve",
+            config: Some(&config),
+            state: Some(&state),
+            sudo_user: None,
+        };
+        let err = resolve_target_account(&request, None).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert_eq!(rendered.matches("config error:").count(), 1, "{rendered}");
+        assert!(rendered.contains("does not exist"), "{rendered}");
+        assert!(!rendered.contains("Create it first"), "{rendered}");
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
         );
     }
 

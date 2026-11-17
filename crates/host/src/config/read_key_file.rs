@@ -33,6 +33,8 @@ pub(super) fn read_key_file(path: Option<&Path>) -> Result<String> {
             CliError::Config(format!("--key-file {}: file is empty", path.display())).into(),
         );
     }
+    // The cause is dropped on purpose: one fixed message for every malformed
+    // key keeps the diagnostic free of anything derived from the contents.
     resolve_secret_key(key).map_err(|_| {
         CliError::Config(format!(
             "--key-file {}: not a valid base64 32-byte secret key",

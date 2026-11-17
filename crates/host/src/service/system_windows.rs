@@ -79,8 +79,8 @@ pub(crate) fn resolve_target(
             let parent = config.parent().unwrap_or(config);
             let owner = owner_of(parent).map_err(|e| {
                 e.context(CliError::Config(format!(
-                    "cannot determine the owner of {} (the directory of --config); pass a \
-                     --config in a directory you can read. Nothing was changed.",
+                    "cannot determine the owner of {}, the directory of --config (pass a \
+                     --config in a directory you can read; nothing was changed)",
                     parent.display()
                 )))
             })?;
