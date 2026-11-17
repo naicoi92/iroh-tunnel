@@ -672,10 +672,9 @@ mod tests {
     }
 }
 
-#[allow(clippy::mixed_attributes_style)]
 #[cfg(test)]
+#[cfg(windows)]
 mod windows_tests {
-    #![cfg(windows)]
     use super::super::fixtures::sample_status;
     use super::*;
     use crate::error::CliError;

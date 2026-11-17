@@ -80,7 +80,7 @@ impl Pin {
                 .iter()
                 .any(|marker| l.strip_prefix(marker).is_some_and(|r| r.starts_with(KEY)))
         })?;
-        let rest = &line[line.find(KEY)? + KEY.len()..];
+        let (_, rest) = line.split_once(KEY)?;
         let mut config = None;
         let mut uid = None;
         let mut sid = None;
@@ -122,7 +122,6 @@ pub(super) fn require_unix_pin(pin: Option<&Pin>) -> anyhow::Result<()> {
 
 /// [`Pin::same_target`] with the platform made explicit, so the Windows rule
 /// is testable everywhere.
-#[cfg_attr(not(unix), allow(dead_code))]
 fn same_target_with(windows: bool, a: &Pin, b: &Pin) -> bool {
     if a.owner != b.owner {
         return false;
@@ -210,40 +209,34 @@ fn escape(path: &Path) -> String {
     out
 }
 
+/// Decode `%XX` escapes; `None` for a truncated or non-hex escape.
+fn unescape_bytes(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut rest = text.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let (hex, tail) = tail.split_first_chunk::<2>()?;
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            rest = tail;
+        } else {
+            out.push(byte);
+            rest = tail;
+        }
+    }
+    Some(out)
+}
+
 #[cfg(unix)]
 fn unescape(text: &str) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = text.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+    unescape_bytes(text).map(|bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 
 #[cfg(not(unix))]
 fn unescape(text: &str) -> Option<PathBuf> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            out.push(u8::from_str_radix(text.get(i + 1..i + 3)?, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok().map(PathBuf::from)
+    String::from_utf8(unescape_bytes(text)?)
+        .ok()
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -464,5 +457,8 @@ mod tests {
         assert_eq!(Pin::find("[Service]\nExecStart=x\n"), None);
         assert_eq!(Pin::find("# iroh-tunnel-pin config=/a uid=x"), None);
         assert_eq!(Pin::find("# iroh-tunnel-pin config=%ZZ uid=1"), None);
+        assert_eq!(Pin::find("# iroh-tunnel-pin config=/a% uid=1"), None);
+        assert_eq!(Pin::find("# iroh-tunnel-pin config=/a%4 uid=1"), None);
+        assert_eq!(Pin::find("# iroh-tunnel-pin config=/a%4é uid=1"), None);
     }
 }

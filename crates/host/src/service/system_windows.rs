@@ -3,9 +3,6 @@
 //! Pure: the token user, the owner lookup, the LocalAppData lookup and the
 //! account-name lookup are injected, so every rule runs on any platform.
 
-// Pure and compiled everywhere for its tests, but only Windows consumes it.
-#![cfg_attr(not(windows), allow(dead_code))]
-
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -63,11 +60,17 @@ pub(crate) fn resolve_target(
     local_appdata: &dyn Fn(&Sid) -> Result<PathBuf>,
     account_of: &dyn Fn(&Sid) -> Option<String>,
 ) -> Result<WinTarget> {
-    // Looked up once, and only when a default path needs it.
+    // Looked up once, up front, and only when a default path needs it.
     let appdata = if req.config.is_none() || req.state.is_none() {
         Some(local_appdata(token)?)
     } else {
         None
+    };
+    let appdata_dir = || -> Result<PathBuf> {
+        match &appdata {
+            Some(dir) => Ok(dir.clone()),
+            None => local_appdata(token),
+        }
     };
     let name = |sid: &Sid| account_of(sid).unwrap_or_else(|| sid.0.clone());
 
@@ -96,14 +99,11 @@ pub(crate) fn resolve_target(
             }
             config.to_path_buf()
         }
-        None => crate::paths::windows_config_path_in(
-            appdata.as_deref().expect("looked up above"),
-            req.role,
-        ),
+        None => crate::paths::windows_config_path_in(&appdata_dir()?, req.role),
     };
     let state = match req.state {
         Some(state) => state.to_path_buf(),
-        None => crate::paths::windows_state_path_in(appdata.as_deref().expect("looked up above")),
+        None => crate::paths::windows_state_path_in(&appdata_dir()?),
     };
     Ok(WinTarget {
         sid: token.clone(),

@@ -13,7 +13,6 @@ use crate::error::CliError;
 /// # Errors
 ///
 /// Never fails today; kept as the single seam for a platform without a backend.
-#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn ensure_supported(_scope: ServiceScope) -> Result<()> {
     Ok(())
 }

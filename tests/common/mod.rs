@@ -1,6 +1,9 @@
 //! Helpers shared by integration tests.
 // Each test crate uses a different subset of these helpers.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test crate uses a different subset of these helpers"
+)]
 
 pub mod busy_exec;
 pub mod release_server;

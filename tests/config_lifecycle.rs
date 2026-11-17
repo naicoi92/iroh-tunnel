@@ -7,6 +7,7 @@
 //! Windows owner-only permissions and lock behavior are UNVERIFIED (see the
 //! #99 evidence record).
 #![cfg(unix)]
+#![cfg(test)]
 
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;

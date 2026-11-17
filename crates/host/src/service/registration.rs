@@ -10,7 +10,6 @@ use crate::error::CliError;
 
 /// Name suffix that keeps a test registration apart from any real service.
 /// Empty in production builds; `test-utils` reads it from the environment.
-#[allow(dead_code)] // unused on targets without a service backend
 pub(crate) fn instance_suffix() -> String {
     #[cfg(feature = "test-utils")]
     if let Some(suffix) = std::env::var_os("IROH_TUNNEL_TEST_SERVICE_SUFFIX") {
@@ -26,7 +25,10 @@ pub(crate) fn instance_suffix() -> String {
 /// [`CliError::Permission`] when the OS denies access. The scope and account
 /// are left as requested and the message says how to proceed, because
 /// retrying under another scope or account would silently broaden access.
-#[allow(dead_code)] // unused on targets without a service backend
+#[cfg_attr(
+    all(not(test), windows),
+    expect(dead_code, reason = "only the Unix backends write registration files")
+)]
 pub(crate) fn write_registration(path: &Path, contents: &str) -> Result<()> {
     let denied = |e: std::io::Error, what: &str, target: &Path| -> anyhow::Error {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -141,7 +143,10 @@ fn registration_permissions(target: &Path) -> std::fs::Permissions {
 /// The text of an installed registration. Absent is `None`; a registration
 /// that exists but cannot be read counts as one with an unknown owner (empty
 /// text), never as "nothing installed", so the retarget prompt is not skipped.
-#[allow(dead_code)] // unused on targets without a service backend
+#[cfg_attr(
+    all(not(test), windows),
+    expect(dead_code, reason = "only the Unix backends write registration files")
+)]
 pub(crate) fn read_registration(path: &Path) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),

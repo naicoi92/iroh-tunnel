@@ -6,6 +6,8 @@
 use std::future::Future;
 use std::time::Duration;
 
+use anyhow::{Context, Result};
+
 use tokio::signal;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -49,7 +51,10 @@ pub(crate) fn scm_stop() -> &'static watch::Sender<bool> {
 /// set fires immediately, once (the stop arrived before anyone listened);
 /// otherwise only a later transition fires, so a watchdog that starts after
 /// the stop does not take the same latch for a repeated signal.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), not(windows)),
+    expect(dead_code, reason = "only the Windows SCM latch fires it")
+)]
 async fn latch_fired(rx: &mut watch::Receiver<bool>, replay: &mut bool) {
     if std::mem::take(replay) && *rx.borrow_and_update() {
         return;
@@ -84,26 +89,27 @@ struct StopSignals {
 impl StopSignals {
     /// `replay`: a stop the SCM already requested still counts (the primary
     /// stop wait); the watchdog passes `false` and sees only later ones.
-    fn install(replay: bool) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// The OS refused a signal handler (resource exhaustion).
+    fn install(replay: bool) -> Result<Self> {
         #[cfg(not(windows))]
         let _ = replay;
-        Self {
+        Ok(Self {
             #[cfg(windows)]
             scm: scm_stop().subscribe(),
             #[cfg(windows)]
             replay,
-            // Installation only fails on OS resource exhaustion; without the
-            // handler the process could never stop gracefully, so refuse to
-            // start rather than run unstoppable.
             #[cfg(unix)]
             interrupt: signal::unix::signal(signal::unix::SignalKind::interrupt())
-                .expect("failed to install SIGINT handler"),
+                .context("failed to install SIGINT handler")?,
             #[cfg(unix)]
             terminate: signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler"),
+                .context("failed to install SIGTERM handler")?,
             #[cfg(windows)]
-            ctrl_c: signal::windows::ctrl_c().expect("failed to install Ctrl+C handler"),
-        }
+            ctrl_c: signal::windows::ctrl_c().context("failed to install Ctrl+C handler")?,
+        })
     }
 
     /// Wait for the next stop signal and name it.
@@ -140,12 +146,17 @@ impl StopSignals {
 /// which signal was received so operators can tell Ctrl-C apart from a
 /// service manager stop. Repeated signals are handled by [`forced_exit`],
 /// which the CLI boundary races against the whole run.
-pub fn wait_for_signal() -> impl Future<Output = ()> {
-    let mut signals = StopSignals::install(true);
-    async move {
+///
+/// # Errors
+///
+/// A handler could not be installed. Without it the process could never stop
+/// gracefully, so the role must refuse to start rather than run unstoppable.
+pub fn wait_for_signal() -> Result<impl Future<Output = ()>> {
+    let mut signals = StopSignals::install(true)?;
+    Ok(async move {
         let signal_name = signals.next().await;
         tracing::info!("received {signal_name}");
-    }
+    })
 }
 
 /// Resolve when a stuck or repeatedly interrupted shutdown must be abandoned.
@@ -172,8 +183,18 @@ pub async fn forced_exit(ctx: &RunContext) -> ForcedExit {
         .unwrap_or(EXIT_WATCHDOG);
     #[cfg(not(feature = "test-utils"))]
     let watchdog = EXIT_WATCHDOG;
-    let mut signals = StopSignals::install(false);
-    forced_exit_after(deadline, watchdog, async || signals.next().await).await
+    // Without listeners a repeated signal cannot force the exit, but the
+    // watchdog still bounds a stuck shutdown.
+    let mut signals = StopSignals::install(false)
+        .inspect_err(|error| tracing::warn!("repeated stop signals are ignored: {error:#}"))
+        .ok();
+    forced_exit_after(deadline, watchdog, async || match signals.as_mut() {
+        Some(signals) => {
+            signals.next().await;
+        }
+        None => std::future::pending().await,
+    })
+    .await
 }
 
 /// Pure core of [`forced_exit`] with injected signal source, for tests.
@@ -281,14 +302,13 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::mixed_attributes_style)]
+#[cfg(windows)]
 mod scm_stop_tests {
-    #![cfg(windows)]
     use super::*;
 
     #[tokio::test]
     async fn scm_stop_triggers_the_same_drain() {
-        let wait = tokio::spawn(wait_for_signal());
+        let wait = tokio::spawn(wait_for_signal().unwrap());
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!wait.is_finished());
         scm_stop().send_replace(true);

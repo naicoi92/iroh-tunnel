@@ -12,6 +12,7 @@ use super::platform;
 use super::policy::{ensure_privilege, ensure_supported};
 use super::service_binary::release_unreferenced_copy;
 use super::types::{AppliedEffect, Environment, ServiceFailure, ServiceReport, ServiceScope};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::error::CliError;
 use crate::role::Role;
 
@@ -66,6 +67,7 @@ pub(crate) fn check_verb_policy_with_invocation(
 
 /// [`uninstall`]/[`start`]/[`stop`]/[`restart`] over an injected runner.
 #[cfg(test)]
+#[cfg(unix)]
 pub(crate) fn verb_via(
     verb: Verb,
     role: Role,
@@ -86,7 +88,7 @@ pub(crate) fn verb_via(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "one verb invocation's inputs")]
 pub(crate) fn verb_via_with_invocation(
     verb: Verb,
     role: Role,
@@ -191,7 +193,8 @@ fn guard_root_run(
 /// # Errors
 ///
 /// See [`check_effective`].
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn guard_effective_binary(
     native: &mut Native,
     role: &str,
@@ -207,7 +210,8 @@ fn guard_effective_binary(
 ///
 /// [`CliError::Permission`] keeping `verify`'s reason (path, owner, mode),
 /// or naming why the definition is unreadable, with reinstall guidance.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn check_effective(
     loaded: EffectiveBinary,
     role: &str,
@@ -270,7 +274,6 @@ fn check_effective_with_invocation(
     .into())
 }
 
-#[allow(unused_variables)] // unused on targets without a service backend
 fn backend_verb(
     verb: Verb,
     native: &mut Native,
@@ -338,7 +341,6 @@ mod tests {
     use super::super::native::ServiceNote;
     use super::super::status::status_via;
     use super::*;
-    #[cfg(unix)]
     use crate::error::CliError;
 
     #[cfg(unix)]
@@ -460,7 +462,10 @@ mod tests {
         let report = blocking_runtime().block_on(async {
             tokio::task::spawn_blocking(|| {
                 let mut runner = |c: &mut std::process::Command, _| {
-                    #[allow(unused_mut)] // only Windows fills the listing
+                    #[cfg_attr(
+                        not(windows),
+                        expect(unused_mut, reason = "only Windows fills the listing")
+                    )]
                     let mut out = ok_output(c.get_program().to_string_lossy().into_owned());
                     // Windows status first lists the tasks and refuses an
                     // unregistered role, so the listing must name the task.
@@ -615,7 +620,9 @@ mod steps_tests {
                         .collect::<Vec<_>>()
                         .join(" ")
                 }
-                super::super::native::fake::Event::Note(_) => unreachable!(),
+                super::super::native::fake::Event::Note(_) => {
+                    panic!("commands() yields only calls")
+                }
             })
             .collect()
     }
@@ -761,7 +768,8 @@ mod steps_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod guard_tests {
     //! The start/restart guard over the effective binary (Linux, macOS).
 
@@ -1112,7 +1120,7 @@ mod guard_tests {
         let calls = commands(&log);
         assert_eq!(calls.len(), 1, "{calls:?}");
         let super::super::native::fake::Event::Call { args, mode, .. } = calls[0] else {
-            unreachable!()
+            panic!("commands() yields only calls: {calls:?}")
         };
         assert_eq!(*mode, OutputMode::Capture);
         assert!(

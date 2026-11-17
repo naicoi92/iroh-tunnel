@@ -5,6 +5,7 @@
 //! Opt-in (`IROH_TUNNEL_E2E_SERVICE=1`).
 
 #![cfg(windows)]
+#![cfg(test)]
 
 mod common;
 

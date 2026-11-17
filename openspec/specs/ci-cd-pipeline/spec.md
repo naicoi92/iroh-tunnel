@@ -30,14 +30,14 @@ Confidence: inferred
 - **THEN** only `e2e.yml` declares `workflow_dispatch`
 
 ### Requirement: Pull-request test gate
-The system SHALL run, for every pull request and in parallel, only the checks its changed paths need: `lint` and the unit jobs for code paths, `scripts` for script and workflow paths, and `action` for GitHub Action paths. Pull requests SHALL NOT run end-to-end tests or build release artifacts. Unit job names SHALL identify the operating system (`unit (linux)`, `unit (macos)`, `unit (windows)`), and a failing unit job SHALL NOT cancel the others. A single `ci-ok` check SHALL always report and SHALL fail when any check failed or was cancelled.
-`lint` SHALL run the rustfmt check, clippy with warnings denied, and `cargo doc --workspace --no-deps --locked` with `RUSTDOCFLAGS=-D warnings`.
-Evidence: .github/workflows/ci.yml (changes, lint, unit, scripts, ci-ok), design.md D1; optimize-ci-cd design.md D10; cleanup-config-dto-rustdoc design.md D5
+The system SHALL run, for every pull request and in parallel, only the checks its changed paths need: the lint jobs and the unit jobs for code paths, `scripts` for script and workflow paths, and `action` for GitHub Action paths. Pull requests SHALL NOT run end-to-end tests or build release artifacts. Lint and unit job names SHALL identify the operating system (`lint (linux)`, `lint (macos)`, `lint (windows)`, `unit (linux)`, `unit (macos)`, `unit (windows)`), and a failing lint or unit job SHALL NOT cancel the others. A single `ci-ok` check SHALL always report and SHALL fail when any check failed or was cancelled.
+Each lint job SHALL run `cargo clippy --workspace --all-targets --all-features --locked` with warnings denied on its operating system, using the toolchain pinned by the `setup-rust` action (the `Cargo.toml` `rust-version`). `lint (linux)` SHALL also run the rustfmt check and `cargo doc --workspace --no-deps --locked` with `RUSTDOCFLAGS=-D warnings`; the other lint jobs SHALL NOT repeat them.
+Evidence: .github/workflows/ci.yml (changes, lint, unit, scripts, ci-ok), design.md D1; optimize-ci-cd design.md D10; cleanup-config-dto-rustdoc design.md D5; ci-cross-platform-clippy design.md D1-D3
 Confidence: inferred
 
 #### Scenario: Code change
 - **WHEN** a pull request changes a code path: `src/**`, `crates/**`, `tests/**`, `examples/**`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.github/actions/**` or `.github/workflows/ci.yml`
-- **THEN** `lint` (rustfmt check, clippy with warnings denied, workspace rustdoc build with warnings denied) and the unit jobs on Linux, macOS and Windows run in parallel, no e2e test runs, and `ci-ok` reflects their results
+- **THEN** the lint jobs (clippy with warnings denied on Linux, macOS and Windows; the rustfmt check and workspace rustdoc build with warnings denied on Linux) and the unit jobs on Linux, macOS and Windows run in parallel, no e2e test runs, and `ci-ok` reflects their results
 
 #### Scenario: Installer script change only
 - **WHEN** a pull request changes only `install.sh` or `install.ps1`
@@ -57,14 +57,14 @@ Confidence: inferred
 
 #### Scenario: Mixed change
 - **WHEN** a pull request changes both `crates/**` and `action-src/**`, or changes `.github/workflows/ci.yml`
-- **THEN** every job whose path filter matches runs, so `lint`, the unit jobs and `action` all run
+- **THEN** every job whose path filter matches runs, so the lint jobs, the unit jobs and `action` all run
 
 #### Scenario: Docs-only change
 - **WHEN** a pull request changes no code, script, workflow or action path
 - **THEN** every check is skipped and `ci-ok` passes
 
 #### Scenario: A check fails
-- **WHEN** `lint`, any unit job, `scripts` or `action` fails or is cancelled
+- **WHEN** any lint job, any unit job, `scripts` or `action` fails or is cancelled
 - **THEN** `ci-ok` fails
 
 #### Scenario: Superseded push
@@ -72,8 +72,12 @@ Confidence: inferred
 - **THEN** the older run is cancelled
 
 #### Scenario: Broken rustdoc link
-- **WHEN** a pull request changes a code path and introduces an intra-doc link that does not resolve on an item documented for the Linux `lint` target
-- **THEN** `lint` fails and `ci-ok` fails
+- **WHEN** a pull request changes a code path and introduces an intra-doc link that does not resolve on an item documented for the Linux lint target
+- **THEN** `lint (linux)` fails and `ci-ok` fails
+
+#### Scenario: Platform-only lint finding
+- **WHEN** a pull request adds a clippy finding in code compiled only on one operating system (for example under `#[cfg(windows)]` or `#[cfg(target_os = "macos")]`)
+- **THEN** the lint job of that operating system fails, the other lint jobs keep running to completion, and `ci-ok` fails
 
 ### Requirement: Tests cover the application only
 The system SHALL keep only tests of application behaviour in the Rust test suite. The suite SHALL NOT contain tests whose subject is the installer scripts, workflow or Dockerfile contents, the GitHub Actions, or release-artifact sets. Installer scripts and workflows SHALL be checked by static linting only. The GitHub Actions SHALL be tested by their own unit tests under `action-src/` and by running them in the end-to-end stage, never from the Rust suite.
@@ -106,13 +110,13 @@ Confidence: inferred
 - **THEN** `IROH_TUNNEL_E2E_SERVICE` is not set, so `tests/service_user.rs` does not drive the host service manager
 
 ### Requirement: Cache stage compiles without running tests
-The system SHALL, on a push to `main` that changes a Cargo manifest, `Cargo.lock`, the `setup-rust` action or `cache.yml`, compile the lint target on Linux and the unit targets on Linux, macOS and Windows, with the same flags and cache keys as the pull-request jobs, and save the caches, without running any test.
-Evidence: .github/actions/setup-rust/action.yml, .github/workflows/cache.yml, design.md D5
+The system SHALL, on a push to `main` that changes a Cargo manifest, `Cargo.lock`, the `setup-rust` action or `cache.yml`, compile the lint target and the unit targets on Linux, macOS and Windows, with the same flags and cache keys as the pull-request jobs, and save the caches, without running any test.
+Evidence: .github/actions/setup-rust/action.yml, .github/workflows/cache.yml, design.md D5; ci-cross-platform-clippy design.md D4
 Confidence: inferred
 
 #### Scenario: Dependency bump merged
 - **WHEN** a change to `Cargo.lock` is pushed to `main`
-- **THEN** clippy compiles on Linux, the unit targets compile with `--no-run` on Linux, macOS and Windows, and the caches are saved
+- **THEN** on each of Linux, macOS and Windows, clippy compiles the lint target and the unit targets compile with `--no-run`, and the caches are saved
 
 #### Scenario: Source-only change merged
 - **WHEN** a push to `main` changes only files under `src/`

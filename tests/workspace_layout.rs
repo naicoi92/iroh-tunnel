@@ -1,4 +1,5 @@
 //! Workspace shape and engine-extraction invariants (Task 19).
+#![cfg(test)]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -97,6 +98,10 @@ fn non_test_lines(text: &str) -> Vec<(usize, &str)> {
             continue;
         }
         if pending_attr {
+            // Further attributes stacked on the same item keep it pending.
+            if line.trim_start().starts_with("#[") {
+                continue;
+            }
             pending_attr = false;
             if line.trim_end().ends_with('{') {
                 skip_indent = Some(indent);
@@ -106,6 +111,13 @@ fn non_test_lines(text: &str) -> Vec<(usize, &str)> {
         out.push((n + 1, line));
     }
     out
+}
+
+#[test]
+fn non_test_lines_skips_test_modules_with_stacked_attributes() {
+    let text = "fn a() {}\n#[cfg(test)]\n#[cfg(windows)]\nmod t {\n    x!();\n}\nfn b() {}\n";
+    let kept: Vec<&str> = non_test_lines(text).into_iter().map(|(_, l)| l).collect();
+    assert_eq!(kept, ["fn a() {}", "fn b() {}"]);
 }
 
 #[test]

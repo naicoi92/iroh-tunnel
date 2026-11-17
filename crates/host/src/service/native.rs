@@ -171,7 +171,13 @@ pub(crate) type Runner<'a> = dyn FnMut(&mut Command, OutputMode) -> io::Result<N
 /// Runs native commands for a backend, in the caller's [`OutputMode`].
 pub(crate) struct Native<'a> {
     // Only `run` reads it; the Windows backend always captures.
-    #[cfg_attr(all(windows, not(test)), allow(dead_code))]
+    #[cfg_attr(
+        all(windows, not(test)),
+        expect(
+            dead_code,
+            reason = "only `run` reads it; the Windows backend always captures"
+        )
+    )]
     mode: OutputMode,
     runner: &'a mut Runner<'a>,
     applied: Vec<AppliedEffect>,

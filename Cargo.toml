@@ -108,3 +108,26 @@ lto = "thin"
 codegen-units = 1
 strip = true
 opt-level = 3
+
+# No-panic policy for production code (#216). Tests are exempted via
+# clippy.toml; a remaining invariant needs a narrow
+# `#[expect(clippy::<lint>, reason = "invariant: ...")]`.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+get_unwrap = "deny"
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+[lints]
+workspace = true

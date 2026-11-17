@@ -140,7 +140,6 @@ fn owner_fact(
 
 /// Whether the platform's registration file exists (Unix backends).
 #[cfg(not(windows))]
-#[allow(unused_variables)] // unused on targets without a service backend
 fn registration_of(role: &str, scope: ServiceScope) -> Result<Registration> {
     #[cfg(target_os = "linux")]
     let path = if super::platform::linux_is_systemd() {
@@ -175,7 +174,10 @@ fn role_note(role: Role, liveness: &crate::ownership::Liveness) -> ServiceNote {
     }
 }
 
-#[allow(unused_variables)] // unused on targets without a service backend
+#[cfg_attr(
+    not(windows),
+    expect(unused_variables, reason = "only the Windows backend reports liveness")
+)]
 fn backend_status(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),

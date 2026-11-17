@@ -19,6 +19,11 @@
 //!    transports, and endpoint-wide `local_bound_addrs`.
 //! 3. After the access role shuts down, the entry disappears — untracking
 //!    works and the 5 s flush picks it up.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use std::sync::Arc;
 use std::time::Duration;

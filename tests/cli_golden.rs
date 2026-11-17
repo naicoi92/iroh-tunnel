@@ -9,6 +9,7 @@
 //! cli_golden`; without it the output is compared. Only dynamic values are
 //! normalized (see [`normalize`]); the static text under test is never touched.
 //! The serve test uses an in-process local relay, never a public one.
+#![cfg(test)]
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

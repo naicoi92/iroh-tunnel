@@ -19,7 +19,6 @@ const REPLACE_DENIED_HINT: &str =
 /// Appended on Windows: a system service holds its executable open, and only
 /// an elevated `service stop --system` releases it. Standalone binaries name
 /// their own command; the combined binary names both possible service roles.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn windows_locked_hint(exe_name: &str) -> String {
     let commands = match exe_name {
         "iroh-tunnel-serve" | "iroh-tunnel-access" => {

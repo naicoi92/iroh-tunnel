@@ -39,8 +39,12 @@ mod stop;
 mod stop_with_invocation;
 #[cfg(unix)]
 pub(crate) mod system;
+// Pure Windows seams, compiled elsewhere only for their tests.
+#[cfg(any(windows, test))]
 mod system_verb;
+#[cfg(any(windows, test))]
 mod system_windows;
+#[cfg(any(windows, test))]
 mod task_xml;
 #[cfg(unix)]
 pub(crate) mod trust;
@@ -72,7 +76,10 @@ pub use stop_with_invocation::stop_with_invocation;
 #[cfg(unix)]
 pub use system::unknown_user;
 #[cfg(windows)]
-#[cfg_attr(feature = "test-utils", allow(unused_imports))]
+#[cfg_attr(
+    all(feature = "test-utils", not(test)),
+    expect(unused_imports, reason = "test-utils builds use a temp machine dir")
+)]
 pub(crate) use trust_windows::{create_dir_with_sddl, program_data_dir, verify_machine_dir};
 pub use types::{
     AppliedEffect, Environment, Fact, InstallNeed, InstallOutcome, InstallRequest, Registration,

@@ -44,6 +44,11 @@
 //! endpoint (explicit `insecure_skip_verify` when the variable is set) skip
 //! relay TLS verification, so only a local, self-hosted relay may be named by
 //! the variable.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -333,7 +338,6 @@ async fn echo_stream(mut recv: RecvStream, mut send: SendStream, streams: Arc<At
 /// Boot a real `testing::run_unowned` against `serve_node_id`, exposing
 /// the service locally on a fresh port. Returns the local listen address, the
 /// shutdown sender, and the task handle.
-#[allow(clippy::type_complexity)]
 async fn boot_access(
     tmp: &tempfile::TempDir,
     serve_node_id: &str,
@@ -577,7 +581,6 @@ async fn retry_connect(addr: std::net::SocketAddr, deadline: Duration) -> Result
 
 // Keep the unused ServeConfig import warning-free — referenced only for the
 // docstring link above.
-#[allow(dead_code)]
 fn _config_type_anchor() -> Option<ServeConfig> {
     None
 }

@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use super::mutate::{mutate_deciding, Edit};
 use super::resolve_config_path::resolve_config_path;
-use super::store::{ensure_node_table, existing_secret_key, resolve_target};
+use super::store::{existing_secret_key, resolve_target, set_node_secret_key};
 use super::types::{KeygenOutcome, RotationConsent};
 use crate::role::Role;
 
@@ -37,8 +37,7 @@ pub fn keygen(
             }));
         }
         let rotated = existing.is_some();
-        ensure_node_table(doc, &path)?;
-        doc["node"]["secret_key"] = toml_edit::value(key_str.as_str());
+        set_node_secret_key(doc, &path, &key_str)?;
         Ok(Edit::Apply(KeygenOutcome::Generated {
             path: path.clone(),
             node_id: key.public().to_string(),

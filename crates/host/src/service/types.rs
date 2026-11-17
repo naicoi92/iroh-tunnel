@@ -236,20 +236,17 @@ pub enum ScopeDecision {
 /// under systemd, but a bare `KeepAlive{SuccessfulExit=false}` under launchd,
 /// which has no exit-status exemption. A macOS job refused for "already
 /// running" is therefore respawned until it is booted out.
-#[allow(dead_code)] // unused on targets without a service backend
 pub(crate) struct RestartPolicy {
     /// Restart the service when it exits with a non-zero status.
     pub on_failure: bool,
     /// Delay between restart attempts, in seconds. Read by systemd; ignored
     /// by launchd (which uses an internal ThrottleInterval).
-    #[allow(dead_code)] // unread on macOS builds (launchd has no equivalent knob)
     pub delay_secs: u64,
 }
 
 impl RestartPolicy {
     /// The policy iroh-tunnel ships with: restart on crash, 5 s backoff.
     /// Matches the previous hard-coded values in both templates.
-    #[allow(dead_code)] // unused on targets without a service backend
     pub const DEFAULT: RestartPolicy = RestartPolicy {
         on_failure: true,
         delay_secs: 5,

@@ -15,7 +15,6 @@
 //! the general error (exit 1) with an actionable message naming the exact
 //! path (see docs/monitoring.md, "Exit codes").
 
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
@@ -74,46 +73,47 @@ pub fn run(role: Role, json: bool) -> Result<()> {
     }
 }
 
-/// Write one line to stdout, tolerating a closed pipe.
-///
-/// `println!` panics on a broken pipe (exit 101) — but a consumer closing
+/// Write one line to stdout, tolerating a closed pipe: a consumer closing
 /// early (`iroh-tunnel serve status | head`) is a normal exit for this
 /// command, not an error. Any other write failure propagates.
 fn print_line(line: &str) -> Result<()> {
-    let mut out = std::io::stdout().lock();
-    match writeln!(out, "{line}") {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(anyhow::Error::new(e).context("failed to write status output")),
+    crate::output::stdout_with_context(&format!("{line}\n"), "failed to write status output")
+}
+
+/// Print the stale-snapshot warning for `freshness`, if any. Advisory: a
+/// failed write must not block the snapshot on stdout.
+fn warn_for_freshness(role: Role, freshness: &Freshness, payload: &StatusPayload) {
+    if let Some(warning) = freshness_warning(role, freshness, payload) {
+        crate::output::report(&format!("{warning}\n"));
     }
 }
 
-/// Print the stale-snapshot warning for `freshness`, if any.
-fn warn_for_freshness(role: Role, freshness: &Freshness, payload: &StatusPayload) {
+/// The stale-snapshot warning for `freshness`, if any.
+fn freshness_warning(role: Role, freshness: &Freshness, payload: &StatusPayload) -> Option<String> {
     let pid = payload.pid();
     let started_at = payload.started_at();
     match freshness {
-        Freshness::StalePid { live_pid: None } => eprintln!(
+        Freshness::StalePid { live_pid: None } => Some(format!(
             "warning: {} is not running; this snapshot (pid {pid}) is stale, showing the last \
              snapshot from epoch {started_at}",
             role.name()
-        ),
+        )),
         Freshness::StalePid {
             live_pid: Some(live),
-        } => eprintln!(
+        } => Some(format!(
             "warning: {} is running as pid {live}, but this snapshot was written by pid {pid} \
              and is stale; showing the last snapshot from epoch {started_at}",
             role.name()
-        ),
-        Freshness::OwnerUnknown => eprintln!(
+        )),
+        Freshness::OwnerUnknown => Some(format!(
             "warning: {} is running but its owner record is missing, so this snapshot (pid {pid}) \
              cannot be verified as current; showing the last snapshot from epoch {started_at}",
             role.name()
-        ),
+        )),
         Freshness::Current
         | Freshness::LiveWithoutSnapshot
         | Freshness::AbsentNotRunning
-        | Freshness::Unreadable => {}
+        | Freshness::Unreadable => None,
     }
 }
 
@@ -257,9 +257,9 @@ fn render_table(headers: &[&str], rows: &[Vec<Vec<String>>]) -> String {
     // Column width = widest line across the header and every cell.
     let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
     for row in rows {
-        for (col, cell) in row.iter().enumerate() {
+        for (width, cell) in widths.iter_mut().zip(row) {
             for line in cell {
-                widths[col] = widths[col].max(line.chars().count());
+                *width = (*width).max(line.chars().count());
             }
         }
     }
@@ -291,9 +291,9 @@ fn padded_lines(cells: &[Vec<String>], widths: &[usize]) -> Vec<String> {
     (0..height)
         .map(|line| {
             let mut out = String::new();
-            for (col, cell) in cells.iter().enumerate() {
+            for (col, (cell, width)) in cells.iter().zip(widths).enumerate() {
                 let text = cell.get(line).map(String::as_str).unwrap_or("");
-                out.push_str(&format!("{text:<width$}", width = widths[col]));
+                out.push_str(&format!("{text:<width$}"));
                 if col + 1 < widths.len() {
                     out.push_str("  ");
                 }

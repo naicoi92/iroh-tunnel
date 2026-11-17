@@ -1,4 +1,5 @@
 //! Usage-error and help end-to-end coverage against the real binaries.
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

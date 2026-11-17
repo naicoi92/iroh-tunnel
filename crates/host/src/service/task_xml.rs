@@ -6,9 +6,6 @@
 //! so the rendering is unit-tested everywhere; running `schtasks` lives in
 //! `windows.rs`.
 
-// Only the Windows backend and the tests call into this module.
-#![cfg_attr(not(windows), allow(dead_code))]
-
 use std::path::Path;
 
 use anyhow::Result;

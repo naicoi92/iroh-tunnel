@@ -228,21 +228,31 @@ pub(crate) fn strip_retired_fields(doc: &mut DocumentMut) {
     }
 }
 
-/// Ensure a `[node]` table exists. A non-table `node` is a malformed config
-/// (exit 2) rather than a panic on the next index.
-pub(crate) fn ensure_node_table(doc: &mut DocumentMut, path: &Path) -> Result<()> {
-    match doc.get("node") {
+/// Store `key` as `[node].secret_key`, creating `[node]` when absent.
+///
+/// # Errors
+///
+/// [`CliError::Config`] (exit 2) when `node` exists but is not a table.
+pub(crate) fn set_node_secret_key(doc: &mut DocumentMut, path: &Path, key: &str) -> Result<()> {
+    let node = doc
+        .entry("node")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| {
+            CliError::Config(format!(
+                "invalid config at {}: [node] must be a table",
+                path.display()
+            ))
+        })?;
+    // Assign in place when present: `insert` would reset the key's decor
+    // and drop the operator's comment above it.
+    match node.get_mut("secret_key") {
+        Some(item) => *item = toml_edit::value(key),
         None => {
-            doc["node"] = toml_edit::Item::Table(toml_edit::Table::new());
-            Ok(())
+            node.insert("secret_key", toml_edit::value(key));
         }
-        Some(item) if item.is_table_like() => Ok(()),
-        Some(_) => Err(CliError::Config(format!(
-            "invalid config at {}: [node] must be a table",
-            path.display()
-        ))
-        .into()),
     }
+    Ok(())
 }
 
 /// The non-empty `[node].secret_key` of `doc`, if any.
@@ -273,8 +283,7 @@ pub(crate) fn persist_generated_key<D: RoleDoc>(path: &Path, encoded: &str) -> R
         resolve_secret_key(existing)?;
         return Ok(existing.to_string());
     }
-    ensure_node_table(&mut doc, &path)?;
-    doc["node"]["secret_key"] = toml_edit::value(encoded);
+    set_node_secret_key(&mut doc, &path, encoded)?;
     strip_retired_fields(&mut doc);
     let text = doc.to_string();
     let parsed: D = toml::from_str(&text).map_err(|e| {
@@ -359,6 +368,39 @@ mod tests {
     use super::*;
     use crate::config::fixtures::VALID_SERVE;
     use crate::config::{AccessConfig, NodeConfig, ServeConfig};
+
+    fn with_key(text: &str) -> Result<String> {
+        let mut doc: DocumentMut = text.parse()?;
+        set_node_secret_key(&mut doc, Path::new("c.toml"), "k")?;
+        Ok(doc.to_string())
+    }
+
+    #[test]
+    fn set_node_secret_key_creates_the_node_table() {
+        assert_eq!(with_key("").unwrap(), "[node]\nsecret_key = \"k\"\n");
+    }
+
+    #[test]
+    fn set_node_secret_key_keeps_an_inline_node_table() {
+        assert_eq!(
+            with_key("node = { relay_urls = [] }\n").unwrap(),
+            "node = { relay_urls = [] , secret_key = \"k\" }\n"
+        );
+    }
+
+    #[test]
+    fn set_node_secret_key_keeps_the_comment_above_an_existing_key() {
+        assert_eq!(
+            with_key("[node]\n# rotated 2024\nsecret_key   = \"\"\n").unwrap(),
+            "[node]\n# rotated 2024\nsecret_key   = \"k\"\n"
+        );
+    }
+
+    #[test]
+    fn set_node_secret_key_rejects_a_non_table_node() {
+        let err = with_key("node = 5\n").unwrap_err();
+        assert!(format!("{err}").contains("[node] must be a table"), "{err}");
+    }
 
     #[test]
     fn load_role_config_reads_and_validates() {

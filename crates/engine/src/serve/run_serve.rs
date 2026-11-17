@@ -295,43 +295,59 @@ impl StatusSnapshot {
 /// same service (e.g. a legacy access peer) is
 /// refcounted, and services are merged across a peer's connections.
 #[derive(Clone, Default)]
-struct PeerTracker(Arc<std::sync::Mutex<HashMap<iroh::EndpointId, HashMap<String, u64>>>>);
+struct PeerTracker(Arc<std::sync::Mutex<PeerRegistry>>);
+
+/// Connection refcount per service, per peer.
+type PeerRegistry = HashMap<iroh::EndpointId, HashMap<String, u64>>;
 
 impl PeerTracker {
+    /// Lock the registry; a poisoned lock is fatal for the caller (#216):
+    /// a panic mid-section may have left the refcounts inconsistent.
+    fn registry(&self) -> Result<std::sync::MutexGuard<'_, PeerRegistry>> {
+        self.0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("peer tracker lock poisoned"))
+    }
+
     /// Record one accepted connection from `peer` for `service`, returning
     /// the RAII handle that untracks it.
     ///
     /// The guard's [`Drop`] decrements the refcount, so a connection task
     /// that returns *or panics* cannot leak the entry — the unwind drops the
     /// guard like any local.
-    fn track(&self, peer: iroh::EndpointId, service: &str) -> TrackedPeer {
-        // std Mutex is deliberate: the critical section is a few map ops,
-        // the guard is never held across an await, and unlock failures can
-        // only mean a panic mid-section — unwrapping is the right response.
-        self.0
-            .lock()
-            .unwrap()
+    ///
+    /// # Errors
+    ///
+    /// The registry lock is poisoned.
+    fn track(&self, peer: iroh::EndpointId, service: &str) -> Result<TrackedPeer> {
+        // std Mutex is deliberate: the critical section is a few map ops and
+        // the guard is never held across an await.
+        self.registry()?
             .entry(peer)
             .or_default()
             .entry(service.to_string())
             .and_modify(|n| *n += 1)
             .or_insert(1);
-        TrackedPeer {
+        Ok(TrackedPeer {
             peers: self.clone(),
             peer,
             service: service.to_string(),
-        }
+        })
     }
 
     /// Drop one connection from `peer` for `service`; removes the service
     /// (and with it the peer) when its refcount hits zero.
-    fn untrack(&self, peer: iroh::EndpointId, service: &str) {
-        let mut guard = self.0.lock().unwrap();
+    ///
+    /// # Errors
+    ///
+    /// The registry lock is poisoned.
+    fn untrack(&self, peer: iroh::EndpointId, service: &str) -> Result<()> {
+        let mut guard = self.registry()?;
         let Some(services) = guard.get_mut(&peer) else {
-            return;
+            return Ok(());
         };
         let Some(count) = services.get_mut(service) else {
-            return;
+            return Ok(());
         };
         *count -= 1;
         if *count == 0 {
@@ -340,15 +356,18 @@ impl PeerTracker {
                 guard.remove(&peer);
             }
         }
+        Ok(())
     }
 
     /// Point-in-time copy of the registry: `(peer, sorted service names)`,
     /// sorted by peer id for deterministic output.
-    fn snapshot(&self) -> Vec<(iroh::EndpointId, Vec<String>)> {
+    ///
+    /// # Errors
+    ///
+    /// The registry lock is poisoned.
+    fn snapshot(&self) -> Result<Vec<(iroh::EndpointId, Vec<String>)>> {
         let mut peers: Vec<_> = self
-            .0
-            .lock()
-            .unwrap()
+            .registry()?
             .iter()
             .map(|(peer, services)| {
                 let mut names: Vec<String> = services.keys().cloned().collect();
@@ -359,7 +378,7 @@ impl PeerTracker {
         // Cached key: the node-id string is computed once per peer instead
         // of once per comparison.
         peers.sort_by_cached_key(|(peer, _)| peer.to_string());
-        peers
+        Ok(peers)
     }
 }
 
@@ -372,7 +391,10 @@ struct TrackedPeer {
 
 impl Drop for TrackedPeer {
     fn drop(&mut self) {
-        self.peers.untrack(self.peer, &self.service);
+        // Drop cannot propagate: report the poisoned registry instead.
+        if let Err(error) = self.peers.untrack(self.peer, &self.service) {
+            tracing::error!(peer = %self.peer, service = %self.service, "{error:#}");
+        }
     }
 }
 
@@ -383,12 +405,16 @@ impl Drop for TrackedPeer {
 /// Peers whose iroh remote-map entry has already expired (`remote_info` →
 /// `None`) are skipped — the flush cadence picks them back up if they
 /// reconnect.
+///
+/// # Errors
+///
+/// The tracker's lock is poisoned.
 async fn render_connections(
     ep: &iroh::Endpoint,
     peers: &PeerTracker,
-) -> Vec<PeerConnectionObservation> {
+) -> Result<Vec<PeerConnectionObservation>> {
     let mut out = Vec::new();
-    for (peer, services) in peers.snapshot() {
+    for (peer, services) in peers.snapshot()? {
         let Some(report) = crate::conn_path::peer_path_report(ep, peer).await else {
             continue;
         };
@@ -397,7 +423,7 @@ async fn render_connections(
             services,
         });
     }
-    out
+    Ok(out)
 }
 
 /// The endpoint's home relay as rendered into the status file, read live:
@@ -436,7 +462,14 @@ async fn status_flush_loop(
             _ = &mut stop => break,
             _ = tokio::time::sleep(interval) => {}
         }
-        let connections = render_connections(&ep, &peers).await;
+        let connections = match render_connections(&ep, &peers).await {
+            Ok(connections) => connections,
+            Err(error) => {
+                // A poisoned tracker is fatal for this task (#216).
+                tracing::error!("status flush stopped: {error:#}");
+                break;
+            }
+        };
         let observation = status.render(current_home_relay(&ep), connections);
         if last.as_ref() == Some(&observation) {
             continue;
@@ -547,7 +580,14 @@ async fn accept_loop(
             // as long as this connection lives (issue #57). The guard
             // untracks on drop — normal return or panic unwind alike — so
             // the refcount can never leak.
-            let _tracked = conn_peers.track(remote_id, &name);
+            let _tracked = match conn_peers.track(remote_id, &name) {
+                Ok(tracked) => tracked,
+                Err(error) => {
+                    // A poisoned tracker ends this connection (#216).
+                    tracing::error!(peer = %remote_id, "connection refused: {error:#}");
+                    return;
+                }
+            };
             handle_connection(&conn, target, &conn_sinks, conn_stop).await;
         });
     }
@@ -1048,7 +1088,12 @@ async fn relay_upstream_replies(
                 continue;
             }
         }
-        if let Err(error) = conn.send_datagram(crate::udp::encode(flow, &buf[..n])) {
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "invariant: recv never reports more bytes than the buffer holds"
+        )]
+        let reply = &buf[..n];
+        if let Err(error) = conn.send_datagram(crate::udp::encode(flow, reply)) {
             tracing::debug!(flow = flow.0, "udp reply not sent: {error}");
         }
     }
@@ -1113,22 +1158,22 @@ mod tests {
     fn track_refcounts_connections_until_the_last_untrack() {
         let tracker = PeerTracker::default();
         let p = peer();
-        let first = tracker.track(p, "echo");
-        let second = tracker.track(p, "echo");
+        let first = tracker.track(p, "echo").unwrap();
+        let second = tracker.track(p, "echo").unwrap();
 
         let expected = vec![(p, vec!["echo".to_string()])];
-        assert_eq!(tracker.snapshot(), expected);
+        assert_eq!(tracker.snapshot().unwrap(), expected);
 
         drop(first);
         assert_eq!(
-            tracker.snapshot(),
+            tracker.snapshot().unwrap(),
             expected,
             "one connection left — the entry must survive"
         );
 
         drop(second);
         assert!(
-            tracker.snapshot().is_empty(),
+            tracker.snapshot().unwrap().is_empty(),
             "peer must disappear with its last connection"
         );
     }
@@ -1140,29 +1185,53 @@ mod tests {
         let tracker = PeerTracker::default();
         let p = peer();
         {
-            let _tracked = tracker.track(p, "echo");
-            assert_eq!(tracker.snapshot(), vec![(p, vec!["echo".to_string()])]);
+            let _tracked = tracker.track(p, "echo").unwrap();
+            assert_eq!(
+                tracker.snapshot().unwrap(),
+                vec![(p, vec!["echo".to_string()])]
+            );
         }
-        assert!(tracker.snapshot().is_empty());
+        assert!(tracker.snapshot().unwrap().is_empty());
     }
 
     #[test]
     fn services_merge_across_a_peers_connections() {
         let tracker = PeerTracker::default();
         let p = peer();
-        let web = tracker.track(p, "web");
-        let echo = tracker.track(p, "echo");
+        let web = tracker.track(p, "web").unwrap();
+        let echo = tracker.track(p, "echo").unwrap();
 
         // Service names sorted within the peer's row.
         assert_eq!(
-            tracker.snapshot(),
+            tracker.snapshot().unwrap(),
             vec![(p, vec!["echo".to_string(), "web".to_string()])]
         );
 
         drop(web);
-        assert_eq!(tracker.snapshot(), vec![(p, vec!["echo".to_string()])]);
+        assert_eq!(
+            tracker.snapshot().unwrap(),
+            vec![(p, vec!["echo".to_string()])]
+        );
         drop(echo);
-        assert!(tracker.snapshot().is_empty());
+        assert!(tracker.snapshot().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_poisoned_tracker_reports_errors_instead_of_panicking() {
+        let tracker = PeerTracker::default();
+        let p = peer();
+        let held = tracker.track(p, "echo").unwrap();
+        let poisoner = tracker.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.0.lock().unwrap();
+            panic!("poison the tracker");
+        })
+        .join();
+
+        assert!(tracker.track(p, "web").is_err(), "track must fail");
+        assert!(tracker.snapshot().is_err(), "snapshot must fail");
+        // Untracking through the guard must not panic either.
+        drop(held);
     }
 
     #[test]
@@ -1170,12 +1239,16 @@ mod tests {
         let tracker = PeerTracker::default();
         let peers: Vec<_> = (0..3).map(|_| peer()).collect();
         // Hold every guard so all peers stay tracked.
-        let guards: Vec<_> = peers.iter().map(|p| tracker.track(*p, "echo")).collect();
+        let guards: Vec<_> = peers
+            .iter()
+            .map(|p| tracker.track(*p, "echo").unwrap())
+            .collect();
 
         let mut expected: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
         expected.sort();
         let got: Vec<String> = tracker
             .snapshot()
+            .unwrap()
             .into_iter()
             .map(|(p, _)| p.to_string())
             .collect();

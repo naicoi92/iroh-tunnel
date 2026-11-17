@@ -98,7 +98,9 @@ pub fn deepest_command_path(root: &clap::Command, argv: &[OsString]) -> Vec<Stri
                 }
             }
         } else {
-            let current = chain[chain.len() - 1];
+            let Some(current) = chain.last() else {
+                break;
+            };
             match current.find_subcommand(&*token) {
                 Some(sub) => {
                     path.push(token.into_owned());

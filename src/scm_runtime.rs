@@ -4,9 +4,6 @@
 //! pure and compiled (and tested) on every platform; only the dispatcher in
 //! [`dispatcher`] touches Windows APIs.
 
-// Consumed only by the Windows dispatcher; the tests cover them elsewhere.
-#![cfg_attr(not(windows), allow(dead_code))]
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 

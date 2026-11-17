@@ -29,8 +29,8 @@ pub fn remove_service(role: Role, config: Option<&Path>, name: &str) -> Result<M
             .iter()
             .position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
             .ok_or_else(not_found)?;
-        doc["services"]
-            .as_array_of_tables_mut()
+        doc.get_mut("services")
+            .and_then(|i| i.as_array_of_tables_mut())
             .context("internal: [services] is not an array-of-tables")?
             .remove(idx);
         Ok(())

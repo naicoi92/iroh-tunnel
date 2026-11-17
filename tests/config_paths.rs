@@ -6,6 +6,7 @@
 //! pointed elsewhere to prove they are ignored. Windows LocalAppData is covered
 //! by `config_paths_windows.rs`; this file is Unix-only.
 #![cfg(unix)]
+#![cfg(test)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

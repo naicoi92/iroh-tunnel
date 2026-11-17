@@ -5,6 +5,11 @@
 //!
 //! Quick flags: -n/--name, -t/--target, -l/--listen, -N/--node-id,
 //! -p/--protocol (tcp default, or udp), and --relay-url.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 mod common;
 
@@ -727,7 +732,7 @@ async fn quick_udp_forwards_datagrams_to_fixed_target() -> Result<()> {
                 target.send_to(b"response", from).await?;
             }
         }
-        #[allow(unreachable_code)]
+        #[expect(unreachable_code, reason = "names the async block's error type")]
         Ok::<_, anyhow::Error>(())
     };
     tokio::time::timeout(Duration::from_secs(90), async {

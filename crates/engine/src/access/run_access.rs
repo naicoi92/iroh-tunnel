@@ -764,8 +764,13 @@ async fn udp_forward_loop(ctx: UdpForwardCtx, socket: Arc<UdpSocket>, mut stop: 
         let Some((conn, incarnation)) = admitted else {
             continue;
         };
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "invariant: recv_from never reports more bytes than the buffer holds"
+        )]
+        let datagram = &buf[..n];
         session
-            .forward(&ctx, &conn, incarnation, client, &buf[..n])
+            .forward(&ctx, &conn, incarnation, client, datagram)
             .await;
     }
     session.readers.abort_all();

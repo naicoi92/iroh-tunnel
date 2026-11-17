@@ -113,7 +113,6 @@ fn format_plist_with(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn format_plist_invocation(
     role: &str,
     binary: &Path,
@@ -205,7 +204,7 @@ pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<S
     super::super::registration::read_registration(&plist_path(role, scope).ok()?)
 }
 
-#[allow(clippy::too_many_arguments)] // one registration's inputs
+#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),

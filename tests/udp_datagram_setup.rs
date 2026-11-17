@@ -10,6 +10,11 @@
 //! On Windows `Child::kill` is used for cleanup only and graceful exit is not
 //! asserted (documented limitation; graceful shutdown is covered by the
 //! existing in-process tests).
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

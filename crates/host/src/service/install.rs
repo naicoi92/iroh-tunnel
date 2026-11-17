@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 
 use super::decide_install_scope::decide_install_scope;
 use super::execute::execute;
-#[allow(unused_imports)] // unused on targets without a service backend
 use super::native::system_runner;
 #[cfg(windows)]
 use super::native::InstalledAt;
@@ -240,7 +239,10 @@ fn other_scope_probe<'a>(
 /// # Errors
 ///
 /// [`CliError::Service`] naming the uninstall command for the other scope.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), not(windows)),
+    expect(dead_code, reason = "only the Windows backend checks the other scope")
+)]
 pub(crate) fn cross_scope_conflict(
     requested: ServiceScope,
     other_registered: bool,
@@ -289,7 +291,6 @@ struct InstallPlan {
 
 /// Every check that precedes the write, in the order the CLI always ran them:
 /// scope, platform support, then the scope's own privilege and trust checks.
-#[cfg_attr(not(windows), allow(unused_variables))] // the probe is Windows-only
 fn plan_install(
     req: &InstallRequest,
     env: Environment,
@@ -318,7 +319,10 @@ fn plan_install(
 /// The user-scope half of [`plan_install`]. `system_wide_only` hosts (BusyBox)
 /// register a root-run service even for `--user`, so an unprivileged caller is
 /// refused first, before any path, trust or binary decision.
-#[cfg_attr(not(windows), allow(unused_variables))] // the probe is Windows-only
+#[cfg_attr(
+    not(windows),
+    expect(unused_variables, reason = "the probe is Windows-only")
+)]
 fn plan_user_install(
     req: &InstallRequest,
     env: Environment,
@@ -560,7 +564,10 @@ fn machine_dir_refusal(err: anyhow::Error, dir: &Path) -> anyhow::Error {
 /// Drop a leading `\\?\` (verbatim) prefix that `canonicalize` adds, so the
 /// pinned and displayed path matches what the user would type. A verbatim UNC
 /// path (`\\?\UNC\…`) is left alone: the trust walk refuses it.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), not(windows)),
+    expect(dead_code, reason = "only Windows paths carry a verbatim prefix")
+)]
 fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
@@ -720,8 +727,7 @@ fn installable(role: Role, config: &Path, loaded: Result<()>) -> Result<()> {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(unused_variables)] // unused on targets without a service backend
+#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
 fn backend_install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
@@ -1229,6 +1235,10 @@ mod tests {
     }
 
     /// A `verify` that must never run.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test double: reaching it is the failure under test"
+    )]
     fn no_verify(path: &Path) -> Result<()> {
         panic!("the binary check must not run for {}", path.display())
     }
@@ -1413,7 +1423,8 @@ mod tests {
 }
 
 /// The binary decision of root-run registrations on Linux and macOS.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix_binary_tests {
     use super::super::fixtures::{in_isolated_home, request, write_valid_config};
     use super::super::pin::{Pin, PinOwner};
@@ -1639,10 +1650,9 @@ mod unix_binary_tests {
 }
 
 /// Windows plan against the real token; gated like the other service tests.
-#[allow(clippy::mixed_attributes_style)]
 #[cfg(test)]
+#[cfg(windows)]
 mod windows_plan_tests {
-    #![cfg(windows)]
     use super::super::fixtures::request;
     use super::super::pin::PinOwner;
     use super::super::trust_windows::token_user;

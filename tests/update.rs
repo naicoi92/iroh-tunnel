@@ -12,6 +12,11 @@
 //!   keeps the old file; `--insecure` bypasses with a warning.
 //! - 95.AC2 (UPDATE-RUNNING-01): a running process is not stopped.
 #![cfg(unix)]
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 mod common;
 
@@ -138,7 +143,9 @@ fn exec_retry_outlasts_a_transient_writer_on_the_executable() -> Result<()> {
 
     let out = busy_exec::output(&mut Command::new(&script))?;
 
-    release.join().expect("writer thread panicked");
+    release
+        .join()
+        .map_err(|_| anyhow::anyhow!("writer thread panicked"))?;
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "READY");
     Ok(())
 }

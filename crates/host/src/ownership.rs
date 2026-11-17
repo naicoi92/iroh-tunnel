@@ -161,13 +161,7 @@ pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
 /// The Windows machine directory under the resolved `%ProgramData%` folder.
 /// Compiled on every target so the fail-closed mapping is testable; only
 /// Windows production builds call it.
-#[cfg_attr(
-    any(feature = "test-utils", not(windows)),
-    allow(
-        dead_code,
-        reason = "called only by the Windows production machine_dir and by tests; `expect` would be unfulfilled under cfg(test)"
-    )
-)]
+#[cfg(any(test, all(windows, not(feature = "test-utils"))))]
 fn machine_dir_from_program_data(program_data: Result<PathBuf>) -> Result<Option<MachineDir>> {
     let dir = program_data.context("cannot resolve the machine lock directory (%ProgramData%)")?;
     Ok(Some(MachineDir {
@@ -1037,7 +1031,10 @@ fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
 ///
 /// [`CliError::Service`] when the role still runs after `timeout`; errors from
 /// [`probe`].
-#[allow(dead_code)] // consumed by the restart verb in a later task
+#[cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "only the Windows system verbs wait for release")
+)]
 pub(crate) fn wait_released(role: Role, timeout: std::time::Duration) -> Result<()> {
     wait_released_with(role, timeout, probe)
 }

@@ -12,6 +12,7 @@ use crate::cli::{Binary, Cli, ConfigAction, Role, RoleCmd, ServiceArgs};
 use crate::cli_args::ProtocolArg;
 use crate::config_cmd;
 use crate::lifecycle;
+use crate::output;
 use crate::status_cmd;
 use crate::usage::{self, UsageError};
 use anyhow::Context as _;
@@ -45,11 +46,11 @@ pub fn main_access() -> ! {
 /// only reports it through this observer. Runs before any path resolution.
 fn install_migration_notice() {
     iroh_tunnel_host::paths::set_migration_notice(|legacy, dest| {
-        eprintln!(
-            "migrated configuration {} -> {} (original kept)",
+        output::report(&format!(
+            "migrated configuration {} -> {} (original kept)\n",
             legacy.display(),
             dest.display()
-        );
+        ));
     });
 }
 
@@ -63,7 +64,7 @@ fn parse_or_exit(binary: Binary) -> Cli {
         Err(e) => match e.kind() {
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => e.exit(),
             ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-                eprint!("{}", e.render());
+                output::report(&e.render().to_string());
                 std::process::exit(2);
             }
             _ => {
@@ -152,7 +153,7 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook, log_err
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("error: failed to start runtime: {e}");
+            output::report(&format!("error: failed to start runtime: {e}\n"));
             log_failure(log_errors, &format!("failed to start runtime: {e}"));
             return 1;
         }
@@ -186,7 +187,9 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook, log_err
         Err(forced) => {
             // Exit statuses: 130 repeated stop after grace, 1 watchdog (see
             // CHANGELOG). Own-state cleanup is still attempted here.
-            eprintln!("error: shutdown abandoned ({forced:?}), exiting");
+            output::report(&format!(
+                "error: shutdown abandoned ({forced:?}), exiting\n"
+            ));
             log_failure(
                 log_errors,
                 &format!("shutdown abandoned ({forced:?}), exiting"),
@@ -215,7 +218,7 @@ pub(crate) fn run_to_code(parsed: Cli, binary: Binary, ready: ReadyHook, log_err
                     &set_err.to_string(),
                 );
             }
-            eprintln!("error: {e:#}");
+            output::report(&format!("error: {e:#}\n"));
             log_failure(log_errors, &format!("{e:#}"));
             exit_code_for(&e)
         }
@@ -226,36 +229,35 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext, ready: ReadyHook) -> any
     // The typed role tag comes from ONE match on the CLI enum; the dispatch
     // string is derived from it — an invalid role is unrepresentable, and
     // the two can never disagree.
-    let status_role = match &cli.role {
-        Role::Serve { .. } => StatusRole::Serve,
-        Role::Access { .. } => StatusRole::Access,
-        Role::Update(args) => {
-            return run_update_cli(args, "iroh-tunnel").await;
-        }
-    };
     match cli.role {
-        Role::Update(_) => unreachable!("handled above"),
+        Role::Update(args) => run_update_cli(&args, "iroh-tunnel").await,
         Role::Serve { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd, binary, ctx, ready).await
+            dispatch_role_cmd(StatusRole::Serve, cmd, binary, ctx, ready).await
         }
         Role::Access { cmd: Some(cmd), .. } => {
-            dispatch_role_cmd(status_role, cmd, binary, ctx, ready).await
+            dispatch_role_cmd(StatusRole::Access, cmd, binary, ctx, ready).await
         }
         Role::Serve { quick, cmd: None } => {
             let cfg = config_ops::quick_serve_config(&quick_serve_request(quick)?)?;
-            runtime::run_quick_serve(cfg, ctx, crate::render::print_ready(), stop_signal()).await
+            runtime::run_quick_serve(cfg, ctx, crate::render::print_ready(), stop_signal()?).await
         }
         Role::Access { quick, cmd: None } => {
             let cfg = config_ops::quick_access_config(&quick_access_request(quick)?)?;
-            runtime::run_quick_access(cfg, ctx, crate::render::print_ready(), stop_signal()).await
+            runtime::run_quick_access(cfg, ctx, crate::render::print_ready(), stop_signal()?).await
         }
     }
 }
 
 /// The stop wait handed to a running role, behind the test seam that can
 /// delay its first poll.
-fn stop_signal() -> impl std::future::Future<Output = ()> {
-    crate::test_fault::delay_stop_wait(lifecycle::wait_for_signal())
+///
+/// # Errors
+///
+/// The stop-signal handlers could not be installed.
+fn stop_signal() -> anyhow::Result<impl std::future::Future<Output = ()>> {
+    Ok(crate::test_fault::delay_stop_wait(
+        lifecycle::wait_for_signal()?,
+    ))
 }
 
 /// Map the quick serve flags to the host request; clap guarantees the
@@ -332,32 +334,31 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
             guidance,
             overridable,
         } => {
-            println!("{guidance}");
+            let mut text = format!("{guidance}\n");
             if overridable {
-                println!("to replace the file anyway, run again with --yes");
+                text.push_str("to replace the file anyway, run again with --yes\n");
             }
-            return Ok(());
+            return output::stdout(&text);
         }
         update::OwnerDecision::Proceed {
             overriding_package: true,
-        } => eprintln!(
+        } => output::stderr(&format!(
             "warning: replacing {} although it is managed by a package manager; \
-             the package database will no longer match the file",
+             the package database will no longer match the file\n",
             ctx.install_path.display()
-        ),
+        ))?,
         update::OwnerDecision::Proceed {
             overriding_package: false,
         } => {}
     }
     if request.verification == update::Verification::Insecure {
-        eprintln!(
+        output::stderr(
             "warning: --insecure skips signature and checksum verification; \
-             you accept responsibility for the installed file"
-        );
+             you accept responsibility for the installed file\n",
+        )?;
     }
     let outcome = update::update(&request, &ctx).await?;
-    print!("{}", crate::render::render_update(&outcome, exe_name));
-    Ok(())
+    output::stdout(&crate::render::render_update(&outcome, exe_name))
 }
 
 async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
@@ -381,7 +382,7 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
                 &path,
                 ctx,
                 crate::test_fault::wrap_ready(compose_ready(crate::render::print_ready(), ready)),
-                stop_signal(),
+                stop_signal()?,
             ))
             .await
         }

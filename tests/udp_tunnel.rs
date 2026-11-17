@@ -4,6 +4,11 @@
 //! CI-safe; same harness shape as `serve_status_conn_path.rs`) and drives
 //! real UDP sockets: clients send to the Access listener, a real UDP target
 //! sits behind Serve. Contract: `docs/udp-integration-contract.md`.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

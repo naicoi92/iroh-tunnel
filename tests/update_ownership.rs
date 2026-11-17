@@ -5,6 +5,11 @@
 //! project's images set. Real package managers and images are not exercised by
 //! the test suite.
 #![cfg(unix)]
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 mod common;
 

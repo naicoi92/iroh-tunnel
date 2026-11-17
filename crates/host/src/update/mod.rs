@@ -9,7 +9,10 @@ mod fixtures;
 mod replace;
 mod types;
 // The operation file is named after the operation, as the layout rule requires.
-#[allow(clippy::module_inception)]
+#[expect(
+    clippy::module_inception,
+    reason = "the operation file is named after the operation"
+)]
 mod update;
 mod verify;
 

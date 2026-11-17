@@ -121,20 +121,22 @@ pub(crate) fn render_service_note_for_invocation(
 }
 
 /// Print service notes synchronously, preserving native output ordering.
+///
+/// The note callback cannot fail the service operation it reports on, so a
+/// write error is logged instead of propagated.
 pub(crate) fn print_service_note(
     note: &ServiceNote,
     invocation: iroh_tunnel_host::service::ServiceInvocation,
     executable: &Path,
     config: Option<&Path>,
 ) {
-    use std::io::Write as _;
     let (stream, text) = render_service_note_for_invocation(note, invocation, executable, config);
-    match stream {
-        Stream::Stdout => {
-            print!("{text}");
-            let _ = std::io::stdout().flush();
-        }
-        Stream::Stderr => eprint!("{text}"),
+    let written = match stream {
+        Stream::Stdout => crate::output::stdout(&text),
+        Stream::Stderr => crate::output::stderr(&text),
+    };
+    if let Err(error) = written {
+        tracing::warn!("service note not shown: {error:#}");
     }
 }
 
@@ -289,11 +291,9 @@ pub(crate) fn render_service_list(role: Role, list: &ServiceList) -> String {
 }
 
 /// The CLI's readiness hook: print the rendered startup lines to stdout.
+/// A ready line that could not be written fails the start.
 pub(crate) fn print_ready() -> OnReady {
-    Box::new(|report| {
-        print!("{}", render_ready(report));
-        Ok(())
-    })
+    Box::new(|report| crate::output::stdout_strict(&render_ready(report)))
 }
 
 /// Render the outcome of `update` as the stdout text the CLI printed before

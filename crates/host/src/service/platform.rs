@@ -70,7 +70,13 @@ fn windows_load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
 }
 
 /// The refusal for a keyless config under a Windows system service.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), not(windows)),
+    expect(
+        dead_code,
+        reason = "only Windows system services refuse a keyless config"
+    )
+)]
 fn empty_key_text(path: &Path) -> String {
     format!(
         "{0} has no secret_key, and a system service does not write into a user's file. Run \
@@ -466,10 +472,9 @@ mod tests {
     }
 }
 
-#[allow(clippy::mixed_attributes_style)]
 #[cfg(test)]
+#[cfg(windows)]
 mod windows_tests {
-    #![cfg(windows)]
     use super::*;
     use crate::config::ServeConfig;
     use crate::error::CliError;

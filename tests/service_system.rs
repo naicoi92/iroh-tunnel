@@ -30,7 +30,7 @@
 //! `it91b`, `it91x` and removes the registration on exit. The `test-utils`
 //! feature disables relay TLS verification: only an unreachable relay is used,
 //! never public relays or real secrets.
-
+#![cfg(test)]
 // The prompts are answered through the root crate's `test-utils` seam
 // `IROH_TUNNEL_TEST_INTERACTIVE`, so the file needs `--all-features`.
 #![cfg(all(target_os = "linux", feature = "test-utils"))]

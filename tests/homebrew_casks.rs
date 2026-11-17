@@ -1,6 +1,7 @@
 //! Homebrew renderer and stable tap publication contracts (Task 3).
 //! Requires Ruby to execute rendered hooks; `RUBY` overrides the executable.
 #![cfg(unix)]
+#![cfg(test)]
 
 use std::fs;
 use std::io::Write;

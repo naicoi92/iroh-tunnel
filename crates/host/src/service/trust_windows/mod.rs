@@ -2,20 +2,21 @@
 //!
 //! `model` is pure and compiles on every platform; `win32` is the adapter
 //! that feeds it real descriptors read from no-follow handles.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "the model is pure and compiled everywhere, but only Windows consumes it"
+    )
+)]
 
 mod ace;
-// On Windows `win32` consumes the model; only `EVERYONE`, `CREATOR_OWNER`
-// (test fixtures) and `TrustedSet::{for_user_files, machine}` (service
-// runtime and machine dir, later tasks) remain unused there.
-#[cfg_attr(windows, allow(dead_code))]
+// On Windows `win32` consumes the model.
 pub(crate) mod model;
 #[cfg(windows)]
 pub(crate) mod win32;
 
 #[cfg(windows)]
-#[allow(unused_imports)]
-// `account_of`, `owner_of`, `token_user`, `verify_binary` are consumed by the SCM install later
 pub(crate) use win32::{
     account_of, create_dir_with_sddl, owner_of, program_data_dir, publish, read_in, read_verified,
     remove_in, token_user, verify_binary, verify_dir,
@@ -23,10 +24,9 @@ pub(crate) use win32::{
 
 /// Serialised, scoped process-environment edits shared by every test that
 /// sets the service variables (the environment is global).
-#[allow(clippy::mixed_attributes_style)]
 #[cfg(test)]
+#[cfg(windows)]
 pub(crate) mod test_env {
-    #![cfg(windows)]
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard};
 

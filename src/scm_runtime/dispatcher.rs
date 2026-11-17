@@ -162,7 +162,7 @@ fn role_name(parsed: &Cli) -> Option<&'static str> {
 /// [`dispatcher_error_code`].
 pub(crate) fn run_as_service(parsed: Cli, binary: Binary) -> ! {
     let Some(role) = role_name(&parsed) else {
-        eprintln!("error: only the serve and access roles run as a Windows service");
+        crate::output::report("error: only the serve and access roles run as a Windows service\n");
         std::process::exit(2);
     };
     let name = system_service_name(role);
@@ -171,7 +171,9 @@ pub(crate) fn run_as_service(parsed: Cli, binary: Binary) -> ! {
     match service_dispatcher::start(name, ffi_service_main) {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            eprintln!("error: cannot connect to the Service Control Manager: {e}");
+            crate::output::report(&format!(
+                "error: cannot connect to the Service Control Manager: {e}\n"
+            ));
             let raw = match &e {
                 windows_service::Error::Winapi(io) => io.raw_os_error(),
                 _ => None,
@@ -186,11 +188,11 @@ fn service_main(_arguments: Vec<OsString>) {
         .get()
         .and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
     let Some((parsed, binary)) = taken else {
-        eprintln!("error: service started without a pending command");
+        crate::output::report("error: service started without a pending command\n");
         return;
     };
     let Some(role) = role_name(&parsed) else {
-        eprintln!("error: only the serve and access roles run as a Windows service");
+        crate::output::report("error: only the serve and access roles run as a Windows service\n");
         return;
     };
     let shared = Arc::new(Shared {
@@ -216,7 +218,9 @@ fn service_main(_arguments: Vec<OsString>) {
         Ok(handle) => handle,
         Err(e) => {
             // No status handle: the SCM cannot be told anything.
-            eprintln!("error: cannot register the service control handler: {e}");
+            crate::output::report(&format!(
+                "error: cannot register the service control handler: {e}\n"
+            ));
             return;
         }
     };

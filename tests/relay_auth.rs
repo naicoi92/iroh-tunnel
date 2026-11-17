@@ -24,6 +24,11 @@
 //! The self-signed relay certificate is trusted via the crate's own
 //! `test-utils` feature (see `endpoint.rs`), mirroring how iroh's own tests
 //! drive `run_relay_server`.
+#![cfg(test)]
+#![expect(
+    clippy::panic_in_result_fn,
+    reason = "tests may assert inside Result-returning functions (#216)"
+)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -199,7 +204,6 @@ impl Roles {
 /// `access_token` the node token. The access service always carries a
 /// per-service `relay_urls` override equal to `access_relays` when the node
 /// list is empty (suite 3), and no override otherwise.
-#[allow(clippy::too_many_arguments)]
 async fn boot_serve_and_access(
     serve_relays: &str,
     serve_token: &str,
