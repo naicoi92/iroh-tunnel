@@ -29,6 +29,7 @@ pub fn prepare_edit(role: Role, config: Option<&Path>) -> Result<EditAttempt> {
         path,
         scratch,
         original,
+        keep_scratch: false,
     })
 }
 
@@ -43,12 +44,36 @@ impl EditAttempt {
     /// It is applied only if the live file is unchanged since the copy was
     /// taken and the edited document is valid; otherwise the live file is left
     /// as it was and the edited text is kept in `<config>.rejected`
-    /// (owner-only) so it is not lost.
-    pub fn commit(self) -> Result<EditOutcome> {
+    /// (owner-only) so it is not lost. The scratch copy is removed only once
+    /// the edit is saved, unchanged or kept in that sidecar; on any other
+    /// failure it stays in place and the error names it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the scratch copy cannot be read, the writer lock is not
+    /// acquired in time, or the live file cannot be read or replaced.
+    pub fn commit(mut self) -> Result<EditOutcome> {
+        let outcome = self.apply().with_context(|| {
+            format!(
+                "your edit was not saved; it is still in {}",
+                self.scratch.display()
+            )
+        });
+        self.keep_scratch = !matches!(
+            outcome,
+            Ok(EditOutcome::Unchanged
+                | EditOutcome::Saved { .. }
+                | EditOutcome::Rejected {
+                    sidecar: Some(_),
+                    ..
+                })
+        );
+        outcome
+    }
+
+    fn apply(&self) -> Result<EditOutcome> {
         let edited = std::fs::read_to_string(&self.scratch)
-            .with_context(|| format!("failed to read edited copy: {}", self.scratch.display()));
-        let _ = std::fs::remove_file(&self.scratch);
-        let edited = edited?;
+            .with_context(|| format!("failed to read edited copy: {}", self.scratch.display()))?;
         let path = &self.path;
 
         if edited == self.original.as_deref().unwrap_or_default() {
@@ -57,7 +82,7 @@ impl EditAttempt {
 
         let _lock = ConfigLock::acquire(path)?;
         if read_optional(path)? != self.original {
-            let (sidecar, kept) = keep_rejected(path, &edited);
+            let (sidecar, kept) = keep_rejected(path, &self.scratch, &edited);
             return Ok(EditOutcome::Rejected {
                 reason: EditRejection::Conflict,
                 sidecar,
@@ -79,7 +104,7 @@ impl EditAttempt {
                 Ok(EditOutcome::Saved { path: path.clone() })
             }
             Err(e) => {
-                let (sidecar, kept) = keep_rejected(path, &edited);
+                let (sidecar, kept) = keep_rejected(path, &self.scratch, &edited);
                 Ok(EditOutcome::Rejected {
                     reason: EditRejection::Invalid,
                     sidecar,
@@ -102,8 +127,9 @@ fn scratch_path(path: &Path) -> PathBuf {
 }
 
 /// Keep the rejected edit in `<config>.rejected` and describe where, for the
-/// error message. A failure to keep it is reported instead of hidden.
-fn keep_rejected(path: &Path, edited: &str) -> (Option<PathBuf>, String) {
+/// error message. A failure to keep it is reported instead of hidden, naming
+/// the scratch copy that then still holds the text.
+fn keep_rejected(path: &Path, scratch: &Path, edited: &str) -> (Option<PathBuf>, String) {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".rejected");
     let sidecar = path.with_file_name(name);
@@ -112,7 +138,14 @@ fn keep_rejected(path: &Path, edited: &str) -> (Option<PathBuf>, String) {
             let kept = format!("; your text is in {}", sidecar.display());
             (Some(sidecar), kept)
         }
-        Err(e) => (None, format!("; could not keep your text ({e:#})")),
+        Err(e) => (
+            None,
+            format!(
+                "; could not keep your text in {} ({e:#}); it is still in {}",
+                sidecar.display(),
+                scratch.display()
+            ),
+        ),
     }
 }
 
@@ -163,6 +196,30 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# original\n");
+    }
+
+    #[test]
+    fn rejected_edit_keeps_scratch_when_sidecar_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.toml");
+        std::fs::write(&path, "# original\n").unwrap();
+        // A directory in the sidecar's place makes keeping the text there fail.
+        std::fs::create_dir(dir.path().join("serve.toml.rejected")).unwrap();
+        let attempt = prepare_edit(Role::Serve, Some(&path)).unwrap();
+        let scratch = attempt.scratch_path().to_path_buf();
+        std::fs::write(&scratch, "not = [valid").unwrap();
+        match attempt.commit().unwrap() {
+            EditOutcome::Rejected {
+                sidecar: None,
+                message,
+                ..
+            } => assert!(
+                message.contains(&scratch.display().to_string()),
+                "{message}"
+            ),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "not = [valid");
     }
 
     #[test]

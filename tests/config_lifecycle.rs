@@ -223,6 +223,94 @@ fn edit_conflicting_with_a_concurrent_change_is_rejected() {
     assert!(err(&output).contains("changed"), "{}", err(&output));
 }
 
+/// Scratch copies `config edit` left next to `serve.toml`.
+fn edit_scratches(world: &World) -> Vec<PathBuf> {
+    std::fs::read_dir(world.root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("serve.toml.edit-"))
+        })
+        .collect()
+}
+
+/// The single scratch copy left behind, named in `stderr` and holding the edit.
+fn assert_edit_kept(world: &World, output: &Output, marker: &str) {
+    let kept = edit_scratches(world);
+    assert_eq!(kept.len(), 1, "{kept:?}; {}", err(output));
+    assert!(err(output).contains(p(&kept[0])), "{}", err(output));
+    assert!(std::fs::read_to_string(&kept[0]).unwrap().contains(marker));
+}
+
+const EDIT_TO_9090: &str = "sed 's/8080/9090/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"";
+
+#[test]
+fn edit_kept_when_the_writer_lock_times_out() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    write_valid(&cfg);
+    let before = std::fs::read(&cfg).unwrap();
+    let lock = File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(world.file("serve.toml.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let editor = editor_script(&world, EDIT_TO_9090);
+    let output = world
+        .command(&["serve", "config", "edit", "--config", p(&cfg)])
+        .env("EDITOR", &editor)
+        .env("IROH_TUNNEL_TEST_CONFIG_LOCK_TIMEOUT_MS", "300")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", err(&output));
+    assert!(err(&output).contains("another process"), "{}", err(&output));
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+    assert_edit_kept(&world, &output, "9090");
+}
+
+#[test]
+fn edit_kept_when_writing_the_config_fails() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    write_valid(&cfg);
+    let before = std::fs::read(&cfg).unwrap();
+    // The lock file exists already, so only the atomic write needs the directory.
+    File::create(world.file("serve.toml.lock")).unwrap();
+    let dir = world.root.path().display().to_string();
+    let editor = editor_script(&world, &format!("{EDIT_TO_9090} && chmod 555 '{dir}'"));
+    let output = world
+        .command(&["serve", "config", "edit", "--config", p(&cfg)])
+        .env("EDITOR", &editor)
+        .output()
+        .unwrap();
+    std::fs::set_permissions(world.root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!output.status.success(), "{}", err(&output));
+    assert_eq!(std::fs::read(&cfg).unwrap(), before);
+    assert_edit_kept(&world, &output, "9090");
+}
+
+#[test]
+fn saved_and_unchanged_edits_leave_no_scratch() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    write_valid(&cfg);
+    for body in ["true", EDIT_TO_9090] {
+        let editor = editor_script(&world, body);
+        let output = world
+            .command(&["serve", "config", "edit", "--config", p(&cfg)])
+            .env("EDITOR", &editor)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", err(&output));
+        assert!(edit_scratches(&world).is_empty(), "{body}");
+    }
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("9090"));
+}
+
 // --- AC-CFG-06 / AC-CFG-10 -------------------------------------------------
 
 #[test]
