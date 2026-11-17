@@ -157,6 +157,26 @@ runs as root, the [binary trust rules](#system-services) apply to it too: its
 `DAEMON` line names the registered binary or the managed copy. `stop` sends
 `SIGTERM`, then `SIGKILL` after 5 seconds.
 
+The script stores every path as a single-quoted shell literal, so spaces or
+shell metacharacters in the binary, config or state path are never expanded.
+The PID file records the daemon's PID and the executable it launched.
+`start`, `stop` and `status` only act on that process: before any signal the
+script checks `/proc/<pid>/exe` against the recorded executable. A stale PID
+file (dead or zombie process, malformed content or another program) is removed and
+never signalled. If the identity cannot be checked, for example when `/proc`
+is missing, nothing is signalled and the PID file is kept: `start` and `stop`
+exit 1 and `status` exits 4 (unknown). `status` exits 3 when the daemon is not
+running.
+
+Scripts written by older versions do not have these checks. Run `service
+install` again to rewrite the script; it recognises the daemon started by the
+old script and restarts it. If the re-install changes both the binary name and
+the config path, the old daemon may not be recognised and the new one is
+refused by the ownership lock; stop the old process by hand once. To downgrade,
+run `service stop` with the current version first, then install the previous
+version. Otherwise the older script cannot read the new PID file and leaves the
+daemon running unmanaged.
+
 ## Windows
 
 ### User scope
