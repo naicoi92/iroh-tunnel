@@ -69,10 +69,16 @@ impl StagedRegistration {
     /// handle, write `contents` and flush them to disk.
     fn create(target: &Path, contents: &str) -> std::io::Result<Self> {
         let path = staging_path(target)?;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Owner-only until the final mode is set below, so a permissive
+        // umask never opens a window for another user to grab a write fd.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
         // Armed from here on: the file exists and is ours to clean up.
         let staged = Self { path, armed: true };
         #[cfg(unix)]
@@ -199,6 +205,31 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_directory_is_a_permission_error_and_leaves_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.service");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::File::create(dir.path().join("probe")).is_ok() {
+            return; // running as root: permission cannot be denied
+        }
+
+        let err = write_registration(&path, "unit").unwrap_err();
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ),
+            "{err:#}"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
