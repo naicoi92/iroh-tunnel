@@ -28,6 +28,8 @@ fn command(dir: &Path, args: &[&str]) -> Command {
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir.join("xdg"))
         .env("IROH_TUNNEL_STATE_DIR", dir.join("state"))
+        // A container marker makes `update` delegate instead of updating.
+        .env_remove("IROH_TUNNEL_CONTAINER")
         .stdin(Stdio::null())
         .stderr(Stdio::piped());
     cmd
@@ -77,15 +79,49 @@ fn small_outputs_stop_cleanly_when_the_reader_is_gone() {
         vec!["serve", "config", "check", "--config", config],
         vec!["serve", "config", "keygen", "--print"],
     ] {
-        // The reader is closed before the child writes anything.
-        let mut child = command(dir.path(), &args)
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("spawn iroh-tunnel");
-        drop(child.stdout.take());
-        let out = child.wait_with_output().unwrap();
+        let out = run_with_reader_gone(dir.path(), &args);
         assert_clean_stop(&out, &args.join(" "));
     }
+}
+
+/// Run with stdout connected to a pipe whose reader is closed before the
+/// child writes anything.
+fn run_with_reader_gone(dir: &Path, args: &[&str]) -> Output {
+    let mut child = command(dir, args)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn iroh-tunnel");
+    drop(child.stdout.take());
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn status_output_stops_cleanly_when_the_reader_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("serve-status.json"),
+        r#"{"node_id":"abc","home_relay":null,"pid":999999,"started_at":1700000000,"services":[],"connections":[]}"#,
+    )
+    .unwrap();
+    for args in [vec!["serve", "status"], vec!["serve", "status", "--json"]] {
+        let out = run_with_reader_gone(dir.path(), &args);
+        assert_clean_stop(&out, &args.join(" "));
+    }
+}
+
+/// `--insecure --to <installed version>` needs no network: the release is
+/// already current, so `update` only prints its outcome.
+#[test]
+fn update_output_stops_cleanly_when_the_reader_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let version =
+        String::from_utf8(Command::new(BIN).arg("--version").output().unwrap().stdout).unwrap();
+    let version = version.trim().rsplit(' ').next().unwrap().to_owned();
+    let args = ["update", "--insecure", "--to", &version];
+    let out = run_with_reader_gone(dir.path(), &args);
+    assert_clean_stop(&out, &args.join(" "));
 }
 
 #[cfg(target_os = "linux")]
