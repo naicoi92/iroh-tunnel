@@ -74,8 +74,8 @@ where
 ///
 /// The half-close contract: each direction runs `copy_buf`, then unconditionally
 /// `shutdown()`s its write side (so the peer sees FIN even when the copy
-/// errored), then surfaces the original copy result. If both directions error,
-/// the first error wins.
+/// errored), then surfaces the copy error, or the shutdown error when the copy
+/// succeeded. If both directions error, the first error wins.
 ///
 /// The read sides take [`AsyncBufRead`] because [`tokio::io::copy_buf`]
 /// requires it; callers wrap their streams in [`BufReader`] to pick the
@@ -95,28 +95,27 @@ where
     BR: AsyncBufRead + Unpin,
     BW: AsyncWrite + Unpin,
 {
-    // direction A: a_read → a_write
-    let dir_a = async {
-        let res = tokio::io::copy_buf(&mut a_read, &mut a_write).await;
-        // Always attempt a clean half-close so the peer sees FIN, even when the
-        // copy errored. The original error (if any) is what we return.
-        let _ = a_write.shutdown().await;
-        let _ = res?;
-        Ok::<_, std::io::Error>(())
-    };
-
-    // direction B: b_read → b_write
-    let dir_b = async {
-        let res = tokio::io::copy_buf(&mut b_read, &mut b_write).await;
-        let _ = b_write.shutdown().await;
-        let _ = res?;
-        Ok::<_, std::io::Error>(())
-    };
-
-    let (a, b) = tokio::join!(dir_a, dir_b);
-    a.map_err(anyhow::Error::from)?;
-    b.map_err(anyhow::Error::from)?;
+    let (a, b) = tokio::join!(
+        copy_then_half_close(&mut a_read, &mut a_write),
+        copy_then_half_close(&mut b_read, &mut b_write),
+    );
+    a?;
+    b?;
     Ok(())
+}
+
+/// One direction of [`pipe_halves`]: copy, then always attempt a clean
+/// half-close so the peer sees FIN even when the copy errored. The copy error
+/// wins; a shutdown error is returned only when the copy succeeded.
+async fn copy_then_half_close<R, W>(read: &mut R, write: &mut W) -> std::io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let copied = tokio::io::copy_buf(read, write).await;
+    let closed = write.shutdown().await;
+    copied?;
+    closed
 }
 
 /// How long a completed pipe waits for the peer to acknowledge final stream
@@ -325,5 +324,81 @@ mod tests {
         assert_eq!(got_peer, payload_back);
 
         pipe.await.unwrap().unwrap();
+    }
+
+    /// A writer whose copy succeeds but whose half-close fails.
+    struct FailingShutdown;
+
+    impl AsyncWrite for FailingShutdown {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+        }
+    }
+
+    /// A failed half-close after a successful copy is an error: the peer may
+    /// never see FIN, so the channel did not complete cleanly.
+    #[tokio::test]
+    async fn half_close_failure_after_a_successful_copy_is_reported() {
+        let empty: &[u8] = &[];
+        let err = pipe_halves((empty, FailingShutdown), (empty, tokio::io::sink()))
+            .await
+            .expect_err("a failed shutdown must surface");
+        assert!(
+            err.chain().any(|c| c
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)),
+            "{err:?}"
+        );
+    }
+
+    /// The copy error wins over a half-close error in the same direction.
+    #[tokio::test]
+    async fn copy_failure_wins_over_a_failed_half_close() {
+        let failing_read = tokio::io::BufReader::new(reset_reader());
+        let err = pipe_halves(
+            (failing_read, FailingShutdown),
+            (&[][..], tokio::io::sink()),
+        )
+        .await
+        .expect_err("a failed copy must surface");
+        assert!(
+            err.chain().any(|c| c
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::ConnectionReset)),
+            "{err:?}"
+        );
+    }
+
+    /// A reader that fails its first read with `ConnectionReset`.
+    fn reset_reader() -> impl tokio::io::AsyncRead + Unpin {
+        struct Reset;
+        impl tokio::io::AsyncRead for Reset {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
+            }
+        }
+        Reset
     }
 }

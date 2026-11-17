@@ -415,15 +415,25 @@ pub fn read_verified(path: &Path, trusted_uid: u32) -> Result<String> {
 ///
 /// # Errors
 ///
-/// [`CliError::Config`] when the path does not exist.
+/// [`CliError::Config`] when the path cannot be resolved, with the
+/// [`std::io::Error`] kept in the chain.
 pub fn canonical(path: &Path) -> Result<PathBuf> {
-    std::fs::canonicalize(path).map_err(|e| {
-        CliError::Config(format!(
-            "cannot resolve {}: {e}. Create it first or pass the right path",
-            path.display()
-        ))
-        .into()
-    })
+    std::fs::canonicalize(path).map_err(|e| canonical_error(path, e))
+}
+
+/// The [`canonical`] diagnostic for a failed `canonicalize` of `path`: a
+/// [`CliError::Config`] whose advice depends on the error kind, with `e` kept
+/// as its source.
+pub(crate) fn canonical_error(path: &Path, e: std::io::Error) -> anyhow::Error {
+    let hint = if e.kind() == std::io::ErrorKind::NotFound {
+        "create it first or pass the right path"
+    } else {
+        "check its permissions or pass the right path"
+    };
+    anyhow::Error::new(e).context(CliError::Config(format!(
+        "cannot resolve {} ({hint})",
+        path.display()
+    )))
 }
 
 /// Atomically publish `dir/name` with the bytes of `source` and exactly

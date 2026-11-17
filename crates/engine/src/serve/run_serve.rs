@@ -122,7 +122,7 @@ pub async fn run_serve(
         Some(sink) => match sink.save(initial.clone()).await {
             Ok(()) => Some(initial),
             Err(e) => {
-                tracing::warn!("failed to write status file: {e}");
+                tracing::warn!("failed to write status file: {e:#}");
                 None
             }
         },
@@ -479,7 +479,7 @@ async fn status_flush_loop(
         // until the next change.
         match sink.save(observation.clone()).await {
             Ok(()) => last = Some(observation),
-            Err(e) => tracing::warn!("failed to write status file: {e}"),
+            Err(e) => tracing::warn!("failed to write status file: {e:#}"),
         }
     }
 }
@@ -704,7 +704,7 @@ async fn handle_connection(
                         }
                     }
                 }
-                Err(error) => tracing::warn!("stream error: {error}"),
+                Err(error) => tracing::warn!("stream error: {error:#}"),
             }
         });
     };
@@ -885,7 +885,7 @@ async fn handle_udp_connection(
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .refuse(flow);
                         stats.record_drop(DropReason::Cap);
-                        tracing::warn!(flow = flow.0, "cannot open udp upstream: {error}");
+                        tracing::warn!(flow = flow.0, "cannot open udp upstream: {error:#}");
                         continue;
                     }
                 };
@@ -1045,8 +1045,13 @@ async fn open_upstream(local_addr: &str) -> Result<UdpSocket> {
     } else {
         (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
     };
-    let socket = UdpSocket::bind(bind).await?;
-    socket.connect(target).await?;
+    let socket = UdpSocket::bind(bind)
+        .await
+        .with_context(|| format!("cannot bind a udp socket for {local_addr} on {bind}"))?;
+    socket
+        .connect(target)
+        .await
+        .with_context(|| format!("cannot connect udp upstream {local_addr} ({target})"))?;
     Ok(socket)
 }
 
@@ -1134,6 +1139,23 @@ mod tests {
     use super::*;
     use crate::serve::bind_serve;
     use crate::settings::{NodeSettings, ServeServiceSettings};
+
+    /// A failed upstream connect names the target and keeps the OS error.
+    #[tokio::test]
+    async fn open_upstream_failure_names_the_target() {
+        // macOS and Windows refuse a udp connect to port 0, so CI on those runners
+        // asserts this; Linux accepts it, and there is nothing to check there.
+        let Err(err) = open_upstream("0.0.0.0:0").await else {
+            return;
+        };
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("0.0.0.0:0"), "{rendered}");
+        assert!(
+            err.chain()
+                .any(<dyn std::error::Error>::is::<std::io::Error>),
+            "{err:?}"
+        );
+    }
 
     #[tokio::test]
     async fn connect_local_timeout_resets_only_that_channel() {

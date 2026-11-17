@@ -331,7 +331,7 @@ pub(crate) fn open_chain(path: &Path, last: LastAccess) -> Result<Chain> {
         }
         let handle = open_element(component, access).map_err(|e| {
             let msg = format!(
-                "cannot open {component} to verify {} ({e}); nothing was changed",
+                "cannot open {component} to verify {} (nothing was changed)",
                 path.display()
             );
             // Keep the io::Error reachable for callers that map error codes.
@@ -339,7 +339,11 @@ pub(crate) fn open_chain(path: &Path, last: LastAccess) -> Result<Chain> {
         })?;
         let attrs = attributes(&handle)
             .and_then(|attrs| owner_and_dacl(&handle).map(|od| (attrs, od)))
-            .map_err(|e| permission(format!("cannot read the security of {component}: {e}")));
+            .map_err(|e| {
+                anyhow::Error::new(e).context(CliError::Permission(format!(
+                    "cannot read the security of {component}"
+                )))
+            });
         let (attrs, (owner, dacl)) = attrs?;
         let dacl = match dacl {
             DaclState::Null => None,

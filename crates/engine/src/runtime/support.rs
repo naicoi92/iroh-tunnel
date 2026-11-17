@@ -131,24 +131,46 @@ pub(crate) fn attempt_timeout(attempt: u32) -> Duration {
 /// # Errors
 ///
 /// Returns an error once `deadline` passes: attempts and backoff sleeps are
-/// both truncated at it, so the loop can never run unbounded (RS-09). Callers
-/// may additionally cancel the future (for shutdown); dropping it cancels the
-/// in-flight dial.
+/// both truncated at it, so the loop can never run unbounded (RS-09). The
+/// last attempt's failure is the error's source. Callers may additionally
+/// cancel the future (for shutdown); dropping it cancels the in-flight dial.
 pub(crate) async fn connect_with_retry(
     ep: &iroh::Endpoint,
     addr: &iroh::EndpointAddr,
     alpn: &[u8],
     deadline: tokio::time::Instant,
 ) -> Result<Connection> {
+    retry_until(deadline, || async {
+        ep.connect(addr.clone(), alpn)
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await
+}
+
+/// The retry loop of [`connect_with_retry`], generic over the dial so the
+/// deadline and error-chaining behaviour can be tested without a network.
+///
+/// # Errors
+///
+/// `dial deadline expired`, caused by the last attempt's failure or timeout
+/// (or bare when the deadline had already passed before the first attempt).
+async fn retry_until<T, F, Fut>(deadline: tokio::time::Instant, mut dial: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut attempt = 1u32;
+    let mut last_error: Option<anyhow::Error> = None;
     loop {
         let now = tokio::time::Instant::now();
-        anyhow::ensure!(now < deadline, "dial deadline expired");
+        if now >= deadline {
+            return Err(deadline_expired(last_error));
+        }
         // Dropping a timed-out attempt cancels that dial future.
         let limit = (now + attempt_timeout(attempt)).min(deadline);
-        let dial = tokio::time::timeout_at(limit, ep.connect(addr.clone(), alpn)).await;
-        match dial {
+        match tokio::time::timeout_at(limit, dial()).await {
             Ok(Ok(conn)) => {
                 if attempt > 1 {
                     tracing::info!("reconnected after {attempt} attempts");
@@ -157,12 +179,17 @@ pub(crate) async fn connect_with_retry(
             }
             Ok(Err(error)) => {
                 tracing::warn!(
-                    "connect attempt {attempt} failed: {error}, retrying in {backoff_ms}ms"
+                    "connect attempt {attempt} failed: {error:#}, retrying in {backoff_ms}ms"
                 );
+                last_error = Some(error.context(format!("connect attempt {attempt} failed")));
             }
-            Err(_) if limit == deadline => anyhow::bail!("dial deadline expired"),
             Err(_) => {
+                let timed_out = anyhow::anyhow!("connect attempt {attempt} timed out");
+                if limit == deadline {
+                    return Err(deadline_expired(Some(timed_out)));
+                }
                 tracing::warn!("connect attempt {attempt} timed out, retrying in {backoff_ms}ms");
+                last_error = Some(timed_out);
             }
         }
         tokio::time::sleep_until(
@@ -171,6 +198,15 @@ pub(crate) async fn connect_with_retry(
         .await;
         backoff_ms = next_backoff_ms(backoff_ms);
         attempt += 1;
+    }
+}
+
+/// The deadline error, keeping the last attempt's failure as its source.
+fn deadline_expired(last_error: Option<anyhow::Error>) -> anyhow::Error {
+    const MSG: &str = "dial deadline expired";
+    match last_error {
+        Some(error) => error.context(MSG),
+        None => anyhow::anyhow!(MSG),
     }
 }
 
@@ -243,6 +279,37 @@ mod tests {
         let prev = u64::MAX;
         let next = next_backoff_ms(prev);
         assert_eq!(next, MAX_BACKOFF_MS, "huge input must cap, not overflow");
+    }
+
+    /// The deadline error carries the last dial failure as its cause, so the
+    /// operator sees why the peer was unreachable.
+    #[tokio::test(start_paused = true)]
+    async fn deadline_error_keeps_the_last_dial_failure() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2500);
+        let mut attempts = 0u32;
+        let result: Result<()> = retry_until(deadline, || {
+            attempts += 1;
+            let n = attempts;
+            async move { Err(anyhow::anyhow!("no route to peer (attempt {n})")) }
+        })
+        .await;
+        let err = result.expect_err("an always-failing dial must expire");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("dial deadline expired"), "{rendered}");
+        assert!(
+            rendered.contains(&format!("no route to peer (attempt {attempts})")),
+            "{rendered}"
+        );
+    }
+
+    /// A stalled final attempt is named as a timeout under the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn deadline_error_names_a_stalled_last_attempt() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let result: Result<()> = retry_until(deadline, std::future::pending::<Result<()>>).await;
+        let rendered = format!("{:#}", result.expect_err("a stalled dial must expire"));
+        assert!(rendered.contains("dial deadline expired"), "{rendered}");
+        assert!(rendered.contains("attempt 1 timed out"), "{rendered}");
     }
 
     /// The retry loop is bounded by the caller's deadline by construction:

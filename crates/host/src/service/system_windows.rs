@@ -54,7 +54,7 @@ fn is_machine_owner(sid: &Sid) -> bool {
 pub(crate) fn resolve_target(
     req: &WinRequest<'_>,
     token: &Sid,
-    owner_of: &dyn Fn(&Path) -> Option<Sid>,
+    owner_of: &dyn Fn(&Path) -> Result<Sid>,
     local_appdata: &dyn Fn(&Sid) -> Result<PathBuf>,
     account_of: &dyn Fn(&Sid) -> Option<String>,
 ) -> Result<WinTarget> {
@@ -75,12 +75,12 @@ pub(crate) fn resolve_target(
     let config = match req.config {
         Some(config) => {
             let parent = config.parent().unwrap_or(config);
-            let owner = owner_of(parent).ok_or_else(|| {
-                CliError::Config(format!(
-                    "cannot determine the owner of {} (the directory of --config); pass a \
-                     --config in a directory you can read. Nothing was changed.",
+            let owner = owner_of(parent).map_err(|e| {
+                e.context(CliError::Config(format!(
+                    "cannot determine the owner of {}, the directory of --config (pass a \
+                     --config in a directory you can read; nothing was changed)",
                     parent.display()
-                ))
+                )))
             })?;
             if !is_machine_owner(&owner) && owner != *token {
                 return Err(CliError::Config(format!(
@@ -146,7 +146,11 @@ mod tests {
         resolve_target(
             &req,
             &sid(ALICE),
-            &|_| owner.map(sid),
+            &|_| {
+                owner.map(sid).ok_or_else(|| {
+                    anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                })
+            },
             &appdata,
             &account_of,
         )
@@ -233,5 +237,11 @@ mod tests {
             panic!("not a config error: {err}")
         };
         assert!(msg.contains("cannot determine the owner"), "{msg}");
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "the owner lookup failure must stay in the chain: {err:?}"
+        );
     }
 }
