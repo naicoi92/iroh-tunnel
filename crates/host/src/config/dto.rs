@@ -325,8 +325,14 @@ impl NodeConfig {
     ///
     /// # Errors
     ///
-    /// Fails when a node-level field (stream cap, relay URL) is out of range.
+    /// Fails when a node-level field (relay URL, stream cap, relay token) is
+    /// invalid.
     pub fn validate(&self) -> Result<()> {
+        for url in &self.relay_urls {
+            if !url.starts_with("https://") {
+                anyhow::bail!("invalid relay_url '{url}': must be https://");
+            }
+        }
         if let Some(max) = self.max_concurrent_streams {
             if max == 0 {
                 anyhow::bail!("invalid max_concurrent_streams {max}: must be >= 1");
@@ -377,11 +383,6 @@ impl ServeConfig {
             validate_port(svc.port)?;
             svc.udp.validate(&svc.name, svc.protocol, true)?;
         }
-        for url in &self.node.relay_urls {
-            if !url.starts_with("https://") {
-                anyhow::bail!("invalid relay_url '{url}': must be https://");
-            }
-        }
         self.node.validate()?;
         Ok(())
     }
@@ -407,11 +408,6 @@ impl AccessConfig {
     ///
     /// Fails on an invalid relay URL, service name, port or node id, or a duplicate service.
     pub fn validate(&self) -> Result<()> {
-        for url in &self.node.relay_urls {
-            if !url.starts_with("https://") {
-                anyhow::bail!("invalid relay_url '{url}': must be https://");
-            }
-        }
         self.node.validate()?;
         let mut seen: HashSet<&str> = HashSet::new();
         for svc in &self.services {
@@ -840,6 +836,18 @@ relay_urls = ["https://override.example"]
         };
         let err = cfg.validate().unwrap_err();
         assert!(format!("{err:#}").contains("invalid relay_url"));
+    }
+
+    #[test]
+    fn node_validation_rejects_non_https_relay() {
+        let node = NodeConfig {
+            relay_urls: vec!["https://ok.relay".into(), "http://insecure.relay".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            node.validate().unwrap_err().to_string(),
+            "invalid relay_url 'http://insecure.relay': must be https://"
+        );
     }
 
     #[test]

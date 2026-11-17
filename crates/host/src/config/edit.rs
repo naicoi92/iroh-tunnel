@@ -6,11 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 
-use super::mutate::validate_role_doc;
+use super::mutate::render_valid;
 use super::resolve_config_path::resolve_config_path;
 use super::store::{
-    ensure_parent, parse_doc, read_optional, resolve_target, strip_retired_fields, write_atomic,
-    ConfigLock,
+    ensure_parent, parse_doc, read_optional, resolve_target, write_atomic, ConfigLock,
 };
 use super::types::{EditAttempt, EditOutcome, EditRejection};
 use crate::role::Role;
@@ -110,14 +109,11 @@ impl EditAttempt {
                 ),
             });
         }
-        let checked = parse_doc(edited, path).and_then(|mut doc| {
-            strip_retired_fields(&mut doc);
-            validate_role_doc(self.role, &doc.to_string(), path)?;
-            Ok(doc)
-        });
+        let checked =
+            parse_doc(edited, path).and_then(|mut doc| render_valid(self.role, &mut doc, path));
         match checked {
-            Ok(doc) => {
-                write_atomic(path, doc.to_string().as_bytes())?;
+            Ok(text) => {
+                write_atomic(path, text.as_bytes())?;
                 Ok(EditOutcome::Saved { path: path.clone() })
             }
             Err(e) => {
