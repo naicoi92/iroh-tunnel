@@ -6,7 +6,35 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 
+use super::pin::Pin;
+use super::types::{RestartPolicy, ServiceInvocation, ServiceScope};
 use crate::error::CliError;
+
+/// Everything a backend needs to write one role's registration.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RegistrationInput<'a> {
+    /// Invariant: a `Role::name()` (`serve`/`access`).
+    pub role: &'a str,
+    /// The command-line form the registered executable accepts.
+    pub invocation: &'a ServiceInvocation,
+    pub scope: ServiceScope,
+    /// What the registration runs. Absolute.
+    pub binary: &'a Path,
+    /// The config the service reads. Absolute.
+    pub config: &'a Path,
+    /// The state directory the service writes. Absolute.
+    pub state: &'a Path,
+    /// Recorded in a system registration; `None` for a user one.
+    pub pin: Option<&'a Pin>,
+    pub policy: &'a RestartPolicy,
+}
+
+impl RegistrationInput<'_> {
+    /// The role subcommand the registered executable needs before `run`.
+    pub(crate) fn role_arg(&self) -> Option<&str> {
+        self.invocation.role_arg(self.role)
+    }
+}
 
 /// Name suffix that keeps a test registration apart from any real service.
 /// Empty in production builds; `test-utils` reads it from the environment.

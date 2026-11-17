@@ -1,7 +1,8 @@
 //! `service uninstall`: stop, disable, and remove the registration.
 
-use super::native::ServiceCall;
-use super::types::{Environment, ServiceFailure, ServiceReport, ServiceScope};
+use super::native::{system_runner, ServiceCall};
+use super::types::{Environment, ServiceFailure, ServiceInvocation, ServiceReport, ServiceScope};
+use super::verb::{verb_via, Verb};
 use crate::role::Role;
 
 /// `service uninstall`: stop, disable, and remove the registration.
@@ -11,17 +12,20 @@ use crate::role::Role;
 /// A [`ServiceFailure`]; see [`super::install`].
 pub fn uninstall(
     role: Role,
+    invocation: &ServiceInvocation,
     scope: ServiceScope,
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceReport, ServiceFailure> {
-    super::uninstall_with_invocation(
+    let mut runner = system_runner;
+    verb_via(
+        Verb::Uninstall,
         role,
+        invocation,
         scope,
         env,
         call,
-        super::ServiceInvocation::Combined,
-        std::path::Path::new("iroh-tunnel"),
+        &mut runner,
     )
 }
 
@@ -42,7 +46,13 @@ mod tests {
         }
         let mut notes = |_: &ServiceNote| {};
         let mut call = ServiceCall::capture(&mut notes);
-        let result = uninstall(Role::Serve, ServiceScope::System, BATCH, &mut call);
+        let result = uninstall(
+            Role::Serve,
+            &ServiceInvocation::Combined,
+            ServiceScope::System,
+            BATCH,
+            &mut call,
+        );
         let err = anyhow::Error::from(result.unwrap_err());
         assert!(matches!(
             err.downcast_ref::<CliError>(),

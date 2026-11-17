@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use super::registration::RegistrationInput;
 use super::types::RestartPolicy;
 use crate::error::CliError;
 
@@ -54,22 +55,8 @@ fn ensure_plain(what: &str, path: &Path) -> Result<()> {
 /// # Errors
 ///
 /// [`CliError::Config`] when a path contains `"` or `%`.
-#[cfg(test)]
-pub(super) fn task_action(role: &str, binary: &Path, config: &Path) -> Result<TaskAction> {
-    task_action_invocation(
-        role,
-        binary,
-        config,
-        super::types::ServiceInvocation::Combined,
-    )
-}
-
-pub(super) fn task_action_invocation(
-    role: &str,
-    binary: &Path,
-    config: &Path,
-    invocation: super::types::ServiceInvocation,
-) -> Result<TaskAction> {
+pub(super) fn task_action(reg: &RegistrationInput<'_>) -> Result<TaskAction> {
+    let (binary, config) = (reg.binary, reg.config);
     ensure_plain("binary", binary)?;
     ensure_plain("config", config)?;
     let (Some(binary), Some(config)) = (binary.to_str(), config.to_str()) else {
@@ -80,11 +67,9 @@ pub(super) fn task_action_invocation(
         )
         .into());
     };
-    let prefix = if invocation == super::types::ServiceInvocation::Combined {
-        format!("{role} ")
-    } else {
-        String::new()
-    };
+    let prefix = reg
+        .role_arg()
+        .map_or_else(String::new, |role| format!("{role} "));
     Ok(TaskAction {
         command: binary.to_owned(),
         arguments: format!("{prefix}run --config \"{config}\""),
@@ -168,21 +153,26 @@ pub(super) fn encode_utf16_le(xml: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::fixtures::registration;
+
     #[test]
     fn task_matches_golden_for_every_user_case() {
-        use super::super::golden::{assert_golden, cases};
+        use super::super::fixtures::{assert_golden, cases};
         let mut all = String::new();
         for case in cases()
             .into_iter()
             .filter(|c| c.scope == super::super::types::ServiceScope::User)
         {
             let config = format!(r"C:\Users\a b\it's & <cfg>\{}.toml", case.role);
-            let action = task_action_invocation(
-                case.role,
-                Path::new(r"C:\Program Files\iroh tunnel\iroh-tunnel.exe"),
-                Path::new(&config),
-                case.invocation,
-            )
+            let action = task_action(&RegistrationInput {
+                invocation: &case.invocation,
+                ..registration(
+                    case.role,
+                    Path::new(r"C:\Program Files\iroh tunnel\iroh-tunnel.exe"),
+                    Path::new(&config),
+                    Path::new(r"C:\state"),
+                )
+            })
             .unwrap();
             all.push_str(&case.header());
             all.push_str(&format_task_xml(
@@ -204,16 +194,21 @@ mod tests {
                     format!("{role} "),
                 ),
                 (
-                    super::super::types::ServiceInvocation::Standalone,
+                    super::super::types::ServiceInvocation::Standalone {
+                        executable: r"C:\Program Files\renamed.exe".into(),
+                    },
                     String::new(),
                 ),
             ] {
-                let action = task_action_invocation(
-                    role,
-                    Path::new(r"C:\Program Files\renamed.exe"),
-                    Path::new(r"C:\config dir\role.toml"),
-                    invocation,
-                )
+                let action = task_action(&RegistrationInput {
+                    invocation: &invocation,
+                    ..registration(
+                        role,
+                        Path::new(r"C:\Program Files\renamed.exe"),
+                        Path::new(r"C:\config dir\role.toml"),
+                        Path::new(r"C:\state"),
+                    )
+                })
                 .unwrap();
                 assert_eq!(action.command, r"C:\Program Files\renamed.exe");
                 assert_eq!(
@@ -229,11 +224,12 @@ mod tests {
     const POLICY: RestartPolicy = RestartPolicy::DEFAULT;
 
     fn direct() -> TaskAction {
-        task_action(
+        task_action(&registration(
             "serve",
             Path::new(r"C:\Program Files\it\iroh-tunnel.exe"),
             Path::new(r"C:\Users\me\AppData\Local\iroh-tunnel\config\serve.toml"),
-        )
+            Path::new(r"C:\state"),
+        ))
         .unwrap()
     }
 
@@ -250,7 +246,13 @@ mod tests {
     #[test]
     fn paths_that_cmd_would_rewrite_are_refused_as_config_errors() {
         for bad in [r"C:\100%\a.toml", "C:\\a\"b.toml"] {
-            let err = task_action("serve", Path::new(r"C:\b.exe"), Path::new(bad)).unwrap_err();
+            let err = task_action(&registration(
+                "serve",
+                Path::new(r"C:\b.exe"),
+                Path::new(bad),
+                Path::new(r"C:\state"),
+            ))
+            .unwrap_err();
             assert!(
                 matches!(err.downcast_ref::<CliError>(), Some(CliError::Config(_))),
                 "{bad}: {err:?}"
@@ -309,11 +311,12 @@ mod tests {
 
     #[test]
     fn xml_metacharacters_in_user_and_paths_are_escaped() {
-        let action = task_action(
+        let action = task_action(&registration(
             "serve",
             Path::new(r"C:\a&b\it.exe"),
             Path::new(r"C:\<x>\s.toml"),
-        )
+            Path::new(r"C:\state"),
+        ))
         .unwrap();
         let xml = format_task_xml("serve", r"HOST\o&m", &action, &POLICY);
         assert!(xml.contains(r"HOST\o&amp;m"), "{xml}");

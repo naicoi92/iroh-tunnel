@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::Context as _;
 
-use crate::cli::{ScopeArgs, ServiceAction};
+use crate::cli::{Binary, ScopeArgs, ServiceAction};
 use crate::render::print_service_note;
 use iroh_tunnel_host::error::CliError;
 use iroh_tunnel_host::service::Environment;
@@ -57,18 +57,34 @@ pub(crate) fn is_interactive() -> bool {
     std::io::stdin().is_terminal()
 }
 
+/// The executable a registration runs: the invoked standalone executable,
+/// or the combined one found on `PATH`, falling back to this process's.
 fn resolve_tunnel_executable_with(
-    invocation: ServiceInvocation,
+    invocation: &ServiceInvocation,
     on_path: impl FnOnce() -> Option<PathBuf>,
     current_exe: impl FnOnce() -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
     match invocation {
-        ServiceInvocation::Standalone => current_exe(),
+        ServiceInvocation::Standalone { executable } => Ok(executable.clone()),
         ServiceInvocation::Combined => match on_path() {
             Some(path) => Ok(path),
             None => current_exe(),
         },
     }
+}
+
+/// The invocation of `binary`: a standalone executable is named by this
+/// process's path, resolved only for it.
+///
+/// # Errors
+///
+/// When a standalone executable cannot resolve its own path.
+pub(crate) fn invocation(binary: Binary) -> anyhow::Result<ServiceInvocation> {
+    if !binary.is_standalone() {
+        return Ok(ServiceInvocation::Combined);
+    }
+    let executable = std::env::current_exe().context("failed to resolve current executable")?;
+    Ok(ServiceInvocation::Standalone { executable })
 }
 
 /// A service call for the CLI: native output goes straight to the terminal and
@@ -101,113 +117,43 @@ pub(crate) fn dispatch(
     let existing = |args: &ScopeArgs| {
         explicit_scope(args).unwrap_or_else(|| service::default_scope(env.elevated))
     };
-    let executable = std::env::current_exe().context("failed to resolve current executable")?;
-    // Explicit paths are available even if registration fails after publishing
-    // the copy. Default system paths may belong to another user: recover those
-    // only from the registration's authoritative pin, not root's HOME.
-    let config = match &action {
-        ServiceAction::Install {
-            config: Some(path), ..
-        } => std::fs::canonicalize(path).ok(),
-        _ => None,
-    };
-    let mut pending = None;
-    let mut notes = |note: &service::ServiceNote| {
-        if invocation == ServiceInvocation::Standalone {
-            if matches!(note, service::ServiceNote::ManagedBinary { .. }) {
-                pending = Some(note.clone());
-                return;
-            }
-            if let service::ServiceNote::Installed {
-                at: service::InstalledAt::Path(path),
-                ..
-            } = note
-            {
-                let pinned = std::fs::read_to_string(path)
-                    .ok()
-                    .and_then(|body| service::Pin::find(&body));
-                if let Some(managed) = pending.take() {
-                    print_service_note(
-                        &managed,
-                        invocation,
-                        &executable,
-                        pinned
-                            .as_ref()
-                            .map(|pin| pin.config.as_path())
-                            .or(config.as_deref()),
-                    );
-                }
-            }
-        }
-        print_service_note(note, invocation, &executable, config.as_deref());
-    };
+    let mut notes = |note: &service::ServiceNote| print_service_note(note, &invocation);
     let mut call = cli_call(&mut notes);
-    let result = match action {
+    match action {
         ServiceAction::Install { config, scope } => install(
             role,
             config,
             explicit_scope(&scope),
             env,
             &mut call,
-            invocation,
+            &invocation,
         ),
-        ServiceAction::Uninstall { scope } => service::uninstall_with_invocation(
-            role,
-            existing(&scope),
-            env,
-            &mut call,
-            invocation,
-            &executable,
-        )
-        .map(drop)
-        .map_err(Into::into),
-        ServiceAction::Start { scope } => service::start_with_invocation(
-            role,
-            existing(&scope),
-            env,
-            &mut call,
-            invocation,
-            &executable,
-        )
-        .map(drop)
-        .map_err(Into::into),
-        ServiceAction::Stop { scope } => service::stop_with_invocation(
-            role,
-            existing(&scope),
-            env,
-            &mut call,
-            invocation,
-            &executable,
-        )
-        .map(drop)
-        .map_err(Into::into),
-        ServiceAction::Restart { scope } => service::restart_with_invocation(
-            role,
-            existing(&scope),
-            env,
-            &mut call,
-            invocation,
-            &executable,
-        )
-        .map(drop)
-        .map_err(Into::into),
-        ServiceAction::Status { scope } => service::status_with_invocation(
-            role,
-            existing(&scope),
-            env,
-            &mut call,
-            invocation,
-            &executable,
-        )
-        .map(drop)
-        .map_err(Into::into),
-    };
-    // A backend may fail after publishing the managed copy but before it can
-    // announce the registration. Still report the copy before the error.
-    if let Some(note) = pending {
-        print_service_note(&note, invocation, &executable, config.as_deref());
+        ServiceAction::Uninstall { scope } => {
+            service::uninstall(role, &invocation, existing(&scope), env, &mut call)
+                .map(drop)
+                .map_err(Into::into)
+        }
+        ServiceAction::Start { scope } => {
+            service::start(role, &invocation, existing(&scope), env, &mut call)
+                .map(drop)
+                .map_err(Into::into)
+        }
+        ServiceAction::Stop { scope } => {
+            service::stop(role, &invocation, existing(&scope), env, &mut call)
+                .map(drop)
+                .map_err(Into::into)
+        }
+        ServiceAction::Restart { scope } => {
+            service::restart(role, &invocation, existing(&scope), env, &mut call)
+                .map(drop)
+                .map_err(Into::into)
+        }
+        ServiceAction::Status { scope } => {
+            service::status(role, &invocation, existing(&scope), env, &mut call)
+                .map(drop)
+                .map_err(Into::into)
+        }
     }
-    result
 }
 
 /// Install, answering each [`InstallNeed`] with the prompt the CLI always had.
@@ -217,10 +163,10 @@ fn install(
     scope: Option<ServiceScope>,
     env: Environment,
     call: &mut ServiceCall,
-    invocation: ServiceInvocation,
+    invocation: &ServiceInvocation,
 ) -> anyhow::Result<()> {
     let mut request = InstallRequest {
-        invocation,
+        invocation: invocation.clone(),
         role,
         scope,
         config,
@@ -362,9 +308,11 @@ mod tests {
     #[test]
     fn standalone_resolution_ignores_combined_binary_on_path() {
         let path = resolve_tunnel_executable_with(
-            ServiceInvocation::Standalone,
+            &ServiceInvocation::Standalone {
+                executable: PathBuf::from("/renamed standalone"),
+            },
             || panic!("combined executable must not be selected"),
-            || Ok(PathBuf::from("/renamed standalone")),
+            || panic!("the invoked executable is already known"),
         )
         .unwrap();
         assert_eq!(path, PathBuf::from("/renamed standalone"));
@@ -399,14 +347,14 @@ mod tests {
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let found = resolve_tunnel_executable_with(
-            ServiceInvocation::Combined,
+            &ServiceInvocation::Combined,
             || which::which_in("iroh-tunnel", Some(dir.path()), dir.path()).ok(),
             || panic!("current_exe must not be consulted when PATH has the binary"),
         )
         .unwrap();
         assert_eq!(found, exe);
         let fallback = resolve_tunnel_executable_with(
-            ServiceInvocation::Combined,
+            &ServiceInvocation::Combined,
             || None,
             || Ok(PathBuf::from("/somewhere/current")),
         )

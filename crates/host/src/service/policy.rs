@@ -106,7 +106,8 @@ fn powershell_quote(arg: &str) -> String {
 }
 
 /// Quote `arg` for a POSIX shell only when it needs it.
-pub(crate) fn shell_quote(arg: &str) -> String {
+#[must_use]
+pub fn shell_quote(arg: &str) -> String {
     let plain = !arg.is_empty()
         && arg
             .chars()

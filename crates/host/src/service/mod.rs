@@ -20,8 +20,6 @@ mod effective_binary;
 mod execute;
 #[cfg(test)]
 mod fixtures;
-#[cfg(test)]
-mod golden;
 mod install;
 mod is_elevated;
 mod native;
@@ -31,14 +29,10 @@ mod platform;
 mod policy;
 mod registration;
 mod restart;
-mod restart_with_invocation;
 mod service_binary;
 mod start;
-mod start_with_invocation;
 mod status;
-mod status_with_invocation;
 mod stop;
-mod stop_with_invocation;
 #[cfg(unix)]
 pub(crate) mod system;
 // Pure Windows seams, compiled elsewhere only for their tests.
@@ -53,7 +47,6 @@ pub(crate) mod trust;
 pub(crate) mod trust_windows;
 mod types;
 mod uninstall;
-mod uninstall_with_invocation;
 mod verb;
 
 mod log_file;
@@ -67,14 +60,11 @@ pub use native::{InstalledAt, NativeOutput, OutputMode, ServiceCall, ServiceNote
 pub use parse_scope_answer::parse_scope_answer;
 pub use pin::{Pin, PinOwner, RetargetConsent};
 pub(crate) use platform::load_config;
+pub use policy::shell_quote;
 pub use restart::restart;
-pub use restart_with_invocation::restart_with_invocation;
 pub use start::start;
-pub use start_with_invocation::start_with_invocation;
 pub use status::status;
-pub use status_with_invocation::status_with_invocation;
 pub use stop::stop;
-pub use stop_with_invocation::stop_with_invocation;
 #[cfg(unix)]
 pub use system::unknown_user;
 #[cfg(windows)]
@@ -89,7 +79,6 @@ pub use types::{
     ServiceScope, ServiceStatusReport,
 };
 pub use uninstall::uninstall;
-pub use uninstall_with_invocation::uninstall_with_invocation;
 
 /// Runs the service binary trust check on `path` (installer ACL test).
 ///

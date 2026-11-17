@@ -7,9 +7,9 @@
 use super::super::effective_binary::{parse_systemd_show, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
-use super::super::registration::{instance_suffix, write_registration};
+use super::super::registration::{instance_suffix, write_registration, RegistrationInput};
 use super::super::types::AppliedEffect;
-use super::super::types::{RestartPolicy, ServiceInvocation, ServiceScope};
+use super::super::types::ServiceScope;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -40,45 +40,19 @@ fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
 ///
 /// The restart directives come from the shared [`RestartPolicy`] so they stay
 /// in sync with the launchd plist template.
-#[cfg(test)]
-fn format_unit(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
-    format_unit_with(role, binary, config, state, &RestartPolicy::DEFAULT, None)
-}
-
-#[cfg(test)]
-fn format_unit_with(
-    role: &str,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    policy: &RestartPolicy,
-    pin: Option<&Pin>,
-) -> String {
-    format_unit_invocation(
+fn format_unit(reg: &RegistrationInput<'_>) -> String {
+    let RegistrationInput {
         role,
         binary,
         config,
         state,
-        policy,
         pin,
-        ServiceInvocation::Combined,
-    )
-}
-
-fn format_unit_invocation(
-    role: &str,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    policy: &RestartPolicy,
-    pin: Option<&Pin>,
-    invocation: ServiceInvocation,
-) -> String {
-    let role_arg = if invocation == ServiceInvocation::Combined {
-        format!("{role} ")
-    } else {
-        String::new()
-    };
+        policy,
+        ..
+    } = *reg;
+    let role_arg = reg
+        .role_arg()
+        .map_or_else(String::new, |role| format!("{role} "));
     let binary = quote_arg(&binary.to_string_lossy(), Expand::Command);
     let config = quote_arg(&config.to_string_lossy(), Expand::Command);
     let state_env = quote_arg(
@@ -199,33 +173,18 @@ pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<S
     super::super::registration::read_registration(&unit_path(role, scope).ok()?)
 }
 
-#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
-    invocation: ServiceInvocation,
-    scope: ServiceScope,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    pin: Option<&Pin>,
+    reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    super::super::pin::require_unix_pin(pin)?;
-    let unit = format_unit_invocation(
-        role,
-        binary,
-        config,
-        state,
-        &RestartPolicy::DEFAULT,
-        pin,
-        invocation,
-    );
-    let path = unit_path(role, scope)?;
+    super::super::pin::require_unix_pin(reg.pin)?;
+    let unit = format_unit(reg);
+    let path = unit_path(reg.role, reg.scope)?;
     write_registration(&path, &unit)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));
 
-    enable_and_start(native, notes, scope, &unit_name(role), &path)
+    enable_and_start(native, notes, reg.scope, &unit_name(reg.role), &path)
 }
 
 /// Reload, enable and (re)start the written unit, then announce it.
@@ -323,21 +282,18 @@ pub(crate) fn status(
 mod tests {
     #[test]
     fn unit_matches_golden_for_every_case() {
-        use super::super::super::golden::{assert_golden, cases, unix_paths, unix_pin};
+        use super::super::super::fixtures::{assert_golden, cases, unix_paths, unix_pin};
         let mut all = String::new();
         for case in cases() {
             let paths = unix_paths(case.role);
             let pin = unix_pin(case.scope, &paths.config);
             all.push_str(&case.header());
-            all.push_str(&format_unit_invocation(
-                case.role,
-                &paths.binary,
-                &paths.config,
-                &paths.state,
-                &RestartPolicy::DEFAULT,
-                pin.as_ref(),
-                case.invocation,
-            ));
+            all.push_str(&format_unit(&RegistrationInput {
+                invocation: &case.invocation,
+                scope: case.scope,
+                pin: pin.as_ref(),
+                ..registration(case.role, &paths.binary, &paths.config, &paths.state)
+            }));
         }
         assert_golden("systemd.txt", &all);
     }
@@ -363,17 +319,22 @@ mod tests {
         for role in ["serve", "access"] {
             for (invocation, expected) in [
                 (ServiceInvocation::Combined, format!("{role} run")),
-                (ServiceInvocation::Standalone, "run".to_owned()),
+                (
+                    ServiceInvocation::Standalone {
+                        executable: PathBuf::from("/opt/role bin/renamed"),
+                    },
+                    "run".to_owned(),
+                ),
             ] {
-                let body = format_unit_invocation(
-                    role,
-                    Path::new("/managed path/copy"),
-                    Path::new("/config path/c"),
-                    Path::new("/state"),
-                    &RestartPolicy::DEFAULT,
-                    None,
-                    invocation,
-                );
+                let body = format_unit(&RegistrationInput {
+                    invocation: &invocation,
+                    ..registration(
+                        role,
+                        Path::new("/managed path/copy"),
+                        Path::new("/config path/c"),
+                        Path::new("/state"),
+                    )
+                });
                 assert!(
                     body.contains(&format!(
                         "ExecStart=\"/managed path/copy\" {expected} --config \"/config path/c\""
@@ -384,6 +345,8 @@ mod tests {
         }
     }
 
+    use super::super::super::fixtures::registration;
+    use super::super::super::types::{RestartPolicy, ServiceInvocation};
     use super::*;
     use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
     use crate::service::native::{Native, OutputMode};
@@ -511,12 +474,12 @@ mod tests {
     fn format_unit_uses_default_restart_policy() {
         // Regression: the shared RestartPolicy::DEFAULT must produce the same
         // Restart=/RestartSec= values the template used to hard-code.
-        let body = format_unit(
+        let body = format_unit(&registration(
             "serve",
             Path::new("/usr/bin/iroh-tunnel"),
             Path::new("/etc/cfg"),
             Path::new("/var/state"),
-        );
+        ));
         assert!(body.contains("Restart=on-failure"), "body: {body}");
         assert!(body.contains("RestartSec=5"), "body: {body}");
         // A refused start (exit 6, role already running) must not restart-loop.
@@ -528,12 +491,12 @@ mod tests {
     fn unit_exempts_the_refused_start_status() {
         // Deliberately duplicates one assertion of the test above so the
         // systemd and launchd containment guards sit side by side.
-        let body = format_unit(
+        let body = format_unit(&registration(
             "serve",
             Path::new("/usr/bin/iroh-tunnel"),
             Path::new("/etc/cfg"),
             Path::new("/var/state"),
-        );
+        ));
         assert!(body.contains("RestartPreventExitStatus=6"), "body: {body}");
     }
 
@@ -543,26 +506,22 @@ mod tests {
             on_failure: false,
             delay_secs: 0,
         };
-        let body = format_unit_with(
-            "serve",
-            Path::new("/x"),
-            Path::new("/y"),
-            Path::new("/z"),
-            &policy,
-            None,
-        );
+        let body = format_unit(&RegistrationInput {
+            policy: &policy,
+            ..registration("serve", Path::new("/x"), Path::new("/y"), Path::new("/z"))
+        });
         assert!(body.contains("Restart=no"), "body: {body}");
         assert!(body.contains("RestartSec=0"), "body: {body}");
     }
 
     #[test]
     fn unit_pins_state_dir_and_quotes_paths_with_spaces() {
-        let body = format_unit(
+        let body = format_unit(&registration(
             "serve",
             Path::new("/usr/bin/iroh-tunnel"),
             Path::new("/home/a b/serve.toml"),
             Path::new("/home/a b/state"),
-        );
+        ));
         assert!(
             body.contains(
                 "ExecStart=/usr/bin/iroh-tunnel serve run --config \"/home/a b/serve.toml\""
@@ -577,12 +536,12 @@ mod tests {
 
     #[test]
     fn dollar_is_doubled_in_exec_start_but_literal_in_environment() {
-        let body = format_unit(
+        let body = format_unit(&registration(
             "serve",
             Path::new("/usr/bin/iroh-tunnel"),
             Path::new("/home/$u/serve.toml"),
             Path::new("/home/$u/state"),
-        );
+        ));
         assert!(body.contains("--config \"/home/$$u/serve.toml\""), "{body}");
         assert!(
             body.contains("Environment=\"IROH_TUNNEL_STATE_DIR=/home/$u/state\""),
@@ -602,7 +561,12 @@ mod tests {
     #[test]
     fn managed_path_renders_as_one_argument_in_each_backend() {
         let copy = "/Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel";
-        let body = format_unit("serve", Path::new(copy), Path::new("/c"), Path::new("/s"));
+        let body = format_unit(&registration(
+            "serve",
+            Path::new(copy),
+            Path::new("/c"),
+            Path::new("/s"),
+        ));
         let exec = body
             .lines()
             .find_map(|line| line.strip_prefix("ExecStart="))

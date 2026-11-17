@@ -1,7 +1,8 @@
 //! `service start`; refused while the role already runs.
 
-use super::native::ServiceCall;
-use super::types::{Environment, ServiceFailure, ServiceReport, ServiceScope};
+use super::native::{system_runner, ServiceCall};
+use super::types::{Environment, ServiceFailure, ServiceInvocation, ServiceReport, ServiceScope};
+use super::verb::{verb_via, Verb};
 use crate::role::Role;
 
 /// `service start`; refused while the role already runs.
@@ -11,18 +12,13 @@ use crate::role::Role;
 /// A [`ServiceFailure`]; [`crate::error::CliError::Conflict`] when the role runs.
 pub fn start(
     role: Role,
+    invocation: &ServiceInvocation,
     scope: ServiceScope,
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceReport, ServiceFailure> {
-    super::start_with_invocation(
-        role,
-        scope,
-        env,
-        call,
-        super::ServiceInvocation::Combined,
-        std::path::Path::new("iroh-tunnel"),
-    )
+    let mut runner = system_runner;
+    verb_via(Verb::Start, role, invocation, scope, env, call, &mut runner)
 }
 
 #[cfg(test)]
@@ -42,7 +38,13 @@ mod tests {
         }
         let mut notes = |_: &ServiceNote| {};
         let mut call = ServiceCall::capture(&mut notes);
-        let result = start(Role::Serve, ServiceScope::System, BATCH, &mut call);
+        let result = start(
+            Role::Serve,
+            &ServiceInvocation::Combined,
+            ServiceScope::System,
+            BATCH,
+            &mut call,
+        );
         let err = anyhow::Error::from(result.unwrap_err());
         assert!(matches!(
             err.downcast_ref::<CliError>(),

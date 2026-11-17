@@ -3,9 +3,10 @@
 
 use anyhow::Result;
 
-use super::native::{Native, NativeOutput, Runner, ServiceCall, ServiceNote};
+use super::native::{system_runner, Native, NativeOutput, Runner, ServiceCall, ServiceNote};
 use super::types::{
-    Environment, Fact, Registration, ServiceFailure, ServiceScope, ServiceStatusReport,
+    Environment, Fact, Registration, ServiceFailure, ServiceInvocation, ServiceScope,
+    ServiceStatusReport,
 };
 use crate::role::Role;
 
@@ -19,53 +20,26 @@ use crate::role::Role;
 /// run. A fact that cannot be read is [`Fact::Unavailable`], not an error.
 pub fn status(
     role: Role,
+    invocation: &ServiceInvocation,
     scope: ServiceScope,
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
-    super::status_with_invocation(
-        role,
-        scope,
-        env,
-        call,
-        super::ServiceInvocation::Combined,
-        std::path::Path::new("iroh-tunnel"),
-    )
+    let mut runner = system_runner;
+    status_via(role, invocation, scope, env, call, &mut runner)
 }
 
 /// [`status`] over an injected command runner.
-#[cfg(test)]
 pub(crate) fn status_via(
     role: Role,
+    invocation: &ServiceInvocation,
     scope: ServiceScope,
     env: Environment,
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
-    status_via_with_invocation(
-        role,
-        scope,
-        env,
-        call,
-        runner,
-        super::ServiceInvocation::Combined,
-        std::path::Path::new("iroh-tunnel"),
-    )
-}
-
-pub(super) fn status_via_with_invocation(
-    role: Role,
-    scope: ServiceScope,
-    env: Environment,
-    call: &mut ServiceCall,
-    runner: &mut Runner<'_>,
-    invocation: super::ServiceInvocation,
-    executable: &std::path::Path,
-) -> Result<ServiceStatusReport, ServiceFailure> {
-    super::verb::check_verb_policy_with_invocation(
-        "status", role, scope, env, invocation, executable,
-    )
-    .map_err(ServiceFailure::before_effects)?;
+    super::verb::check_verb_policy("status", role, invocation, scope, env)
+        .map_err(ServiceFailure::before_effects)?;
     let liveness = crate::ownership::probe(role);
     let owner = owner_fact(&liveness);
     // Queried once: the absent-service refusal and the registration fact share

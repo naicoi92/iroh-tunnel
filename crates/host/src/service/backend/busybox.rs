@@ -22,12 +22,10 @@
 
 use super::super::effective_binary::{parse_busybox_script, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
-use super::super::pin::Pin;
-use super::super::registration::write_registration;
+use super::super::registration::{write_registration, RegistrationInput};
 use super::super::types::AppliedEffect;
-use super::super::types::ServiceInvocation;
 use super::super::types::ServiceScope;
-use super::busybox_script::{InitScript, ScriptLayout};
+use super::busybox_script::{render_script, ScriptLayout};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -118,32 +116,18 @@ pub(crate) fn existing_registration(role: &str) -> Option<String> {
     super::super::registration::read_registration(&script_path(role))
 }
 
-#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
-    invocation: ServiceInvocation,
-    scope: ServiceScope,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    pin: Option<&Pin>,
+    reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    super::super::pin::require_unix_pin(pin)?;
+    super::super::pin::require_unix_pin(reg.pin)?;
     require_root()?;
-    if let Some(note) = busybox_scope_note(role, scope) {
+    let role = reg.role;
+    if let Some(note) = busybox_scope_note(role, reg.scope) {
         notes(&note);
     }
-    let script = InitScript {
-        role,
-        invocation,
-        binary,
-        config,
-        state,
-        pin,
-    }
-    .render(&ScriptLayout::for_role(role))?;
+    let script = render_script(reg, &ScriptLayout::for_role(role))?;
     let path = script_path(role);
     write_registration(&path, &script)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));

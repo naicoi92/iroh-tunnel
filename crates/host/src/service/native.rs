@@ -112,6 +112,8 @@ pub enum ServiceNote {
         source: PathBuf,
         /// The managed copy the registration runs.
         copy: PathBuf,
+        /// The absolute config the registration pins, for rerun guidance.
+        config: PathBuf,
     },
 }
 
