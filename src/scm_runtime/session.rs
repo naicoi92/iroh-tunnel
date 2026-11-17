@@ -249,7 +249,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::{Arc, Barrier};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::sync::Arc;
 
     /// Decides whether the fake refuses a status.
     type Refusal = fn(Status) -> bool;
@@ -260,9 +261,9 @@ mod tests {
         attempts: Vec<Status>,
         /// Each matching attempt consumes the front refusal.
         refuse: VecDeque<Refusal>,
-        /// One-shot pause of the first `Running` attempt: wait on the first
-        /// barrier ("inside the retry"), then on the second ("released").
-        gate: Option<(Arc<Barrier>, Arc<Barrier>)>,
+        /// One-shot pause of the first `Running` attempt: signal "entered",
+        /// then wait for "release" (bounded, so a failed test cannot hang).
+        gate: Option<(Sender<()>, Receiver<()>)>,
     }
 
     /// Records every attempted and accepted status; refuses an attempt that
@@ -279,12 +280,12 @@ mod tests {
 
         /// Like [`Self::refusing`], and the first `Running` attempt pauses
         /// until the test thread passes both returned barriers.
-        fn gated_on_first_running(refusals: &[Refusal]) -> (Self, Arc<Barrier>, Arc<Barrier>) {
+        fn gated_on_first_running(refusals: &[Refusal]) -> (Self, Receiver<()>, Sender<()>) {
             let handle = Self::refusing(refusals);
-            let inside = Arc::new(Barrier::new(2));
-            let released = Arc::new(Barrier::new(2));
-            handle.log().gate = Some((Arc::clone(&inside), Arc::clone(&released)));
-            (handle, inside, released)
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            handle.log().gate = Some((entered_tx, release_rx));
+            (handle, entered_rx, release_tx)
         }
 
         fn log(&self) -> MutexGuard<'_, FakeLog> {
@@ -306,9 +307,11 @@ mod tests {
             if status == Status::Running {
                 // Wait outside the log lock so the test thread can inspect it.
                 let gate = self.0.lock().map_err(|_| "fake poisoned")?.gate.take();
-                if let Some((inside, released)) = gate {
-                    inside.wait();
-                    released.wait();
+                if let Some((entered, release)) = gate {
+                    // Send/recv failures mean the test thread is gone or
+                    // timed out; carry on so the scope can join.
+                    let _ = entered.send(());
+                    let _ = release.recv_timeout(GATE_TIMEOUT);
                 }
             }
             let mut log = self.0.lock().map_err(|_| "fake poisoned")?;
@@ -328,6 +331,31 @@ mod tests {
 
     fn is_stopped(status: Status) -> bool {
         matches!(status, Status::Stopped(_))
+    }
+
+    /// Bound on every gate wait, so a missed signal fails instead of hanging.
+    const GATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Runs `on_ready` on one thread and, once its first `Running` attempt is
+    /// paused at the gate, issues the stop control on another. Returns whether
+    /// the gate was reached and whether the state lock was held at that point;
+    /// the caller asserts after both threads joined, and the gate is always
+    /// released first, so a failed check cannot hang the test.
+    fn race_stop_with_running_retry(
+        session: &Session<FakeHandle>,
+        entered: &Receiver<()>,
+        release: &Sender<()>,
+    ) -> (bool, bool) {
+        std::thread::scope(|scope| {
+            scope.spawn(|| session.on_ready().unwrap());
+            let reached = entered.recv_timeout(GATE_TIMEOUT).is_ok();
+            let held = reached && session.machine.try_lock().is_err();
+            if reached {
+                scope.spawn(|| session.on_stop_control().unwrap());
+            }
+            let _ = release.send(());
+            (reached, held)
+        })
     }
 
     fn is_pending(status: Status) -> bool {
@@ -421,7 +449,7 @@ mod tests {
         assert_eq!(handle.attempts(), [Status::Running, Status::Running]);
         assert_eq!(handle.sent(), [Status::Running]);
         assert_eq!(stops.load(Ordering::SeqCst), 0);
-        assert!(logs.contains("Running"), "{logs}");
+        assert!(logs.contains("SCM refused status Running"), "{logs}");
         session.on_finished(0).unwrap();
         assert_eq!(handle.sent().last(), Some(&Status::Stopped(ScmExit::Clean)));
     }
@@ -450,18 +478,11 @@ mod tests {
 
     #[test]
     fn stop_request_while_running_is_retried_then_stops_cleanly() {
-        let (handle, inside, released) = FakeHandle::gated_on_first_running(&[is_running]);
+        let (handle, entered, release) = FakeHandle::gated_on_first_running(&[is_running]);
         let (session, stops) = session(&handle);
-        std::thread::scope(|scope| {
-            scope.spawn(|| session.on_ready().unwrap());
-            inside.wait();
-            assert!(
-                session.machine.try_lock().is_err(),
-                "the retry holds the state lock"
-            );
-            scope.spawn(|| session.on_stop_control().unwrap());
-            released.wait();
-        });
+        let (entered, held) = race_stop_with_running_retry(&session, &entered, &release);
+        assert!(entered, "the first Running attempt was reached");
+        assert!(held, "the retry holds the state lock");
         assert!(!session.tick().unwrap());
         session.on_finished(0).unwrap();
         assert_eq!(stops.load(Ordering::SeqCst), 1);
@@ -479,15 +500,11 @@ mod tests {
 
     #[test]
     fn stop_request_while_running_keeps_failing_ends_with_101() {
-        let (handle, inside, released) =
+        let (handle, entered, release) =
             FakeHandle::gated_on_first_running(&[is_running as Refusal; 3]);
         let (session, stops) = session(&handle);
-        std::thread::scope(|scope| {
-            scope.spawn(|| session.on_ready().unwrap());
-            inside.wait();
-            scope.spawn(|| session.on_stop_control().unwrap());
-            released.wait();
-        });
+        let (entered, _) = race_stop_with_running_retry(&session, &entered, &release);
+        assert!(entered, "the first Running attempt was reached");
         assert_eq!(
             stops.load(Ordering::SeqCst),
             1,
