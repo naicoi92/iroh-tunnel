@@ -2,7 +2,7 @@
 
 **Change**: `ownership-fail-closed`
 **Finalized at**: `2026-11-17 03:16 UTC`
-**Outcome**: `kept-as-is`
+**Outcome**: `pr-created`
 
 ---
 
@@ -10,27 +10,27 @@
 
 - **Branch**: `ownership-fail-closed`
 - **Base branch**: `main`
-- **Final state**: `kept-open`
-- **PR URL**: `N/A` (`gh pr view ownership-fail-closed` → no pull requests found)
+- **Final state**: `pr-open`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/235`
 
 ---
 
 ## Workspace
 
 - **Worktree**: `/Users/naicoi/Projects/iroh/iroh-tunnel.ownership-fail-closed`
-- **Cleanup**: `preserved (harness-owned)` — Worktrunk-managed worktree, the session's own cwd; removal is `wt remove` from `main` after merge.
+- **Cleanup**: `preserved (PR / keep-as-is)` — Worktrunk-managed worktree; remove with `wt remove ownership-fail-closed` from `main` after the PR merges.
 
 ### Policy deviation (AGENTS.md overrides the git-side closeout)
 
-- Global and user instructions forbid push, merge or opening a PR without explicit approval in chat ("KHÔNG push, KHÔNG mở PR, KHÔNG merge"). Steps 3–7 (checkout/pull/merge into the feature branch, worktree removal, branch deletion), 10 (push), 11 (PR prompt) and 12 (PR comment) were not run.
-- The feature branch recorded in `apply.md` is the worktree branch itself (`ownership-fail-closed`, pre-created by the user), so the fast-forward merge would be a no-op; the implementation already sits on the branch that would be pushed.
-- When the user authorizes it: push `ownership-fail-closed` (check `gh auth status` against owner `naicoi92` first), open a PR against `main`, then run the code-reviewer comment subroutine.
+- First pass recorded `kept-as-is` because push/PR/merge needed explicit approval; the user then approved push and PR in chat. Merge is still not authorized.
+- The feature branch is the worktree branch itself (`ownership-fail-closed`), so steps 3–4 (checkout, fast-forward merge) were no-ops and steps 6–7 (worktree removal, branch deletion) are deferred to after merge.
+- Push used HTTPS with `gh` credentials for `naicoi92` (SSH key resolves to `ttdua`, which is denied); the remote URL was not changed.
 
 ---
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/235#issuecomment-6937051608)
 
 ---
 
@@ -50,4 +50,4 @@
 
 ## Next step
 
-Resume when push/PR is authorized: push the branch, open the PR, post the orientation comment, then after PR approval run `/opsx-archive` on this branch, push the archive commits and merge. Alternatively run `/opsx-archive` locally first; the worktree is preserved.
+Wait for PR code-review and CI (including the first Windows build). After approval, run `/opsx-archive` on this feature branch (commits land here), push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch` or GitHub UI) — that single merge lands implementation + archive into main.
