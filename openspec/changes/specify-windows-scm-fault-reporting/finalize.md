@@ -2,9 +2,9 @@
 
 **Change**: `specify-windows-scm-fault-reporting`
 **Finalized at**: `2026-11-17T23:48Z`
-**Outcome**: `kept-as-is`
+**Outcome**: `pr-created`
 
-> Deviation from the git-side closeout (`pr-updated`): the project `AGENTS.md` and the user's instructions forbid push, merge and opening a PR without explicit permission, and that policy overrides the finalize steps. Apply ran in the existing worktree on the feature branch itself (user-approved), so there is no worktree branch to merge (steps 3–7 not applicable). Steps 10–12 (push, PR prompt, PR comment) were not run; they wait for the user's permission.
+> Deviation from the git-side closeout: apply ran on the feature branch itself (user-approved), so there was no worktree branch to merge and steps 3–7 did not apply. Push and PR creation ran only after the user's explicit permission in chat, as the project `AGENTS.md` requires. The push used HTTPS with the `gh` credential helper because the default SSH key belongs to another account (AGENTS.md rule).
 
 ---
 
@@ -12,8 +12,8 @@
 
 - **Branch**: `fix/windows-scm-effects`
 - **Base branch**: `main`
-- **Final state**: `kept-open` (local commits only, not pushed)
-- **PR URL**: `N/A`
+- **Final state**: `pr-open`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/255`
 
 ---
 
@@ -26,7 +26,7 @@
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/255#issuecomment-6964541678)
 
 ---
 
@@ -46,4 +46,4 @@
 
 ## Next step
 
-Resume when the user allows it: push `fix/windows-scm-effects` and open the PR (which also carries the #223 fix commits `c0dcf47`, `d317572`), then re-enter finalize to record `pr-created` and post the code-reviewer orientation comment. Confirm the Windows CI job `service_system_windows` passes on the PR (verify.md WARNING). Run `/opsx-archive` on this feature branch before merging the PR.
+Wait for PR review. Resolve the `CHANGELOG.md` conflict with `main` (#248 added an entry in the same section; keep both). Confirm the Windows CI job `service_system_windows` passes (verify.md WARNING). After approval, run `/opsx-archive` on this feature branch, push the archive commits to update the PR, then merge the PR.
