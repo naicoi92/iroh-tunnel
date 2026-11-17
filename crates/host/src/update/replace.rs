@@ -83,10 +83,7 @@ impl StagedFile {
             ".iroh-tunnel-update-{}-{nonce:08x}-{seq}.tmp",
             std::process::id()
         ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        let mut file = open_staging(&path)
             .with_context(|| format!("cannot stage update beside {}", target.display()))?;
         let staged = Self {
             path,
@@ -107,6 +104,20 @@ impl StagedFile {
     fn disarm(&self) {
         self.armed.set(false);
     }
+}
+
+/// Open `path` exclusively (`O_EXCL`) for writing, owner-only until the
+/// caller sets the final mode on the handle, so a permissive umask never
+/// opens a window for another user to grab a write fd.
+fn open_staging(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 impl Drop for StagedFile {
@@ -260,6 +271,22 @@ mod tests {
         assert!(!hint.contains("iroh-tunnel access"), "{hint}");
         assert!(!hint.contains("serve"), "{hint}");
         assert!(hint.contains("elevated"), "{hint}");
+    }
+
+    /// Issue #230: the staging file is owner-only from the moment it exists,
+    /// so a permissive umask never lets another user grab a write fd before
+    /// the final permissions are set.
+    #[cfg(unix)]
+    #[test]
+    fn staging_file_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("staged");
+
+        let file = open_staging(&path).unwrap();
+
+        let mode = file.metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "mode {:o}", mode & 0o777);
     }
 
     #[test]
