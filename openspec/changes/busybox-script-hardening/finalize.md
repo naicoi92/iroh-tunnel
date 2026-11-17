@@ -2,9 +2,9 @@
 
 **Change**: `busybox-script-hardening`
 **Finalized at**: `2026-11-17 11:58`
-**Outcome**: `kept-as-is`
+**Outcome**: `pr-created`
 
-> Deviation from the canonical git-side closeout (recorded per the finalize instruction): the project/user policy (`AGENTS.md` "Git approval" and the task brief) forbids push, merge or opening a PR without explicit approval in chat. Steps 3–7 and 10–12 (checkout/pull, ff-merge, cleanup, push, PR) were not run. The feature branch recorded in apply.md is the worktree branch itself, so no local merge is needed.
+> Deviation from the canonical git-side closeout (recorded per the finalize instruction): the project/user policy (`AGENTS.md` "Git approval" and the task brief) forbids push, merge or opening a PR without explicit approval in chat. Steps 3–7 (checkout/pull, ff-merge, cleanup) were not run because the feature branch is the worktree branch itself; push and PR creation ran after the user approved them in chat (pushed over HTTPS with gh credentials after SSH was refused). The feature branch recorded in apply.md is the worktree branch itself, so no local merge is needed.
 
 ---
 
@@ -12,8 +12,8 @@
 
 - **Branch**: `busybox-script-hardening`
 - **Base branch**: `main` (merge-base `82d7d92`)
-- **Final state**: `kept-open` (local only, not pushed)
-- **PR URL**: `N/A`
+- **Final state**: `pr-open`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/238`
 
 ---
 
@@ -46,4 +46,4 @@
 
 ## Next step
 
-Run `/opsx-archive` on this branch to sync delta specs and archive the change. Then, with explicit approval, push `busybox-script-hardening` and open a PR against `main` (suggested title `fix(system-service-management): busybox-script-hardening`, closes #220).
+Wait for PR code review. After approval, run `/opsx-archive` on this feature branch, push the archive commits to update the PR, then merge the PR.
