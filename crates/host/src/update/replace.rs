@@ -83,15 +83,15 @@ impl StagedFile {
             ".iroh-tunnel-update-{}-{nonce:08x}-{seq}.tmp",
             std::process::id()
         ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        let mut file = open_staging(&path)
             .with_context(|| format!("cannot stage update beside {}", target.display()))?;
         let staged = Self {
             path,
             armed: std::cell::Cell::new(true),
         };
+        // Test-only: observe the mode before it is changed below (#230).
+        #[cfg(all(test, unix))]
+        tests::record_mode_at_open(&file);
         file.set_permissions(permissions.clone()).with_context(|| {
             format!(
                 "cannot set permissions on staged update for {}",
@@ -107,6 +107,20 @@ impl StagedFile {
     fn disarm(&self) {
         self.armed.set(false);
     }
+}
+
+/// Open `path` exclusively (`O_EXCL`) for writing, owner-only until the
+/// caller sets the final mode on the handle, so a permissive umask never
+/// opens a window for another user to grab a write fd.
+fn open_staging(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 impl Drop for StagedFile {
@@ -260,6 +274,73 @@ mod tests {
         assert!(!hint.contains("iroh-tunnel access"), "{hint}");
         assert!(!hint.contains("serve"), "{hint}");
         assert!(hint.contains("elevated"), "{hint}");
+    }
+
+    #[cfg(unix)]
+    thread_local! {
+        /// Mode of the staging file right after `StagedFile::create` opened
+        /// it, before the final permissions are applied.
+        static MODE_AT_OPEN: std::cell::Cell<Option<u32>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    #[cfg(unix)]
+    pub(super) fn record_mode_at_open(file: &std::fs::File) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file.metadata().ok().map(|m| m.permissions().mode());
+        MODE_AT_OPEN.with(|cell| cell.set(mode));
+    }
+
+    /// Sets the process umask and restores the previous one on drop. The
+    /// umask is process-wide: no other test may change it in-process (use
+    /// `service::fixtures::in_isolated_home` to isolate one that must).
+    #[cfg(unix)]
+    struct UmaskGuard(libc::mode_t);
+
+    #[cfg(unix)]
+    impl UmaskGuard {
+        fn set(mask: libc::mode_t) -> Self {
+            // SAFETY: umask(2) has no preconditions and cannot fail.
+            Self(unsafe { libc::umask(mask) })
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            // SAFETY: umask(2) has no preconditions and cannot fail.
+            unsafe { libc::umask(self.0) };
+        }
+    }
+
+    /// Issue #230: the staging file is owner-only from the moment it exists,
+    /// so a permissive umask never lets another user grab a write fd before
+    /// the final permissions are set.
+    #[cfg(unix)]
+    #[test]
+    fn staging_file_is_created_owner_only_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("t");
+        std::fs::write(&target, b"o").unwrap();
+        let perms = std::fs::Permissions::from_mode(0o755);
+
+        // Explicit, so the test does not depend on the runner's umask (a 077
+        // umask would hide the bug). 022 is enough to expose group/other bits
+        // on a default-mode open; umask is process-wide, so stay no looser
+        // than the usual default to avoid widening files of parallel tests.
+        let staged = {
+            let _umask = UmaskGuard::set(0o022);
+            StagedFile::create(dir.path(), &target, b"new", &perms).unwrap()
+        };
+
+        let at_open = MODE_AT_OPEN.with(std::cell::Cell::take).unwrap();
+        assert_eq!(at_open & 0o077, 0, "mode at open {:o}", at_open & 0o777);
+        let final_mode = std::fs::metadata(&staged.path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(final_mode & 0o777, 0o755);
     }
 
     #[test]
