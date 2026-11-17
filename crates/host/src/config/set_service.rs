@@ -22,6 +22,10 @@ const DEFAULT_PROTOCOL: &str = "tcp";
 /// present entry changes only fields whose value differs. The whole document is
 /// validated through the role schema before anything is written, so an invalid
 /// result is a config error and the file is left unchanged.
+///
+/// # Errors
+///
+/// Fails when the config cannot be read, locked or written, or the result does not validate.
 pub fn set_service(role: Role, req: &SetService) -> Result<SetOutcome> {
     let path = resolve_target(&resolve_config_path(role, req.config.as_deref())?);
     mutate_deciding(role, &path, |doc| {

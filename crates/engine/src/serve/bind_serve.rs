@@ -12,6 +12,10 @@ use crate::settings::ServeSettings;
 ///
 /// Every service's ALPN is registered up front: in iroh 1.0 ALPNs are
 /// registered on the endpoint at build time (not filtered per-`accept`).
+///
+/// # Errors
+///
+/// Fails when a relay URL does not parse or the endpoint cannot bind.
 pub async fn bind_serve(s: &ServeSettings) -> Result<Endpoint> {
     let alpns: Vec<Vec<u8>> = s
         .services

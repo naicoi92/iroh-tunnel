@@ -31,7 +31,7 @@ pub async fn peer_path_report(ep: &Endpoint, peer: EndpointId) -> Option<PeerPat
     // unchanged endpoint must compare equal, or the flush loop would
     // rewrite the status file every 5 s for no real change.
     let mut local_bound_addrs: Vec<String> =
-        ep.bound_sockets().iter().map(|a| a.to_string()).collect();
+        ep.bound_sockets().iter().map(ToString::to_string).collect();
     local_bound_addrs.sort();
     Some(PeerPathObservation {
         peer: peer.to_string(),

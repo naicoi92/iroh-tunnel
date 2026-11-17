@@ -23,6 +23,10 @@ pub use iroh_tunnel_host::Role;
 
 /// CLI wrapper: prompt (or refuse without a terminal) before rotating, then
 /// print the result.
+///
+/// # Errors
+///
+/// Fails when rotation is refused, the config cannot be updated or stdout fails.
 pub fn keygen_cli(role: Role, config: Option<&Path>, yes: bool) -> Result<()> {
     let mut consent = if yes {
         RotationConsent::Given
@@ -83,35 +87,59 @@ fn confirm_rotation(path: &Path) -> Result<()> {
 
 /// `config keygen --print`: print the identity. The secret goes to stdout only,
 /// so it can be captured (`$(…)`, pipes).
+///
+/// # Errors
+///
+/// Fails when stdout cannot be written.
 pub fn keygen_random() -> Result<()> {
     output::stdout(&render::render_identity(&random_identity()))
 }
 
 /// `config set`: create or update the service and print the change report.
+///
+/// # Errors
+///
+/// Fails when the request is incomplete, the config cannot be updated or stdout fails.
 pub fn set<S: ServiceArgs>(args: S, config: Option<PathBuf>) -> Result<()> {
     let outcome = set_service(S::ROLE, &args.into_set(config)?)?;
     output::stdout(&render::render_set(S::ROLE, &outcome))
 }
 
 /// `config check`: validate the config and print the confirmation.
+///
+/// # Errors
+///
+/// Fails when the config is missing or invalid, or stdout fails.
 pub fn check(role: Role, config: Option<&Path>) -> Result<()> {
     let path = check_config(role, config)?;
     output::stdout(&render::render_checked(role, &path))
 }
 
 /// `config rm`: remove the service and print the confirmation.
+///
+/// # Errors
+///
+/// Fails when the service or config is missing, the config cannot be written or stdout fails.
 pub fn rm(role: Role, config: Option<&Path>, name: &str) -> Result<()> {
     let outcome = remove_service(role, config, name)?;
     output::stdout(&render::render_removed(&outcome))
 }
 
 /// `config list`: print a compact table of the configured services.
+///
+/// # Errors
+///
+/// Fails when the config is missing or unreadable, or stdout fails.
 pub fn list(role: Role, config: Option<&Path>) -> Result<()> {
     let list = list_services(role, config)?;
     output::stdout(&render::render_service_list(role, &list))
 }
 
 /// `config show`: print the config, redacted unless `reveal`.
+///
+/// # Errors
+///
+/// Fails when the config is missing or unreadable, or stdout fails.
 pub fn show(role: Role, config: Option<&Path>, reveal: bool) -> Result<()> {
     let disclosure = if reveal {
         Disclosure::Reveal
@@ -125,6 +153,10 @@ pub fn show(role: Role, config: Option<&Path>, reveal: bool) -> Result<()> {
 ///
 /// The editor runs without any lock held; see [`prepare_edit`] and
 /// [`iroh_tunnel_host::config::EditAttempt::commit`] for the rules applied to the result.
+///
+/// # Errors
+///
+/// Fails when the editor fails, the edit is rejected or the config cannot be written.
 pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
     let attempt = prepare_edit(role, config)?;
     edit::edit_file(attempt.scratch_path()).map_err(anyhow::Error::from)?;
@@ -136,6 +168,10 @@ pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
 }
 
 /// `config path`: print the resolved config file path.
+///
+/// # Errors
+///
+/// Fails when the path cannot be resolved or stdout fails.
 pub fn path(role: Role, config: Option<&Path>) -> Result<()> {
     let path = iroh_tunnel_host::config::resolve_config_path(role, config)?;
     output::stdout(&render::render_path(&path))

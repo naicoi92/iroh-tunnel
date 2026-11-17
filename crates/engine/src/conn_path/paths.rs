@@ -119,7 +119,7 @@ pub(crate) fn render_active_kinds(transports: &[TransportObservation]) -> String
     }
     kinds
         .iter()
-        .map(|kind| kind.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("+")
 }

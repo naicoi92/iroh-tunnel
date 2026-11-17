@@ -10,6 +10,10 @@ use iroh::SecretKey;
 ///   knows it should persist the new key.
 /// - Non-empty: base64-decode and parse into a [`SecretKey`], returning
 ///   `(key, false)`.
+///
+/// # Errors
+///
+/// Fails when a non-empty key is not valid base64 or not a 32-byte secret key.
 pub fn resolve_secret_key(s: &str) -> Result<(SecretKey, bool)> {
     if s.is_empty() {
         Ok((SecretKey::generate(), true))

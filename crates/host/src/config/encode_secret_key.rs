@@ -4,6 +4,7 @@ use data_encoding::BASE64;
 use iroh::SecretKey;
 
 /// Encode a [`SecretKey`] to a base64 string for config storage.
+#[must_use]
 pub fn encode_secret_key(key: &SecretKey) -> String {
     BASE64.encode(&key.to_bytes())
 }

@@ -30,6 +30,10 @@ impl NodeConfig {
 /// Map a serve document to engine settings, resolving its secret key.
 ///
 /// Fails like [`resolve_secret_key`] does, before anything binds.
+///
+/// # Errors
+///
+/// Fails like [`resolve_secret_key`] when the configured key is invalid.
 pub fn serve_settings(cfg: &ServeConfig) -> Result<ServeSettings> {
     Ok(ServeSettings {
         node: cfg.node.node_settings()?,
@@ -50,6 +54,10 @@ pub fn serve_settings(cfg: &ServeConfig) -> Result<ServeSettings> {
 /// Map an access document to engine settings, resolving its secret key.
 ///
 /// Fails like [`resolve_secret_key`] does, before anything binds.
+///
+/// # Errors
+///
+/// Fails like [`resolve_secret_key`] when the configured key is invalid.
 pub fn access_settings(cfg: &AccessConfig) -> Result<AccessSettings> {
     Ok(AccessSettings {
         node: cfg.node.node_settings()?,

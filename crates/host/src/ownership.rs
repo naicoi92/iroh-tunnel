@@ -521,6 +521,7 @@ fn write_record_file(path: &Path, body: &[u8], mode: u32) -> std::io::Result<()>
 }
 
 /// Human description of a recorded owner: pid, plus public node id when known.
+#[must_use]
 pub fn describe_owner(owner: Option<&OwnerRecord>) -> String {
     match owner {
         Some(OwnerRecord {
@@ -535,6 +536,7 @@ pub fn describe_owner(owner: Option<&OwnerRecord>) -> String {
 
 impl Tier {
     /// Who holds the role at this tier, for messages.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Tier::User => "this user",

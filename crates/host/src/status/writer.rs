@@ -437,7 +437,7 @@ mod tests {
         // `.exists()` so the caller can assert absence.
         dir.read_dir()
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .find(|e| e.file_name().to_string_lossy().starts_with(prefix))
             .map(|e| e.path())
             .unwrap_or_else(|| dir.join(format!("{prefix}.none")))

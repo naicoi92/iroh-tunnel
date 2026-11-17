@@ -23,6 +23,10 @@ fn parse_port(s: &str) -> Result<NonZeroU16, String> {
 }
 
 /// Parse `PORT`, `HOST:PORT` or `[IPV6]:PORT`.
+///
+/// # Errors
+///
+/// A user-facing message when the host or port is malformed.
 pub fn parse_service_addr(s: &str) -> Result<ServiceAddr, String> {
     let bad =
         || format!("invalid address '{s}': expected PORT, HOST:PORT or [IPV6]:PORT (port 1-65535)");

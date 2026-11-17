@@ -57,6 +57,7 @@ pub struct GeneratedIdentity {
 
 impl GeneratedIdentity {
     /// The base64 secret key, exactly as it is stored in `[node].secret_key`.
+    #[must_use]
     pub fn secret(&self) -> &str {
         &self.secret
     }
@@ -124,6 +125,7 @@ pub struct ShownConfig(pub(super) String);
 
 impl ShownConfig {
     /// The text to display.
+    #[must_use]
     pub fn text(&self) -> &str {
         &self.0
     }
@@ -312,6 +314,7 @@ pub enum ServiceField {
 
 impl ServiceField {
     /// The label shown in the change report for `role`.
+    #[must_use]
     pub fn label(self, role: Role) -> &'static str {
         match (self, role) {
             (ServiceField::Address, Role::Serve) => "target",

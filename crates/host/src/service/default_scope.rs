@@ -4,6 +4,7 @@ use super::types::ServiceScope;
 
 /// Scope for verbs that act on an existing service when no flag is given:
 /// the elevated installer owns a system service, everyone else a user one.
+#[must_use]
 pub fn default_scope(elevated: bool) -> ServiceScope {
     if elevated {
         ServiceScope::System

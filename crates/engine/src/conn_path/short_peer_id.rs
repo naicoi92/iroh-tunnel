@@ -6,6 +6,7 @@
 /// thing everywhere. The full id stays in the machine-readable fields
 /// (`peer=`, status files) so both hosts can be correlated by grepping the
 /// same string; short forms only need to be recognizable at a glance.
+#[must_use]
 pub fn short_peer_id(peer: &str) -> String {
     let head: String = peer.chars().take(8).collect();
     format!("{head}…")

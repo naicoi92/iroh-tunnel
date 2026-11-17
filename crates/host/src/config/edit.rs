@@ -16,6 +16,10 @@ use super::types::{EditAttempt, EditOutcome, EditRejection};
 use crate::role::Role;
 
 /// Copy the config to a scratch file next to it for editing.
+///
+/// # Errors
+///
+/// Fails when the config path cannot be resolved or the config or scratch file cannot be read or written.
 pub fn prepare_edit(role: Role, config: Option<&Path>) -> Result<EditAttempt> {
     let path = resolve_target(&resolve_config_path(role, config)?);
     let original = read_optional(&path)?;
@@ -35,6 +39,7 @@ pub fn prepare_edit(role: Role, config: Option<&Path>) -> Result<EditAttempt> {
 
 impl EditAttempt {
     /// The file the editor should modify.
+    #[must_use]
     pub fn scratch_path(&self) -> &Path {
         &self.scratch
     }

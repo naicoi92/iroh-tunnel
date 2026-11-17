@@ -3,6 +3,10 @@ use bytes::Bytes;
 use super::types::{DecodeError, FlowId, HEADER_LEN};
 
 /// Split a tunnel datagram into its flow and payload.
+///
+/// # Errors
+///
+/// [`DecodeError::Malformed`] when the datagram is shorter than the header.
 pub fn decode(datagram: &Bytes) -> Result<(FlowId, Bytes), DecodeError> {
     let Some(header) = datagram.first_chunk::<HEADER_LEN>() else {
         return Err(DecodeError::Malformed);

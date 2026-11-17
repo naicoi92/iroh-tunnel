@@ -378,7 +378,7 @@ fn quick_to_stored_entry_matches() -> Result<()> {
         "{text}"
     );
     assert_eq!(
-        found.get("port").and_then(|v| v.as_integer()),
+        found.get("port").and_then(toml::Value::as_integer),
         Some(3000),
         "{text}"
     );

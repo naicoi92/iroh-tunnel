@@ -20,6 +20,7 @@ pub enum Protocol {
 
 impl Protocol {
     /// Lowercase protocol name (`"tcp"` / `"udp"`).
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Protocol::Tcp => "tcp",
@@ -34,11 +35,13 @@ pub struct RelayToken(String);
 
 impl RelayToken {
     /// Wrap the raw token text.
+    #[must_use]
     pub fn new(token: String) -> Self {
         Self(token)
     }
 
     /// The token text, for the relay connection only.
+    #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -91,6 +94,7 @@ pub struct UdpLimits {
 impl UdpLimits {
     /// The effective limits, with the UDP-06 defaults for absent overrides.
     /// A per-peer cap never exceeds the service cap.
+    #[must_use]
     pub fn from_overrides(
         idle_timeout: Option<Duration>,
         max_flows: Option<usize>,

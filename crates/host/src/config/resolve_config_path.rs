@@ -10,8 +10,11 @@ use crate::role::Role;
 /// the platform default. With `test-utils`, an absolute test config root may
 /// replace the platform root; a relative override is rejected.
 ///
-/// Returns an error when the platform root is unavailable or the test root is
-/// not absolute. Production builds resolve defaults with [`crate::paths`].
+/// Production builds resolve defaults with [`crate::paths`].
+///
+/// # Errors
+///
+/// Fails when the platform root is unavailable or the test root is not absolute.
 pub fn resolve_config_path(role: Role, override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.to_path_buf());

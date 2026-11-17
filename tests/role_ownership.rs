@@ -105,7 +105,7 @@ fn serve_args(relay: &str, key: &Path) -> Vec<String> {
         "--key-file",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(std::string::ToString::to_string)
     .chain([key.display().to_string()])
     .collect()
 }
@@ -129,7 +129,7 @@ fn access_args(relay: &str, key: &Path, node: &str) -> Vec<String> {
         "--key-file",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(std::string::ToString::to_string)
     .chain([key.display().to_string()])
     .collect()
 }

@@ -17,6 +17,10 @@ use crate::role::Role;
 /// Replacing an existing key changes the NodeId, so without
 /// [`RotationConsent::Given`] the decision (made under the writer lock) is
 /// [`KeygenOutcome::ConsentNeeded`] and the file is left byte-identical.
+///
+/// # Errors
+///
+/// Fails when the config cannot be resolved, locked, parsed or written.
 pub fn keygen(
     role: Role,
     config: Option<&Path>,

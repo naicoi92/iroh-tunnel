@@ -11,6 +11,10 @@ use super::types::{ServiceList, ServiceRow};
 use crate::role::Role;
 
 /// Read the configured services. The config must exist ([`require_existing`]).
+///
+/// # Errors
+///
+/// Fails when the config is missing, unreadable or does not parse.
 pub fn list_services(role: Role, config: Option<&Path>) -> Result<ServiceList> {
     let path = resolve_config_path(role, config)?;
     let doc = parse_doc(&require_existing(role, &path)?, &path)?;
@@ -28,7 +32,7 @@ pub fn list_services(role: Role, config: Option<&Path>) -> Result<ServiceList> {
                     node_id: text(t, "node_id"),
                     protocol: text(t, "protocol"),
                     host: text(t, "host"),
-                    port: t.get("port").and_then(|v| v.as_integer()),
+                    port: t.get("port").and_then(toml_edit::Item::as_integer),
                 })
                 .collect()
         });
