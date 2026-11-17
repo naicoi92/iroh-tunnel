@@ -38,7 +38,7 @@ The system SHALL render every value interpolated into the BusyBox init script (b
 - **THEN** the daemon is the binary at the literal path and sees `IROH_TUNNEL_STATE_DIR` equal to the literal state path
 
 ### Requirement: BusyBox install refuses non-UTF-8 paths
-The system SHALL refuse to install a BusyBox script whose binary, config or state path is not valid UTF-8, with a config error (exit code 2) naming the path, before writing anything.
+The system SHALL refuse to install a BusyBox script whose binary, config or state path is not valid UTF-8, with a config error (exit code 2) naming the path, before the init script is written or any service command runs; a managed binary copy prepared earlier in the same install may remain, as after any other failed registration.
 
 #### Scenario: Non-UTF-8 path refused
 - **WHEN** a BusyBox install is rendered with a config path that is not valid UTF-8
