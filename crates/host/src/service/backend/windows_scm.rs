@@ -1073,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_create_after_delete_reports_the_deletion() {
+    fn reinstall_failing_after_delete_reports_stop_and_delete() {
         let mut port = FakeScm::with(Some(ScmState::Running));
         port.fail_once.insert("create");
         let (result, applied) = install_recording(&mut port);
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn rolled_back_install_records_the_rollback() {
+    fn install_rolls_back_a_service_stuck_starting_with_all_effects() {
         let mut port = FakeScm::with(None);
         port.start_script = vec![ScmState::StartPending];
         let (result, applied) = install_recording(&mut port);
@@ -1109,6 +1109,22 @@ mod tests {
                 AppliedEffect::Enabled,
                 AppliedEffect::Started,
                 AppliedEffect::Stopped,
+                AppliedEffect::Disabled,
+            ]
+        );
+    }
+
+    #[test]
+    fn install_rolls_back_a_service_that_stopped_by_itself_without_a_stop_effect() {
+        let mut port = FakeScm::with(None);
+        port.start_script = vec![ScmState::StartPending, ScmState::Stopped];
+        let (result, applied) = install_recording(&mut port);
+        assert!(result.is_err());
+        assert_eq!(
+            applied,
+            [
+                AppliedEffect::Enabled,
+                AppliedEffect::Started,
                 AppliedEffect::Disabled,
             ]
         );
