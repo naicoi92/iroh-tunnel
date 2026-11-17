@@ -221,24 +221,9 @@ impl StatusWriter {
             std::process::id(),
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        // Write + fsync the temp file before renaming: the atomic-rename
-        // guarantee below covers concurrent readers, and the fsync covers
-        // durability — without it a crash right after the rename can leave
-        // an empty destination. One save per change (throttled by the flush
-        // loop), so the cost is negligible.
-        let mut file = std::fs::File::create(&temp)
-            .with_context(|| format!("failed to create status temp file: {}", temp.display()))?;
-        std::io::Write::write_all(&mut file, content.as_bytes())
-            .and_then(|()| file.sync_all())
-            .with_context(|| format!("failed to write status file: {}", temp.display()))?;
-        // If rename fails, the temp file is stale — clean it up so repeated
-        // failures don't accumulate temp files on disk. The original rename
-        // error is still what we return; a cleanup failure is best-effort.
-        if let Err(e) = std::fs::rename(&temp, &path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(e)
-                .with_context(|| format!("failed to finalize status file: {}", path.display()));
-        }
+        write_staged(&temp, &path, |file| {
+            std::io::Write::write_all(file, content.as_bytes())
+        })?;
         // Best-effort removal of the pre-rename legacy serve file, on every
         // successful save of EITHER role: both roles share one state
         // directory, so an access-only host upgrading from the pre-rename
@@ -248,6 +233,52 @@ impl StatusWriter {
         let _ = std::fs::remove_file(dir.join(LEGACY_STATUS_FILE_NAME));
         Ok(path)
     }
+}
+
+/// A staged temp file, removed on drop unless it was renamed into place, so
+/// no failure between create and rename leaves it behind.
+struct StagedFile<'a> {
+    path: &'a Path,
+    published: bool,
+}
+
+impl Drop for StagedFile<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            // Best-effort: the original error is what the caller sees.
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
+/// Create `temp`, fill it with `write`, fsync it and rename it onto `dest`.
+///
+/// The fsync before the rename covers durability: without it a crash right
+/// after the rename can leave an empty destination. The temp file is removed
+/// on every failure.
+///
+/// # Errors
+///
+/// Fails when the temp file cannot be created, written, synced or renamed.
+fn write_staged(
+    temp: &Path,
+    dest: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<()> {
+    let mut file = std::fs::File::create(temp)
+        .with_context(|| format!("failed to create status temp file: {}", temp.display()))?;
+    let mut staged = StagedFile {
+        path: temp,
+        published: false,
+    };
+    write(&mut file)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed to write status file: {}", temp.display()))?;
+    drop(file);
+    std::fs::rename(temp, dest)
+        .with_context(|| format!("failed to finalize status file: {}", dest.display()))?;
+    staged.published = true;
+    Ok(())
 }
 
 /// Just the `pid` field of a status file — the minimal probe
@@ -529,6 +560,19 @@ mod tests {
         let body = std::fs::read_to_string(tmp.path().join("serve-status.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["node_id"], "xyz789");
+    }
+
+    #[test]
+    fn write_staged_removes_the_temp_file_when_the_write_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let temp = tmp.path().join("serve-status.json.tmp.1.0");
+        let dest = tmp.path().join("serve-status.json");
+
+        let res = write_staged(&temp, &dest, |_| Err(std::io::Error::other("disk full")));
+
+        assert!(res.is_err(), "a failed write must surface");
+        assert!(!temp.exists(), "temp file leaked after write failure");
+        assert!(!dest.exists(), "a failed write must not publish");
     }
 
     #[test]
