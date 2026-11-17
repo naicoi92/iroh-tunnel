@@ -127,53 +127,108 @@ fn user_dir() -> Result<PathBuf> {
     crate::paths::default_state_dir()
 }
 
+/// The machine lock directory; `Ok(None)` only where the platform defines
+/// no machine tier.
+///
+/// # Errors
+///
+/// The test-utils fallback beside the user tier cannot be resolved.
 #[cfg(feature = "test-utils")]
-pub(crate) fn machine_dir() -> Option<MachineDir> {
+pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
     let verify = std::env::var_os(ENV_TEST_VERIFY_MACHINE_DIR).is_some_and(|v| v == "1");
     if let Some(dir) = std::env::var_os(ENV_MACHINE_LOCK_DIR).filter(|d| !d.is_empty()) {
-        return Some(MachineDir {
+        return Ok(Some(MachineDir {
             path: PathBuf::from(dir),
             verify,
-        });
+        }));
     }
     // Test builds never touch the real machine-wide location: without an
     // explicit directory it lives beside the user tier, so tests that
     // isolate HOME are isolated from each other and from a real service.
-    user_dir().ok().map(|dir| MachineDir {
-        path: dir.join("machine"),
+    Ok(Some(MachineDir {
+        path: user_dir()?.join("machine"),
         verify,
-    })
+    }))
 }
 
-/// The Windows machine directory under the `%ProgramData%` folder.
+/// The Windows machine directory under the resolved `%ProgramData%` folder.
+/// Compiled on every target so the fail-closed mapping is testable; only
+/// Windows production builds call it.
 #[cfg_attr(any(feature = "test-utils", not(windows)), allow(dead_code))] // Windows non-test builds only
-fn windows_machine_dir(program_data: &Path) -> PathBuf {
-    program_data.join("iroh-tunnel")
+fn machine_dir_from_program_data(program_data: Result<PathBuf>) -> Result<Option<MachineDir>> {
+    let dir = program_data.context("cannot resolve the machine lock directory (%ProgramData%)")?;
+    Ok(Some(MachineDir {
+        path: dir.join("iroh-tunnel"),
+        verify: true,
+    }))
 }
 
+/// The machine lock directory under `%ProgramData%`.
+///
+/// # Errors
+///
+/// `%ProgramData%` cannot be resolved: ownership must fail closed rather than
+/// silently skip the machine tier.
 #[cfg(all(windows, not(feature = "test-utils")))]
-pub(crate) fn machine_dir() -> Option<MachineDir> {
-    crate::service::program_data_dir()
-        .ok()
-        .map(|dir| MachineDir {
-            path: windows_machine_dir(&dir),
-            verify: true,
-        })
+pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
+    machine_dir_from_program_data(crate::service::program_data_dir())
 }
 
+/// The machine lock directory; `Ok(None)` where the platform defines none.
+///
+/// # Errors
+///
+/// Never on these platforms; the `Result` matches the other variants.
 #[cfg(all(not(windows), not(feature = "test-utils")))]
-pub(crate) fn machine_dir() -> Option<MachineDir> {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "signature shared with the Windows and test-utils variants, which can fail"
+)]
+pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
     let path = if cfg!(target_os = "linux") {
         PathBuf::from("/run/iroh-tunnel")
     } else if cfg!(target_os = "macos") {
         PathBuf::from("/var/run/iroh-tunnel")
     } else {
-        return None;
+        return Ok(None);
     };
-    Some(MachineDir {
+    Ok(Some(MachineDir {
         path,
         verify: false,
-    })
+    }))
+}
+
+/// Both tiers' directories, resolved before any lock is taken so a
+/// resolution error never leaves a half-taken claim.
+#[derive(Debug)]
+struct TierDirs {
+    user: PathBuf,
+    /// `None` only where the platform defines no machine tier.
+    machine: Option<MachineDir>,
+}
+
+impl TierDirs {
+    /// Resolve both tiers with the platform machine resolver.
+    ///
+    /// # Errors
+    ///
+    /// As [`TierDirs::resolve_with`].
+    fn resolve() -> Result<TierDirs> {
+        Self::resolve_with(machine_dir)
+    }
+
+    /// Resolve both tiers, the machine tier through `machine` (first).
+    ///
+    /// # Errors
+    ///
+    /// The machine or the user directory cannot be resolved.
+    fn resolve_with(machine: impl FnOnce() -> Result<Option<MachineDir>>) -> Result<TierDirs> {
+        let machine = machine()?;
+        Ok(TierDirs {
+            user: user_dir()?,
+            machine,
+        })
+    }
 }
 
 fn lock_name(role: Role) -> String {
@@ -420,9 +475,10 @@ fn stop_hint_for(role: Role, flag_suffix: &str) -> String {
 #[derive(Debug)]
 pub(crate) struct RoleClaim {
     role: Role,
-    user_dir: PathBuf,
-    /// Present when this process holds the machine tier exclusively.
-    machine_dir: Option<PathBuf>,
+    /// The directories this claim was taken in.
+    dirs: TierDirs,
+    /// Whether this process holds the machine tier exclusively.
+    holds_machine: bool,
     _locks: Vec<File>,
 }
 
@@ -432,10 +488,20 @@ pub(crate) struct RoleClaim {
 ///
 /// [`CliError::Conflict`] when the role already runs (any start mode, any
 /// executable); [`CliError::Config`] when the user state directory cannot be
-/// resolved; other I/O errors with the failing path.
+/// resolved; the machine lock directory cannot be resolved (checked before
+/// any lock is taken); other I/O errors with the failing path.
 pub(crate) fn claim(role: Role) -> Result<RoleClaim> {
-    let user_dir = user_dir()?;
-    create_dir(&user_dir, 0o700)
+    claim_in(role, TierDirs::resolve()?)
+}
+
+/// [`claim`] in already resolved directories.
+///
+/// # Errors
+///
+/// As [`claim`], except resolution.
+fn claim_in(role: Role, dirs: TierDirs) -> Result<RoleClaim> {
+    let user_dir = &dirs.user;
+    create_dir(user_dir, 0o700)
         .with_context(|| format!("cannot create state directory {}", user_dir.display()))?;
     let user_path = user_dir.join(lock_name(role));
     let file = create_lock_file(&user_path, 0o600)
@@ -446,35 +512,35 @@ pub(crate) fn claim(role: Role) -> Result<RoleClaim> {
             return Err(already_running(
                 role,
                 Tier::User.label(),
-                read_owner(&user_dir, role).as_ref(),
+                read_owner(user_dir, role).as_ref(),
             ))
         }
     };
 
     let mut locks = vec![user_lock];
-    let mut held_machine = None;
-    if let Some(MachineDir { path: dir, verify }) = machine_dir() {
-        match claim_machine(role, &dir, verify)? {
+    let mut holds_machine = false;
+    if let Some(MachineDir { path: dir, verify }) = &dirs.machine {
+        match claim_machine(role, dir, *verify)? {
             MachineClaim::Exclusive(file) => {
                 locks.push(file);
-                held_machine = Some(dir);
+                holds_machine = true;
             }
             MachineClaim::Shared(file) => locks.push(file),
             MachineClaim::Absent => {}
         }
     }
+    let claim = RoleClaim {
+        role,
+        dirs,
+        holds_machine,
+        _locks: locks,
+    };
     // Replace any record a crashed predecessor left, before anyone can read
     // it as ours: its pid may equal the pid in a stale status snapshot.
-    write_owner(&user_dir, role, None);
-    if let Some(dir) = &held_machine {
+    for dir in claim.record_dirs() {
         write_owner(dir, role, None);
     }
-    Ok(RoleClaim {
-        role,
-        user_dir,
-        machine_dir: held_machine,
-        _locks: locks,
-    })
+    Ok(claim)
 }
 
 /// Errors that mean "this account may not create the machine lock".
@@ -572,8 +638,7 @@ impl Drop for RoleClaim {
     /// stay (unlinking a lock inode would allow split ownership), and a
     /// record is removed only while it still names this process.
     fn drop(&mut self) {
-        let dirs = std::iter::once(&self.user_dir).chain(self.machine_dir.as_ref());
-        for dir in dirs {
+        for dir in self.record_dirs() {
             if read_owner(dir, self.role).is_some_and(|o| o.pid == std::process::id()) {
                 if let Err(e) = std::fs::remove_file(dir.join(owner_name(self.role))) {
                     tracing::debug!("could not remove owner record in {}: {e}", dir.display());
@@ -584,6 +649,18 @@ impl Drop for RoleClaim {
 }
 
 impl RoleClaim {
+    /// The directories this process publishes owner records in: the user
+    /// tier, plus the machine tier while it is held exclusively.
+    fn record_dirs(&self) -> impl Iterator<Item = &Path> {
+        let machine = self
+            .dirs
+            .machine
+            .as_ref()
+            .filter(|_| self.holds_machine)
+            .map(|m| m.path.as_path());
+        std::iter::once(self.dirs.user.as_path()).chain(machine)
+    }
+
     /// Publish this process as the owner with its public `node_id` and reject
     /// the same public identity already running in the other role (RO-02).
     ///
@@ -594,12 +671,11 @@ impl RoleClaim {
     ///
     /// [`CliError::Conflict`] when the other role runs with this identity.
     pub(crate) fn publish_identity(&self, node_id: &str) -> Result<()> {
-        write_owner(&self.user_dir, self.role, Some(node_id));
-        if let Some(dir) = &self.machine_dir {
+        for dir in self.record_dirs() {
             write_owner(dir, self.role, Some(node_id));
         }
         let other = other_role(self.role);
-        for liveness in probe_tiers(other)? {
+        for liveness in probe_tiers_in(other, &self.dirs)? {
             let Liveness::Running {
                 owner: Some(owner), ..
             } = liveness
@@ -634,10 +710,24 @@ pub(crate) fn probe(role: Role) -> Result<Liveness> {
 }
 
 /// Every tier at which `role` is running (user first), empty when none.
+///
+/// # Errors
+///
+/// A tier directory cannot be resolved (checked before any lock is tested);
+/// otherwise as [`probe_tiers_in`].
 fn probe_tiers(role: Role) -> Result<Vec<Liveness>> {
-    let mut seen = vec![tier_liveness_in(role, Tier::User, &user_dir()?)?];
-    if let Some(MachineDir { path: dir, .. }) = machine_dir() {
-        seen.push(tier_liveness_in(role, Tier::Machine, &dir)?);
+    probe_tiers_in(role, &TierDirs::resolve()?)
+}
+
+/// [`probe_tiers`] in already resolved directories.
+///
+/// # Errors
+///
+/// As [`tier_liveness_in`].
+fn probe_tiers_in(role: Role, dirs: &TierDirs) -> Result<Vec<Liveness>> {
+    let mut seen = vec![tier_liveness_in(role, Tier::User, &dirs.user)?];
+    if let Some(MachineDir { path: dir, .. }) = &dirs.machine {
+        seen.push(tier_liveness_in(role, Tier::Machine, dir)?);
     }
     seen.retain(|l| matches!(l, Liveness::Running { .. }));
     Ok(seen)
@@ -658,8 +748,23 @@ impl LockDirs {
     ///
     /// # Errors
     ///
-    /// The user state directory cannot be resolved.
+    /// The machine lock directory or the user state directory cannot be
+    /// resolved.
     pub(crate) fn resolve(home: Option<&Path>) -> Result<LockDirs> {
+        Self::resolve_with(home, machine_dir)
+    }
+
+    /// [`LockDirs::resolve`] with the machine resolver injected (called
+    /// first).
+    ///
+    /// # Errors
+    ///
+    /// As [`LockDirs::resolve`].
+    fn resolve_with(
+        home: Option<&Path>,
+        machine: impl FnOnce() -> Result<Option<MachineDir>>,
+    ) -> Result<LockDirs> {
+        let machine = machine()?.map(|m| m.path);
         #[cfg(unix)]
         let user = match home {
             Some(home) => crate::paths::state_dir_in(home),
@@ -670,10 +775,7 @@ impl LockDirs {
             let _ = home;
             user_dir()?
         };
-        Ok(LockDirs {
-            user,
-            machine: machine_dir().map(|m| m.path),
-        })
+        Ok(LockDirs { user, machine })
     }
 }
 
@@ -880,9 +982,42 @@ mod tests {
     }
 
     #[test]
-    fn windows_machine_dir_is_programdata_child() {
-        let dir = windows_machine_dir(Path::new("C:\\ProgramData"));
-        assert!(dir.ends_with("iroh-tunnel"), "{}", dir.display());
+    fn machine_dir_from_program_data_joins_iroh_tunnel_and_verifies() {
+        let machine = machine_dir_from_program_data(Ok("C:\\ProgramData".into()))
+            .unwrap()
+            .expect("a machine dir");
+        assert!(
+            machine.path.ends_with("iroh-tunnel"),
+            "{}",
+            machine.path.display()
+        );
+        assert!(machine.verify);
+    }
+
+    #[test]
+    fn machine_dir_from_program_data_propagates_a_resolution_failure() {
+        let err = machine_dir_from_program_data(Err(anyhow::anyhow!("hr 0x80004005")))
+            .expect_err("resolution failure must propagate");
+        let text = format!("{err:#}");
+        assert!(text.contains("%ProgramData%"), "{text}");
+        assert!(text.contains("0x80004005"), "{text}");
+    }
+
+    #[test]
+    fn tier_dirs_resolution_fails_when_program_data_cannot_be_resolved() {
+        let err =
+            TierDirs::resolve_with(|| machine_dir_from_program_data(Err(anyhow::anyhow!("hr"))))
+                .expect_err("must fail closed");
+        assert!(format!("{err:#}").contains("%ProgramData%"), "{err:#}");
+    }
+
+    #[test]
+    fn lock_dirs_resolution_fails_when_program_data_cannot_be_resolved() {
+        let err = LockDirs::resolve_with(None, || {
+            machine_dir_from_program_data(Err(anyhow::anyhow!("hr")))
+        })
+        .expect_err("must fail closed");
+        assert!(format!("{err:#}").contains("%ProgramData%"), "{err:#}");
     }
 
     #[test]
@@ -1060,7 +1195,7 @@ mod tests {
         let dirs = LockDirs::resolve(None).ok();
         assert_eq!(dirs.as_ref().map(|d| d.user.clone()), user_dir().ok());
         if let Some(dirs) = dirs {
-            assert_eq!(dirs.machine, machine_dir().map(|m| m.path));
+            assert_eq!(dirs.machine, machine_dir().ok().flatten().map(|m| m.path));
         }
     }
 

@@ -126,9 +126,12 @@ impl Write for CappedLog {
 /// The machine log directory, `<machine dir>/logs`. On Windows the machine
 /// directory is created when missing; it is `None` when an existing one must
 /// be trust-verified and does not pass, or cannot be created.
+///
+/// Log selection is best-effort: an unresolvable machine directory yields
+/// `None` here, while ownership still fails closed when the role claims.
 #[must_use]
 pub fn machine_log_dir() -> Option<PathBuf> {
-    let machine = crate::ownership::machine_dir()?;
+    let machine = crate::ownership::machine_dir().ok().flatten()?;
     #[cfg(windows)]
     crate::ownership::ensure_machine_dir(&machine).ok()?;
     Some(machine.path.join("logs"))
