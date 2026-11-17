@@ -17,6 +17,12 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   written; on Windows, `run`, `status` and `service install` report an error
   when `%ProgramData%` cannot be resolved instead of silently skipping the
   system-service conflict check.
+- UDP on Serve (#219): a new flow's upstream (resolve, bind, connect) opens
+  in its own task, so a slow resolver no longer stalls live flows, sweeps or
+  task reaping on the same connection. Datagrams for an opening flow wait in
+  its bounded queue; a failed open releases the flow's cap slots and counts
+  its queued datagrams as `cap`; shutdown cancels opens within the drain
+  grace.
 
 ## [0.6.0] - 2026-11-12
 
