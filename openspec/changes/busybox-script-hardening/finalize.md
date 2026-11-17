@@ -26,7 +26,7 @@
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted`
 
 ---
 
