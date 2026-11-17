@@ -268,12 +268,39 @@ fn edit_kept_when_the_writer_lock_times_out() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2), "{}", err(&output));
     assert!(err(&output).contains("another process"), "{}", err(&output));
+    assert!(
+        err(&output).contains("delete it once recovered"),
+        "{}",
+        err(&output)
+    );
     assert_eq!(std::fs::read(&cfg).unwrap(), before);
-    assert_edit_kept(&world, &output, "9090");
+    let sidecar = world.file("serve.toml.rejected");
+    assert!(err(&output).contains(p(&sidecar)), "{}", err(&output));
+    assert!(std::fs::read_to_string(&sidecar).unwrap().contains("9090"));
+    assert_eq!(mode(&sidecar), 0o600);
+    assert!(edit_scratches(&world).is_empty(), "{}", err(&output));
+}
+
+/// Restores a directory's mode when dropped, even if the test panics.
+struct RestoreMode<'a>(&'a Path);
+
+impl Drop for RestoreMode<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+fn is_root() -> bool {
+    // SAFETY: geteuid(2) has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
 }
 
 #[test]
 fn edit_kept_when_writing_the_config_fails() {
+    if is_root() {
+        // Root ignores directory modes, so the write would not fail.
+        return;
+    }
     let world = World::new();
     let cfg = world.file("serve.toml");
     write_valid(&cfg);
@@ -282,12 +309,13 @@ fn edit_kept_when_writing_the_config_fails() {
     File::create(world.file("serve.toml.lock")).unwrap();
     let dir = world.root.path().display().to_string();
     let editor = editor_script(&world, &format!("{EDIT_TO_9090} && chmod 555 '{dir}'"));
+    let restore = RestoreMode(world.root.path());
     let output = world
         .command(&["serve", "config", "edit", "--config", p(&cfg)])
         .env("EDITOR", &editor)
         .output()
         .unwrap();
-    std::fs::set_permissions(world.root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(restore);
     assert!(!output.status.success(), "{}", err(&output));
     assert_eq!(std::fs::read(&cfg).unwrap(), before);
     assert_edit_kept(&world, &output, "9090");

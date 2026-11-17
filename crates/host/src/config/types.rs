@@ -174,7 +174,9 @@ pub struct EditAttempt {
     pub(super) path: PathBuf,
     pub(super) scratch: PathBuf,
     pub(super) original: Option<String>,
-    /// Set by a commit that failed before the edit was saved or kept elsewhere.
+    /// Set by a commit when the scratch copy is the only place the edited
+    /// text may be: the sidecar could not be written, or the copy could not
+    /// be read.
     pub(super) keep_scratch: bool,
 }
 
