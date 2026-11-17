@@ -424,10 +424,7 @@ fn system_service_across_the_privilege_boundary() {
     start_and_wait(&bob, "bob's service after the fix");
 
     // --- RO-03: a real kill leaves files behind; they must not block restart.
-    let pid = std::fs::read_to_string("/var/run/iroh-tunnel-serve.pid")
-        .unwrap()
-        .trim()
-        .to_owned();
+    let pid = pidfile_pid();
     assert!(sh(&["kill", "-9", &pid]).status.success());
     wait_for("the killed process to exit", || {
         // Without an init to reap it, a killed child stays a zombie (`Z`).
@@ -557,14 +554,44 @@ fn service_verb(verb: &str, path: &str) -> Output {
     run(&["serve", "service", verb, "--system"], &[("PATH", path)])
 }
 
-/// The binary the init script runs.
+/// The binary the init script runs: `DAEMON=` as a plain word or
+/// `'…'` segments joined by `\'`, or the legacy `DAEMON="…"` form.
 fn daemon() -> String {
     script()
         .lines()
-        .find_map(|l| l.strip_prefix("DAEMON=\""))
-        .and_then(|l| l.strip_suffix('"'))
-        .map(str::to_owned)
+        .find_map(|l| l.strip_prefix("DAEMON="))
+        .map(shell_word)
         .unwrap_or_default()
+}
+
+/// Decode one shell word built from plain characters, `'…'` segments and
+/// `\'`, or a legacy double-quoted word (taken verbatim between the quotes).
+fn shell_word(word: &str) -> String {
+    if let Some(inner) = word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
+        return inner.to_owned();
+    }
+    let mut out = String::new();
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => out.extend(chars.by_ref().take_while(|&c| c != '\'')),
+            '\\' => out.extend(chars.next()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The PID on the first line of the serve PID file (which goes on with the
+/// launched binary), or `""` when there is none.
+fn pidfile_pid() -> String {
+    pid_in(PIDFILE).unwrap_or_default()
+}
+
+/// The PID on the first line of `pidfile`, if it is readable.
+fn pid_in(pidfile: &str) -> Option<String> {
+    let text = std::fs::read_to_string(pidfile).ok()?;
+    Some(text.lines().next().unwrap_or_default().trim().to_owned())
 }
 
 fn exited(pid: &str) -> bool {
@@ -583,10 +610,7 @@ fn wait_released(pid: &str) {
 
 /// `service stop`, then wait for the release of the pidfile and role lock.
 fn stop_and_release(path: &str) {
-    let pid = std::fs::read_to_string(PIDFILE)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let pid = pidfile_pid();
     let out = service_verb("stop", path);
     assert!(out.status.success(), "stop: {}", err(&out));
     wait_released(&pid);
@@ -627,9 +651,7 @@ fn clear_snapshot(user: &Home) {
 /// a snapshot of a previous (even killed) process never satisfies this.
 fn wait_running(user: &Home) {
     wait_for("the live service to report its own status", || {
-        let pid = std::fs::read_to_string(PIDFILE)
-            .map(|p| p.trim().to_owned())
-            .unwrap_or_default();
+        let pid = pidfile_pid();
         !pid.is_empty() && alive(&pid) && snapshot_pid(user).as_deref() == Some(pid.as_str())
     });
 }
@@ -653,10 +675,7 @@ impl Drop for BinSandbox {
 /// Remove the registration, the running service and every binary copy the
 /// SM-BIN tests create, whatever state a previous test left.
 fn reset_binary_state() {
-    let pid = std::fs::read_to_string(PIDFILE)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let pid = pidfile_pid();
     // Identify the process by pid and start time, to reduce the risk of
     // killing or waiting on a reused pid.
     let started = start_time(&pid);
@@ -801,7 +820,8 @@ fn sm_bin_03_root_path_direct_and_uninstall_cleans() {
     assert!(out.status.success(), "{}", err(&out));
     assert!(Path::new(MANAGED_COPY).exists());
     wait_running(&alice);
-    let pid = std::fs::read_to_string(PIDFILE).unwrap().trim().to_owned();
+    let pid = pidfile_pid();
+    assert!(!pid.is_empty(), "no pid in {PIDFILE}");
 
     let out = service_verb("uninstall", &path);
     assert!(out.status.success(), "uninstall: {}", err(&out));
@@ -902,9 +922,7 @@ fn reset_access_state() {
     if Path::new(ACCESS_SCRIPT).exists() {
         let _ = Command::new("sh").args([ACCESS_SCRIPT, "stop"]).output();
         wait_for("the access process to exit", || {
-            std::fs::read_to_string(ACCESS_PIDFILE)
-                .map(|p| exited(p.trim()))
-                .unwrap_or(true)
+            pid_in(ACCESS_PIDFILE).is_none_or(|p| exited(&p))
         });
         let _ = Command::new(BIN)
             .args(["access", "service", "uninstall", "--system"])
@@ -1051,10 +1069,10 @@ fn sm_bin_08_uninstalling_serve_keeps_the_access_copy() {
     let access_meta = std::fs::metadata(ACCESS_COPY).unwrap();
     assert!(Path::new(MANAGED_COPY).exists());
 
-    let pid = std::fs::read_to_string(PIDFILE).unwrap_or_default();
+    let pid = pidfile_pid();
     let out = service_verb("uninstall", &path);
     assert!(out.status.success(), "uninstall: {}", err(&out));
-    wait_released(pid.trim());
+    wait_released(&pid);
     assert!(std::fs::symlink_metadata(MANAGED_COPY).is_err());
     assert!(std::fs::symlink_metadata(MANAGED_DIR).is_err());
     assert_eq!(std::fs::read(ACCESS_COPY).unwrap(), access_bytes);
