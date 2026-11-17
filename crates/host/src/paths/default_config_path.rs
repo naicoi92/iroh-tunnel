@@ -163,7 +163,11 @@ mod tests {
             err.downcast_ref::<CliError>(),
             Some(CliError::Config(_))
         ));
-        assert!(err.chain().any(|c| c.is::<std::io::Error>()), "{err:?}");
+        assert!(
+            err.chain()
+                .any(<dyn std::error::Error>::is::<std::io::Error>),
+            "{err:?}"
+        );
     }
 
     #[test]

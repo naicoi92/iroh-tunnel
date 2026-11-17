@@ -1136,7 +1136,11 @@ mod tests {
         };
         let rendered = format!("{err:#}");
         assert!(rendered.contains("0.0.0.0:0"), "{rendered}");
-        assert!(err.chain().any(|c| c.is::<std::io::Error>()), "{err:?}");
+        assert!(
+            err.chain()
+                .any(<dyn std::error::Error>::is::<std::io::Error>),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

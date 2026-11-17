@@ -1249,7 +1249,8 @@ mod tests {
             "{err:?}"
         );
         assert!(
-            err.chain().any(|c| c.is::<std::io::Error>()),
+            err.chain()
+                .any(<dyn std::error::Error>::is::<std::io::Error>),
             "the I/O error must stay reachable: {err:?}"
         );
     }
