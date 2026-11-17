@@ -140,11 +140,12 @@ fn spawn_ticker(shared: Arc<Shared>) {
     });
 }
 
-/// Log writer of the service: the capped machine log, or nowhere.
+/// Log writer of the service: the capped machine log, or nowhere when the
+/// machine directory does not resolve or fails its trust check. A log file
+/// that cannot be opened yet is retried by [`CappedLog`] itself.
 fn log_writer(role: &str) -> BoxMakeWriter {
-    let log = machine_log_dir().and_then(|dir| CappedLog::open(&dir, role, LOG_CAP));
-    match log {
-        Some(log) => BoxMakeWriter::new(Mutex::new(log)),
+    match machine_log_dir() {
+        Some(dir) => BoxMakeWriter::new(Mutex::new(CappedLog::open(&dir, role, LOG_CAP))),
         None => BoxMakeWriter::new(std::io::sink),
     }
 }
