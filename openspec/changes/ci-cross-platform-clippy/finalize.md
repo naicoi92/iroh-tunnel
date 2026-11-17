@@ -7,7 +7,7 @@
 
 **Change**: `ci-cross-platform-clippy`
 **Finalized at**: `2026-11-17 13:32`
-**Outcome**: `pr-updated`
+**Outcome**: `pr-created`
 
 ---
 
@@ -15,10 +15,10 @@
 
 - **Branch**: `refactor/no-panic-policy`
 - **Base branch**: `main`
-- **Final state**: `pr-updated`
-- **PR URL**: `N/A (no PR yet; see PR comment)`
+- **Final state**: `pr-open`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/239`
 
-The worktree branch `ci-cross-platform-clippy` was fast-forwarded into `refactor/no-panic-policy` (head `ccc71f2`). The feature branch had no remote tracking branch, so step 3's pull was skipped. It also carries the #216 no-panic commits, which this change depends on (design, Migration Plan).
+The worktree branch `ci-cross-platform-clippy` was fast-forwarded into `refactor/no-panic-policy` (head `ccc71f2`). The feature branch had no remote tracking branch, so step 3's pull was skipped. It also carries the #216 no-panic commits, which this change depends on (design, Migration Plan). The user then approved option 1: the feature branch was rebased onto `origin/main` (`c971761`, clean), re-verified on Rust 1.91 (fmt; clippy `-D warnings` clean on macOS, Linux and Windows targets for all targets + all features, default features, and lib+bins; `cargo test --all-features --locked` 1024 passed, 0 failed; rustdoc; actionlint), pushed over HTTPS as `naicoi92` (SSH resolved to another account), and PR #239 was opened against `main`.
 
 ---
 
@@ -31,7 +31,7 @@ The worktree branch `ci-cross-platform-clippy` was fast-forwarded into `refactor
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/239#issuecomment-6940890499)
 
 ---
 
@@ -39,16 +39,16 @@ The worktree branch `ci-cross-platform-clippy` was fast-forwarded into `refactor
 
 - **Code review**: `approved`
 - **Reviewer tier**: human, plannotator-cli code review (`plannotator review --base refactor/no-panic-policy --diff-type merge-base --gate`)
-- **Commit range reviewed**: `7f59fac..ccc71f2`
+- **Commit range reviewed**: `7f59fac..ccc71f2` (same commits after the rebase: `cfc9514..93ac8ae`)
 
 ---
 
 ## Tests
 
-- **Baseline status at finish**: `passing` (`cargo +1.91 test --all-features --locked`: 992 passed, 0 failed, in the worktree and again on the merged feature branch; clippy `-D warnings` clean)
+- **Baseline status at finish**: `passing` (`cargo +1.91 test --all-features --locked`: 992 passed in the worktree and on the merged branch; 1024 passed, 0 failed after rebasing onto `origin/main`)
 
 ---
 
 ## Next step
 
-Task 1.5 (native CI run of `lint (linux|macos|windows)` and `ci-ok`) closes once a PR from `refactor/no-panic-policy` runs CI. `origin/main` gained `c971761` after the rebase; rebase the feature branch before opening the PR. Then wait for code review, run `/opsx-archive` on this feature branch, push the archive commits, and merge the PR — that single merge lands #216, this CI change and the archive into main.
+Wait for PR #239's CI: `lint (linux)`, `lint (macos)`, `lint (windows)` and `ci-ok` passing closes task 1.5 (tick it on this branch). After code review approval, run `/opsx-archive` on this feature branch, push the archive commits to update the PR, then merge the PR (`gh pr merge --squash --delete-branch` or GitHub UI) only with the user's approval — that single merge lands #216, this CI change and the archive into main.
