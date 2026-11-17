@@ -78,16 +78,11 @@ impl EditAttempt {
     /// The scratch copy could not be read: it is the only place the text may
     /// be, so keep it.
     fn unreadable_scratch(&mut self, error: std::io::Error) -> anyhow::Error {
-        self.keep_scratch = true;
-        anyhow::Error::new(error)
-            .context(format!(
-                "failed to read edited copy: {}",
-                self.scratch.display()
-            ))
-            .context(format!(
-                "your edit was not saved; {}",
-                scratch_note(&self.scratch)
-            ))
+        self.keep_scratch = self.scratch.exists();
+        anyhow::Error::new(error).context(format!(
+            "your edit was not saved; failed to read the edited copy and {}",
+            scratch_note(&self.scratch)
+        ))
     }
 
     fn apply(&self, edited: &str) -> Result<EditOutcome> {
@@ -324,9 +319,16 @@ mod tests {
         let path = dir.path().join("serve.toml");
         std::fs::write(&path, "# original\n").unwrap();
         let attempt = prepare_edit(Role::Serve, Some(&path)).unwrap();
-        std::fs::remove_file(attempt.scratch_path()).unwrap();
+        let scratch = attempt.scratch_path().to_path_buf();
+        std::fs::remove_file(&scratch).unwrap();
         let message = format!("{:#}", attempt.commit().unwrap_err());
         assert!(!message.contains("still in"), "{message}");
+        assert!(message.contains("no longer exists"), "{message}");
+        assert_eq!(
+            message.matches(&scratch.display().to_string()).count(),
+            1,
+            "{message}"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# original\n");
     }
 
