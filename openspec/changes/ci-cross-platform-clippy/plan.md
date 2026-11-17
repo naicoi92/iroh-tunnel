@@ -101,7 +101,7 @@ Expected: `Change 'ci-cross-platform-clippy' is valid`.
 - [ ] **Step 6: Local lint of all three targets on the pinned toolchain**
 
 Run (host macOS): `cargo +1.91 clippy --workspace --all-targets --all-features --locked -- -D warnings` → exit 0.
-Run (Linux target): `RUSTUP_TOOLCHAIN=1.91 cargo zigbuild clippy --workspace --all-targets --all-features --locked --target x86_64-unknown-linux-gnu -- -D warnings` → exit 0.
+Run (Linux target): with `/tmp/zcc/cc` (bash wrapper dropping `--target=*` and running `zig cc -target x86_64-linux-gnu`) and `/tmp/zcc/ar` (`zig ar`): `CC_x86_64_unknown_linux_gnu=/tmp/zcc/cc AR_x86_64_unknown_linux_gnu=/tmp/zcc/ar cargo +1.91 clippy --workspace --all-targets --all-features --locked --target x86_64-unknown-linux-gnu --target-dir target/lx -- -D warnings` → exit 0. (Changed during apply: the installed cargo-zigbuild has no `clippy` subcommand.)
 Run (Windows target): `RUSTUP_TOOLCHAIN=1.91 cargo xwin clippy --workspace --all-targets --all-features --locked --target x86_64-pc-windows-msvc -- -D warnings` → exit 0.
 Record the exact commands in `apply.md`. Read the unchanged `ci-ok` step: `needs: [changes, lint, ...]` and the `failure|cancelled` match still cover a failed matrix entry.
 
