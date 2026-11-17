@@ -28,7 +28,7 @@ pub use drain_queue::drain_queue;
 pub use encode::encode;
 pub use is_transient_recv_error::is_transient_recv_error;
 pub use payload_limit::payload_limit;
-pub use peer_flow_slots::{PeerFlowSlot, PeerFlowSlots};
+pub(crate) use peer_flow_slots::{PeerFlowSlot, PeerFlowSlots};
 pub(crate) use redial_backoff::{BackoffCheck, Incarnation, RedialBackoff};
 pub(crate) use send_decision::{send_decision, SendDecision};
 pub use sweep_interval::sweep_interval;

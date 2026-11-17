@@ -801,14 +801,24 @@ async fn handle_udp_connection(
                 // then the service's flows across every peer. A refused flow
                 // is counted and its identifier spent; nothing running is
                 // evicted.
-                let peer_slot = peer_slots
+                let reserved = peer_slots
                     .try_reserve(peer, limits.max_flows_per_peer)
-                    .and_then(|slot| stats.try_open_flow(limits.max_flows).then_some(slot));
-                let Some(peer_slot) = peer_slot else {
-                    flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
-                    stats.record_drop(DropReason::Cap);
-                    tracing::debug!(flow = flow.0, "udp flow refused: flow cap reached");
-                    continue;
+                    .ok_or("peer")
+                    .and_then(|slot| {
+                        if stats.try_open_flow(limits.max_flows) {
+                            Ok(slot)
+                        } else {
+                            Err("service")
+                        }
+                    });
+                let peer_slot = match reserved {
+                    Ok(slot) => slot,
+                    Err(cap) => {
+                        flows.lock().unwrap_or_else(|p| p.into_inner()).refuse(flow);
+                        stats.record_drop(DropReason::Cap);
+                        tracing::debug!(flow = flow.0, cap, "udp flow refused: flow cap reached");
+                        continue;
+                    }
                 };
                 let opened = tokio::select! {
                     biased;
@@ -896,7 +906,8 @@ async fn handle_udp_connection(
 /// for [`crate::udp::QUARANTINE`], so a late reply cannot reach a new flow
 /// that the OS would otherwise give the same local port.
 ///
-/// The socket keeps its slot against the caps until the sink closes. The sink
+/// The socket keeps its service-cap slot (not its peer slot) until the sink
+/// closes. The sink
 /// is owned by the role run's `sinks`: it outlives the connection, ends early
 /// on shutdown, and is joined or aborted within the stop deadline.
 fn quarantine(
