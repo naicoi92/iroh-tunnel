@@ -1219,7 +1219,9 @@ type Lookup = Arc<dyn Fn(String) -> ResolveFuture + Send + Sync>;
 /// Clones share one bound of lookups in flight, so every flow of a service
 /// draws from it (#248). A lookup keeps its permit until it finishes, even
 /// after the open that started it gave up: the system resolver's
-/// `getaddrinfo` cannot be cancelled and holds a blocking-pool thread.
+/// `getaddrinfo` cannot be cancelled and holds a blocking-pool thread. The
+/// cost: while the bound is spent on hung lookups, new flows of the service
+/// time out even if the resolver has recovered, until those lookups end.
 #[derive(Clone)]
 struct UpstreamResolver {
     lookup: Lookup,
@@ -1991,7 +1993,9 @@ mod tests {
         }
     }
 
-    /// Let every spawned task run until it waits on something.
+    /// Let every spawned task run until it waits on something. Too few
+    /// yields can only start fewer lookups, which fails the bound assertion
+    /// instead of passing it falsely.
     async fn settle() {
         for _ in 0..16 {
             tokio::task::yield_now().await;

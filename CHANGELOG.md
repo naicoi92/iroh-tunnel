@@ -27,7 +27,8 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   at once, so many new flows against a hung resolver no longer flood the
   blocking pool. A lookup abandoned by a timed-out open keeps its share until
   it ends; flows waiting for a share stay opening, queue their datagrams and
-  still give up at the resolve timeout.
+  still give up at the resolve timeout. While hung lookups hold every share,
+  new flows of that service time out even after the resolver recovers.
 
 ## [0.6.0] - 2026-11-12
 
