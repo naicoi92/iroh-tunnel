@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use crate::error::CliError;
 use crate::service::registration::RegistrationInput;
 use crate::service::trust_windows::ENV_TRUSTED_SID;
-use crate::service::types::RestartPolicy;
+use crate::service::types::{AppliedEffect, RestartPolicy};
 use crate::service::{PinOwner, ENV_SCM};
 use crate::status::writer::ENV_STATE_DIR;
 
@@ -207,6 +207,61 @@ pub(crate) trait ScmPort {
     fn executable(&mut self, name: &str) -> Result<Option<PathBuf>>;
 }
 
+/// Records each change an [`ScmPort`] makes, as it succeeds.
+pub(crate) type EffectSink<'a> = dyn FnMut(AppliedEffect) + 'a;
+
+/// An [`ScmPort`] that reports every successful change to a sink, so a
+/// failure later in the orchestration (including during rollback) still
+/// lists what reached the SCM.
+///
+/// The mapping follows the scheduled-task backend: a created service is
+/// [`AppliedEffect::Enabled`] (it starts automatically), a deleted one
+/// [`AppliedEffect::Disabled`].
+pub(crate) struct RecordingPort<'p, 's> {
+    port: &'p mut dyn ScmPort,
+    sink: &'p mut EffectSink<'s>,
+}
+
+impl<'p, 's> RecordingPort<'p, 's> {
+    pub(crate) fn new(port: &'p mut dyn ScmPort, sink: &'p mut EffectSink<'s>) -> Self {
+        Self { port, sink }
+    }
+
+    fn recorded(&mut self, result: Result<()>, effect: AppliedEffect) -> Result<()> {
+        result?;
+        (self.sink)(effect);
+        Ok(())
+    }
+}
+
+impl ScmPort for RecordingPort<'_, '_> {
+    fn state(&mut self, name: &str) -> Result<Option<ScmState>> {
+        self.port.state(name)
+    }
+    fn create(&mut self, spec: &ServiceSpec) -> Result<()> {
+        let result = self.port.create(spec);
+        self.recorded(result, AppliedEffect::Enabled)
+    }
+    fn delete(&mut self, name: &str) -> Result<()> {
+        let result = self.port.delete(name);
+        self.recorded(result, AppliedEffect::Disabled)
+    }
+    fn start(&mut self, name: &str) -> Result<()> {
+        let result = self.port.start(name);
+        self.recorded(result, AppliedEffect::Started)
+    }
+    fn stop(&mut self, name: &str) -> Result<()> {
+        let result = self.port.stop(name);
+        self.recorded(result, AppliedEffect::Stopped)
+    }
+    fn description(&mut self, name: &str) -> Result<Option<String>> {
+        self.port.description(name)
+    }
+    fn executable(&mut self, name: &str) -> Result<Option<PathBuf>> {
+        self.port.executable(name)
+    }
+}
+
 /// Monotonic time source and sleeper, injected so tests need no real time.
 pub(crate) trait Clock {
     /// Time elapsed since an arbitrary fixed origin.
@@ -335,8 +390,10 @@ fn delete_and_wait(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) ->
 }
 
 /// Register, start and announce the SCM service of `reg` (system scope).
+/// Every change reaches `native`'s applied list as it happens.
 #[cfg(windows)]
 pub(crate) fn install(
+    native: &mut crate::service::native::Native,
     notes: &mut dyn FnMut(&crate::service::ServiceNote),
     reg: &RegistrationInput<'_>,
 ) -> Result<()> {
@@ -344,7 +401,12 @@ pub(crate) fn install(
     use crate::service::{InstalledAt, ServiceNote};
 
     let spec = ServiceSpec::render(reg)?;
-    install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
+    let mut record = |effect| native.applied(effect);
+    install_with(
+        &mut RecordingPort::new(&mut Scm, &mut record),
+        &mut SystemClock::new(),
+        &spec,
+    )?;
     notes(&ServiceNote::Installed {
         name: spec.name,
         at: InstalledAt::WindowsService,
@@ -368,8 +430,11 @@ pub(crate) fn install_with(
         .start(name)
         .and_then(|()| wait_running(port, clock, name));
     if let Err(err) = started {
-        // Best effort: the start failure is the error worth reporting.
-        let _ = stop_and_delete(port, clock, name);
+        // Best effort: the start failure is the error worth reporting; the
+        // rollback's own effects are already recorded by the port.
+        if let Err(rollback) = stop_and_delete(port, clock, name) {
+            tracing::warn!(service = %name, "rolling back the failed install failed: {rollback:#}");
+        }
         return Err(err);
     }
     Ok(())
@@ -992,6 +1057,69 @@ mod tests {
         port.never_gone = true;
         let err = install_with(&mut port, &mut FakeClock::default(), &spec()).unwrap_err();
         assert_eq!(service_msg(err), "start boom");
+    }
+
+    /// Run `install_with` through a [`RecordingPort`] and return the effects.
+    fn install_recording(port: &mut FakeScm) -> (Result<()>, Vec<AppliedEffect>) {
+        let mut applied = Vec::new();
+        let mut record = |effect| applied.push(effect);
+        let result = install_with(
+            &mut RecordingPort::new(port, &mut record),
+            &mut FakeClock::default(),
+            &spec(),
+        );
+        (result, applied)
+    }
+
+    #[test]
+    fn failed_create_after_delete_reports_the_deletion() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.fail_once.insert("create");
+        let (result, applied) = install_recording(&mut port);
+        assert_eq!(service_msg(result.unwrap_err()), "create boom");
+        assert_eq!(applied, [AppliedEffect::Stopped, AppliedEffect::Disabled]);
+    }
+
+    #[test]
+    fn install_records_every_effect_in_order() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        let (result, applied) = install_recording(&mut port);
+        result.unwrap();
+        assert_eq!(
+            applied,
+            [
+                AppliedEffect::Stopped,
+                AppliedEffect::Disabled,
+                AppliedEffect::Enabled,
+                AppliedEffect::Started,
+            ]
+        );
+    }
+
+    #[test]
+    fn rolled_back_install_records_the_rollback() {
+        let mut port = FakeScm::with(None);
+        port.start_script = vec![ScmState::StartPending];
+        let (result, applied) = install_recording(&mut port);
+        assert!(result.is_err());
+        assert_eq!(
+            applied,
+            [
+                AppliedEffect::Enabled,
+                AppliedEffect::Started,
+                AppliedEffect::Stopped,
+                AppliedEffect::Disabled,
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_operations_record_nothing() {
+        let mut port = FakeScm::with(Some(ScmState::Running));
+        port.fail_once.insert("stop");
+        let (result, applied) = install_recording(&mut port);
+        assert!(result.is_err());
+        assert!(applied.is_empty(), "{applied:?}");
     }
 
     #[test]

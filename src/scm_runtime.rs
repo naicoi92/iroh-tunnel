@@ -9,6 +9,7 @@ use std::time::Duration;
 
 #[cfg(windows)]
 mod dispatcher;
+mod session;
 #[cfg(windows)]
 pub(crate) use dispatcher::run_as_service;
 

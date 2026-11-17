@@ -87,7 +87,7 @@ impl Backend {
             #[cfg(windows)]
             Self::WindowsTask => super::windows::install(native, notes, reg),
             #[cfg(windows)]
-            Self::WindowsService => super::windows_scm::install(notes, reg),
+            Self::WindowsService => super::windows_scm::install(native, notes, reg),
         }
     }
 
@@ -143,7 +143,9 @@ impl Backend {
                 }
             }
             #[cfg(windows)]
-            Self::WindowsService => super::super::system_verb::system_verb(verb, role_id, notes),
+            Self::WindowsService => {
+                super::super::system_verb::system_verb(verb, role_id, native, notes)
+            }
         }
     }
 
