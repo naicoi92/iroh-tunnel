@@ -303,7 +303,8 @@ mod tests {
         crate::fixtures::in_isolated_home(NAME, |home| {
             use std::os::unix::fs::PermissionsExt;
             // Explicit, so the test does not depend on the runner's umask (a
-            // 077 umask would hide the bug).
+            // 077 umask would hide the bug); 022 exposes group/other bits on
+            // a default-mode open.
             // SAFETY: umask(2) only changes this child process's file mode
             // creation mask; it has no memory-safety preconditions.
             unsafe { libc::umask(0o022) };
