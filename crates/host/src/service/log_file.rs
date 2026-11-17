@@ -27,8 +27,8 @@ pub struct CappedLog {
 
 impl CappedLog {
     /// Open (creating `dir` when missing) the log of `role`. A file that
-    /// cannot be opened yet is retried on every later write, so a transient
-    /// startup failure does not silence the whole run.
+    /// cannot be opened yet is retried by later writes, at most once per
+    /// second, so a transient startup failure does not silence the whole run.
     #[must_use]
     pub fn open(dir: &Path, role: &str, cap: u64) -> CappedLog {
         let mut log = CappedLog {
@@ -93,10 +93,12 @@ impl CappedLog {
 
 impl Write for CappedLog {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.file.is_none() || (self.checked.elapsed() >= RECHECK && !self.path.exists()) {
-            self.reopen();
-        }
+        // A missing handle or path is retried at most once per RECHECK, so
+        // a log that stays unopenable does not cost an open per record.
         if self.checked.elapsed() >= RECHECK {
+            if self.file.is_none() || !self.path.exists() {
+                self.reopen();
+            }
             self.checked = Instant::now();
         }
         if self.file.is_some() && self.written > 0 && self.written + buf.len() as u64 > self.cap {
@@ -110,7 +112,7 @@ impl Write for CappedLog {
             self.written += buf.len() as u64;
         } else if self.file.is_some() {
             // The handle went bad (directory removed, disk error): recreate
-            // on the next write instead of statting the path every time.
+            // it on the next due check instead of statting the path every time.
             self.file = None;
         }
         Ok(buf.len())
@@ -205,8 +207,12 @@ mod tests {
         std::fs::write(&logs, "not a directory").unwrap();
         let mut log = CappedLog::open(&logs, "serve", 100);
         assert_eq!(log.write(b"dropped\n").unwrap(), 8);
-        // Once the obstacle is gone the next record lands in the log.
+        // Retries are throttled: not every record pays for a failing open.
         std::fs::remove_file(&logs).unwrap();
+        log.write_all(b"throttled\n").unwrap();
+        assert!(!logs.exists(), "reopened before the retry was due");
+        // Once the retry is due the next record lands in the log.
+        log.checked -= RECHECK;
         log.write_all(b"after\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(logs.join("serve.log")).unwrap(),
@@ -215,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn log_writer_open_failure_is_not_fatal() {
+    fn log_writer_survives_a_dir_replaced_by_a_file() {
         let tmp = tempfile::tempdir().unwrap();
         // Writing after the directory became a file must still succeed.
         let sub = tmp.path().join("sub");

@@ -11,6 +11,7 @@ pub fn is_elevated() -> bool {
 
 /// See the Unix variant; there is no root account to compare against here.
 #[cfg(all(not(unix), not(windows)))]
+#[must_use]
 pub fn is_elevated() -> bool {
     false
 }

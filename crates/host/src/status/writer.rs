@@ -239,11 +239,24 @@ impl StatusWriter {
 /// no failure between create and rename leaves it behind.
 struct StagedFile<'a> {
     path: &'a Path,
+    /// The open handle, closed before the rename or the removal.
+    file: Option<std::fs::File>,
     published: bool,
+}
+
+impl StagedFile<'_> {
+    /// Close the handle and rename the file onto `dest`.
+    fn publish(mut self, dest: &Path) -> std::io::Result<()> {
+        drop(self.file.take());
+        std::fs::rename(self.path, dest)?;
+        self.published = true;
+        Ok(())
+    }
 }
 
 impl Drop for StagedFile<'_> {
     fn drop(&mut self) {
+        drop(self.file.take());
         if !self.published {
             // Best-effort: the original error is what the caller sees.
             let _ = std::fs::remove_file(self.path);
@@ -267,18 +280,16 @@ fn write_staged(
 ) -> Result<()> {
     let mut file = std::fs::File::create(temp)
         .with_context(|| format!("failed to create status temp file: {}", temp.display()))?;
-    let mut staged = StagedFile {
+    let written = write(&mut file).and_then(|()| file.sync_all());
+    let staged = StagedFile {
         path: temp,
+        file: Some(file),
         published: false,
     };
-    write(&mut file)
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("failed to write status file: {}", temp.display()))?;
-    drop(file);
-    std::fs::rename(temp, dest)
-        .with_context(|| format!("failed to finalize status file: {}", dest.display()))?;
-    staged.published = true;
-    Ok(())
+    written.with_context(|| format!("failed to write status file: {}", temp.display()))?;
+    staged
+        .publish(dest)
+        .with_context(|| format!("failed to finalize status file: {}", dest.display()))
 }
 
 /// Just the `pid` field of a status file — the minimal probe
