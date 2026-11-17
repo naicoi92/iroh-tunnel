@@ -322,6 +322,10 @@ pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
 impl NodeConfig {
     /// Shared node-level validation. Both roles call this from their
     /// `RoleDoc::validate`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a node-level field (stream cap, relay URL) is out of range.
     pub fn validate(&self) -> Result<()> {
         if let Some(max) = self.max_concurrent_streams {
             if max == 0 {
@@ -359,6 +363,10 @@ fn validate_port(port: u16) -> Result<()> {
 
 impl ServeConfig {
     /// Validate node + services (names, ports, relay URLs, duplicates).
+    ///
+    /// # Errors
+    ///
+    /// Fails on an invalid node field, service name, port or relay URL, or a duplicate service.
     pub fn validate(&self) -> Result<()> {
         let mut seen: HashSet<&str> = HashSet::new();
         for svc in &self.services {
@@ -394,6 +402,10 @@ impl RoleDoc for ServeConfig {
 impl AccessConfig {
     /// Validate node relay_urls + services (names, ports, node_id format,
     /// duplicates).
+    ///
+    /// # Errors
+    ///
+    /// Fails on an invalid relay URL, service name, port or node id, or a duplicate service.
     pub fn validate(&self) -> Result<()> {
         for url in &self.node.relay_urls {
             if !url.starts_with("https://") {

@@ -7,6 +7,7 @@ use super::types::{Environment, ScopeDecision, ServiceScope};
 /// An explicit request wins. Otherwise an elevated process installs a system
 /// service without asking; a non-elevated process that can answer must choose;
 /// a non-elevated process that cannot answer gets the unprivileged user scope.
+#[must_use]
 pub fn decide_install_scope(requested: Option<ServiceScope>, env: Environment) -> ScopeDecision {
     if let Some(scope) = requested {
         return ScopeDecision::Chosen(scope);

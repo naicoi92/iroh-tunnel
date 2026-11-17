@@ -4,6 +4,10 @@ use super::verb::Verb;
 use crate::role::Role;
 
 /// Perform the operation using the supplied executable identity for guidance.
+///
+/// # Errors
+///
+/// A [`ServiceFailure`] when the service manager refuses or fails the operation.
 pub fn uninstall_with_invocation(
     role: Role,
     scope: ServiceScope,

@@ -11,6 +11,10 @@ use crate::settings::AccessSettings;
 /// every service's dial has a live relay transport for its URLs (a relay only
 /// carries traffic for peers connected to it). Per-service dials still attach
 /// only that service's own URLs.
+///
+/// # Errors
+///
+/// Fails when a relay URL does not parse or the endpoint cannot bind.
 pub async fn bind_access(s: &AccessSettings) -> Result<Endpoint> {
     let mut relays = s.node.relay_urls.clone();
     for svc in &s.services {

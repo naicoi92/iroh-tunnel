@@ -45,6 +45,7 @@ impl std::fmt::Display for PinOwner {
 
 impl Pin {
     /// The record text (no comment delimiters).
+    #[must_use]
     pub fn record(&self) -> String {
         let owner = match &self.owner {
             PinOwner::Uid(uid) => format!("uid={uid}"),
@@ -71,6 +72,7 @@ impl Pin {
     /// Find and decode the record inside a registration body. `None` when the
     /// body has no record (a registration from before this policy) or the
     /// record is malformed: the caller must treat both as an unknown target.
+    #[must_use]
     pub fn find(body: &str) -> Option<Self> {
         // Only a comment line counts: a path inside another directive (the
         // busybox `CONFIG=` line) could otherwise embed the key and forge it.

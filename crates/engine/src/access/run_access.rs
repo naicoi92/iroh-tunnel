@@ -125,7 +125,7 @@ pub async fn run_access(
         Some(sink) => match sink.save(initial.clone()).await {
             Ok(()) => Some(initial),
             Err(e) => {
-                tracing::warn!("failed to write status file: {e}");
+                tracing::warn!("failed to write status file: {e:#}");
                 None
             }
         },
@@ -190,7 +190,7 @@ fn ready_services(cfg: &AccessSettings) -> ReadyServices {
     // spawned listeners.
     let relay_urls: Vec<iroh::RelayUrl> = endpoint::resolve_relay_urls(&cfg.node.relay_urls)
         .unwrap_or_else(|e| {
-            tracing::warn!("failed to resolve relay_urls, will fail at dial time: {e}");
+            tracing::warn!("failed to resolve relay_urls, will fail at dial time: {e:#}");
             Vec::new()
         });
     if cfg.node.relay_urls.is_empty() {
@@ -369,7 +369,7 @@ async fn access_status_flush_loop(
         // until the next change.
         match sink.save(observation.clone()).await {
             Ok(()) => last = Some(observation),
-            Err(e) => tracing::warn!("failed to write status file: {e}"),
+            Err(e) => tracing::warn!("failed to write status file: {e:#}"),
         }
     }
 }
@@ -533,7 +533,7 @@ impl ServiceDialer {
             .await
             .conn
             .as_ref()
-            .map(|conn| conn.stable_id())
+            .map(iroh::endpoint::Connection::stable_id)
     }
 
     /// Fresh connection-path report for the cached multiplexed connection,
@@ -546,7 +546,10 @@ impl ServiceDialer {
     async fn path_report(&self) -> Option<crate::observation::PeerPathObservation> {
         let peer = {
             let guard = self.state.lock().await;
-            guard.conn.as_ref().map(|conn| conn.remote_id())?
+            guard
+                .conn
+                .as_ref()
+                .map(iroh::endpoint::Connection::<iroh::endpoint::HandshakeCompleted>::remote_id)?
         };
         crate::conn_path::peer_path_report(&self.ep, peer).await
     }
@@ -587,7 +590,7 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
                     clients.spawn(async move {
                         match handle_local_connection(&dialer, local_stream, deadline, stop).await {
                             Ok(()) => tracing::debug!(%peer_addr, svc = %dialer.svc_name, "tunnel closed"),
-                            Err(error) => tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {error}"),
+                            Err(error) => tracing::warn!(%peer_addr, svc = %dialer.svc_name, "tunnel error: {error:#}"),
                         }
                     });
                 }
@@ -779,7 +782,10 @@ async fn udp_forward_loop(ctx: UdpForwardCtx, socket: Arc<UdpSocket>, mut stop: 
 
 impl UdpSession {
     fn expire_idle(&self, ctx: &UdpForwardCtx) {
-        let mut flows = self.flows.lock().unwrap_or_else(|p| p.into_inner());
+        let mut flows = self
+            .flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ended = flows.expire(
             std::time::Instant::now(),
             ctx.dialer.udp_limits.idle_timeout,
@@ -814,7 +820,7 @@ impl UdpSession {
         let conn = match ctx.dialer.get_or_dial(deadline).await {
             Ok(conn) => conn,
             Err(error) => {
-                tracing::warn!(svc = %ctx.dialer.svc_name, "udp datagram dropped, no connection: {error}");
+                tracing::warn!(svc = %ctx.dialer.svc_name, "udp datagram dropped, no connection: {error:#}");
                 return None;
             }
         };
@@ -857,7 +863,11 @@ impl UdpSession {
     async fn retire(&mut self) {
         self.readers.abort_all();
         while self.readers.join_next().await.is_some() {}
-        *self.flows.lock().unwrap_or_else(|p| p.into_inner()) = crate::udp::ClientFlows::default();
+        *self
+            .flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            crate::udp::ClientFlows::default();
         self.current = None;
     }
 
@@ -897,11 +907,15 @@ impl UdpSession {
                 return;
             }
         }
-        let flow = self.flows.lock().unwrap_or_else(|p| p.into_inner()).touch(
-            client,
-            std::time::Instant::now(),
-            dialer.udp_limits.max_flows,
-        );
+        let flow = self
+            .flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .touch(
+                client,
+                std::time::Instant::now(),
+                dialer.udp_limits.max_flows,
+            );
         let flow = match flow {
             Ok(flow) => flow,
             Err(crate::udp::Refused::Cap) => {
@@ -923,7 +937,12 @@ impl UdpSession {
                 return;
             }
         };
-        stats.set_active_flows(self.flows.lock().unwrap_or_else(|p| p.into_inner()).len());
+        stats.set_active_flows(
+            self.flows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+        );
         if let Err(error) = conn.send_datagram(crate::udp::encode(flow, payload)) {
             tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
             // A lost connection never recovers. Evict it so the next datagram
@@ -968,7 +987,9 @@ async fn reject_unusable(
 
 impl UdpForwardCtx {
     fn lock_backoff(&self) -> std::sync::MutexGuard<'_, RedialBackoff> {
-        self.backoff.lock().unwrap_or_else(|p| p.into_inner())
+        self.backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether the back-off lets this datagram dial; logs the drop if not.
@@ -1054,7 +1075,7 @@ async fn relay_peer_replies(
         };
         let client = flows
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .client_of(flow, std::time::Instant::now());
         match client {
             Some(client) => {
@@ -1085,14 +1106,8 @@ async fn handle_local_connection(
     let streams = tokio::select! {
         biased;
         _ = shutdown::stopped(&mut stop) => anyhow::bail!("client connection cancelled on shutdown"),
-        result = tokio::time::timeout_at(deadline, open_client_stream(dialer, deadline)) => match result {
-            Ok(Ok(streams)) => streams,
-            // The dial loop stops at the same deadline; report one message.
-            Ok(Err(_)) if tokio::time::Instant::now() >= deadline => {
-                anyhow::bail!("client connection deadline expired")
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => anyhow::bail!("client connection deadline expired"),
+        result = tokio::time::timeout_at(deadline, open_client_stream(dialer, deadline)) => {
+            client_stream_outcome(result, deadline)?
         }
     };
     // QUIC shutdown queues FIN; pipe completion alone does not prove final
@@ -1115,6 +1130,23 @@ async fn handle_local_connection(
         crate::tcp::Delivery::Lost(error) => {
             Err(anyhow::Error::new(error).context("client stream delivery failed"))
         }
+    }
+}
+
+/// Map a deadline-bounded stream open to its result.
+///
+/// The dial loop stops at the same deadline, so a failure at or after it is
+/// reported as the client deadline, with the dial failure kept as its cause.
+fn client_stream_outcome<T>(
+    result: Result<Result<T>, tokio::time::error::Elapsed>,
+    deadline: tokio::time::Instant,
+) -> Result<T> {
+    const EXPIRED: &str = "client connection deadline expired";
+    match result {
+        Ok(Ok(streams)) => Ok(streams),
+        Ok(Err(error)) if tokio::time::Instant::now() >= deadline => Err(error.context(EXPIRED)),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(anyhow::anyhow!(EXPIRED)),
     }
 }
 
@@ -1274,6 +1306,22 @@ fn spawn_path_change_poller(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A dial that failed at the client deadline is reported under the
+    /// deadline message, keeping the dial failure as its cause.
+    #[tokio::test(start_paused = true)]
+    async fn client_deadline_keeps_the_dial_failure() {
+        let deadline = tokio::time::Instant::now();
+        let dial =
+            Err::<(), _>(anyhow::anyhow!("no route to peer").context("dial deadline expired"));
+        let err = client_stream_outcome(Ok(dial), deadline).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.starts_with("client connection deadline expired"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("no route to peer"), "{rendered}");
+    }
 
     /// PR #62 run 4, acceptance A — the shutdown race, driven directly.
     ///
@@ -1518,7 +1566,12 @@ mod tests {
 
     impl Drop for ChildrenGuard {
         fn drop(&mut self) {
-            for handle in self.0.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+            for handle in self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
                 handle.abort();
             }
         }
@@ -1534,11 +1587,18 @@ mod tests {
     /// for the next caller. Only the harness (never the
     /// supervisor) drains, so the supervisor's cancellation cannot lose it.
     async fn drain_children(children: &PeerChildren) {
-        for handle in children.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+        for handle in children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
             handle.abort();
         }
         loop {
-            let next = children.lock().unwrap_or_else(|p| p.into_inner()).pop();
+            let next = children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop();
             let Some(handle) = next else { break };
             let _ = handle.await;
         }
@@ -1634,7 +1694,7 @@ mod tests {
                             let _ = conn.send_datagram(datagram);
                         }
                     });
-                    children.lock().unwrap_or_else(|p| p.into_inner()).push(child);
+                    children.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(child);
                 }
             }
         }
@@ -1773,7 +1833,7 @@ mod tests {
         fn waiting_until(&self) -> Option<std::time::Instant> {
             self.backoff
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .waiting_until()
         }
 

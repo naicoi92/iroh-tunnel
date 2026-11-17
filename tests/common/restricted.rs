@@ -35,6 +35,20 @@ use windows_sys::Win32::System::Threading::{
 /// `SE_GROUP_INTEGRITY` (winnt.h); windows-sys only exposes it behind a feature we do not need.
 const SE_GROUP_INTEGRITY: u32 = 0x20;
 
+/// Size of a fixed Win32 structure as the `u32` the API takes.
+fn win32_size_of<T>() -> u32 {
+    win32_len(size_of::<T>())
+}
+
+/// A buffer or structure length as the `u32` the API takes.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "invariant: the small fixed buffers here are far below u32::MAX bytes"
+)]
+fn win32_len(len: usize) -> u32 {
+    len as u32
+}
+
 /// Which API launched the child (reported by the self-test).
 pub static LAUNCH_API: std::sync::Mutex<&'static str> = std::sync::Mutex::new("none");
 
@@ -47,7 +61,7 @@ struct Sid([u8; SECURITY_MAX_SID_SIZE as usize]);
 impl Sid {
     fn well_known(kind: i32) -> Result<Self> {
         let mut buf = [0u8; SECURITY_MAX_SID_SIZE as usize];
-        let mut len = buf.len() as u32;
+        let mut len = win32_len(buf.len());
         // SAFETY: `buf` is SECURITY_MAX_SID_SIZE bytes and `len` says so.
         let ok = unsafe { CreateWellKnownSid(kind, null_mut(), buf.as_mut_ptr().cast(), &mut len) };
         ensure!(
@@ -75,7 +89,7 @@ fn owned(handle: HANDLE) -> OwnedHandle {
 /// `(read, write)` of an anonymous pipe; the child inherits only `child_end`.
 fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle)> {
     let sa = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        nLength: win32_size_of::<SECURITY_ATTRIBUTES>(),
         lpSecurityDescriptor: null_mut(),
         bInheritHandle: 1,
     };
@@ -143,9 +157,9 @@ fn set_default_dacl(original: &OwnedHandle, restricted: &OwnedHandle) -> Result<
     // SAFETY: both SIDs are valid.
     let (user_len, system_len) = unsafe { (GetLengthSid(user_sid), GetLengthSid(system.as_ptr())) };
     // ACE header + mask, minus the one-DWORD SidStart placeholder, plus the SID.
-    let ace_overhead = size_of::<ACCESS_ALLOWED_ACE>() as u32 - size_of::<u32>() as u32;
+    let ace_overhead = win32_size_of::<ACCESS_ALLOWED_ACE>() - win32_size_of::<u32>();
     let acl_len =
-        (size_of::<ACL>() as u32 + 2 * ace_overhead + user_len + system_len).next_multiple_of(4);
+        (win32_size_of::<ACL>() + 2 * ace_overhead + user_len + system_len).next_multiple_of(4);
     let mut acl_buf = vec![0u32; (acl_len / 4) as usize];
     let acl: *mut ACL = acl_buf.as_mut_ptr().cast();
     // SAFETY: `acl_buf` is `acl_len` bytes, DWORD aligned; both SIDs are valid.
@@ -163,7 +177,7 @@ fn set_default_dacl(original: &OwnedHandle, restricted: &OwnedHandle) -> Result<
             restricted.as_raw_handle() as _,
             TokenDefaultDacl,
             (&dacl as *const TOKEN_DEFAULT_DACL).cast(),
-            size_of::<TOKEN_DEFAULT_DACL>() as u32,
+            win32_size_of::<TOKEN_DEFAULT_DACL>(),
         )
     };
     ensure!(
@@ -227,7 +241,7 @@ fn restricted_token() -> Result<OwnedHandle> {
             restricted.as_raw_handle() as _,
             TokenIntegrityLevel,
             (&label as *const TOKEN_MANDATORY_LABEL).cast(),
-            size_of::<TOKEN_MANDATORY_LABEL>() as u32 + sid_len,
+            win32_size_of::<TOKEN_MANDATORY_LABEL>() + sid_len,
         )
     };
     ensure!(
@@ -335,7 +349,7 @@ pub fn run_non_elevated(cmd: &mut Command) -> Result<Output> {
         w.push(0);
         w
     });
-    let cwd_ptr = cwd.as_ref().map_or(null(), |w| w.as_ptr());
+    let cwd_ptr = cwd.as_ref().map_or(null(), Vec::as_ptr);
 
     let (stdin_read, stdin_write) = pipe(true)?;
     let (out_read, out_write) = pipe(false)?;
@@ -344,7 +358,7 @@ pub fn run_non_elevated(cmd: &mut Command) -> Result<Output> {
 
     // SAFETY: all-zero is a valid STARTUPINFOW before the fields are set.
     let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    startup.cb = size_of::<STARTUPINFOW>() as u32;
+    startup.cb = win32_size_of::<STARTUPINFOW>();
     startup.dwFlags = STARTF_USESTDHANDLES;
     startup.hStdInput = stdin_read.as_raw_handle() as _;
     startup.hStdOutput = out_write.as_raw_handle() as _;

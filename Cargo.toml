@@ -128,6 +128,13 @@ print_stdout = "deny"
 print_stderr = "deny"
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
+# A curated subset of `clippy::pedantic` (#229).
+missing_errors_doc = "warn"
+redundant_closure_for_method_calls = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+must_use_candidate = "warn"
 
 [lints]
 workspace = true

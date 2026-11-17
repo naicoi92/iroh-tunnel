@@ -15,6 +15,7 @@ use iroh::RelayUrl;
 /// explicitly (IROHTUN-44).
 ///
 /// [`RelayMode::Default`]: iroh::endpoint::RelayMode::Default
+#[must_use]
 pub fn n0_default_relay_urls() -> Vec<RelayUrl> {
     iroh::defaults::prod::default_relay_map().urls::<Vec<_>>()
 }
@@ -30,7 +31,7 @@ mod tests {
         // this set ever changes upstream, the test will tell us.
         let urls = n0_default_relay_urls();
         assert!(!urls.is_empty(), "expected at least one default relay");
-        let hostnames: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+        let hostnames: Vec<String> = urls.iter().map(ToString::to_string).collect();
         assert!(
             hostnames
                 .iter()

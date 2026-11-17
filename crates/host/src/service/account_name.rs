@@ -6,6 +6,7 @@ use super::pin::PinOwner;
 /// uid, no user database, or a SID this platform cannot look up). Used by
 /// frontends to describe a registration's owner in prompts.
 #[cfg(unix)]
+#[must_use]
 pub fn account_name(owner: &PinOwner) -> String {
     match owner {
         PinOwner::Uid(uid) => {
@@ -18,6 +19,7 @@ pub fn account_name(owner: &PinOwner) -> String {
 /// See the Unix variant: a SID resolves to `DOMAIN\name` via
 /// `LookupAccountSidW`; a uid has no meaning here.
 #[cfg(windows)]
+#[must_use]
 pub fn account_name(owner: &PinOwner) -> String {
     use super::trust_windows::{account_of, model::Sid};
     match owner {

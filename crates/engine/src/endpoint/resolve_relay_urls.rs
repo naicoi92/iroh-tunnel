@@ -18,6 +18,10 @@ use super::n0_default_relay_urls::n0_default_relay_urls;
 /// Lifted out of `access::run` so the parsing logic has a single home
 /// (previously it was duplicated with `relay_mode_from_urls` and inlined in
 /// the access handler).
+///
+/// # Errors
+///
+/// Fails on the first entry that is not a valid relay URL.
 pub fn resolve_relay_urls(config_urls: &[String]) -> Result<Vec<RelayUrl>> {
     if config_urls.is_empty() {
         return Ok(n0_default_relay_urls());
@@ -42,7 +46,7 @@ mod tests {
         // Empty config must return the n0-operated public relays (IROHTUN-44).
         let urls = resolve_relay_urls(&[]).unwrap();
         assert!(!urls.is_empty(), "expected fallback to n0 defaults");
-        let hostnames: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+        let hostnames: Vec<String> = urls.iter().map(ToString::to_string).collect();
         assert!(
             hostnames.iter().any(|h| h.contains("relay.n0.iroh.link")),
             "no n0 relay hostname in fallback: {hostnames:?}"

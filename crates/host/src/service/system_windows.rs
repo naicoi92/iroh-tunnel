@@ -15,8 +15,6 @@ use crate::error::CliError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WinTarget {
     pub sid: Sid,
-    /// `DOMAIN\name`, or `?` when the SID cannot be named.
-    pub account: String,
     /// Config file path.
     pub config: PathBuf,
     /// State directory.
@@ -56,7 +54,7 @@ fn is_machine_owner(sid: &Sid) -> bool {
 pub(crate) fn resolve_target(
     req: &WinRequest<'_>,
     token: &Sid,
-    owner_of: &dyn Fn(&Path) -> Option<Sid>,
+    owner_of: &dyn Fn(&Path) -> Result<Sid>,
     local_appdata: &dyn Fn(&Sid) -> Result<PathBuf>,
     account_of: &dyn Fn(&Sid) -> Option<String>,
 ) -> Result<WinTarget> {
@@ -77,12 +75,12 @@ pub(crate) fn resolve_target(
     let config = match req.config {
         Some(config) => {
             let parent = config.parent().unwrap_or(config);
-            let owner = owner_of(parent).ok_or_else(|| {
-                CliError::Config(format!(
-                    "cannot determine the owner of {} (the directory of --config); pass a \
-                     --config in a directory you can read. Nothing was changed.",
+            let owner = owner_of(parent).map_err(|e| {
+                e.context(CliError::Config(format!(
+                    "cannot determine the owner of {}, the directory of --config (pass a \
+                     --config in a directory you can read; nothing was changed)",
                     parent.display()
-                ))
+                )))
             })?;
             if !is_machine_owner(&owner) && owner != *token {
                 return Err(CliError::Config(format!(
@@ -107,7 +105,6 @@ pub(crate) fn resolve_target(
     };
     Ok(WinTarget {
         sid: token.clone(),
-        account: account_of(token).unwrap_or_else(|| "?".into()),
         config,
         state,
     })
@@ -149,7 +146,11 @@ mod tests {
         resolve_target(
             &req,
             &sid(ALICE),
-            &|_| owner.map(sid),
+            &|_| {
+                owner.map(sid).ok_or_else(|| {
+                    anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                })
+            },
             &appdata,
             &account_of,
         )
@@ -164,7 +165,6 @@ mod tests {
         let t = resolve(None, None, None).unwrap();
         let root = Path::new("C:\\Users\\alice\\AppData\\Local");
         assert_eq!(t.sid, sid(ALICE));
-        assert_eq!(t.account, "PC\\alice");
         assert_eq!(
             t.config,
             root.join("iroh-tunnel").join("config").join("serve.toml")
@@ -237,5 +237,11 @@ mod tests {
             panic!("not a config error: {err}")
         };
         assert!(msg.contains("cannot determine the owner"), "{msg}");
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "the owner lookup failure must stay in the chain: {err:?}"
+        );
     }
 }

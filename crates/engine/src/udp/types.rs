@@ -208,6 +208,7 @@ pub struct FlowQueue {
 impl FlowQueue {
     /// A queue holding up to `depth` datagrams, and the receiving end for the
     /// flow's writer task.
+    #[must_use]
     pub fn new(depth: usize) -> (Self, tokio::sync::mpsc::Receiver<Bytes>) {
         let (tx, rx) = tokio::sync::mpsc::channel(depth.max(1));
         (Self { tx }, rx)
@@ -268,6 +269,10 @@ impl ClientFlows {
     /// idle timer. A client that already has a flow is never refused; a new
     /// one is refused at `max_flows` live flows ([`Refused::Cap`]) or once the
     /// identifier space is spent ([`Refused::Exhausted`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Refused::Cap`] or [`Refused::Exhausted`] when a new client cannot get a flow.
     pub fn touch(
         &mut self,
         client: std::net::SocketAddr,
@@ -303,11 +308,13 @@ impl ClientFlows {
     }
 
     /// Flows currently live.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.by_flow.len()
     }
 
     /// Whether no flow is live.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_flow.is_empty()
     }
@@ -402,16 +409,19 @@ impl<T> PeerFlows<T> {
     }
 
     /// Flows currently live.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.live.len()
     }
 
     /// Whether no flow is live.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.live.is_empty()
     }
 
     /// The upstream of a live flow.
+    #[must_use]
     pub fn get(&self, flow: FlowId) -> Option<&T> {
         self.live.get(&flow).map(|(upstream, _)| upstream)
     }

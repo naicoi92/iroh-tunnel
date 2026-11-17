@@ -14,6 +14,10 @@ use crate::role::Role;
 /// Read the config file contents with `secret_key` and `relay_token` replaced
 /// by a placeholder, unless `d` is [`Disclosure::Reveal`] (D2). Comments and
 /// formatting are kept; the file itself is never changed.
+///
+/// # Errors
+///
+/// Fails when the config is missing, unreadable or does not parse.
 pub fn show_config(role: Role, config: Option<&Path>, d: Disclosure) -> Result<ShownConfig> {
     let path = resolve_config_path(role, config)?;
     let text = require_existing(role, &path)?;

@@ -3,6 +3,7 @@ use super::types::HEADER_LEN;
 /// Largest client payload a connection can carry now, or `None` when the
 /// connection cannot carry datagrams at all (unsupported, disabled, or a
 /// maximum no larger than the header, per the contract).
+#[must_use]
 pub fn payload_limit(max_datagram_size: Option<usize>) -> Option<usize> {
     max_datagram_size
         .and_then(|max| max.checked_sub(HEADER_LEN))

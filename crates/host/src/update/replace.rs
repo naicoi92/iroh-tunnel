@@ -38,7 +38,8 @@ pub(super) fn windows_locked_hint(exe_name: &str) -> String {
 const REPLACE_DENIED_HINT: &str = "rerun with sufficient privileges (for example sudo)";
 
 /// A permission failure while replacing is reported as [`CliError::Permission`]
-/// (exit 3, RS-06); everything else keeps its unclassified exit 1.
+/// (exit 3, RS-06) wrapped around the original chain, so the `io::Error` stays
+/// reachable; everything else keeps its unclassified exit 1.
 pub(super) fn classify_replace_error(err: anyhow::Error, exe_name: &str) -> anyhow::Error {
     let denied = err.chain().any(|cause| {
         cause
@@ -51,7 +52,9 @@ pub(super) fn classify_replace_error(err: anyhow::Error, exe_name: &str) -> anyh
         } else {
             String::new()
         };
-        CliError::Permission(format!("{err:#}; {REPLACE_DENIED_HINT}{extra}")).into()
+        err.context(CliError::Permission(format!(
+            "cannot update the executable ({REPLACE_DENIED_HINT}{extra})"
+        )))
     } else {
         err
     }
@@ -232,8 +235,31 @@ mod tests {
             err.downcast_ref::<CliError>(),
             Some(CliError::Permission(_))
         ));
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("cannot stage"), "{rendered}");
+        assert!(rendered.contains(REPLACE_DENIED_HINT), "{rendered}");
         let other = classify_replace_error(anyhow::anyhow!("boom"), "iroh-tunnel");
         assert!(other.downcast_ref::<CliError>().is_none());
+    }
+
+    #[test]
+    fn permission_denied_keeps_the_io_error_in_the_chain() {
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let err = classify_replace_error(
+            anyhow::Error::new(io).context("cannot stage"),
+            "iroh-tunnel",
+        );
+        let source = err.chain().find_map(|c| c.downcast_ref::<std::io::Error>());
+        assert_eq!(
+            source.map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
     }
 
     #[test]
@@ -290,56 +316,38 @@ mod tests {
         MODE_AT_OPEN.with(|cell| cell.set(mode));
     }
 
-    /// Sets the process umask and restores the previous one on drop. The
-    /// umask is process-wide: no other test may change it in-process (use
-    /// `service::fixtures::in_isolated_home` to isolate one that must).
-    #[cfg(unix)]
-    struct UmaskGuard(libc::mode_t);
-
-    #[cfg(unix)]
-    impl UmaskGuard {
-        fn set(mask: libc::mode_t) -> Self {
-            // SAFETY: umask(2) has no preconditions and cannot fail.
-            Self(unsafe { libc::umask(mask) })
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for UmaskGuard {
-        fn drop(&mut self) {
-            // SAFETY: umask(2) has no preconditions and cannot fail.
-            unsafe { libc::umask(self.0) };
-        }
-    }
-
     /// Issue #230: the staging file is owner-only from the moment it exists,
     /// so a permissive umask never lets another user grab a write fd before
     /// the final permissions are set.
     #[cfg(unix)]
     #[test]
     fn staging_file_is_created_owner_only_under_a_permissive_umask() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("t");
-        std::fs::write(&target, b"o").unwrap();
-        let perms = std::fs::Permissions::from_mode(0o755);
+        const NAME: &str =
+            "update::replace::tests::staging_file_is_created_owner_only_under_a_permissive_umask";
+        // The umask is process-wide, so it is only changed in a child
+        // process that runs this test alone.
+        crate::fixtures::in_isolated_home(NAME, |home| {
+            use std::os::unix::fs::PermissionsExt;
+            // Explicit, so the test does not depend on the runner's umask (a
+            // 077 umask would hide the bug); 022 exposes group/other bits on
+            // a default-mode open.
+            // SAFETY: umask(2) only changes this child process's file mode
+            // creation mask; it has no memory-safety preconditions.
+            unsafe { libc::umask(0o022) };
+            let target = home.join("t");
+            std::fs::write(&target, b"o").unwrap();
+            let perms = std::fs::Permissions::from_mode(0o755);
 
-        // Explicit, so the test does not depend on the runner's umask (a 077
-        // umask would hide the bug). 022 is enough to expose group/other bits
-        // on a default-mode open; umask is process-wide, so stay no looser
-        // than the usual default to avoid widening files of parallel tests.
-        let staged = {
-            let _umask = UmaskGuard::set(0o022);
-            StagedFile::create(dir.path(), &target, b"new", &perms).unwrap()
-        };
+            let staged = StagedFile::create(home, &target, b"new", &perms).unwrap();
 
-        let at_open = MODE_AT_OPEN.with(std::cell::Cell::take).unwrap();
-        assert_eq!(at_open & 0o077, 0, "mode at open {:o}", at_open & 0o777);
-        let final_mode = std::fs::metadata(&staged.path)
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(final_mode & 0o777, 0o755);
+            let at_open = MODE_AT_OPEN.with(std::cell::Cell::take).unwrap();
+            assert_eq!(at_open & 0o077, 0, "mode at open {:o}", at_open & 0o777);
+            let final_mode = std::fs::metadata(&staged.path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(final_mode & 0o777, 0o755);
+        });
     }
 
     #[test]

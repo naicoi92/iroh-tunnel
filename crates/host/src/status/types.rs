@@ -66,6 +66,7 @@ impl RoleStatus {
     /// A pid is never proof of life: a crash leaves the file behind and the
     /// OS may hand the pid to an unrelated process. The kernel lock held by
     /// the running role is the only liveness signal, on every platform.
+    #[must_use]
     pub fn freshness(&self) -> Freshness {
         match (&self.snapshot, &self.liveness) {
             (Snapshot::Invalid(_), _) => Freshness::Unreadable,

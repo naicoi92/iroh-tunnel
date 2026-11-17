@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use super::locations::default_config_dir;
 #[cfg(target_os = "macos")]
 use super::locations::APP_DIR;
-use super::locations::{config_err, default_config_dir};
 use super::set_migration_notice::notify_migrated;
+use crate::error::CliError;
 
 /// Default config file for `role`. On macOS a legacy configuration is first
 /// copied into place when the new one does not exist yet; that performs
@@ -47,29 +48,29 @@ fn migrate_legacy(legacy: &Path, dest: &Path) -> Result<()> {
         Ok(_) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(config_err(format!(
-                "cannot access configuration {}: {e}; fix its permissions or pass --config",
+            return Err(anyhow::Error::new(e).context(CliError::Config(format!(
+                "cannot access configuration {}; fix its permissions or pass --config",
                 dest.display()
-            )))
+            ))))
         }
     }
     match std::fs::symlink_metadata(legacy) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(migration_failed(legacy, dest, &e)),
+        Err(e) => return Err(migration_failed(legacy, dest, e)),
     }
-    copy_no_overwrite(legacy, dest).map_err(|e| migration_failed(legacy, dest, &e))?;
+    copy_no_overwrite(legacy, dest).map_err(|e| migration_failed(legacy, dest, e))?;
     notify_migrated(legacy, dest);
     Ok(())
 }
 
-fn migration_failed(legacy: &Path, dest: &Path, e: &std::io::Error) -> anyhow::Error {
-    config_err(format!(
-        "could not migrate legacy configuration {} to {}: {e}; no new identity was created. \
+fn migration_failed(legacy: &Path, dest: &Path, e: std::io::Error) -> anyhow::Error {
+    anyhow::Error::new(e).context(CliError::Config(format!(
+        "could not migrate legacy configuration {} to {}; no new identity was created. \
          Fix access to the legacy file, copy it manually, or pass --config",
         legacy.display(),
         dest.display()
-    ))
+    )))
 }
 
 fn copy_no_overwrite(legacy: &Path, dest: &Path) -> std::io::Result<()> {
@@ -149,6 +150,24 @@ mod tests {
         migrate_legacy(&legacy, &dest).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "changed");
+    }
+
+    #[test]
+    fn a_failed_migration_keeps_the_io_error_in_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory as the legacy "file": it exists, but cannot be read.
+        let legacy = dir.path().join("legacy");
+        std::fs::create_dir(&legacy).unwrap();
+        let err = migrate_legacy(&legacy, &dir.path().join("new").join("serve.toml")).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<CliError>(),
+            Some(CliError::Config(_))
+        ));
+        assert!(
+            err.chain()
+                .any(<dyn std::error::Error>::is::<std::io::Error>),
+            "{err:?}"
+        );
     }
 
     #[test]

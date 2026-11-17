@@ -99,7 +99,7 @@ mod tests {
     }
 
     fn ace(ace_type: u8, flags: u8, mask: u32, body: &[u8]) -> Vec<u8> {
-        let size = (HEADER_AND_MASK + body.len()) as u16;
+        let size = u16::try_from(HEADER_AND_MASK + body.len()).unwrap();
         let mut v = vec![ace_type, flags];
         v.extend_from_slice(&size.to_le_bytes());
         v.extend_from_slice(&mask.to_le_bytes());

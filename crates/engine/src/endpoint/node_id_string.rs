@@ -1,6 +1,7 @@
 use iroh::Endpoint;
 
 /// The node id (public key) of an [`Endpoint`], as its base32 string form.
+#[must_use]
 pub fn node_id_string(ep: &Endpoint) -> String {
     ep.secret_key().public().to_string()
 }

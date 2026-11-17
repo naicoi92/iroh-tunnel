@@ -4,6 +4,7 @@ use super::types::GeneratedIdentity;
 
 /// Generate a fresh key and its node ID without touching any configuration
 /// file or the default path. Nothing is logged.
+#[must_use]
 pub fn random_identity() -> GeneratedIdentity {
     let key = iroh::SecretKey::generate();
     GeneratedIdentity {

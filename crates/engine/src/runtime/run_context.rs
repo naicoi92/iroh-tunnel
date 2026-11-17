@@ -23,6 +23,7 @@ impl Default for RunContext {
 
 impl RunContext {
     /// A context whose drain has not started.
+    #[must_use]
     pub fn new() -> Self {
         Self(Arc::new(watch::channel(None).0))
     }

@@ -51,6 +51,7 @@ pub struct Request<'a> {
 /// The refusal for a system install whose target user cannot be determined.
 ///
 /// A [`CliError::Config`] naming `why` and the re-run options for `role`; nothing was changed.
+#[must_use]
 pub fn unknown_user(why: &str, role: &str) -> anyhow::Error {
     CliError::Config(format!(
         "cannot tell which user this system service is for ({why}); the service must not fall \
@@ -136,7 +137,7 @@ pub fn resolve_target_account(
         Some(path) => trust::canonical(path)?,
         None => {
             let path = crate::paths::config_path_in(&account.home, request.role);
-            trust::canonical(&path).map_err(|_| {
+            canonical_or(&path, || {
                 CliError::Config(format!(
                     "no configuration for user {} at {}. Create it as that user \
                      (`iroh-tunnel {} config keygen`), or pass --config",
@@ -149,22 +150,37 @@ pub fn resolve_target_account(
     };
     // Canonical like the config: the runtime walk refuses every symlink, so a
     // symlinked home or /var must be resolved once, here (SM-04).
-    let state = trust::canonical(&match request.state {
-        Some(path) => std::path::absolute(path)?,
-        None => crate::paths::state_dir_in(&account.home),
-    })
-    .map_err(|_| {
-        CliError::Config(format!(
-            "the state directory for user {} does not exist; create it as that user \
+    let state = canonical_or(
+        &match request.state {
+            Some(path) => std::path::absolute(path)?,
+            None => crate::paths::state_dir_in(&account.home),
+        },
+        || {
+            CliError::Config(format!(
+                "the state directory for user {} does not exist; create it as that user \
              (`mkdir -p`), the service does not create directories in a user's home as root",
-            account.name
-        ))
-    })?;
+                account.name
+            ))
+        },
+    )?;
     Ok(Some(Target {
         account,
         config,
         state,
     }))
+}
+
+/// [`trust::canonical`], reporting a path that does not exist as `missing`;
+/// any other failure keeps the generic diagnostic. Either way the
+/// `io::Error` stays the source.
+fn canonical_or(path: &Path, missing: impl FnOnce() -> CliError) -> Result<PathBuf> {
+    std::fs::canonicalize(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::Error::new(e).context(missing())
+        } else {
+            trust::canonical_error(path, e)
+        }
+    })
 }
 
 pub(crate) use super::pin::RetargetDecision;
@@ -313,6 +329,71 @@ mod tests {
             "{msg}"
         );
         assert!(msg.contains("--config"), "{msg}");
+    }
+
+    /// Only a missing state directory gets the "does not exist" advice; a
+    /// permission failure is reported as such, with the OS error kept.
+    #[test]
+    fn an_unreadable_state_dir_is_not_reported_as_missing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        std::fs::write(&config, "x").unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::create_dir(locked.join("state")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let state = locked.join("state");
+        let request = Request {
+            role: "serve",
+            config: Some(&config),
+            state: Some(&state),
+            sudo_user: None,
+        };
+        let result = resolve_target_account(&request, None);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::fs::metadata(&state).is_ok() && unsafe { libc::geteuid() } == 0 {
+            return; // root traverses a 000 directory
+        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.downcast_ref::<CliError>(), Some(CliError::Config(_))),
+            "exit category must stay config: {err:?}"
+        );
+        let rendered = format!("{err:#}");
+        assert!(!rendered.contains("does not exist"), "{rendered}");
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+    }
+
+    /// A missing state directory gets one config diagnostic with one piece of
+    /// advice, followed by the OS cause.
+    #[test]
+    fn a_missing_state_dir_is_reported_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        std::fs::write(&config, "x").unwrap();
+        let state = tmp.path().join("absent");
+        let request = Request {
+            role: "serve",
+            config: Some(&config),
+            state: Some(&state),
+            sudo_user: None,
+        };
+        let err = resolve_target_account(&request, None).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert_eq!(rendered.matches("config error:").count(), 1, "{rendered}");
+        assert!(rendered.contains("does not exist"), "{rendered}");
+        assert!(!rendered.contains("Create it first"), "{rendered}");
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
     }
 
     #[test]

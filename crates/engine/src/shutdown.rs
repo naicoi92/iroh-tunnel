@@ -110,6 +110,8 @@ impl QuarantineSinks {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, JoinSet<()>> {
-        self.tasks.lock().unwrap_or_else(|p| p.into_inner())
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

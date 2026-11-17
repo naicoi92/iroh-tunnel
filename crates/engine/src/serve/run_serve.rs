@@ -100,7 +100,7 @@ pub async fn run_serve(
                 local_addr: support::format_local_addr(&s.host, s.port),
                 active_streams: targets
                     .get(&proto::alpn_for(&s.name))
-                    .map(|t| t.active_streams())
+                    .map(ServiceTarget::active_streams)
                     .unwrap_or_default(),
                 udp_stats: (s.protocol == Protocol::Udp)
                     .then(|| {
@@ -122,7 +122,7 @@ pub async fn run_serve(
         Some(sink) => match sink.save(initial.clone()).await {
             Ok(()) => Some(initial),
             Err(e) => {
-                tracing::warn!("failed to write status file: {e}");
+                tracing::warn!("failed to write status file: {e:#}");
                 None
             }
         },
@@ -482,7 +482,7 @@ async fn status_flush_loop(
         // until the next change.
         match sink.save(observation.clone()).await {
             Ok(()) => last = Some(observation),
-            Err(e) => tracing::warn!("failed to write status file: {e}"),
+            Err(e) => tracing::warn!("failed to write status file: {e:#}"),
         }
     }
 }
@@ -707,7 +707,7 @@ async fn handle_connection(
                         }
                     }
                 }
-                Err(error) => tracing::warn!("stream error: {error}"),
+                Err(error) => tracing::warn!("stream error: {error:#}"),
             }
         });
     };
@@ -857,7 +857,9 @@ impl<'conn> UdpConnectionFlows<'conn> {
     }
 
     fn flows(&self) -> std::sync::MutexGuard<'_, crate::udp::PeerFlows<UdpFlow>> {
-        self.table.lock().unwrap_or_else(|p| p.into_inner())
+        self.table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn stats(&self) -> &Arc<crate::udp::UdpStats> {
@@ -938,7 +940,9 @@ impl<'conn> UdpConnectionFlows<'conn> {
         let OpenAttempt { flow, rx, opened } = attempt;
         // One lock from the check to the swap: the flow cannot end between.
         let table = self.table.clone();
-        let mut flows = table.lock().unwrap_or_else(|p| p.into_inner());
+        let mut flows = table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let queue = match flows.get(flow) {
             Some(UdpFlow::Opening { queue, .. }) => queue.clone(),
             // The flow ended while its open finished: drop the result.
@@ -1242,8 +1246,13 @@ async fn open_upstream(local_addr: &str, resolver: &UpstreamResolver) -> Result<
     } else {
         (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
     };
-    let socket = UdpSocket::bind(bind).await?;
-    socket.connect(target).await?;
+    let socket = UdpSocket::bind(bind)
+        .await
+        .with_context(|| format!("cannot bind a udp socket for {local_addr} on {bind}"))?;
+    socket
+        .connect(target)
+        .await
+        .with_context(|| format!("cannot connect udp upstream {local_addr} ({target})"))?;
     Ok(socket)
 }
 
@@ -1275,7 +1284,7 @@ async fn relay_upstream_replies(
         };
         flows
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .refresh(flow, std::time::Instant::now());
         let max = conn.max_datagram_size();
         let limit = crate::udp::payload_limit(max);
@@ -1331,6 +1340,23 @@ mod tests {
     use super::*;
     use crate::serve::bind_serve;
     use crate::settings::{NodeSettings, ServeServiceSettings};
+
+    /// A failed upstream connect names the target and keeps the OS error.
+    #[tokio::test]
+    async fn open_upstream_failure_names_the_target() {
+        // macOS and Windows refuse a udp connect to port 0, so CI on those runners
+        // asserts this; Linux accepts it, and there is nothing to check there.
+        let Err(err) = open_upstream("0.0.0.0:0", &UpstreamResolver::default()).await else {
+            return;
+        };
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("0.0.0.0:0"), "{rendered}");
+        assert!(
+            err.chain()
+                .any(<dyn std::error::Error>::is::<std::io::Error>),
+            "{err:?}"
+        );
+    }
 
     #[tokio::test]
     async fn connect_local_timeout_resets_only_that_channel() {
@@ -1455,7 +1481,7 @@ mod tests {
             .map(|p| tracker.track(*p, "echo").unwrap())
             .collect();
 
-        let mut expected: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
+        let mut expected: Vec<String> = peers.iter().map(ToString::to_string).collect();
         expected.sort();
         let got: Vec<String> = tracker
             .snapshot()

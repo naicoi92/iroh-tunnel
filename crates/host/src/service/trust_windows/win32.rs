@@ -44,6 +44,18 @@ use super::ace::ace_layout;
 use super::model::{self, Ace, Descriptor, Refusal, Sid, TrustedSet};
 use crate::error::CliError;
 
+/// Size of a fixed Win32 structure, as the `u32` length the API takes.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "invariant: fixed Win32 structures are far smaller than u32::MAX bytes"
+)]
+pub(crate) const fn win32_size_of<T>() -> u32 {
+    std::mem::size_of::<T>() as u32
+}
+
+/// Bytes requested per `ReadFile` call of a verified read.
+const READ_CHUNK: u32 = 64 * 1024;
+
 /// What the last element of a chain is opened for. Every element gets
 /// `READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY`: NT skips the
 /// share-mode check for an open whose access mask holds no data right, and
@@ -265,7 +277,7 @@ fn owner_and_dacl(handle: &OwnedHandle) -> io::Result<(Sid, DaclState)> {
         )
     };
     if status != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(status as i32));
+        return Err(io::Error::from_raw_os_error(status.cast_signed()));
     }
     let _sd = LocalBox(sd);
     if owner.is_null() {
@@ -319,7 +331,7 @@ pub(crate) fn open_chain(path: &Path, last: LastAccess) -> Result<Chain> {
         }
         let handle = open_element(component, access).map_err(|e| {
             let msg = format!(
-                "cannot open {component} to verify {} ({e}); nothing was changed",
+                "cannot open {component} to verify {} (nothing was changed)",
                 path.display()
             );
             // Keep the io::Error reachable for callers that map error codes.
@@ -327,7 +339,11 @@ pub(crate) fn open_chain(path: &Path, last: LastAccess) -> Result<Chain> {
         })?;
         let attrs = attributes(&handle)
             .and_then(|attrs| owner_and_dacl(&handle).map(|od| (attrs, od)))
-            .map_err(|e| permission(format!("cannot read the security of {component}: {e}")));
+            .map_err(|e| {
+                anyhow::Error::new(e).context(CliError::Permission(format!(
+                    "cannot read the security of {component}"
+                )))
+            });
         let (attrs, (owner, dacl)) = attrs?;
         let dacl = match dacl {
             DaclState::Null => None,
@@ -383,7 +399,7 @@ fn not_a(kind: &str, d: &Descriptor) -> anyhow::Error {
 pub(crate) fn verify_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
     let chain = verified(path, LastAccess::Inspect, trusted).map_err(|e| {
         let missing = e.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error);
-        if matches!(missing, Some(c) if c == ERROR_FILE_NOT_FOUND as i32 || c == ERROR_PATH_NOT_FOUND as i32)
+        if matches!(missing, Some(c) if c == ERROR_FILE_NOT_FOUND.cast_signed() || c == ERROR_PATH_NOT_FOUND.cast_signed())
         {
             permission(format!(
                 "{} does not exist; create it as the installing user, the service does not \
@@ -418,7 +434,7 @@ pub(crate) fn read_verified(path: &Path, trusted: &TrustedSet) -> Result<String>
 
 fn read_all(handle: &OwnedHandle, path: &Path) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; READ_CHUNK as usize];
     loop {
         let mut read = 0u32;
         // SAFETY: `handle` is open with FILE_READ_DATA for synchronous I/O;
@@ -428,7 +444,7 @@ fn read_all(handle: &OwnedHandle, path: &Path) -> Result<Vec<u8>> {
             ReadFile(
                 handle.as_raw_handle(),
                 buf.as_mut_ptr(),
-                buf.len() as u32,
+                READ_CHUNK,
                 &mut read,
                 std::ptr::null_mut(),
             )
@@ -526,7 +542,12 @@ impl RenameInfo {
     /// `path` is the NUL-less UTF-16 destination. `flags` is
     /// `FILE_RENAME_FLAG_*` for `FileRenameInfoEx`; `None` builds the legacy
     /// `FileRenameInfo` with `ReplaceIfExists = TRUE`.
-    fn new(path: &[u16], flags: Option<u32>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] when the path does not fit the `u32`
+    /// lengths of the structure.
+    fn new(path: &[u16], flags: Option<u32>) -> io::Result<Self> {
         let name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let name_bytes = std::mem::size_of_val(path);
         let len = model::rename_buffer_len(
@@ -534,6 +555,9 @@ impl RenameInfo {
             name_offset,
             path.len(),
         );
+        let too_long = |_| io::Error::from(io::ErrorKind::InvalidInput);
+        let name_len = u32::try_from(name_bytes).map_err(too_long)?;
+        let total_len = u32::try_from(len).map_err(too_long)?;
         let mut buf = vec![0u64; len.div_ceil(8)];
         let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         // SAFETY: `buf` is zeroed, 8-byte aligned and at least `len` bytes,
@@ -545,17 +569,17 @@ impl RenameInfo {
                 None => (*info).Anonymous.ReplaceIfExists = true,
             }
             (*info).RootDirectory = std::ptr::null_mut();
-            (*info).FileNameLength = name_bytes as u32;
+            (*info).FileNameLength = name_len;
             std::ptr::copy_nonoverlapping(
                 path.as_ptr(),
                 buf.as_mut_ptr().cast::<u8>().add(name_offset).cast::<u16>(),
                 path.len(),
             );
         }
-        Self {
+        Ok(Self {
             buf,
-            len: len as u32,
-        }
+            len: total_len,
+        })
     }
 }
 
@@ -592,13 +616,13 @@ type Rename<'a> =
 /// first, the legacy class when the file system does not support them.
 fn rename_into(temp: &OwnedHandle, to: &[u16], rename: Rename) -> io::Result<()> {
     let flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
-    let result = match rename(temp, FileRenameInfoEx, &RenameInfo::new(to, Some(flags))) {
+    let result = match rename(temp, FileRenameInfoEx, &RenameInfo::new(to, Some(flags))?) {
         Err(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED) => {
-            rename(temp, FileRenameInfo, &RenameInfo::new(to, None))
+            rename(temp, FileRenameInfo, &RenameInfo::new(to, None)?)
         }
         other => other,
     };
-    result.map_err(|code| io::Error::from_raw_os_error(code as i32))
+    result.map_err(|code| io::Error::from_raw_os_error(code.cast_signed()))
 }
 
 /// After a rename: `path` must be a regular file, not a link or directory.
@@ -626,7 +650,7 @@ fn delete_on_close(file: &OwnedHandle) -> io::Result<()> {
             file.as_raw_handle(),
             FileDispositionInfo,
             (&info as *const FILE_DISPOSITION_INFO).cast(),
-            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            win32_size_of::<FILE_DISPOSITION_INFO>(),
         )
     };
     if ok == 0 {
@@ -637,7 +661,7 @@ fn delete_on_close(file: &OwnedHandle) -> io::Result<()> {
 
 fn write_all(file: &OwnedHandle, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
-        let chunk = bytes.len().min(u32::MAX as usize) as u32;
+        let chunk = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
         let mut written = 0u32;
         // SAFETY: `file` is open with GENERIC_WRITE for synchronous I/O;
         // `bytes` is readable for `chunk` bytes; `written` is a valid out
@@ -730,7 +754,7 @@ fn publish_with(
 fn is_not_found(e: &io::Error) -> bool {
     [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]
         .iter()
-        .any(|c| e.raw_os_error() == Some(*c as i32))
+        .any(|c| e.raw_os_error() == Some(c.cast_signed()))
 }
 
 /// Read `dir\name` under a verified directory chain, without following a
@@ -995,7 +1019,7 @@ pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     }
     let descriptor = LocalBox(descriptor);
     let attributes = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        nLength: win32_size_of::<SECURITY_ATTRIBUTES>(),
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: 0,
     };
@@ -1005,7 +1029,7 @@ pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     let created = unsafe { CreateDirectoryW(path.as_ptr(), &attributes) };
     if created == 0 {
         let err = io::Error::last_os_error();
-        let code = err.raw_os_error().unwrap_or(0) as u32;
+        let code = err.raw_os_error().unwrap_or(0).cast_unsigned();
         // `CreateDirectoryW` is atomic: a failure leaves no directory behind.
         return Err(match super::map_create_error(code) {
             io::ErrorKind::PermissionDenied if err.kind() != io::ErrorKind::PermissionDenied => {

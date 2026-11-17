@@ -61,7 +61,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
 ] }
-# SCM control dispatcher and service status (consumed by later tasks).
+# SCM control dispatcher and service status.
 windows-service = "0.8.1"
 
 [lints]

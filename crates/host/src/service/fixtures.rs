@@ -95,32 +95,8 @@ pub(crate) fn commands(log: &[Event]) -> Vec<&Event> {
         .collect()
 }
 
-/// Re-run the named test in a child process whose `HOME` is a fresh
-/// directory, because registration paths and role locks are keyed by
-/// `HOME` and this process is multi-threaded.
 #[cfg(unix)]
-pub(crate) fn in_isolated_home(name: &str, body: impl FnOnce(&Path)) {
-    const CHILD_MARKER: &str = "IROH_TUNNEL_SERVICE_TEST_CHILD";
-    if std::env::var_os(CHILD_MARKER).is_none() {
-        let home = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture"])
-            .env(CHILD_MARKER, "1")
-            .env("HOME", home.path())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "child failed:\n{stdout}\n{stderr}");
-        assert!(
-            stdout.contains(&format!("IROH_CHILD_BODY_RAN {name}")),
-            "child did not run the test body (0 tests matched?):\n{stdout}\n{stderr}"
-        );
-        return;
-    }
-    body(&PathBuf::from(std::env::var_os("HOME").unwrap()));
-    println!("IROH_CHILD_BODY_RAN {name}");
-}
+pub(crate) use crate::fixtures::in_isolated_home;
 
 #[cfg(unix)]
 pub(crate) fn write_valid_config(dir: &Path) -> PathBuf {
