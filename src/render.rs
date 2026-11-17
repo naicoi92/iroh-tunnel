@@ -8,7 +8,7 @@ use iroh_tunnel_host::config::{
 use iroh_tunnel_host::ReadyReport;
 use iroh_tunnel_host::Role;
 
-use iroh_tunnel_host::service::{InstalledAt, ServiceNote};
+use iroh_tunnel_host::service::{shell_quote, InstalledAt, ServiceInvocation, ServiceNote};
 use iroh_tunnel_host::{OnReady, ReadyServices};
 
 /// The stream a rendered line belongs on.
@@ -69,7 +69,9 @@ pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
             (Stream::Stdout, format!("{role} is not running\n"))
         }
         ServiceNote::TaskListing { text } => (Stream::Stdout, text.clone()),
-        ServiceNote::ManagedBinary { role, source, copy } => (
+        ServiceNote::ManagedBinary {
+            role, source, copy, ..
+        } => (
             Stream::Stdout,
             format!(
                 "Registered a root-owned copy of {} at {} for the {role} service; re-run \
@@ -81,41 +83,37 @@ pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
     }
 }
 
-fn quote_shell_argument(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', r"'\''"))
-    }
-}
-
+/// Render a service note for the executable the person invoked: a managed
+/// copy registered for a standalone executable names that executable and the
+/// pinned config in its rerun guidance.
 pub(crate) fn render_service_note_for_invocation(
     note: &ServiceNote,
-    invocation: iroh_tunnel_host::service::ServiceInvocation,
-    executable: &Path,
-    config: Option<&Path>,
+    invocation: &ServiceInvocation,
 ) -> (Stream, String) {
     if let (
-        iroh_tunnel_host::service::ServiceInvocation::Standalone,
-        ServiceNote::ManagedBinary { role, source, copy },
+        ServiceInvocation::Standalone { executable },
+        ServiceNote::ManagedBinary {
+            role,
+            source,
+            copy,
+            config,
+        },
     ) = (invocation, note)
     {
-        let executable = quote_shell_argument(&executable.to_string_lossy());
-        let rerun = match config {
-            Some(config) => format!(
-                "re-run `sudo {executable} service install --system --config {}`",
-                quote_shell_argument(&config.to_string_lossy())
+        let rerun = format!(
+            "re-run `sudo {} service install --system --config {}`",
+            shell_quote(&executable.to_string_lossy()),
+            shell_quote(&config.to_string_lossy())
+        );
+        return (
+            Stream::Stdout,
+            format!(
+                "Registered a root-owned copy of {} at {} for the {role} service; {rerun} after \
+                 upgrading to update it\n",
+                source.display(),
+                copy.display()
             ),
-            None => format!(
-                "re-run service install with sudo using {executable}, select `--system`, and \
-                 supply `--config` followed by the absolute path of this service's config"
-            ),
-        };
-        return (Stream::Stdout, format!("Registered a root-owned copy of {} at {} for the {role} service; {rerun} after upgrading to update it\n", source.display(), copy.display()));
+        );
     }
     render_service_note(note)
 }
@@ -124,13 +122,8 @@ pub(crate) fn render_service_note_for_invocation(
 ///
 /// The note callback cannot fail the service operation it reports on, so a
 /// write error is logged instead of propagated.
-pub(crate) fn print_service_note(
-    note: &ServiceNote,
-    invocation: iroh_tunnel_host::service::ServiceInvocation,
-    executable: &Path,
-    config: Option<&Path>,
-) {
-    let (stream, text) = render_service_note_for_invocation(note, invocation, executable, config);
+pub(crate) fn print_service_note(note: &ServiceNote, invocation: &ServiceInvocation) {
+    let (stream, text) = render_service_note_for_invocation(note, invocation);
     let written = match stream {
         Stream::Stdout => crate::output::stdout(&text),
         Stream::Stderr => crate::output::stderr(&text),
@@ -401,26 +394,22 @@ mod tests {
             role: "serve".into(),
             source: "/source".into(),
             copy: "/copy".into(),
+            config: "/home/a/config file.toml".into(),
         };
         let (_, text) = render_service_note_for_invocation(
             &note,
-            iroh_tunnel_host::service::ServiceInvocation::Standalone,
-            Path::new("/opt/role bin/renamed"),
-            Some(Path::new("/home/a/config file.toml")),
+            &ServiceInvocation::Standalone {
+                executable: "/opt/role bin/renamed".into(),
+            },
         );
-        assert!(text.contains("sudo '/opt/role bin/renamed' service install --system --config '/home/a/config file.toml'"), "{text}");
-        let (_, text) = render_service_note_for_invocation(
-            &note,
-            iroh_tunnel_host::service::ServiceInvocation::Standalone,
-            Path::new("/opt/role bin/renamed"),
-            None,
+        assert_eq!(
+            text,
+            "Registered a root-owned copy of /source at /copy for the serve service; re-run \
+             `sudo '/opt/role bin/renamed' service install --system --config \
+             '/home/a/config file.toml'` after upgrading to update it\n"
         );
-        assert!(!text.contains("<absolute-config-path>"), "{text}");
-        assert!(
-            text.contains("supply `--config` followed by the absolute path"),
-            "{text}"
-        );
-        assert!(text.contains("/opt/role bin/renamed"), "{text}");
+        let (_, combined) = render_service_note_for_invocation(&note, &ServiceInvocation::Combined);
+        assert_eq!(combined, render_service_note(&note).1);
     }
 
     #[test]
@@ -512,6 +501,7 @@ mod tests {
                 role: "serve".into(),
                 source: "/home/u/.cargo/bin/iroh-tunnel".into(),
                 copy: "/var/lib/iroh-tunnel/bin/serve/iroh-tunnel".into(),
+                config: "/home/u/.config/iroh-tunnel/serve.toml".into(),
             },
             Stream::Stdout,
             "Registered a root-owned copy of /home/u/.cargo/bin/iroh-tunnel at \

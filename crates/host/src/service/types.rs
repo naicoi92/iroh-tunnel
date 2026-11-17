@@ -129,13 +129,38 @@ pub struct ServiceStatusReport {
     pub native: Option<NativeOutput>,
 }
 
-/// Command-line form accepted by the executable registered as a service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which executable the person invoked, and so the command-line form the
+/// registered executable accepts and the command guidance names.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceInvocation {
-    /// The combined executable requires a role subcommand.
+    /// The combined `iroh-tunnel` executable: it requires a role subcommand.
     Combined,
-    /// A role-specific executable accepts `run` directly.
-    Standalone,
+    /// A role-specific executable: it accepts `run` directly.
+    Standalone {
+        /// The executable the person invoked, named in rerun guidance.
+        executable: PathBuf,
+    },
+}
+
+impl ServiceInvocation {
+    /// The role subcommand the registered executable needs before `run`:
+    /// `Some(role)` for the combined executable, `None` for a standalone one.
+    #[must_use]
+    pub fn role_arg<'r>(&self, role: &'r str) -> Option<&'r str> {
+        match self {
+            Self::Combined => Some(role),
+            Self::Standalone { .. } => None,
+        }
+    }
+
+    /// The argv that names `role`'s commands in rerun guidance, before the
+    /// `service <verb>` words.
+    pub(crate) fn rerun_prefix(&self, role: &str) -> Vec<String> {
+        match self {
+            Self::Combined => vec!["iroh-tunnel".to_owned(), role.to_owned()],
+            Self::Standalone { executable } => vec![executable.to_string_lossy().into_owned()],
+        }
+    }
 }
 
 /// Everything `install` needs from its caller.
@@ -143,7 +168,9 @@ pub enum ServiceInvocation {
 pub struct InstallRequest {
     /// The role to register.
     pub role: Role,
-    /// The command-line form accepted by the selected executable.
+    /// The command-line form accepted by the selected executable. A
+    /// `Standalone` executable must be `tunnel_executable`: guidance names it
+    /// while the registration runs `tunnel_executable`.
     pub invocation: ServiceInvocation,
     /// `None` lets [`super::decide_install_scope`] decide.
     pub scope: Option<ServiceScope>,
@@ -236,6 +263,7 @@ pub enum ScopeDecision {
 /// under systemd, but a bare `KeepAlive{SuccessfulExit=false}` under launchd,
 /// which has no exit-status exemption. A macOS job refused for "already
 /// running" is therefore respawned until it is booted out.
+#[derive(Debug)]
 pub(crate) struct RestartPolicy {
     /// Restart the service when it exits with a non-zero status.
     pub on_failure: bool,
@@ -256,6 +284,20 @@ impl RestartPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_combined_executable_needs_the_role_argument() {
+        let standalone = ServiceInvocation::Standalone {
+            executable: PathBuf::from("/opt/role bin/renamed"),
+        };
+        assert_eq!(ServiceInvocation::Combined.role_arg("serve"), Some("serve"));
+        assert_eq!(standalone.role_arg("serve"), None);
+        assert_eq!(
+            ServiceInvocation::Combined.rerun_prefix("access"),
+            ["iroh-tunnel", "access"]
+        );
+        assert_eq!(standalone.rerun_prefix("access"), ["/opt/role bin/renamed"]);
+    }
 
     #[test]
     fn scope_variants_exist() {

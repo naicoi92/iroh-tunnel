@@ -17,9 +17,10 @@ use anyhow::{Context, Result};
 
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::registration::instance_suffix;
-use super::super::task_xml::{encode_utf16_le, format_task_xml, task_action_invocation};
+use super::super::registration::RegistrationInput;
+use super::super::task_xml::{encode_utf16_le, format_task_xml, task_action};
 use super::super::types::AppliedEffect;
-use super::super::types::{RestartPolicy, ServiceScope};
+use super::super::types::ServiceScope;
 use crate::error::CliError;
 
 /// Task name, one per role (plus the test-only instance suffix).
@@ -127,26 +128,20 @@ fn ensure_default_state(state: &Path) -> Result<()> {
     .into())
 }
 
-#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
-    invocation: super::super::types::ServiceInvocation,
-    scope: ServiceScope,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
+    reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    debug_assert_eq!(scope, ServiceScope::User, "system scope is refused earlier");
-    ensure_default_state(state)?;
-    let action = task_action_invocation(role, binary, config, invocation)?;
-    let xml = format_task_xml(
-        role,
-        &current_user(native)?,
-        &action,
-        &RestartPolicy::DEFAULT,
+    debug_assert_eq!(
+        reg.scope,
+        ServiceScope::User,
+        "system scope is refused earlier"
     );
+    let role = reg.role;
+    ensure_default_state(reg.state)?;
+    let action = task_action(reg)?;
+    let xml = format_task_xml(role, &current_user(native)?, &action, reg.policy);
 
     let definition = TempDefinition::write(&encode_utf16_le(&xml))?;
 

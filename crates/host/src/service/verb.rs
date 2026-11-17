@@ -1,17 +1,23 @@
 //! Shared mechanics of the uninstall/start/stop/restart operations (private).
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
 
 use anyhow::Result;
 
+use super::backend::Backend;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::effective_binary::EffectiveBinary;
 use super::execute::execute;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
 use super::platform;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::policy::shell_quote;
 use super::policy::{ensure_privilege, ensure_supported};
 use super::service_binary::release_unreferenced_copy;
-use super::types::{AppliedEffect, Environment, ServiceFailure, ServiceReport, ServiceScope};
+use super::types::{
+    AppliedEffect, Environment, ServiceFailure, ServiceInvocation, ServiceReport, ServiceScope,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::error::CliError;
 use crate::role::Role;
@@ -42,21 +48,17 @@ pub(crate) fn flag(scope: ServiceScope) -> &'static str {
     }
 }
 
-pub(crate) fn check_verb_policy_with_invocation(
+/// Refuse `verb` for an unsupported scope or a missing privilege; the
+/// refusal names the command that repeats it as `invocation`.
+pub(crate) fn check_verb_policy(
     verb: &str,
     role: Role,
+    invocation: &ServiceInvocation,
     scope: ServiceScope,
     env: Environment,
-    invocation: super::ServiceInvocation,
-    executable: &Path,
 ) -> Result<()> {
     ensure_supported(scope)?;
-    let mut rerun = match invocation {
-        super::ServiceInvocation::Combined => {
-            vec!["iroh-tunnel".to_owned(), role.name().to_owned()]
-        }
-        super::ServiceInvocation::Standalone => vec![executable.to_string_lossy().into_owned()],
-    };
+    let mut rerun = invocation.rerun_prefix(role.name());
     rerun.extend([
         "service".to_owned(),
         verb.to_owned(),
@@ -66,40 +68,21 @@ pub(crate) fn check_verb_policy_with_invocation(
 }
 
 /// [`uninstall`]/[`start`]/[`stop`]/[`restart`] over an injected runner.
-#[cfg(test)]
-#[cfg(unix)]
+///
+/// [`uninstall`]: super::uninstall
+/// [`start`]: super::start
+/// [`stop`]: super::stop
+/// [`restart`]: super::restart
 pub(crate) fn verb_via(
     verb: Verb,
     role: Role,
+    invocation: &ServiceInvocation,
     scope: ServiceScope,
     env: Environment,
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
 ) -> Result<ServiceReport, ServiceFailure> {
-    verb_via_with_invocation(
-        verb,
-        role,
-        scope,
-        env,
-        call,
-        runner,
-        super::ServiceInvocation::Combined,
-        Path::new("iroh-tunnel"),
-    )
-}
-
-#[expect(clippy::too_many_arguments, reason = "one verb invocation's inputs")]
-pub(crate) fn verb_via_with_invocation(
-    verb: Verb,
-    role: Role,
-    scope: ServiceScope,
-    env: Environment,
-    call: &mut ServiceCall,
-    runner: &mut Runner<'_>,
-    invocation: super::ServiceInvocation,
-    executable: &Path,
-) -> Result<ServiceReport, ServiceFailure> {
-    check_verb_policy_with_invocation(verb.word(), role, scope, env, invocation, executable)
+    check_verb_policy(verb.word(), role, invocation, scope, env)
         .and_then(|()| {
             if matches!(verb, Verb::Start) {
                 // Refuse before the manager: the unit would otherwise start and
@@ -115,8 +98,8 @@ pub(crate) fn verb_via_with_invocation(
             native,
             notes,
             verb,
-            |native| guard_root_run(native, role.name(), root_run, invocation, executable),
-            |native, notes| backend_verb(verb, native, notes, role, scope),
+            |native| guard_root_run(native, role.name(), root_run, invocation),
+            |native, notes| Backend::select(scope)?.verb(verb, native, notes, role, scope),
             |native| release_unreferenced_copy(native, role.name(), root_run),
         )
     })
@@ -160,18 +143,16 @@ fn guard_root_run(
     native: &mut Native,
     role: &str,
     root_run: bool,
-    invocation: super::ServiceInvocation,
-    executable: &Path,
+    invocation: &ServiceInvocation,
 ) -> Result<()> {
     if !root_run {
         return Ok(());
     }
-    check_effective_with_invocation(
+    check_effective(
         platform::effective_binary(native, role),
         role,
         &|path| super::trust::verify_binary(path, super::trust::TrustedOwners::RootOnly),
         invocation,
-        executable,
     )
 }
 
@@ -181,26 +162,9 @@ fn guard_root_run(
     _native: &mut Native,
     _role: &str,
     _root_run: bool,
-    _invocation: super::ServiceInvocation,
-    _executable: &Path,
+    _invocation: &ServiceInvocation,
 ) -> Result<()> {
     Ok(())
-}
-
-/// Ask the service manager which binary it will run for `role` (a read-only
-/// query) and check it with `verify`.
-///
-/// # Errors
-///
-/// See [`check_effective`].
-#[cfg(test)]
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn guard_effective_binary(
-    native: &mut Native,
-    role: &str,
-    verify: &dyn Fn(&Path) -> Result<()>,
-) -> Result<()> {
-    check_effective(platform::effective_binary(native, role), role, verify)
 }
 
 /// Accept a definition the manager has not loaded (the backend verb reports
@@ -209,30 +173,14 @@ fn guard_effective_binary(
 /// # Errors
 ///
 /// [`CliError::Permission`] keeping `verify`'s reason (path, owner, mode),
-/// or naming why the definition is unreadable, with reinstall guidance.
-#[cfg(test)]
+/// or naming why the definition is unreadable, with reinstall guidance that
+/// names the command as `invocation`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn check_effective(
     loaded: EffectiveBinary,
     role: &str,
     verify: &dyn Fn(&Path) -> Result<()>,
-) -> Result<()> {
-    check_effective_with_invocation(
-        loaded,
-        role,
-        verify,
-        super::ServiceInvocation::Combined,
-        Path::new("iroh-tunnel"),
-    )
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn check_effective_with_invocation(
-    loaded: EffectiveBinary,
-    role: &str,
-    verify: &dyn Fn(&Path) -> Result<()>,
-    invocation: super::ServiceInvocation,
-    executable: &Path,
+    invocation: &ServiceInvocation,
 ) -> Result<()> {
     let reason = match loaded {
         EffectiveBinary::NotLoaded => return Ok(()),
@@ -259,75 +207,19 @@ fn check_effective_with_invocation(
         ),
     };
     let guidance = match invocation {
-        super::ServiceInvocation::Combined => {
+        ServiceInvocation::Combined => {
             format!("re-run `sudo iroh-tunnel {role} service install --system`")
         }
-        super::ServiceInvocation::Standalone => format!(
+        ServiceInvocation::Standalone { executable } => format!(
             "re-run service install with sudo using {}, select `--system`, and \
              supply `--config` followed by the absolute path of this service's config",
-            super::policy::shell_quote(&executable.to_string_lossy())
+            shell_quote(&executable.to_string_lossy())
         ),
     };
     Err(CliError::Permission(format!(
         "{reason}. To register a root-owned binary, {guidance}."
     ))
     .into())
-}
-
-fn backend_verb(
-    verb: Verb,
-    native: &mut Native,
-    notes: &mut dyn FnMut(&ServiceNote),
-    role_id: Role,
-    scope: ServiceScope,
-) -> Result<()> {
-    let role = role_id.name();
-    #[cfg(target_os = "linux")]
-    {
-        use super::backend::{busybox, systemd};
-        if super::platform::linux_is_systemd() {
-            match verb {
-                Verb::Uninstall => systemd::uninstall(native, notes, role, scope),
-                Verb::Start => systemd::start(native, role, scope),
-                Verb::Stop => systemd::stop(native, notes, role, scope),
-                Verb::Restart => systemd::restart(native, notes, role, scope),
-            }
-        } else {
-            match verb {
-                Verb::Uninstall => busybox::uninstall(native, notes, role, scope),
-                Verb::Start => busybox::start(native, role, scope),
-                Verb::Stop => busybox::stop(native, notes, role, scope),
-                Verb::Restart => busybox::restart(native, notes, role, scope),
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use super::backend::launchd;
-        match verb {
-            Verb::Uninstall => launchd::uninstall(native, notes, role, scope),
-            Verb::Start => launchd::start(native, role, scope),
-            Verb::Stop => launchd::stop(native, notes, role, scope),
-            Verb::Restart => launchd::restart(native, notes, role, scope),
-        }
-    }
-    #[cfg(windows)]
-    {
-        use super::backend::windows;
-        if scope == ServiceScope::System {
-            return super::system_verb::system_verb(verb, role_id, notes);
-        }
-        match verb {
-            Verb::Uninstall => windows::uninstall(native, notes, role, scope),
-            Verb::Start => windows::start(native, role, scope),
-            Verb::Stop => windows::stop(native, notes, role, scope),
-            Verb::Restart => windows::restart(native, notes, role, scope),
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        super::platform::unsupported()
-    }
 }
 
 #[cfg(test)]
@@ -342,6 +234,7 @@ mod tests {
     use super::super::status::status_via;
     use super::*;
     use crate::error::CliError;
+    use std::path::Path;
 
     #[cfg(unix)]
     #[test]
@@ -357,6 +250,7 @@ mod tests {
             let result = verb_via(
                 Verb::Start,
                 Role::Serve,
+                &ServiceInvocation::Combined,
                 ServiceScope::User,
                 BATCH,
                 &mut call,
@@ -391,39 +285,29 @@ mod tests {
             for verb in ["start", "stop", "restart", "uninstall"] {
                 let mut notes = |_: &ServiceNote| {};
                 let mut call = ServiceCall::capture(&mut notes);
-                let invocation = super::super::ServiceInvocation::Standalone;
+                let invocation = ServiceInvocation::Standalone {
+                    executable: path.to_path_buf(),
+                };
                 let err = match verb {
-                    "start" => super::super::start_with_invocation(
+                    "start" => {
+                        super::super::start(role, &invocation, ServiceScope::System, env, &mut call)
+                    }
+                    "stop" => {
+                        super::super::stop(role, &invocation, ServiceScope::System, env, &mut call)
+                    }
+                    "restart" => super::super::restart(
                         role,
+                        &invocation,
                         ServiceScope::System,
                         env,
                         &mut call,
-                        invocation,
-                        path,
                     ),
-                    "stop" => super::super::stop_with_invocation(
+                    _ => super::super::uninstall(
                         role,
+                        &invocation,
                         ServiceScope::System,
                         env,
                         &mut call,
-                        invocation,
-                        path,
-                    ),
-                    "restart" => super::super::restart_with_invocation(
-                        role,
-                        ServiceScope::System,
-                        env,
-                        &mut call,
-                        invocation,
-                        path,
-                    ),
-                    _ => super::super::uninstall_with_invocation(
-                        role,
-                        ServiceScope::System,
-                        env,
-                        &mut call,
-                        invocation,
-                        path,
                     ),
                 }
                 .unwrap_err();
@@ -440,13 +324,14 @@ mod tests {
             }
             let mut notes = |_: &ServiceNote| {};
             let mut call = ServiceCall::capture(&mut notes);
-            let err = super::super::status_with_invocation(
+            let err = super::super::status(
                 role,
+                &ServiceInvocation::Standalone {
+                    executable: path.to_path_buf(),
+                },
                 ServiceScope::System,
                 env,
                 &mut call,
-                super::super::ServiceInvocation::Standalone,
-                path,
             )
             .unwrap_err();
             assert!(err
@@ -483,6 +368,7 @@ mod tests {
                 let mut call = ServiceCall::capture(&mut notes);
                 status_via(
                     Role::Serve,
+                    &ServiceInvocation::Combined,
                     ServiceScope::User,
                     BATCH,
                     &mut call,
@@ -518,6 +404,7 @@ mod tests {
                     verb_via(
                         Verb::Start,
                         Role::Serve,
+                        &ServiceInvocation::Combined,
                         ServiceScope::User,
                         BATCH,
                         &mut call,
@@ -752,6 +639,7 @@ mod steps_tests {
             verb_via(
                 Verb::Start,
                 Role::Serve,
+                &ServiceInvocation::Combined,
                 ServiceScope::User,
                 super::super::fixtures::BATCH,
                 &mut call,
@@ -832,7 +720,7 @@ mod guard_tests {
             &mut native,
             &mut |_: &ServiceNote| {},
             verb,
-            |_| check_effective(loaded, "serve", verify),
+            |_| check_effective(loaded, "serve", verify, &ServiceInvocation::Combined),
             |_, _| {
                 issued.borrow_mut().push(verb.word().to_owned());
                 Ok(())
@@ -845,12 +733,13 @@ mod guard_tests {
     #[test]
     fn standalone_guard_guidance_names_invoked_executable_and_config() {
         for role in ["serve", "access"] {
-            let err = check_effective_with_invocation(
+            let err = check_effective(
                 EffectiveBinary::Binary("/unsafe".into()),
                 role,
                 &refuse_unsafe,
-                super::super::ServiceInvocation::Standalone,
-                Path::new("/opt/role bin/renamed"),
+                &ServiceInvocation::Standalone {
+                    executable: PathBuf::from("/opt/role bin/renamed"),
+                },
             )
             .unwrap_err();
             let text = permission_text(&err);
@@ -925,6 +814,7 @@ mod guard_tests {
             let failure = verb_via(
                 verb,
                 Role::Serve,
+                &ServiceInvocation::Combined,
                 ServiceScope::System,
                 env,
                 &mut call,
@@ -1076,7 +966,13 @@ mod guard_tests {
         }
         let verify = |p: &Path| verify_binary(p, TrustedOwners::RootAnd(me()));
         // Accepted as installed ...
-        check_effective(EffectiveBinary::Binary(file.clone()), "serve", &verify).unwrap();
+        check_effective(
+            EffectiveBinary::Binary(file.clone()),
+            "serve",
+            &verify,
+            &ServiceInvocation::Combined,
+        )
+        .unwrap();
         // ... refused once a directory above it is loosened.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
 
@@ -1111,8 +1007,13 @@ mod guard_tests {
             refuse_unsafe(p)
         };
 
-        let err = guard_effective_binary(&mut native, "serve", &verify)
-            .expect_err("the loaded binary is refused");
+        let err = check_effective(
+            platform::effective_binary(&mut native, "serve"),
+            "serve",
+            &verify,
+            &ServiceInvocation::Combined,
+        )
+        .expect_err("the loaded binary is refused");
 
         assert_eq!(seen.into_inner(), std::slice::from_ref(&path));
         assert!(permission_text(&err).contains(path.to_str().unwrap()));
@@ -1175,9 +1076,16 @@ mod guard_tests {
                 &mut native,
                 &mut |_: &ServiceNote| {},
                 Verb::Restart,
-                |native| guard_effective_binary(native, "serve", &|p| verify_binary(p, mine)),
+                |native| {
+                    check_effective(
+                        platform::effective_binary(native, "serve"),
+                        "serve",
+                        &|p| verify_binary(p, mine),
+                        &ServiceInvocation::Combined,
+                    )
+                },
                 |native, notes| {
-                    backend_verb(
+                    Backend::select(ServiceScope::System)?.verb(
                         Verb::Restart,
                         native,
                         notes,

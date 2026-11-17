@@ -14,7 +14,8 @@ use std::process::ExitCode;
 use anyhow::{bail, Context, Result};
 use iroh_tunnel_host::role::Role;
 use iroh_tunnel_host::service::{
-    self, Environment, InstallRequest, RunningExecutable, ServiceCall, ServiceNote, ServiceScope,
+    self, Environment, InstallRequest, RunningExecutable, ServiceCall, ServiceInvocation,
+    ServiceNote, ServiceScope,
 };
 
 /// This process's executable, read through `/proc/self/exe` on Linux like the
@@ -87,7 +88,7 @@ fn run() -> Result<String> {
     match args.action.as_str() {
         "install" => {
             let request = InstallRequest {
-                invocation: iroh_tunnel_host::service::ServiceInvocation::Combined,
+                invocation: ServiceInvocation::Combined,
                 role: args.role,
                 scope: Some(args.scope),
                 config: args.config,
@@ -107,11 +108,23 @@ fn run() -> Result<String> {
         }
         "status" => Ok(format!(
             "{:#?}",
-            service::status(args.role, args.scope, env, &mut call)?
+            service::status(
+                args.role,
+                &ServiceInvocation::Combined,
+                args.scope,
+                env,
+                &mut call
+            )?
         )),
         "uninstall" => Ok(format!(
             "{:#?}",
-            service::uninstall(args.role, args.scope, env, &mut call)?
+            service::uninstall(
+                args.role,
+                &ServiceInvocation::Combined,
+                args.scope,
+                env,
+                &mut call
+            )?
         )),
         other => bail!("unknown action {other:?}"),
     }

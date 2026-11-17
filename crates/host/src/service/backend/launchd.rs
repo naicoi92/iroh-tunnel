@@ -23,10 +23,9 @@
 use super::super::effective_binary::{parse_launchctl_print, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::pin::Pin;
-use super::super::registration::{instance_suffix, write_registration};
+use super::super::registration::{instance_suffix, write_registration, RegistrationInput};
 use super::super::types::AppliedEffect;
-use super::super::types::ServiceInvocation;
-use super::super::types::{RestartPolicy, ServiceScope};
+use super::super::types::ServiceScope;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -88,45 +87,19 @@ fn xml_escape(s: &str) -> String {
 ///
 /// The KeepAlive block comes from the shared [`RestartPolicy`] so the
 /// "restart on crash" behavior stays in sync with the systemd unit template.
-#[cfg(test)]
-fn format_plist(role: &str, binary: &Path, config: &Path, state: &Path) -> String {
-    format_plist_with(role, binary, config, state, &RestartPolicy::DEFAULT, None)
-}
-
-#[cfg(test)]
-fn format_plist_with(
-    role: &str,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    policy: &RestartPolicy,
-    pin: Option<&Pin>,
-) -> String {
-    format_plist_invocation(
+fn format_plist(reg: &RegistrationInput<'_>) -> String {
+    let RegistrationInput {
         role,
         binary,
         config,
         state,
-        policy,
         pin,
-        ServiceInvocation::Combined,
-    )
-}
-
-fn format_plist_invocation(
-    role: &str,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    policy: &RestartPolicy,
-    pin: Option<&Pin>,
-    invocation: ServiceInvocation,
-) -> String {
-    let role_arg = if invocation == ServiceInvocation::Combined {
+        policy,
+        ..
+    } = *reg;
+    let role_arg = reg.role_arg().map_or_else(String::new, |role| {
         format!("\t\t<string>{}</string>\n", xml_escape(role))
-    } else {
-        String::new()
-    };
+    });
     let label = xml_escape(&label(role));
     let binary = xml_escape(&binary.to_string_lossy());
     let config = xml_escape(&config.to_string_lossy());
@@ -204,28 +177,14 @@ pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<S
     super::super::registration::read_registration(&plist_path(role, scope).ok()?)
 }
 
-#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
-    invocation: ServiceInvocation,
-    scope: ServiceScope,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    pin: Option<&Pin>,
+    reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    super::super::pin::require_unix_pin(pin)?;
-    let plist = format_plist_invocation(
-        role,
-        binary,
-        config,
-        state,
-        &RestartPolicy::DEFAULT,
-        pin,
-        invocation,
-    );
+    super::super::pin::require_unix_pin(reg.pin)?;
+    let plist = format_plist(reg);
+    let (role, scope) = (reg.role, reg.scope);
     let path = plist_path(role, scope)?;
     write_registration(&path, &plist)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));
@@ -482,18 +441,41 @@ pub(crate) fn status(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn plist_matches_golden_for_every_case() {
+        use super::super::super::fixtures::{assert_golden, cases, unix_paths, unix_pin};
+        let mut all = String::new();
+        for case in cases() {
+            let paths = unix_paths(case.role);
+            let pin = unix_pin(case.scope, &paths.config);
+            all.push_str(&case.header());
+            all.push_str(&format_plist(&RegistrationInput {
+                invocation: &case.invocation,
+                scope: case.scope,
+                pin: pin.as_ref(),
+                ..registration(case.role, &paths.binary, &paths.config, &paths.state)
+            }));
+        }
+        assert_golden("launchd.txt", &all);
+    }
+
+    #[test]
     fn invocation_form_survives_managed_paths_with_spaces() {
         for role in ["serve", "access"] {
-            for invocation in [ServiceInvocation::Combined, ServiceInvocation::Standalone] {
-                let body = format_plist_invocation(
-                    role,
-                    Path::new("/managed path/copy"),
-                    Path::new("/config path/c"),
-                    Path::new("/state"),
-                    &RestartPolicy::DEFAULT,
-                    None,
-                    invocation,
-                );
+            for invocation in [
+                ServiceInvocation::Combined,
+                ServiceInvocation::Standalone {
+                    executable: PathBuf::from("/opt/role bin/renamed"),
+                },
+            ] {
+                let body = format_plist(&RegistrationInput {
+                    invocation: &invocation,
+                    ..registration(
+                        role,
+                        Path::new("/managed path/copy"),
+                        Path::new("/config path/c"),
+                        Path::new("/state"),
+                    )
+                });
                 let role_line = format!("<string>{role}</string>");
                 assert_eq!(
                     body.contains(&role_line),
@@ -509,6 +491,8 @@ mod tests {
         }
     }
 
+    use super::super::super::fixtures::registration;
+    use super::super::super::types::{RestartPolicy, ServiceInvocation};
     use super::*;
     use crate::service::native::fake::{call, note_sink, output, Event, Events, FakeRunner};
     use crate::service::native::{Native, OutputMode};
@@ -641,7 +625,12 @@ mod tests {
 
     #[test]
     fn plist_declares_apples_property_list_doctype() {
-        let body = format_plist("serve", Path::new("/b"), Path::new("/c"), Path::new("/s"));
+        let body = format_plist(&registration(
+            "serve",
+            Path::new("/b"),
+            Path::new("/c"),
+            Path::new("/s"),
+        ));
         assert!(body.contains("PropertyList-1.0.dtd"), "{body}");
         assert!(!body.contains("PropertyManifest"), "{body}");
     }
@@ -651,7 +640,12 @@ mod tests {
         // launchd's KeepAlive cannot exempt an exit status the way systemd's
         // RestartPreventExitStatus does; see design.md. This pins the gap so a
         // future edit cannot claim containment the platform does not provide.
-        let body = format_plist("serve", Path::new("/b"), Path::new("/c"), Path::new("/s"));
+        let body = format_plist(&registration(
+            "serve",
+            Path::new("/b"),
+            Path::new("/c"),
+            Path::new("/s"),
+        ));
         assert!(
             body.contains("<key>SuccessfulExit</key>\n\t\t<false/>"),
             "{body}"
@@ -833,12 +827,12 @@ mod tests {
 
     #[test]
     fn plist_is_valid_xml_and_has_label() {
-        let body = format_plist(
+        let body = format_plist(&registration(
             "serve",
             Path::new("/usr/local/bin/iroh-tunnel"),
             Path::new("/etc/iroh-tunnel/serve.toml"),
             Path::new("/var/state"),
-        );
+        ));
         assert!(
             body.contains("<string>dev.iroh-tunnel.serve</string>"),
             "label missing"
@@ -856,12 +850,12 @@ mod tests {
 
     #[test]
     fn plist_pins_config_argument_and_state_dir_environment() {
-        let body = format_plist(
+        let body = format_plist(&registration(
             "serve",
             Path::new("/bin/it"),
             Path::new("/cfg/serve.toml"),
             Path::new("/st&ate"),
-        );
+        ));
         assert!(body.contains("<string>/cfg/serve.toml</string>"), "{body}");
         assert!(
             body.contains("<key>IROH_TUNNEL_STATE_DIR</key>\n\t\t<string>/st&amp;ate</string>"),
@@ -880,12 +874,12 @@ mod tests {
     fn plist_escapes_xml_metacharacters_in_paths() {
         // A config path containing XML metacharacters must be escaped so the
         // plist stays valid XML (regression guard for the review fix).
-        let body = format_plist(
+        let body = format_plist(&registration(
             "serve",
             Path::new("/opt/a&b"),
             Path::new("/home/u<x>/serve.toml"),
             Path::new("/var/state"),
-        );
+        ));
         assert!(
             body.contains("/opt/a&amp;b") && !body.contains("/opt/a&b<"),
             "binary path not escaped: {body}"
@@ -926,12 +920,12 @@ mod tests {
     fn plist_default_policy_emits_keepalive_successful_exit_false() {
         // Regression: the shared RestartPolicy::DEFAULT must keep the previous
         // "respawn unless clean exit" behavior the plist used to hard-code.
-        let body = format_plist(
+        let body = format_plist(&registration(
             "serve",
             Path::new("/usr/local/bin/iroh-tunnel"),
             Path::new("/etc/cfg"),
             Path::new("/var/state"),
-        );
+        ));
         assert!(
             body.contains("<key>KeepAlive</key>"),
             "KeepAlive missing with default policy: {body}"
@@ -948,14 +942,10 @@ mod tests {
             on_failure: false,
             delay_secs: 0,
         };
-        let body = format_plist_with(
-            "serve",
-            Path::new("/x"),
-            Path::new("/y"),
-            Path::new("/z"),
-            &policy,
-            None,
-        );
+        let body = format_plist(&RegistrationInput {
+            policy: &policy,
+            ..registration("serve", Path::new("/x"), Path::new("/y"), Path::new("/z"))
+        });
         assert!(
             !body.contains("<key>KeepAlive</key>"),
             "KeepAlive should be absent when policy disables restart: {body}"
@@ -967,7 +957,12 @@ mod tests {
     #[test]
     fn managed_path_renders_as_one_argument_in_each_backend() {
         let copy = "/Library/Application Support/iroh-tunnel/bin/serve/iroh-tunnel";
-        let body = format_plist("serve", Path::new(copy), Path::new("/c"), Path::new("/s"));
+        let body = format_plist(&registration(
+            "serve",
+            Path::new(copy),
+            Path::new("/c"),
+            Path::new("/s"),
+        ));
         // One `<string>` element is one argument, spaces included.
         assert!(
             body.contains(&format!(

@@ -16,15 +16,16 @@
 )]
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::error::CliError;
+use crate::service::registration::RegistrationInput;
 use crate::service::trust_windows::ENV_TRUSTED_SID;
 use crate::service::types::RestartPolicy;
-use crate::service::{Pin, PinOwner, ENV_SCM};
+use crate::service::{PinOwner, ENV_SCM};
 use crate::status::writer::ENV_STATE_DIR;
 
 /// Poll interval while waiting for a state change.
@@ -88,47 +89,28 @@ pub(crate) struct ServiceSpec {
 }
 
 impl ServiceSpec {
-    /// Render the definition of the `role` service.
+    /// Render the definition of the `reg.role` service.
     ///
     /// # Errors
     ///
-    /// [`CliError::Service`] when `role` is not `serve`/`access` or `pin` is
-    /// not a SID pin.
-    #[cfg(test)]
-    pub(crate) fn render(
-        role: &str,
-        executable: &Path,
-        config: &Path,
-        state: &Path,
-        pin: &Pin,
-        policy: &RestartPolicy,
-    ) -> Result<Self> {
-        Self::render_with_invocation(
+    /// [`CliError::Service`] when the role is not `serve`/`access` or the
+    /// pin is missing or not a SID pin.
+    pub(crate) fn render(reg: &RegistrationInput<'_>) -> Result<Self> {
+        let RegistrationInput {
             role,
-            executable,
+            binary: executable,
             config,
             state,
-            pin,
             policy,
-            super::super::types::ServiceInvocation::Combined,
-        )
-    }
-
-    pub(crate) fn render_with_invocation(
-        role: &str,
-        executable: &Path,
-        config: &Path,
-        state: &Path,
-        pin: &Pin,
-        policy: &RestartPolicy,
-        invocation: super::super::types::ServiceInvocation,
-    ) -> Result<Self> {
+            ..
+        } = *reg;
         if !matches!(role, "serve" | "access") {
             return Err(CliError::Service(format!(
                 "internal: unknown service role `{role}` (expected serve or access)"
             ))
             .into());
         }
+        let pin = reg.pin.context("internal: a Windows service needs a pin")?;
         let PinOwner::Sid(sid) = &pin.owner else {
             return Err(CliError::Service(
                 "internal: Windows service registration needs a SID pin".into(),
@@ -146,10 +128,7 @@ impl ServiceSpec {
             display_name: format!("iroh-tunnel {role}"),
             executable: executable.to_path_buf(),
             launch_arguments: {
-                let mut args = Vec::new();
-                if invocation == super::super::types::ServiceInvocation::Combined {
-                    args.push(role.into());
-                }
+                let mut args: Vec<OsString> = reg.role_arg().into_iter().map(Into::into).collect();
                 args.extend([
                     "run".into(),
                     "--config".into(),
@@ -353,6 +332,24 @@ fn stop_and_delete(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) ->
 fn delete_and_wait(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) -> Result<()> {
     port.delete(name)?;
     wait_or_fail(port, clock, name, GONE_TIMEOUT, "gone", |s| s.is_none())
+}
+
+/// Register, start and announce the SCM service of `reg` (system scope).
+#[cfg(windows)]
+pub(crate) fn install(
+    notes: &mut dyn FnMut(&crate::service::ServiceNote),
+    reg: &RegistrationInput<'_>,
+) -> Result<()> {
+    use super::windows_scm_impl::Scm;
+    use crate::service::{InstalledAt, ServiceNote};
+
+    let spec = ServiceSpec::render(reg)?;
+    install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
+    notes(&ServiceNote::Installed {
+        name: spec.name,
+        at: InstalledAt::WindowsService,
+    });
+    Ok(())
 }
 
 /// Create `spec`, replacing an existing service, and wait for `Running`.
@@ -641,20 +638,76 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn spec_matches_golden_for_every_system_case() {
+        use crate::service::fixtures::{assert_golden, cases};
+        use std::path::Path;
+        let mut all = String::new();
+        for case in cases()
+            .into_iter()
+            .filter(|c| c.scope == crate::service::ServiceScope::System)
+        {
+            let config = PathBuf::from(format!(r"C:\Users\a b\it's & <cfg>\{}.toml", case.role));
+            let pin = pin(&config);
+            let mut spec = ServiceSpec::render(&RegistrationInput {
+                invocation: &case.invocation,
+                scope: case.scope,
+                pin: Some(&pin),
+                ..registration(
+                    case.role,
+                    Path::new(r"C:\Program Files\iroh tunnel\iroh-tunnel.exe"),
+                    &config,
+                    Path::new(r"C:\Users\a b\AppData\Local\iroh $state%n"),
+                )
+            })
+            .unwrap();
+            // Forwarded test-utils variables depend on the test environment.
+            spec.env.retain(|(key, _)| {
+                !key.starts_with("IROH_TUNNEL_TEST_") && key != "IROH_TUNNEL_MACHINE_LOCK_DIR"
+            });
+            all.push_str(&case.header());
+            all.push_str(&describe(&spec));
+        }
+        assert_golden("windows_scm.txt", &all);
+    }
+
+    /// Every field of `spec`, one per line, in a toolchain-stable form.
+    fn describe(spec: &ServiceSpec) -> String {
+        let mut text = format!(
+            "name: {}\ndisplay_name: {}\nexecutable: {}\n",
+            spec.name,
+            spec.display_name,
+            spec.executable.display()
+        );
+        for arg in &spec.launch_arguments {
+            text.push_str(&format!("arg: {}\n", arg.to_string_lossy()));
+        }
+        for (key, value) in &spec.env {
+            text.push_str(&format!("env: {key}={value}\n"));
+        }
+        text.push_str(&format!(
+            "description: {}\nfailure: {:?}\n",
+            spec.description, spec.failure
+        ));
+        text
+    }
+
+    #[test]
     fn scm_invocation_uses_the_correct_role_form() {
         use crate::service::ServiceInvocation;
         let cfg = Path::new(r"C:\config dir\role.toml");
         for role in ["serve", "access"] {
-            for invocation in [ServiceInvocation::Combined, ServiceInvocation::Standalone] {
-                let spec = ServiceSpec::render_with_invocation(
-                    role,
-                    Path::new(r"C:\Program Files\renamed.exe"),
-                    cfg,
-                    cfg,
-                    &pin(cfg),
-                    &RestartPolicy::DEFAULT,
-                    invocation,
-                )
+            for invocation in [
+                ServiceInvocation::Combined,
+                ServiceInvocation::Standalone {
+                    executable: r"C:\Program Files\renamed.exe".into(),
+                },
+            ] {
+                let pin = pin(cfg);
+                let spec = ServiceSpec::render(&RegistrationInput {
+                    invocation: &invocation,
+                    pin: Some(&pin),
+                    ..registration(role, Path::new(r"C:\Program Files\renamed.exe"), cfg, cfg)
+                })
                 .unwrap();
                 let expected: Vec<OsString> = if invocation == ServiceInvocation::Combined {
                     vec![
@@ -674,7 +727,9 @@ mod tests {
 
     use super::fake::{FakeClock, FakeScm, SERVE};
     use super::*;
-    use crate::service::PinOwner;
+    use crate::service::fixtures::registration;
+    use crate::service::{Pin, PinOwner};
+    use std::path::Path;
     use std::rc::Rc;
 
     const SID: &str = "S-1-5-21-1-2-3-1001";
@@ -685,15 +740,29 @@ mod tests {
         }
     }
 
+    /// Render a system service of `role` pinned to `pin`.
+    fn render(
+        role: &str,
+        executable: &Path,
+        config: &Path,
+        state: &Path,
+        pin: &Pin,
+    ) -> Result<ServiceSpec> {
+        ServiceSpec::render(&RegistrationInput {
+            scope: crate::service::ServiceScope::System,
+            pin: Some(pin),
+            ..registration(role, executable, config, state)
+        })
+    }
+
     fn spec_for(role: &str) -> ServiceSpec {
         let cfg = format!(r"C:\cfg\{role}.toml");
-        ServiceSpec::render(
+        render(
             role,
             Path::new(r"C:\bin\iroh-tunnel.exe"),
             Path::new(&cfg),
             Path::new(r"C:\ProgramData\iroh-tunnel"),
             &pin(Path::new(&cfg)),
-            &RestartPolicy::DEFAULT,
         )
         .unwrap()
     }
@@ -799,8 +868,7 @@ mod tests {
     #[test]
     fn render_rejects_unknown_role() {
         let cfg = Path::new(r"C:\cfg\x.toml");
-        let err = ServiceSpec::render("bogus", cfg, cfg, cfg, &pin(cfg), &RestartPolicy::DEFAULT)
-            .unwrap_err();
+        let err = render("bogus", cfg, cfg, cfg, &pin(cfg)).unwrap_err();
         assert!(service_msg(err).contains("bogus"));
     }
 
@@ -808,13 +876,12 @@ mod tests {
     fn service_spec_keeps_paths_with_spaces_and_unicode() {
         let exe = Path::new(r"C:\Program Files\iroh-tunnel\iroh-tunnel.exe");
         let cfg = Path::new(r"C:\Users\Nguyễn Văn\AppData\Local\iroh-tunnel\config\serve.toml");
-        let s = ServiceSpec::render(
+        let s = render(
             "serve",
             exe,
             cfg,
             Path::new(r"C:\ProgramData\iroh-tunnel"),
             &pin(cfg),
-            &RestartPolicy::DEFAULT,
         )
         .unwrap();
         assert_eq!(s.executable, exe);
@@ -849,8 +916,7 @@ mod tests {
             config: cfg.to_path_buf(),
             owner: PinOwner::Uid(1000),
         };
-        let err =
-            ServiceSpec::render("serve", cfg, cfg, cfg, &uid, &RestartPolicy::DEFAULT).unwrap_err();
+        let err = render("serve", cfg, cfg, cfg, &uid).unwrap_err();
         assert!(service_msg(err).contains("needs a SID pin"));
     }
 

@@ -1,0 +1,136 @@
+==== role=serve invocation=Combined scope=User ====
+[Unit]
+Description=Iroh Tunnel (serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" serve run --config "/home/a b/it's & <cfg>/serve $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target
+==== role=serve invocation=Combined scope=System ====
+# iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/serve%20%24x%25i.toml uid=1000
+[Unit]
+Description=Iroh Tunnel (serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" serve run --config "/home/a b/it's & <cfg>/serve $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Environment=IROH_TUNNEL_TRUSTED_UID=1000
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target
+==== role=serve invocation=Standalone scope=User ====
+[Unit]
+Description=Iroh Tunnel (serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" run --config "/home/a b/it's & <cfg>/serve $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target
+==== role=serve invocation=Standalone scope=System ====
+# iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/serve%20%24x%25i.toml uid=1000
+[Unit]
+Description=Iroh Tunnel (serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" run --config "/home/a b/it's & <cfg>/serve $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Environment=IROH_TUNNEL_TRUSTED_UID=1000
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target
+==== role=access invocation=Combined scope=User ====
+[Unit]
+Description=Iroh Tunnel (access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" access run --config "/home/a b/it's & <cfg>/access $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target
+==== role=access invocation=Combined scope=System ====
+# iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/access%20%24x%25i.toml uid=1000
+[Unit]
+Description=Iroh Tunnel (access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" access run --config "/home/a b/it's & <cfg>/access $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Environment=IROH_TUNNEL_TRUSTED_UID=1000
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target
+==== role=access invocation=Standalone scope=User ====
+[Unit]
+Description=Iroh Tunnel (access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" run --config "/home/a b/it's & <cfg>/access $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target
+==== role=access invocation=Standalone scope=System ====
+# iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/access%20%24x%25i.toml uid=1000
+[Unit]
+Description=Iroh Tunnel (access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/iroh tunnel/bin/iroh-tunnel" run --config "/home/a b/it's & <cfg>/access $$x%%i.toml"
+Environment="IROH_TUNNEL_STATE_DIR=/var/lib/iroh $state%%n"
+Environment=IROH_TUNNEL_TRUSTED_UID=1000
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=6
+
+[Install]
+WantedBy=default.target

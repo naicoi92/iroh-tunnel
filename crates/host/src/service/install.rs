@@ -5,21 +5,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use super::backend::Backend;
 use super::decide_install_scope::decide_install_scope;
 use super::execute::execute;
 use super::native::system_runner;
-#[cfg(windows)]
-use super::native::InstalledAt;
 #[cfg(windows)]
 use super::native::OutputMode;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
 use super::pin::Pin;
 use super::platform;
 use super::policy::{ensure_privilege, ensure_root_run_privilege, ensure_supported};
+use super::registration::RegistrationInput;
 use super::service_binary::ServiceBinary;
 use super::types::{
-    AppliedEffect, Environment, InstallNeed, InstallOutcome, InstallRequest, ScopeDecision,
-    ServiceFailure, ServiceInvocation, ServiceScope,
+    AppliedEffect, Environment, InstallNeed, InstallOutcome, InstallRequest, RestartPolicy,
+    ScopeDecision, ServiceFailure, ServiceScope,
 };
 use crate::error::CliError;
 use crate::ownership::{self, Liveness, LockDirs, LockResolver, Tier};
@@ -31,10 +31,7 @@ pub(crate) fn install_rerun(
     scope: ServiceScope,
     config: &Path,
 ) -> Vec<String> {
-    let mut argv = match req.invocation {
-        ServiceInvocation::Combined => vec!["iroh-tunnel".to_owned(), req.role.name().to_owned()],
-        ServiceInvocation::Standalone => vec![req.tunnel_executable.to_string_lossy().into_owned()],
-    };
+    let mut argv = req.invocation.rerun_prefix(req.role.name());
     argv.extend([
         "service".to_owned(),
         "install".to_owned(),
@@ -85,19 +82,22 @@ pub(crate) fn install_via(
             native,
             notes,
             role,
-            &plan.binary,
+            &plan,
             materialize_root_only,
             |native, notes, binary| {
-                backend_install(
+                Backend::select(plan.scope)?.install(
                     native,
                     notes,
-                    role,
-                    req.invocation,
-                    plan.scope,
-                    binary,
-                    &plan.config,
-                    &plan.state,
-                    plan.pin.as_ref(),
+                    &RegistrationInput {
+                        role,
+                        invocation: &req.invocation,
+                        scope: plan.scope,
+                        binary,
+                        config: &plan.config,
+                        state: &plan.state,
+                        pin: plan.pin.as_ref(),
+                        policy: &RestartPolicy::DEFAULT,
+                    },
                 )
             },
             |native| super::service_binary::release_unreferenced_copy(native, role, root_run),
@@ -140,8 +140,9 @@ fn plan_binary(
 /// Write the binary, then the registration that runs it.
 ///
 /// The managed copy (if any) is written and recorded first, announced with a
-/// [`ServiceNote::ManagedBinary`], and then `register` runs with the path of
-/// `binary`. After a [`ServiceBinary::Direct`] registration succeeds,
+/// [`ServiceNote::ManagedBinary`] naming the plan's absolute config, and then
+/// `register` runs with the path of the plan's binary. After a
+/// [`ServiceBinary::Direct`] registration succeeds,
 /// `release_after_direct` removes a managed copy nothing references any more.
 ///
 /// # Errors
@@ -152,11 +153,12 @@ fn install_steps(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    binary: &ServiceBinary,
+    plan: &InstallPlan,
     materialize: impl FnOnce(&ServiceBinary) -> Result<Option<AppliedEffect>>,
     register: impl FnOnce(&mut Native, &mut dyn FnMut(&ServiceNote), &Path) -> Result<()>,
     release_after_direct: impl FnOnce(&mut Native) -> Result<Option<AppliedEffect>>,
 ) -> Result<()> {
+    let binary = &plan.binary;
     if let Some(effect) = materialize(binary)? {
         native.applied(effect);
     }
@@ -165,6 +167,7 @@ fn install_steps(
             role: role.to_owned(),
             source: source.display.clone(),
             copy: copy.clone(),
+            config: plan.config.clone(),
         });
     }
     register(native, notes, binary.path())?;
@@ -456,35 +459,80 @@ fn plan_system_install(
     probe: &mut OtherScopeProbe<'_>,
     lock_dirs: LockResolver<'_>,
 ) -> Result<Planned> {
-    use super::backend::windows_scm::{existing_registration_body, service_name};
-    use super::backend::windows_scm_impl::Scm;
-    use super::pin::{retarget_decision_for, RetargetDecision};
-    use super::system_windows::{resolve_target, WinRequest};
-    use super::trust_windows::model::TrustedSet;
-    use super::trust_windows::{
-        account_of, owner_of, read_verified, token_user, verify_binary, verify_dir,
-        verify_machine_dir,
-    };
+    let paths = WindowsSystemPaths::of(req)?;
+    ensure_windows_system_install_allowed(req, env, &paths, probe, lock_dirs)?;
+    let target = resolve_windows_target(req.role, &paths)?;
+    verify_windows_trust(req, &target)?;
+    // Read the registration last, right before the write, so a consent given
+    // for an earlier look at it is checked against the current one.
+    if let Some(need) = windows_retarget_need(req, &target)? {
+        return Ok(Planned::Needs(need));
+    }
+    Ok(Planned::Ready(InstallPlan {
+        scope: ServiceScope::System,
+        pin: Some(target.pin()),
+        config: target.config,
+        state: target.state,
+        // Windows trusts the binary through `verify_windows_trust` above.
+        binary: plan_binary(req, ServiceScope::System, false, &verify_root_only)?,
+    }))
+}
 
+/// The explicit paths of a Windows system install, made absolute before
+/// anything reads them: the service runs elsewhere, and the trust checks
+/// refuse a relative path.
+#[cfg(windows)]
+struct WindowsSystemPaths {
+    /// `--config`, absolute and without a verbatim prefix.
+    config: Option<PathBuf>,
+    /// `IROH_TUNNEL_STATE_DIR`, absolute.
+    state: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+impl WindowsSystemPaths {
+    fn of(req: &InstallRequest) -> Result<Self> {
+        let config = req
+            .config
+            .as_deref()
+            .map(windows_absolute_config)
+            .transpose()?;
+        let state = req
+            .state_dir_override
+            .as_deref()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(|dir| {
+                std::path::absolute(dir).with_context(|| {
+                    format!("cannot make state directory {} absolute", dir.display())
+                })
+            })
+            .transpose()?;
+        Ok(Self { config, state })
+    }
+}
+
+/// `path` made absolute (a bare filename has no parent to read) and without
+/// a verbatim prefix, as a Windows registration pins it.
+#[cfg(windows)]
+fn windows_absolute_config(path: &Path) -> Result<PathBuf> {
+    absolutize_config_path(path).map(strip_verbatim_prefix)
+}
+
+/// Refuse a Windows system install without elevation (with rerun guidance)
+/// or while the role is registered or running in the user scope.
+#[cfg(windows)]
+fn ensure_windows_system_install_allowed(
+    req: &InstallRequest,
+    env: Environment,
+    paths: &WindowsSystemPaths,
+    probe: &mut OtherScopeProbe<'_>,
+    lock_dirs: LockResolver<'_>,
+) -> Result<()> {
     let role = req.role;
-    // Absolute before anything reads its parent: a bare filename has none.
-    let absolute = |path: &Path| absolutize_config_path(path).map(strip_verbatim_prefix);
-    let config_abs = req.config.as_deref().map(absolute).transpose()?;
-    // A relative override is resolved here, like `--config`: the service runs
-    // elsewhere and `verify_dir` refuses a relative path.
-    let state_abs = req
-        .state_dir_override
-        .as_deref()
-        .filter(|d| !d.as_os_str().is_empty())
-        .map(|dir| {
-            std::path::absolute(dir)
-                .with_context(|| format!("cannot make state directory {} absolute", dir.display()))
-        })
-        .transpose()?;
     if !env.elevated {
-        let config = match &config_abs {
+        let config = match &paths.config {
             Some(config) => config.clone(),
-            None => absolute(&crate::config::resolve_config_path(role, None)?)?,
+            None => windows_absolute_config(&crate::config::resolve_config_path(role, None)?)?,
         };
         let rerun = install_rerun(req, ServiceScope::System, &config);
         ensure_privilege(ServiceScope::System, false, &rerun)?;
@@ -496,52 +544,78 @@ fn plan_system_install(
         role,
     )?;
     // A user process of the role holds the user tier: refused like on Unix.
-    ensure_no_cross_scope_conflict(role, ServiceScope::System, None, lock_dirs)?;
+    ensure_no_cross_scope_conflict(role, ServiceScope::System, None, lock_dirs)
+}
+
+/// The account and files a Windows system service of `role` is for: the
+/// installing token's user, with default paths from its LocalAppData.
+#[cfg(windows)]
+fn resolve_windows_target(
+    role: Role,
+    paths: &WindowsSystemPaths,
+) -> Result<super::system_windows::WinTarget> {
+    use super::system_windows::{resolve_target, WinRequest};
+    use super::trust_windows::{account_of, owner_of, token_user};
 
     let token = token_user()?;
     // The token user is the elevated process's own user: the shell resolves
     // its LocalAppData with the current token.
-    let target = resolve_target(
+    resolve_target(
         &WinRequest {
             role: role.name(),
-            config: config_abs.as_deref(),
-            state: state_abs.as_deref(),
+            config: paths.config.as_deref(),
+            state: paths.state.as_deref(),
         },
         &token,
         &owner_of,
         &|_| crate::paths::local_app_data(),
         &account_of,
-    )?;
+    )
+}
+
+/// Fail closed before registering anything LocalSystem would later refuse:
+/// the machine directory, the target's state directory and config, and the
+/// binary must all be trusted.
+#[cfg(windows)]
+fn verify_windows_trust(
+    req: &InstallRequest,
+    target: &super::system_windows::WinTarget,
+) -> Result<()> {
+    use super::trust_windows::model::TrustedSet;
+    use super::trust_windows::{read_verified, verify_binary, verify_dir, verify_machine_dir};
 
     if let Some(machine) = crate::ownership::machine_dir()? {
         if machine.verify && machine.path.exists() {
             verify_machine_dir(&machine.path).map_err(|e| machine_dir_refusal(e, &machine.path))?;
         }
     }
-
-    // Fail closed before registering anything LocalSystem would later refuse.
     let trusted = TrustedSet::for_user_files(&target.sid);
     verify_dir(&target.state, &trusted)?;
     let text = read_verified(&target.config, &trusted)?;
-    check_installable_text(role, &text, &target.config)?;
-    verify_binary(&req.tunnel_executable)?;
+    check_installable_text(req.role, &text, &target.config)?;
+    verify_binary(&req.tunnel_executable)
+}
 
-    // Read the registration last, right before the write, so a consent given
-    // for an earlier look at it is checked against the current one.
-    let existing = existing_registration_body(&mut Scm, &service_name(role.name()))?;
-    if let RetargetDecision::Needs { previous, proposed } =
-        retarget_decision_for(existing.as_deref(), target.pin(), req.retarget.as_ref())
-    {
-        return Ok(Planned::Needs(InstallNeed::Retarget { previous, proposed }));
-    }
-    Ok(Planned::Ready(InstallPlan {
-        scope: ServiceScope::System,
-        pin: Some(target.pin()),
-        config: target.config,
-        state: target.state,
-        // Windows trusts the binary through `verify_binary` above.
-        binary: plan_binary(req, ServiceScope::System, false, &verify_root_only)?,
-    }))
+/// The retarget decision needed before replacing the role's current Windows
+/// service, if it belongs to someone else.
+#[cfg(windows)]
+fn windows_retarget_need(
+    req: &InstallRequest,
+    target: &super::system_windows::WinTarget,
+) -> Result<Option<InstallNeed>> {
+    use super::backend::windows_scm::{existing_registration_body, service_name};
+    use super::backend::windows_scm_impl::Scm;
+    use super::pin::{retarget_decision_for, RetargetDecision};
+
+    let existing = existing_registration_body(&mut Scm, &service_name(req.role.name()))?;
+    Ok(
+        match retarget_decision_for(existing.as_deref(), target.pin(), req.retarget.as_ref()) {
+            RetargetDecision::Needs { previous, proposed } => {
+                Some(InstallNeed::Retarget { previous, proposed })
+            }
+            RetargetDecision::Proceed => None,
+        },
+    )
 }
 
 /// Keep a `Permission` refusal from the machine-directory check as it is
@@ -731,87 +805,6 @@ fn installable(role: Role, config: &Path, loaded: Result<()>) -> Result<()> {
     })
 }
 
-#[expect(clippy::too_many_arguments, reason = "one registration's inputs")]
-fn backend_install(
-    native: &mut Native,
-    notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
-    invocation: ServiceInvocation,
-    scope: ServiceScope,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    pin: Option<&Pin>,
-) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        // Same BusyBox-vs-systemd condition as `platform::system_wide_only`.
-        if super::platform::linux_is_systemd() {
-            super::backend::systemd::install(
-                native, notes, role, invocation, scope, binary, config, state, pin,
-            )
-        } else {
-            super::backend::busybox::install(
-                native, notes, role, invocation, scope, binary, config, state, pin,
-            )
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        super::backend::launchd::install(
-            native, notes, role, invocation, scope, binary, config, state, pin,
-        )
-    }
-    #[cfg(windows)]
-    {
-        match scope {
-            ServiceScope::User => super::backend::windows::install(
-                native, notes, role, invocation, scope, binary, config, state,
-            ),
-            ServiceScope::System => {
-                install_windows_service(notes, role, invocation, binary, config, state, pin)
-            }
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        super::platform::unsupported()
-    }
-}
-
-/// Register, start and announce the SCM service of `role` (system scope).
-#[cfg(windows)]
-fn install_windows_service(
-    notes: &mut dyn FnMut(&ServiceNote),
-    role: &str,
-    invocation: ServiceInvocation,
-    binary: &Path,
-    config: &Path,
-    state: &Path,
-    pin: Option<&Pin>,
-) -> Result<()> {
-    use super::backend::windows_scm::{install_with, ServiceSpec, SystemClock};
-    use super::backend::windows_scm_impl::Scm;
-    use super::types::RestartPolicy;
-
-    let pin = pin.context("internal: a Windows service needs a pin")?;
-    let spec = ServiceSpec::render_with_invocation(
-        role,
-        binary,
-        config,
-        state,
-        pin,
-        &RestartPolicy::DEFAULT,
-        invocation,
-    )?;
-    install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
-    notes(&ServiceNote::Installed {
-        name: spec.name,
-        at: InstalledAt::WindowsService,
-    });
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -825,6 +818,7 @@ mod tests {
     use super::super::platform::linux_is_systemd;
     #[cfg(unix)]
     use super::super::types::AppliedEffect;
+    use super::super::types::ServiceInvocation;
     use super::*;
     use crate::ownership::{hold_for_test, LockKind};
     use std::path::PathBuf;
@@ -1028,12 +1022,14 @@ mod tests {
         for role in [Role::Serve, Role::Access] {
             let mut req = request(Some(ServiceScope::System));
             req.role = role;
-            req.invocation = ServiceInvocation::Standalone;
             req.tunnel_executable = PathBuf::from(if cfg!(windows) {
                 r"C:\Program Files\role bin\renamed.exe"
             } else {
                 "/opt/role bin/renamed"
             });
+            req.invocation = ServiceInvocation::Standalone {
+                executable: req.tunnel_executable.clone(),
+            };
             req.config = Some(PathBuf::from("relative config.toml"));
             let (result, log) = run_install(&req, BATCH, vec![]);
             let err = anyhow::Error::from(result.expect_err("must refuse"));
@@ -1318,6 +1314,7 @@ mod tests {
                 role: "serve".into(),
                 source: request(None).running_executable.display,
                 copy,
+                config: PathBuf::from(STEPS_CONFIG),
             }]
         );
     }
@@ -1367,6 +1364,9 @@ mod tests {
         assert!(run.applied.is_empty(), "{:?}", run.applied);
     }
 
+    /// The config every [`run_steps`] registration pins.
+    const STEPS_CONFIG: &str = "/home/a/serve.toml";
+
     /// What one [`install_steps`] run did.
     struct StepsRun {
         result: Result<()>,
@@ -1399,7 +1399,13 @@ mod tests {
             &mut native,
             &mut notes,
             "serve",
-            binary,
+            &InstallPlan {
+                scope: ServiceScope::System,
+                config: PathBuf::from(STEPS_CONFIG),
+                state: PathBuf::from("/home/a/state"),
+                pin: None,
+                binary: binary.clone(),
+            },
             |binary| {
                 order.borrow_mut().push("materialize".into());
                 Ok(match binary {
@@ -1450,6 +1456,8 @@ mod unix_binary_tests {
     use super::super::fixtures::{in_isolated_home, request, write_valid_config};
     use super::super::pin::{Pin, PinOwner};
     use super::super::service_binary::managed_copy_path;
+    #[cfg(all(feature = "test-utils", target_os = "linux"))]
+    use super::super::types::ServiceInvocation;
     use super::*;
 
     fn refuse(path: &Path) -> Result<()> {
@@ -1551,7 +1559,9 @@ mod unix_binary_tests {
                 std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
                 let mut req = request(Some(ServiceScope::System));
                 req.role = role;
-                req.invocation = ServiceInvocation::Standalone;
+                req.invocation = ServiceInvocation::Standalone {
+                    executable: source.clone(),
+                };
                 req.tunnel_executable = source.clone();
                 req.running_executable = super::super::RunningExecutable {
                     display: source.clone(),
@@ -1567,11 +1577,19 @@ mod unix_binary_tests {
                 let mut fake = FakeRunner::new(&events, vec![]);
                 let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
                 let mut native = Native::new(OutputMode::Capture, &mut runner);
+                let config = home.join("config");
+                let plan = InstallPlan {
+                    scope: ServiceScope::System,
+                    config: config.clone(),
+                    state: home.join("state"),
+                    pin: None,
+                    binary: chosen.clone(),
+                };
                 install_steps(
                     &mut native,
                     &mut |_| {},
                     role.name(),
-                    &chosen,
+                    &plan,
                     |binary| {
                         super::super::service_binary::materialize(
                             binary,
@@ -1582,13 +1600,15 @@ mod unix_binary_tests {
                         super::super::backend::systemd::install(
                             native,
                             notes,
-                            role.name(),
-                            req.invocation,
-                            ServiceScope::User,
-                            path,
-                            &home.join("config"),
-                            &home.join("state"),
-                            None,
+                            &RegistrationInput {
+                                invocation: &req.invocation,
+                                ..super::super::fixtures::registration(
+                                    role.name(),
+                                    path,
+                                    &config,
+                                    &home.join("state"),
+                                )
+                            },
                         )
                     },
                     |_| panic!("managed copy must not be released"),

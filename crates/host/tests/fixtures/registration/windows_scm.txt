@@ -1,0 +1,50 @@
+==== role=serve invocation=Combined scope=System ====
+name: iroh-tunnel-serve
+display_name: iroh-tunnel serve
+executable: C:\Program Files\iroh tunnel\iroh-tunnel.exe
+arg: serve
+arg: run
+arg: --config
+arg: C:\Users\a b\it's & <cfg>\serve.toml
+env: IROH_TUNNEL_STATE_DIR=C:\Users\a b\AppData\Local\iroh $state%n
+env: IROH_TUNNEL_TRUSTED_SID=S-1-5-21-1-2-3-1001
+env: IROH_TUNNEL_SCM=1
+description: # iroh-tunnel-pin config=C%3A%5CUsers%5Ca%20b%5Cit%27s%20%26%20%3Ccfg%3E%5Cserve.toml sid=S-1-5-21-1-2-3-1001
+failure: Some(FailurePlan { restart_after: 5s, reset_after: 86400s, on_non_crash_failures: true })
+==== role=serve invocation=Standalone scope=System ====
+name: iroh-tunnel-serve
+display_name: iroh-tunnel serve
+executable: C:\Program Files\iroh tunnel\iroh-tunnel.exe
+arg: run
+arg: --config
+arg: C:\Users\a b\it's & <cfg>\serve.toml
+env: IROH_TUNNEL_STATE_DIR=C:\Users\a b\AppData\Local\iroh $state%n
+env: IROH_TUNNEL_TRUSTED_SID=S-1-5-21-1-2-3-1001
+env: IROH_TUNNEL_SCM=1
+description: # iroh-tunnel-pin config=C%3A%5CUsers%5Ca%20b%5Cit%27s%20%26%20%3Ccfg%3E%5Cserve.toml sid=S-1-5-21-1-2-3-1001
+failure: Some(FailurePlan { restart_after: 5s, reset_after: 86400s, on_non_crash_failures: true })
+==== role=access invocation=Combined scope=System ====
+name: iroh-tunnel-access
+display_name: iroh-tunnel access
+executable: C:\Program Files\iroh tunnel\iroh-tunnel.exe
+arg: access
+arg: run
+arg: --config
+arg: C:\Users\a b\it's & <cfg>\access.toml
+env: IROH_TUNNEL_STATE_DIR=C:\Users\a b\AppData\Local\iroh $state%n
+env: IROH_TUNNEL_TRUSTED_SID=S-1-5-21-1-2-3-1001
+env: IROH_TUNNEL_SCM=1
+description: # iroh-tunnel-pin config=C%3A%5CUsers%5Ca%20b%5Cit%27s%20%26%20%3Ccfg%3E%5Caccess.toml sid=S-1-5-21-1-2-3-1001
+failure: Some(FailurePlan { restart_after: 5s, reset_after: 86400s, on_non_crash_failures: true })
+==== role=access invocation=Standalone scope=System ====
+name: iroh-tunnel-access
+display_name: iroh-tunnel access
+executable: C:\Program Files\iroh tunnel\iroh-tunnel.exe
+arg: run
+arg: --config
+arg: C:\Users\a b\it's & <cfg>\access.toml
+env: IROH_TUNNEL_STATE_DIR=C:\Users\a b\AppData\Local\iroh $state%n
+env: IROH_TUNNEL_TRUSTED_SID=S-1-5-21-1-2-3-1001
+env: IROH_TUNNEL_SCM=1
+description: # iroh-tunnel-pin config=C%3A%5CUsers%5Ca%20b%5Cit%27s%20%26%20%3Ccfg%3E%5Caccess.toml sid=S-1-5-21-1-2-3-1001
+failure: Some(FailurePlan { restart_after: 5s, reset_after: 86400s, on_non_crash_failures: true })

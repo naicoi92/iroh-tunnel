@@ -1,7 +1,8 @@
 //! `service stop`.
 
-use super::native::ServiceCall;
-use super::types::{Environment, ServiceFailure, ServiceReport, ServiceScope};
+use super::native::{system_runner, ServiceCall};
+use super::types::{Environment, ServiceFailure, ServiceInvocation, ServiceReport, ServiceScope};
+use super::verb::{verb_via, Verb};
 use crate::role::Role;
 
 /// `service stop`.
@@ -11,18 +12,13 @@ use crate::role::Role;
 /// A [`ServiceFailure`]; see [`super::install`].
 pub fn stop(
     role: Role,
+    invocation: &ServiceInvocation,
     scope: ServiceScope,
     env: Environment,
     call: &mut ServiceCall,
 ) -> Result<ServiceReport, ServiceFailure> {
-    super::stop_with_invocation(
-        role,
-        scope,
-        env,
-        call,
-        super::ServiceInvocation::Combined,
-        std::path::Path::new("iroh-tunnel"),
-    )
+    let mut runner = system_runner;
+    verb_via(Verb::Stop, role, invocation, scope, env, call, &mut runner)
 }
 
 #[cfg(test)]
@@ -42,7 +38,13 @@ mod tests {
         }
         let mut notes = |_: &ServiceNote| {};
         let mut call = ServiceCall::capture(&mut notes);
-        let result = stop(Role::Serve, ServiceScope::System, BATCH, &mut call);
+        let result = stop(
+            Role::Serve,
+            &ServiceInvocation::Combined,
+            ServiceScope::System,
+            BATCH,
+            &mut call,
+        );
         let err = anyhow::Error::from(result.unwrap_err());
         assert!(matches!(
             err.downcast_ref::<CliError>(),

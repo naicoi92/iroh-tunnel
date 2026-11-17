@@ -407,15 +407,8 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
         },
 
         RoleCmd::Service { action } => tokio::task::spawn_blocking(move || {
-            crate::cli_service::dispatch(
-                status_role,
-                action,
-                if binary.is_standalone() {
-                    iroh_tunnel_host::service::ServiceInvocation::Standalone
-                } else {
-                    iroh_tunnel_host::service::ServiceInvocation::Combined
-                },
-            )
+            let invocation = crate::cli_service::invocation(binary)?;
+            crate::cli_service::dispatch(status_role, action, invocation)
         })
         .await
         .context("service command task failed")?,
