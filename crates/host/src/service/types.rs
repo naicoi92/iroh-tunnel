@@ -168,7 +168,9 @@ impl ServiceInvocation {
 pub struct InstallRequest {
     /// The role to register.
     pub role: Role,
-    /// The command-line form accepted by the selected executable.
+    /// The command-line form accepted by the selected executable. A
+    /// `Standalone` executable must be `tunnel_executable`: guidance names it
+    /// while the registration runs `tunnel_executable`.
     pub invocation: ServiceInvocation,
     /// `None` lets [`super::decide_install_scope`] decide.
     pub scope: Option<ServiceScope>,

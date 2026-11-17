@@ -334,6 +334,24 @@ fn delete_and_wait(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) ->
     wait_or_fail(port, clock, name, GONE_TIMEOUT, "gone", |s| s.is_none())
 }
 
+/// Register, start and announce the SCM service of `reg` (system scope).
+#[cfg(windows)]
+pub(crate) fn install(
+    notes: &mut dyn FnMut(&crate::service::ServiceNote),
+    reg: &RegistrationInput<'_>,
+) -> Result<()> {
+    use super::windows_scm_impl::Scm;
+    use crate::service::{InstalledAt, ServiceNote};
+
+    let spec = ServiceSpec::render(reg)?;
+    install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
+    notes(&ServiceNote::Installed {
+        name: spec.name,
+        at: InstalledAt::WindowsService,
+    });
+    Ok(())
+}
+
 /// Create `spec`, replacing an existing service, and wait for `Running`.
 /// A failed start rolls the registration back and returns the original error.
 pub(crate) fn install_with(

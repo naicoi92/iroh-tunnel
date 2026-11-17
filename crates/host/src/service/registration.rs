@@ -17,6 +17,7 @@ pub(crate) struct RegistrationInput<'a> {
     pub role: &'a str,
     /// The command-line form the registered executable accepts.
     pub invocation: &'a ServiceInvocation,
+    /// The scope the registration is written in.
     pub scope: ServiceScope,
     /// What the registration runs. Absolute.
     pub binary: &'a Path,
@@ -26,6 +27,7 @@ pub(crate) struct RegistrationInput<'a> {
     pub state: &'a Path,
     /// Recorded in a system registration; `None` for a user one.
     pub pin: Option<&'a Pin>,
+    /// What the manager does when the service exits.
     pub policy: &'a RestartPolicy,
 }
 

@@ -87,7 +87,7 @@ impl Backend {
             #[cfg(windows)]
             Self::WindowsTask => super::windows::install(native, notes, reg),
             #[cfg(windows)]
-            Self::WindowsService => install_windows_service(notes, reg),
+            Self::WindowsService => super::windows_scm::install(notes, reg),
         }
     }
 
@@ -220,25 +220,6 @@ impl Backend {
             Self::Launchd => super::launchd::effective_binary(native, role),
         }
     }
-}
-
-/// Register, start and announce the SCM service of `reg` (system scope).
-#[cfg(windows)]
-fn install_windows_service(
-    notes: &mut dyn FnMut(&ServiceNote),
-    reg: &RegistrationInput<'_>,
-) -> Result<()> {
-    use super::super::native::InstalledAt;
-    use super::windows_scm::{install_with, ServiceSpec, SystemClock};
-    use super::windows_scm_impl::Scm;
-
-    let spec = ServiceSpec::render(reg)?;
-    install_with(&mut Scm, &mut SystemClock::new(), &spec)?;
-    notes(&ServiceNote::Installed {
-        name: spec.name,
-        at: InstalledAt::WindowsService,
-    });
-    Ok(())
 }
 
 #[cfg(test)]
