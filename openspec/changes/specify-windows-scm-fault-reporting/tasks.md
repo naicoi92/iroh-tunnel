@@ -4,11 +4,11 @@ Blocked by: none
 
 Owns `src/scm_runtime/session.rs` (tests module only; production code changes only if a test exposes a gap). Platform: compiled and run on every OS; the dispatcher binding is Windows-only and checked with `cargo xwin clippy`.
 
-- [ ] 1.1 Add a test that a refused stop-pending report is logged with its state and checkpoint (scenario "Refusal is logged"), capturing `tracing` output with a scoped subscriber
-- [ ] 1.2 Extend `pending_reports_are_not_retried` to assert the next tick carries a higher checkpoint (scenario "Pending report refused")
-- [ ] 1.3 Add a test where a stop request arrives while the running report is being retried, proven by a gate in `FakeHandle` that pauses the first `Running` attempt, for both outcomes (accepted → clean stop; refused → code 101, no start-pending after) (scenario "Stop request while the running report is retried")
-- [ ] 1.4 Assert in `running_always_refused_stops_with_a_failure_code` that no start-pending report follows the stop-pending one (scenario "Running report always refused")
-- [ ] 1.5 Rename the existing session tests to scenario names, add log assertions to the running-refused-once and stopped-always-refused tests, and assert in the stop-during-retry test that a fault code wins over a requested stop (exit 130 still reports 101)
+- [x] 1.1 Add a test that a refused stop-pending report is logged with its state and checkpoint (scenario "Refusal is logged"), capturing `tracing` output with a scoped subscriber
+- [x] 1.2 Extend `pending_reports_are_not_retried` to assert the next tick carries a higher checkpoint (scenario "Pending report refused")
+- [x] 1.3 Add a test where a stop request arrives while the running report is being retried, proven by a gate in `FakeHandle` that pauses the first `Running` attempt, for both outcomes (accepted → clean stop; refused → code 101, no start-pending after) (scenario "Stop request while the running report is retried")
+- [x] 1.4 Assert in `running_always_refused_stops_with_a_failure_code` that no start-pending report follows the stop-pending one (scenario "Running report always refused")
+- [x] 1.5 Rename the existing session tests to scenario names, add log assertions to the running-refused-once and stopped-always-refused tests, and assert in the stop-during-retry test that a fault code wins over a requested stop (exit 130 still reports 101)
 
 ## 2. SCM effect-recording scenarios
 
