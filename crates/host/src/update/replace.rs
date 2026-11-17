@@ -89,6 +89,7 @@ impl StagedFile {
             path,
             armed: std::cell::Cell::new(true),
         };
+        // Test-only: observe the mode before it is changed below (#230).
         #[cfg(all(test, unix))]
         tests::record_mode_at_open(&file);
         file.set_permissions(permissions.clone()).with_context(|| {
@@ -290,7 +291,9 @@ mod tests {
         MODE_AT_OPEN.with(|cell| cell.set(mode));
     }
 
-    /// Sets the process umask and restores the previous one on drop.
+    /// Sets the process umask and restores the previous one on drop. The
+    /// umask is process-wide: no other test may change it in-process (use
+    /// `service::fixtures::in_isolated_home` to isolate one that must).
     #[cfg(unix)]
     struct UmaskGuard(libc::mode_t);
 
