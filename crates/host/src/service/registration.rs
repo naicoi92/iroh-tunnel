@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Result;
 
 use crate::error::CliError;
+use crate::fs_util::create_private_new;
 
 /// Name suffix that keeps a test registration apart from any real service.
 /// Empty in production builds; `test-utils` reads it from the environment.
@@ -71,16 +72,8 @@ impl StagedRegistration {
     /// handle, write `contents` and flush them to disk.
     fn create(target: &Path, contents: &str) -> std::io::Result<Self> {
         let path = staging_path(target)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        // Owner-only until the final mode is set below, so a permissive
-        // umask never opens a window for another user to grab a write fd.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path)?;
+        // Owner-only until the final mode is set below.
+        let mut file = create_private_new(&path)?;
         // Armed from here on: the file exists and is ours to clean up.
         let staged = Self { path, armed: true };
         #[cfg(unix)]

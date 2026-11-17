@@ -8,6 +8,7 @@ use std::io::Write as _;
 use anyhow::Context as _;
 
 use crate::error::CliError;
+use crate::fs_util::create_private_new;
 
 /// What to do when the OS denies replacing the executable. On Windows "access
 /// denied" is also what a running image reports, and `sudo` does not exist.
@@ -85,7 +86,7 @@ impl StagedFile {
             ".iroh-tunnel-update-{}-{nonce:08x}-{seq}.tmp",
             std::process::id()
         ));
-        let mut file = open_staging(&path)
+        let mut file = create_private_new(&path)
             .with_context(|| format!("cannot stage update beside {}", target.display()))?;
         let staged = Self {
             path,
@@ -109,20 +110,6 @@ impl StagedFile {
     fn disarm(&self) {
         self.armed.set(false);
     }
-}
-
-/// Open `path` exclusively (`O_EXCL`) for writing, owner-only until the
-/// caller sets the final mode on the handle, so a permissive umask never
-/// opens a window for another user to grab a write fd.
-fn open_staging(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
 }
 
 impl Drop for StagedFile {

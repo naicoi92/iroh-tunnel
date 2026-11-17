@@ -28,6 +28,7 @@ use super::dto::RoleDoc;
 use super::encode_secret_key::encode_secret_key;
 use super::resolve_secret_key::resolve_secret_key;
 use crate::error::CliError;
+use crate::fs_util::create_private_new;
 
 /// How long a writer waits for another writer before giving up.
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -150,9 +151,7 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         .map_or(0, |d| d.as_nanos());
     let tmp = sibling(path, &format!(".{}.{stamp}.tmp", std::process::id()));
     let result = (|| -> Result<()> {
-        let mut file = private_options()
-            .create_new(true)
-            .open(&tmp)
+        let mut file = create_private_new(&tmp)
             .with_context(|| format!("failed to create temp config: {}", tmp.display()))?;
         file.write_all(contents)
             .and_then(|()| file.sync_all())
