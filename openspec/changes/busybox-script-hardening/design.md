@@ -42,7 +42,7 @@ Replace `format_script` / `format_script_invocation` with a value type:
 - `identity` (a shell function) returns 0 = ours, 1 = stale, 2 = unverifiable:
   1. `PID` must be a positive decimal without leading zeros (`kill -0 0` targets the process group), else stale.
   2. If `kill -0 "$PID"` fails: unverifiable when `$PROC/$PID` exists (EPERM for a non-root caller on a root daemon), else stale (dead process).
-  3. If `$PROC/$PID` does not exist or `readlink "$PROC/$PID/exe"` fails → unverifiable. A readable link that does not match → stale.
+  3. If `$PROC/$PID` does not exist → unverifiable. A zombie (state `Z` after the last `) ` of a readable `$PROC/$PID/stat`) → stale. If `readlink "$PROC/$PID/exe"` fails → unverifiable. A readable link that does not match → stale.
   4. New format: `EXE` equals `REC` or `"$REC (deleted)"` (the kernel suffix after the managed copy is replaced by rename on re-install).
   5. Legacy format: `EXE` equals `$DAEMON` or `"$DAEMON (deleted)"`; or the basename `NAME` of `EXE` (with ` (deleted)` removed) starts with `iroh-tunnel` and `/proc/$PID/cmdline`, read with NULs translated to `\001`, ends with `<SEP>run<SEP>--config<SEP>$CONFIG<SEP>` and the role is identified: either the word before `run` is `$ROLE` (combined form) or `NAME` is `iroh-tunnel-$ROLE` (standalone form). Both forms are accepted whatever the current invocation is, so a re-install that switches between combined and standalone still recognises the old daemon. Quoted variables inside `case` patterns are matched literally.
 - `start`: ours → "already running", exit 0; unverifiable → message, exit 1, PID file kept, nothing launched; stale or no file → remove and launch.

@@ -162,7 +162,7 @@ shell metacharacters in the binary, config or state path are never expanded.
 The PID file records the daemon's PID and the executable it launched.
 `start`, `stop` and `status` only act on that process: before any signal the
 script checks `/proc/<pid>/exe` against the recorded executable. A stale PID
-file (dead process, malformed content or another program) is removed and
+file (dead or zombie process, malformed content or another program) is removed and
 never signalled. If the identity cannot be checked, for example when `/proc`
 is missing, nothing is signalled and the PID file is kept: `start` and `stop`
 exit 1 and `status` exits 4 (unknown). `status` exits 3 when the daemon is not

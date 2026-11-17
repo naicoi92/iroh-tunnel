@@ -127,8 +127,8 @@ legacy_match() {{
 }}
 
 # Whether the PID file names the daemon: 0 = ours, 1 = stale (no file, no
-# such process, or another executable), 2 = unverifiable (an unreadable PID
-# file, or a live process whose executable cannot be read).
+# such process, a zombie, or another executable), 2 = unverifiable (an
+# unreadable PID file, or a live process whose executable cannot be read).
 identity() {{
     [ -f "$PIDFILE" ] || return 1
     [ -r "$PIDFILE" ] || return 2
@@ -140,6 +140,8 @@ identity() {{
         return 1
     fi
     [ -e "$PROC/$PID" ] || return 2
+    # A zombie (state `Z` after the last ") " of its stat) holds nothing.
+    ST=$(cat "$PROC/$PID/stat" 2>/dev/null) && case ${{ST##*") "}} in Z*) return 1 ;; esac
     EXE=$(readlink "$PROC/$PID/exe" 2>/dev/null) || return 2
     if [ -n "$REC" ]; then
         exe_matches "$EXE" "$REC"
@@ -574,6 +576,14 @@ mod tests {
                 std::fs::write(entry.join("cmdline"), bytes).unwrap();
             }
 
+            /// Fake `/proc/<pid>/stat` with process `state` after `comm`.
+            pub(super) fn fake_stat(&self, pid: u32, comm: &str, state: char) {
+                let entry = self.layout.proc_root.join(pid.to_string());
+                std::fs::create_dir_all(&entry).unwrap();
+                let stat = format!("{pid} ({comm}) {state} 1 {pid} {pid} 0 -1\n");
+                std::fs::write(entry.join("stat"), stat).unwrap();
+            }
+
             /// Re-point `/proc/<pid>/exe` atomically (temp link + rename).
             pub(super) fn set_exe(&self, pid: u32, target: &str) {
                 let entry = self.layout.proc_root.join(pid.to_string());
@@ -843,6 +853,39 @@ mod tests {
             h.write_pidfile(&text);
             h.fake_proc(pid, h.daemon_str(), &[h.daemon_str(), "serve", "run"]);
             std::fs::remove_file(h.proc_file(pid, "exe")).unwrap();
+            assert_unverifiable(&h, pid, &text);
+        }
+
+        #[test]
+        fn zombie_daemon_is_stale() {
+            let h = harness(DaemonKind::Exits);
+            let pid = h.spawn_unrelated();
+            let text = h.record_line(pid);
+            h.write_pidfile(&text);
+            // A zombie has no exe link; `comm` may itself contain ") ".
+            h.fake_stat(pid, "iroh-tunnel) R x", 'Z');
+            assert_eq!(code(&h.run("status")), 3);
+            assert_eq!(h.pidfile_text().unwrap(), text, "status changed it");
+            let out = h.run("stop");
+            assert_eq!(code(&out), 0, "{out:?}");
+            assert!(alive(pid), "stop signalled it");
+            assert!(h.pidfile_text().is_none());
+            h.write_pidfile(&text);
+            let out = h.run("start");
+            assert_eq!(code(&out), 0, "{out:?}");
+            h.wait_record();
+            let launched = h.pidfile_pid();
+            assert_ne!(launched, pid);
+            assert_eq!(h.pidfile_text().unwrap(), h.record_line(launched));
+        }
+
+        #[test]
+        fn running_state_without_exe_link_is_unverifiable() {
+            let h = harness(DaemonKind::Exits);
+            let pid = h.spawn_unrelated();
+            let text = h.record_line(pid);
+            h.write_pidfile(&text);
+            h.fake_stat(pid, "iroh-tunnel) Z x", 'S');
             assert_unverifiable(&h, pid, &text);
         }
 
