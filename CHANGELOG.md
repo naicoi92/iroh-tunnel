@@ -23,6 +23,11 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   its bounded queue; a failed open releases the flow's cap slots and counts
   its queued datagrams as `cap`; shutdown cancels opens within the drain
   grace.
+- UDP on Serve (#248): at most 4 lookups of a service's target address run
+  at once, so many new flows against a hung resolver no longer flood the
+  blocking pool. A lookup abandoned by a timed-out open keeps its share until
+  it ends; flows waiting for a share stay opening, queue their datagrams and
+  still give up at the resolve timeout.
 
 ## [0.6.0] - 2026-11-12
 
