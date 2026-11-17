@@ -127,10 +127,11 @@ legacy_match() {{
 }}
 
 # Whether the PID file names the daemon: 0 = ours, 1 = stale (no file, no
-# such process, or another executable), 2 = unverifiable (alive but its
-# executable cannot be read).
+# such process, or another executable), 2 = unverifiable (an unreadable PID
+# file, or a live process whose executable cannot be read).
 identity() {{
     [ -f "$PIDFILE" ] || return 1
+    [ -r "$PIDFILE" ] || return 2
     read_pidfile
     case "$PID" in ''|0*|*[!0-9]*) return 1 ;; esac
     if ! kill -0 "$PID" 2>/dev/null; then
@@ -369,8 +370,15 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        /// Whether `kill` may target `pid` as one process: never 0 (the
+        /// caller's process group) nor a value `kill` reads as negative.
+        fn signalable(pid: u32) -> bool {
+            pid != 0 && i32::try_from(pid).is_ok()
+        }
+
         /// Whether `pid` is a live process (`kill -0`).
         pub(super) fn alive(pid: u32) -> bool {
+            assert!(signalable(pid), "refusing to probe pid {pid}");
             Command::new("kill")
                 .arg("-0")
                 .arg(pid.to_string())
@@ -500,10 +508,27 @@ mod tests {
                     .stdin(Stdio::null())
                     .output()
                     .unwrap();
-                if let Some(pid) = self.read_pid() {
+                if let Some(pid) = self.read_pid().filter(|&pid| alive(pid)) {
                     self.seen.borrow_mut().push(pid);
                 }
                 output
+            }
+
+            /// `kill -9 pid`, wait until it is gone, and stop tracking it.
+            pub(super) fn kill9(&self, pid: u32) {
+                assert!(signalable(pid), "refusing to signal pid {pid}");
+                let _ = Command::new("kill")
+                    .arg("-9")
+                    .arg(pid.to_string())
+                    .stderr(Stdio::null())
+                    .status();
+                assert!(wait_gone(pid, Duration::from_secs(5)), "{pid} survived -9");
+                self.seen.borrow_mut().retain(|&p| p != pid);
+            }
+
+            /// The fake `/proc/<pid>/<name>` path.
+            pub(super) fn proc_file(&self, pid: u32, name: &str) -> PathBuf {
+                self.layout.proc_root.join(pid.to_string()).join(name)
             }
 
             fn read_pid(&self) -> Option<u32> {
@@ -514,7 +539,7 @@ mod tests {
                     .trim()
                     .parse()
                     .ok()
-                    .filter(|&pid| pid != 0)
+                    .filter(|&pid| signalable(pid))
             }
 
             /// The PID on the PID file's first line.
@@ -571,6 +596,7 @@ mod tests {
                     .trim()
                     .parse()
                     .unwrap();
+                assert!(signalable(pid), "unexpected pid {pid}");
                 self.seen.borrow_mut().push(pid);
                 pid
             }
@@ -591,7 +617,8 @@ mod tests {
 
         impl Drop for ScriptHarness {
             fn drop(&mut self) {
-                for pid in self.seen.borrow().iter().filter(|&&pid| alive(pid)) {
+                let seen = self.seen.borrow();
+                for &pid in seen.iter().filter(|&&pid| signalable(pid) && alive(pid)) {
                     let _ = Command::new("kill")
                         .arg("-9")
                         .arg(pid.to_string())
@@ -635,16 +662,6 @@ mod tests {
             let expected = format!("STATE={}", state.to_str().unwrap());
             assert!(record.lines().any(|l| l == expected), "{record}");
             assert!(alive(h.pidfile_pid()));
-        }
-
-        /// `kill -9 pid` and wait until it is gone.
-        fn kill9(pid: u32) {
-            let _ = Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .stderr(Stdio::null())
-                .status();
-            assert!(wait_gone(pid, Duration::from_secs(5)), "{pid} survived -9");
         }
 
         fn harness(daemon: DaemonKind) -> ScriptHarness {
@@ -762,7 +779,7 @@ mod tests {
                 h.wait_record();
                 let pid = h.pidfile_pid();
                 assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid), "{text:?}");
-                kill9(pid);
+                h.kill9(pid);
             }
         }
 
@@ -806,6 +823,52 @@ mod tests {
             assert_eq!(h.pidfile_text().unwrap(), text);
         }
 
+        /// `status` 4, `stop` 1 and `start` 1: `pid` alive, `text` kept, and
+        /// no daemon launched.
+        fn assert_unverifiable(h: &ScriptHarness, pid: u32, text: &str) {
+            for (verb, expected) in [("status", 4), ("stop", 1), ("start", 1)] {
+                let out = h.run(verb);
+                assert_eq!(code(&out), expected, "{verb}: {out:?}");
+                assert!(alive(pid), "{verb} signalled it");
+                assert_eq!(h.pidfile_text().unwrap(), text, "{verb} changed it");
+            }
+            assert!(!h.record.exists(), "start launched a daemon");
+        }
+
+        #[test]
+        fn missing_exe_link_is_unverifiable() {
+            let h = harness(DaemonKind::Exits);
+            let pid = h.spawn_unrelated();
+            let text = h.record_line(pid);
+            h.write_pidfile(&text);
+            h.fake_proc(pid, h.daemon_str(), &[h.daemon_str(), "serve", "run"]);
+            std::fs::remove_file(h.proc_file(pid, "exe")).unwrap();
+            assert_unverifiable(&h, pid, &text);
+        }
+
+        #[test]
+        fn unreadable_pid_file_is_unverifiable() {
+            let root = Command::new("id").arg("-u").output().unwrap();
+            if String::from_utf8_lossy(&root.stdout).trim() == "0" {
+                // root reads a mode-000 file: nothing to observe.
+                return;
+            }
+            let h = harness(DaemonKind::Exits);
+            let pid = stale(&h);
+            let text = h.record_line(pid);
+            let pidfile = &h.layout.pidfile;
+            std::fs::set_permissions(pidfile, std::fs::Permissions::from_mode(0o000)).unwrap();
+            for (verb, expected) in [("status", 4), ("stop", 1), ("start", 1)] {
+                let out = h.run(verb);
+                assert_eq!(code(&out), expected, "{verb}: {out:?}");
+                assert!(alive(pid), "{verb} signalled it");
+                assert!(pidfile.exists(), "{verb} removed it");
+            }
+            assert!(!h.record.exists(), "start launched a daemon");
+            std::fs::set_permissions(pidfile, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(h.pidfile_text().unwrap(), text);
+        }
+
         #[test]
         fn pid_reused_during_grace_is_not_killed() {
             let h = harness(DaemonKind::IgnoresTerm);
@@ -821,16 +884,32 @@ mod tests {
         #[test]
         fn legacy_pid_of_current_daemon_is_restarted() {
             let h = harness(DaemonKind::Exits);
-            let old = h.spawn_unrelated();
-            h.write_pidfile(&format!("{old}\n"));
-            h.fake_proc(old, h.daemon_str(), &[h.daemon_str(), "serve", "run"]);
-            let out = h.run("restart");
-            assert_eq!(code(&out), 0, "{out:?}");
-            assert!(wait_gone(old, Duration::from_secs(2)), "old daemon kept");
-            h.wait_record();
-            let pid = h.pidfile_pid();
-            assert_ne!(pid, old);
-            assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid));
+            let deleted = format!("{} (deleted)", h.daemon_str());
+            for exe in [h.daemon_str(), deleted.as_str()] {
+                let old = h.spawn_unrelated();
+                h.write_pidfile(&format!("{old}\n"));
+                h.fake_proc(old, exe, &[h.daemon_str(), "serve", "run"]);
+                h.clear_record();
+                let out = h.run("restart");
+                assert_eq!(code(&out), 0, "{exe}: {out:?}");
+                assert!(wait_gone(old, Duration::from_secs(2)), "{exe}: old kept");
+                h.wait_record();
+                let pid = h.pidfile_pid();
+                assert_ne!(pid, old);
+                assert_eq!(h.pidfile_text().unwrap(), h.record_line(pid));
+                h.kill9(pid);
+            }
+        }
+
+        #[test]
+        fn legacy_pid_with_unreadable_cmdline_is_unverifiable() {
+            let h = harness(DaemonKind::Exits);
+            let pid = h.spawn_unrelated();
+            let text = format!("{pid}\n");
+            h.write_pidfile(&text);
+            h.fake_proc(pid, "/x/iroh-tunnel-serve", &[]);
+            std::fs::remove_file(h.proc_file(pid, "cmdline")).unwrap();
+            assert_unverifiable(&h, pid, &text);
         }
 
         #[test]
@@ -869,7 +948,7 @@ mod tests {
         fn legacy_pid_of_unrelated_process_is_kept() {
             let h = harness(DaemonKind::Exits);
             let config = h.config_str().to_owned();
-            let cases: [(&str, Vec<&str>); 3] = [
+            let cases: [(&str, Vec<&str>); 4] = [
                 ("/usr/bin/sleep", vec!["sleep", "30"]),
                 (
                     "/x/iroh-tunnel",
@@ -878,6 +957,11 @@ mod tests {
                 (
                     "/x/iroh-tunnel",
                     vec!["/x/iroh-tunnel", "access", "run", "--config", &config],
+                ),
+                // The other role's standalone binary, same config.
+                (
+                    "/x/iroh-tunnel-access",
+                    vec!["/x/iroh-tunnel-access", "run", "--config", &config],
                 ),
             ];
             for (exe, argv) in cases {
@@ -895,7 +979,7 @@ mod tests {
                 let pid = h.pidfile_pid();
                 assert_ne!(pid, other);
                 assert!(alive(other));
-                kill9(pid);
+                h.kill9(pid);
             }
         }
 
