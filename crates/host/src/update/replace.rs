@@ -290,56 +290,38 @@ mod tests {
         MODE_AT_OPEN.with(|cell| cell.set(mode));
     }
 
-    /// Sets the process umask and restores the previous one on drop. The
-    /// umask is process-wide: no other test may change it in-process (use
-    /// `service::fixtures::in_isolated_home` to isolate one that must).
-    #[cfg(unix)]
-    struct UmaskGuard(libc::mode_t);
-
-    #[cfg(unix)]
-    impl UmaskGuard {
-        fn set(mask: libc::mode_t) -> Self {
-            // SAFETY: umask(2) has no preconditions and cannot fail.
-            Self(unsafe { libc::umask(mask) })
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for UmaskGuard {
-        fn drop(&mut self) {
-            // SAFETY: umask(2) has no preconditions and cannot fail.
-            unsafe { libc::umask(self.0) };
-        }
-    }
-
     /// Issue #230: the staging file is owner-only from the moment it exists,
     /// so a permissive umask never lets another user grab a write fd before
     /// the final permissions are set.
     #[cfg(unix)]
     #[test]
     fn staging_file_is_created_owner_only_under_a_permissive_umask() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("t");
-        std::fs::write(&target, b"o").unwrap();
-        let perms = std::fs::Permissions::from_mode(0o755);
+        const NAME: &str =
+            "update::replace::tests::staging_file_is_created_owner_only_under_a_permissive_umask";
+        // The umask is process-wide, so it is only changed in a child
+        // process that runs this test alone.
+        crate::fixtures::in_isolated_home(NAME, |home| {
+            use std::os::unix::fs::PermissionsExt;
+            // Explicit, so the test does not depend on the runner's umask (a
+            // 077 umask would hide the bug); 022 exposes group/other bits on
+            // a default-mode open.
+            // SAFETY: umask(2) only changes this child process's file mode
+            // creation mask; it has no memory-safety preconditions.
+            unsafe { libc::umask(0o022) };
+            let target = home.join("t");
+            std::fs::write(&target, b"o").unwrap();
+            let perms = std::fs::Permissions::from_mode(0o755);
 
-        // Explicit, so the test does not depend on the runner's umask (a 077
-        // umask would hide the bug). 022 is enough to expose group/other bits
-        // on a default-mode open; umask is process-wide, so stay no looser
-        // than the usual default to avoid widening files of parallel tests.
-        let staged = {
-            let _umask = UmaskGuard::set(0o022);
-            StagedFile::create(dir.path(), &target, b"new", &perms).unwrap()
-        };
+            let staged = StagedFile::create(home, &target, b"new", &perms).unwrap();
 
-        let at_open = MODE_AT_OPEN.with(std::cell::Cell::take).unwrap();
-        assert_eq!(at_open & 0o077, 0, "mode at open {:o}", at_open & 0o777);
-        let final_mode = std::fs::metadata(&staged.path)
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(final_mode & 0o777, 0o755);
+            let at_open = MODE_AT_OPEN.with(std::cell::Cell::take).unwrap();
+            assert_eq!(at_open & 0o077, 0, "mode at open {:o}", at_open & 0o777);
+            let final_mode = std::fs::metadata(&staged.path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(final_mode & 0o777, 0o755);
+        });
     }
 
     #[test]

@@ -18,6 +18,9 @@ pub mod service;
 pub mod status;
 pub mod update;
 
+#[cfg(test)]
+mod fixtures;
+
 pub use role::Role;
 
 pub use iroh_tunnel_engine::settings::Protocol;
