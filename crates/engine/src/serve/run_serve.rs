@@ -1250,6 +1250,12 @@ impl UpstreamResolver {
     /// Wait for a free share of the bound, then resolve in a task of its own
     /// that holds the share until the lookup ends.
     async fn resolve(&self, local_addr: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        if self.permits.available_permits() == 0 {
+            tracing::debug!(
+                target = local_addr,
+                "udp target lookups at their bound, waiting for one to end"
+            );
+        }
         let permit = self
             .permits
             .clone()
@@ -2042,6 +2048,52 @@ mod tests {
             started.load(Ordering::Relaxed),
             3 * MAX_RESOLVES_PER_SERVICE
         );
+    }
+
+    /// #248: an open cancelled while it waits for a share of the bound (as
+    /// when its flow ends or the role stops) takes no share with it.
+    #[tokio::test(start_paused = true)]
+    async fn an_open_cancelled_while_waiting_takes_no_share() {
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = UpstreamResolver::new(Arc::new({
+            let (release, started) = (release.clone(), started.clone());
+            move |_local_addr: String| {
+                let call = started.fetch_add(1, Ordering::Relaxed);
+                let release = release.clone();
+                Box::pin(async move {
+                    // The first lookups hang until released; later ones fail.
+                    if call < MAX_RESOLVES_PER_SERVICE {
+                        drop(release.acquire().await);
+                    }
+                    Err(std::io::ErrorKind::NotFound.into())
+                })
+            }
+        }));
+        let mut holders = JoinSet::new();
+        spawn_opens(&mut holders, &resolver, MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        let mut waiters = JoinSet::new();
+        spawn_opens(&mut waiters, &resolver, MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        waiters.abort_all();
+        while waiters.join_next().await.is_some() {}
+
+        release.add_permits(MAX_RESOLVES_PER_SERVICE);
+        while let Some(open) = holders.join_next().await {
+            open.expect("open task").expect_err("the lookup fails");
+        }
+        let mut next = JoinSet::new();
+        spawn_opens(&mut next, &resolver, MAX_RESOLVES_PER_SERVICE);
+        settle().await;
+        assert_eq!(
+            started.load(Ordering::Relaxed),
+            2 * MAX_RESOLVES_PER_SERVICE,
+            "the cancelled opens must neither start a lookup nor keep a share"
+        );
+        while let Some(open) = next.join_next().await {
+            open.expect("open task").expect_err("the lookup fails");
+        }
     }
 
     async fn read_flow_reply(conn: &Connection, flow: u32) {
