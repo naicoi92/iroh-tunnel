@@ -76,10 +76,6 @@ pub(crate) struct MachineDir {
     pub(crate) verify: bool,
 }
 
-/// Mode bit that lets other users open a lock file for reading.
-#[cfg(unix)]
-const OTHERS_READ: u32 = 0o004;
-
 /// Mode of the machine-dir lock and presence files: every account must be
 /// able to open them for reading.
 const MACHINE_FILE_MODE: u32 = 0o644;
@@ -311,14 +307,29 @@ fn base_options() -> OpenOptions {
     OpenOptions::new()
 }
 
+/// Create `dir` and any missing parents, each created directory getting
+/// exactly `mode` whatever the umask. A directory that already exists is left
+/// untouched (never re-chmodded).
 fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(mode)
-            .create(dir)
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut missing: Vec<&Path> = dir
+            .ancestors()
+            .take_while(|p| !p.as_os_str().is_empty() && std::fs::symlink_metadata(p).is_err())
+            .collect();
+        missing.reverse();
+        for path in missing {
+            match std::fs::DirBuilder::new().mode(mode).create(path) {
+                Ok(()) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        match std::fs::symlink_metadata(dir) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
     #[cfg(not(unix))]
     {
@@ -374,29 +385,33 @@ pub(crate) fn ensure_machine_dir(machine: &MachineDir) -> Result<()> {
     }
 }
 
+/// Open `path` as a lock file, creating it when missing. A file this call
+/// creates gets exactly `mode` (Unix; set on the open file, so the umask cannot
+/// narrow it); an existing file keeps its permissions.
 fn create_lock_file(path: &Path, mode: u32) -> std::io::Result<File> {
-    let mut options = base_options();
-    options.read(true).write(true).create(true);
+    let mut create = base_options();
+    create.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(mode);
+        create.mode(mode);
     }
     #[cfg(not(unix))]
     let _ = mode;
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        // The process umask may have narrowed the mode; other users must be
-        // able to open a machine lock for reading.
-        use std::os::unix::fs::PermissionsExt;
-        if mode & OTHERS_READ != 0 {
-            if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(mode)) {
-                tracing::debug!("could not widen lock mode for {}: {e}", path.display());
+    match create.open(path) {
+        Ok(file) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(mode))?;
             }
+            Ok(file)
         }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            base_options().read(true).write(true).open(path)
+        }
+        Err(e) => Err(e),
     }
-    Ok(file)
 }
 
 /// Outcome of trying to take or test one lock.
@@ -1127,7 +1142,7 @@ pub(crate) fn wait_released(role: Role, timeout: std::time::Duration) -> Result<
 ///
 /// As [`wait_released`], with [`probe_tier`].
 #[cfg_attr(
-    not(windows),
+    not(any(windows, test)),
     expect(
         dead_code,
         reason = "only the Windows system verbs wait for release; the service layer adopts it in a later task"
@@ -1846,51 +1861,106 @@ mod tests {
 
     // --- probes ---
 
-    /// `probe_tier` in already resolved directories.
-    fn probe_in(role: Role, tier: Tier, dirs: &TierDirs) -> Liveness {
-        tier_liveness_in(role, tier, dirs.own_dir(tier).unwrap()).unwrap()
+    /// Run `name` in a child process whose machine dir is under its fresh
+    /// `HOME`, with the tier chosen per call through `IROH_TUNNEL_TEST_TIER`.
+    /// The body claims user and system tiers with distinct node ids (via the
+    /// production seam: `claim`, `probe_tier`, `wait_released_in`).
+    #[cfg(unix)]
+    fn in_two_tier_home(name: &str, body: impl FnOnce(&Path)) {
+        crate::fixtures::in_isolated_home(name, |home| {
+            // SAFETY: single test thread in an isolated child process.
+            unsafe {
+                std::env::set_var(ENV_MACHINE_LOCK_DIR, home.join("machine"));
+            }
+            body(home);
+        });
     }
 
+    /// Claim as `tier` through the production `claim`.
+    #[cfg(unix)]
+    fn claim_as(role: Role, tier: Tier) -> RoleClaim {
+        // SAFETY: single test thread in an isolated child process.
+        unsafe {
+            std::env::set_var(
+                "IROH_TUNNEL_TEST_TIER",
+                if tier == Tier::System {
+                    "system"
+                } else {
+                    "user"
+                },
+            );
+        }
+        claim(role).unwrap()
+    }
+
+    #[cfg(unix)]
     #[test]
     fn probe_tier_sees_only_its_tier() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
-        let _user = claim_tier(Role::Serve, Tier::User, &tmp);
-        let dirs = temp_dirs(&tmp);
-        for tier in [Tier::User, Tier::System] {
-            let Liveness::Running { tier: seen, owner } = probe_in(Role::Serve, tier, &dirs) else {
-                panic!("{tier:?} must read as running");
-            };
-            assert_eq!(seen, tier);
-            assert_eq!(owner.expect("own record").pid, std::process::id());
-        }
-        let system_dir = machine_path(&dirs);
-        assert!(system_dir.join("serve.owner.json").exists());
-        assert!(user_path(&dirs).join("serve.owner.json").exists());
+        const NAME: &str = "ownership::tests::probe_tier_sees_only_its_tier";
+        in_two_tier_home(NAME, |_| {
+            let system = claim_as(Role::Serve, Tier::System);
+            system.publish_identity("SYSTEM-NODE").unwrap();
+            let user = claim_as(Role::Serve, Tier::User);
+            user.publish_identity("USER-NODE").unwrap();
+            for (tier, node) in [(Tier::User, "USER-NODE"), (Tier::System, "SYSTEM-NODE")] {
+                let Liveness::Running { tier: seen, owner } =
+                    probe_tier(Role::Serve, tier).unwrap()
+                else {
+                    panic!("{tier:?} must read as running");
+                };
+                assert_eq!(seen, tier);
+                assert_eq!(owner.unwrap().node_id.as_deref(), Some(node));
+            }
+        });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn probe_follows_the_current_tier() {
+        const NAME: &str = "ownership::tests::probe_follows_the_current_tier";
+        in_two_tier_home(NAME, |_| {
+            let system = claim_as(Role::Serve, Tier::System);
+            system.publish_identity("SYSTEM-NODE").unwrap();
+            let _user = claim_as(Role::Serve, Tier::User);
+            let Liveness::Running { tier, owner } = probe(Role::Serve).unwrap() else {
+                panic!("user tier is running");
+            };
+            assert_eq!(tier, Tier::User);
+            assert_ne!(owner.unwrap().node_id.as_deref(), Some("SYSTEM-NODE"));
+        });
+    }
+
+    #[cfg(unix)]
     #[test]
     fn probe_tier_does_not_see_the_other_tier() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
-        let dirs = temp_dirs(&tmp);
-        std::fs::create_dir_all(user_path(&dirs)).unwrap();
-        assert!(matches!(
-            probe_in(Role::Serve, Tier::User, &dirs),
-            Liveness::NotRunning
-        ));
+        const NAME: &str = "ownership::tests::probe_tier_does_not_see_the_other_tier";
+        in_two_tier_home(NAME, |_| {
+            let _system = claim_as(Role::Serve, Tier::System);
+            assert!(matches!(
+                probe_tier(Role::Serve, Tier::User).unwrap(),
+                Liveness::NotRunning
+            ));
+        });
     }
 
+    #[cfg(unix)]
     #[test]
     fn wait_released_in_ignores_other_tier() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _user = claim_tier(Role::Serve, Tier::User, &tmp);
-        let dirs = temp_dirs(&tmp);
-        std::fs::create_dir_all(machine_path(&dirs)).unwrap();
-        wait_released_with(Role::Serve, Duration::from_millis(300), |role| {
-            Ok(probe_in(role, Tier::System, &dirs))
-        })
-        .expect("a user holder must not delay a system wait");
+        const NAME: &str = "ownership::tests::wait_released_in_ignores_other_tier";
+        in_two_tier_home(NAME, |_| {
+            let user = claim_as(Role::Serve, Tier::User);
+            // A user holder never delays a system wait ...
+            wait_released_in(Role::Serve, Tier::System, Duration::from_millis(300)).unwrap();
+            // ... but does delay a user wait, until it exits.
+            let err = wait_released_in(Role::Serve, Tier::User, Duration::from_millis(200))
+                .expect_err("own tier still held");
+            assert!(matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Service(_))
+            ));
+            drop(user);
+            wait_released_in(Role::Serve, Tier::User, Duration::from_millis(300)).unwrap();
+        });
     }
 
     #[test]
@@ -1984,11 +2054,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn lock_and_presence_readable_under_umask_077() {
+    fn existing_lock_and_presence_keep_their_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        // The umask is process-global, so a narrowed creation mode is
-        // simulated by pre-creating both files 0600 (what umask 077 yields
-        // for a 0644 request).
         let tmp = tempfile::tempdir().unwrap();
         let dirs = temp_dirs(&tmp);
         let machine = machine_path(&dirs);
@@ -2005,8 +2072,50 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777;
-            assert_eq!(mode, 0o644, "{name}: {mode:o}");
+            assert_eq!(mode, 0o600, "{name} must not be re-chmodded: {mode:o}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_machine_dir_lock_and_presence_are_public_under_umask_077() {
+        const NAME: &str =
+            "ownership::tests::new_machine_dir_lock_and_presence_are_public_under_umask_077";
+        crate::fixtures::in_isolated_home(NAME, |home| {
+            use std::os::unix::fs::PermissionsExt;
+            // SAFETY: umask(2) only changes this child process's creation mask.
+            unsafe { libc::umask(0o077) };
+            let machine = home.join("run/iroh-tunnel");
+            let dirs = TierDirs {
+                user: None,
+                machine: Some(MachineDir {
+                    path: machine.clone(),
+                    verify: false,
+                }),
+            };
+            let _claim = claim_in(Role::Serve, Tier::System, dirs).unwrap();
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&machine), 0o755, "machine dir");
+            assert_eq!(mode(&machine.join("serve.lock")), 0o644);
+            assert_eq!(mode(&machine.join("serve.user.lock")), 0o644);
+            assert_eq!(mode(&machine.join("serve.owner.json")), 0o644);
+            assert_eq!(mode(machine.parent().unwrap()), 0o755);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_directory_is_never_chmodded() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        create_dir(&dir, 0o755).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[cfg(unix)]
