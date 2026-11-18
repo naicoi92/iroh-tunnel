@@ -1553,7 +1553,7 @@ impl UpstreamResolver {
 /// Publishes a lookup's outcome to the opens sharing it, and an error when
 /// the lookup task ends without one (its future panicked or the runtime
 /// dropped it). Then a closed channel without an outcome only ever means the
-/// leading open was cancelled before starting the lookup, and the opens
+/// leading open ended before starting the lookup, and the opens
 /// sharing it never start lookup after lookup.
 struct OutcomePublisher(OutcomeSender);
 
@@ -2473,19 +2473,13 @@ mod tests {
             Fault::detached(),
         );
         let mut resolves = JoinSet::new();
-        for _ in 0..3 * MAX_RESOLVES_PER_SERVICE {
-            let resolver = resolver.clone();
-            resolves.spawn(async move { resolver.resolve("shared.test:9").await });
-        }
+        spawn_resolves(&mut resolves, &resolver, 3 * MAX_RESOLVES_PER_SERVICE);
         settle().await;
         assert_eq!(started.load(Ordering::Relaxed), 1);
 
         release.add_permits(1);
-        while let Some(resolved) = resolves.join_next().await {
-            let addrs = resolved
-                .expect("resolve task")
-                .expect("the lookup succeeds");
-            assert_eq!(addrs, vec![target]);
+        for resolved in join_resolves(&mut resolves).await {
+            assert_eq!(resolved.expect("the lookup succeeds"), vec![target]);
         }
         assert_eq!(started.load(Ordering::Relaxed), 1);
     }
@@ -2537,6 +2531,22 @@ mod tests {
         (resolver, started)
     }
 
+    /// Collect every resolution in `resolves`, failing instead of hanging
+    /// when one never ends.
+    async fn join_resolves(
+        resolves: &mut JoinSet<std::io::Result<Vec<std::net::SocketAddr>>>,
+    ) -> Vec<std::io::Result<Vec<std::net::SocketAddr>>> {
+        tokio::time::timeout(UPSTREAM_RESOLVE_TIMEOUT, async {
+            let mut results = Vec::new();
+            while let Some(resolved) = resolves.join_next().await {
+                results.push(resolved.expect("resolve task"));
+            }
+            results
+        })
+        .await
+        .expect("every resolution ends")
+    }
+
     /// Start `count` resolutions of one service at once.
     fn spawn_resolves(
         resolves: &mut JoinSet<std::io::Result<Vec<std::net::SocketAddr>>>,
@@ -2573,12 +2583,11 @@ mod tests {
         assert_eq!(started.load(Ordering::Relaxed), MAX_RESOLVES_PER_SERVICE);
 
         leader.abort_all();
-        // One hung lookup ends and frees a share for the new lead, which is
-        // then released too.
-        release.add_permits(2);
-        while let Some(resolved) = joiners.join_next().await {
-            let addrs = resolved.expect("resolve task").expect("the new lookup");
-            assert_eq!(addrs, vec![target]);
+        // Opening the gate ends the hung lookups, freeing a share for the
+        // new lead, whose lookup passes the gate too.
+        release.add_permits(1);
+        for resolved in join_resolves(&mut joiners).await {
+            assert_eq!(resolved.expect("the new lookup"), vec![target]);
         }
         assert_eq!(
             started.load(Ordering::Relaxed),
@@ -2604,9 +2613,8 @@ mod tests {
 
         leader.abort_all();
         release.add_permits(1);
-        while let Some(resolved) = joiners.join_next().await {
-            let addrs = resolved.expect("resolve task").expect("the shared lookup");
-            assert_eq!(addrs, vec![target]);
+        for resolved in join_resolves(&mut joiners).await {
+            assert_eq!(resolved.expect("the shared lookup"), vec![target]);
         }
         assert_eq!(started.load(Ordering::Relaxed), 1);
     }
@@ -2635,14 +2643,20 @@ mod tests {
             Fault::detached(),
         );
         let mut resolves = JoinSet::new();
+        // The current-thread scheduler runs the three resolves, so they all
+        // share the lookup, before the lookup task itself.
         spawn_resolves(&mut resolves, &resolver, 3);
-        while let Some(resolved) = resolves.join_next().await {
-            let err = resolved
-                .expect("resolve task")
-                .expect_err("no outcome to share");
+        for resolved in join_resolves(&mut resolves).await {
+            let err = resolved.expect_err("no outcome to share");
             assert!(err.to_string().contains("without an outcome"), "{err}");
         }
         assert_eq!(started.load(Ordering::Relaxed), 1);
+        settle().await;
+        assert_eq!(
+            resolver.permits.available_permits(),
+            MAX_RESOLVES_PER_SERVICE,
+            "the panicked lookup gives its share back"
+        );
     }
 
     /// #226: a poisoned resolver state fails the open and raises the role
