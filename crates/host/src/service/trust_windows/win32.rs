@@ -43,7 +43,7 @@ use windows_sys::Win32::System::WindowsProgramming::{
 use super::ace::ace_layout;
 use super::model::{self, Ace, Descriptor, Refusal, Sid, TrustedSet};
 use crate::error::CliError;
-use crate::win32_ffi::win32_size_of;
+use crate::service::win32_ffi::win32_size_of;
 
 /// Bytes requested per `ReadFile` call of a verified read.
 const READ_CHUNK: u32 = 64 * 1024;

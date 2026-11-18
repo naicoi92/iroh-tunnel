@@ -98,7 +98,7 @@ fn token_is_elevated() -> bool {
             token.as_raw_handle(),
             TokenElevation,
             (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            crate::win32_ffi::win32_size_of::<TOKEN_ELEVATION>(),
+            crate::service::win32_ffi::win32_size_of::<TOKEN_ELEVATION>(),
             &mut returned,
         )
     };
