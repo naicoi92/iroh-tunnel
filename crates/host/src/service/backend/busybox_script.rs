@@ -359,7 +359,6 @@ mod tests {
         use std::time::{Duration, Instant};
 
         /// How the fake daemon treats SIGTERM.
-        #[derive(Clone, Copy)]
         pub(super) enum DaemonKind {
             /// Default disposition: SIGTERM ends it.
             Exits,
@@ -421,6 +420,7 @@ mod tests {
         /// (#246). Each harness symlinks its `DAEMON` path here instead, and
         /// the daemon writes its record next to the path it was run as.
         fn shared_daemon(kind: DaemonKind) -> PathBuf {
+            // Never dropped (statics are not): one small temp dir per run.
             static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
             let dir = DIR.get_or_init(|| {
                 let dir = tempfile::tempdir().unwrap();
