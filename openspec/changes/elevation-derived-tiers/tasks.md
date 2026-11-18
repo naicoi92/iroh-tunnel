@@ -27,11 +27,11 @@ Blocked by: 1
 
 Files: `crates/host/src/service/trust.rs`, `crates/host/src/service/trust_windows/{mod,model,win32}.rs`, `crates/host/src/service/platform.rs` (`load_config` family), `crates/host/src/service/mod.rs` (`ENV_SERVICE`), `crates/host/src/status/writer.rs` (trust branches), `crates/host/src/config/store.rs` (Windows confidentiality at the lock boundary), `crates/host/src/config/dto.rs` (`RoleDoc::ROLE`).
 
-- [ ] 3.1 Add `ENV_SERVICE = "IROH_TUNNEL_SERVICE"`; in `load_config` refuse legacy registrations before any read (`IROH_TUNNEL_TRUSTED_UID`/`_SID` present, or root under `INVOCATION_ID`/`XPC_SERVICE_NAME` without the marker) with the Contracts text naming `default_config_path_for(role, System)`; the role comes from `RoleDoc` (design D4).
-- [ ] 3.2 Walk config + state with admin-only owners only when `Tier::current() == System` and the service marker (`IROH_TUNNEL_SERVICE=1` / `IROH_TUNNEL_SCM=1`) is set; user services and foreground elevated runs are not walked; `test-utils` may add one trusted owner via `IROH_TUNNEL_TEST_TRUSTED_OWNER`.
-- [ ] 3.3 Remove the empty-key refusal so a system service persists a generated key through the store (owner root/Administrators, 0600).
-- [ ] 3.4 Windows: confidentiality check (non-admin read on the config dir or file → permission error, never repaired) in `trust_windows` and called from `ConfigLock::acquire` for elevated writes before any lock/temp/config is created, explicit `--config` included.
-- [ ] 3.5 Keep the uid/SID-pinned verify functions compiling for `service/install.rs` until Task 4 deletes them; status writer re-verifies with admin-only owners under the same condition as 3.2.
+- [x] 3.1 Add `ENV_SERVICE = "IROH_TUNNEL_SERVICE"`; in `load_config` refuse legacy registrations before any read (`IROH_TUNNEL_TRUSTED_UID`/`_SID` present, or root under `INVOCATION_ID`/`XPC_SERVICE_NAME` without the marker) with the Contracts text naming `default_config_path_for(role, System)`; the role comes from `RoleDoc` (design D4).
+- [x] 3.2 Walk config + state with admin-only owners only when `Tier::current() == System` and the service marker (`IROH_TUNNEL_SERVICE=1` / `IROH_TUNNEL_SCM=1`) is set; user services and foreground elevated runs are not walked; `test-utils` may add one trusted owner via `IROH_TUNNEL_TEST_TRUSTED_OWNER`.
+- [x] 3.3 Remove the empty-key refusal so a system service persists a generated key through the store (owner root/Administrators, 0600).
+- [x] 3.4 Windows: confidentiality check (non-admin read on the config dir or file → permission error, never repaired) in `trust_windows` and called from `ConfigLock::acquire` for elevated writes before any lock/temp/config is created, explicit `--config` included.
+- [x] 3.5 Keep the uid/SID-pinned verify functions compiling for `service/install.rs` until Task 4 deletes them; status writer re-verifies with admin-only owners under the same condition as 3.2.
 
 ## 4. Service layer: tier from privilege, no pin, no cross-tier refusal
 
