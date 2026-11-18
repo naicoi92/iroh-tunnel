@@ -10,19 +10,23 @@
 //!
 //! ## Two tiers
 //!
-//! - **User tier** — `<default state dir>/<role>.lock`. The location comes
-//!   from the user's home, never from `--config` or `IROH_TUNNEL_STATE_DIR`,
-//!   so foreground and user-service runs of one user share it however they
-//!   were started and whichever binary started them.
-//! - **Machine tier** — `/run/iroh-tunnel/<role>.lock` (Linux),
-//!   `/var/run/iroh-tunnel/<role>.lock` (macOS),
-//!   `%ProgramData%\iroh-tunnel\<role>.lock` (Windows). A process that can create and write the
-//!   file (the root-owned system service) holds it *exclusively*. Any other
-//!   process opens it read-only and holds it *shared*. That refuses a user
-//!   start while the system service runs and a system start while any user
-//!   process runs, in either start order, while two unrelated users still
-//!   coexist. A user process that starts before the file ever existed is not
-//!   seen by a later system start; the file appears on the first system run.
+//! The tier is a fact of the process ([`Tier::current`]): an elevated process
+//! is [`Tier::System`], any other is [`Tier::User`]. A process claims only its
+//! own tier, and the two tiers run side by side.
+//!
+//! - **User tier** — `<default state dir>/<role>.lock`, held exclusively. The
+//!   location comes from the user's home, never from `--config` or
+//!   `IROH_TUNNEL_STATE_DIR`, so foreground and user-service runs of one user
+//!   share it however they were started.
+//! - **System tier** — `<machine dir>/<role>.lock`, held exclusively: one per
+//!   machine per role. The machine dir is `/run/iroh-tunnel` (Linux),
+//!   `/var/run/iroh-tunnel` (macOS), `%ProgramData%\iroh-tunnel` (Windows).
+//! - **Presence file** — `<machine dir>/<role>.user.lock`. The system tier
+//!   creates it (0644, unlocked); a user process holds it *shared* through a
+//!   read-only open while it runs and never creates anything in the machine
+//!   dir. These files only detect the other tier ([`other_tier_running`]); they
+//!   never block a start. A user process that started before the file existed
+//!   is not seen by a later system start (accepted blind spot).
 //!
 //! ## Owner records
 //!
@@ -34,10 +38,10 @@
 //! never the record. The identity check fails closed: while the other role's
 //! lock is held exclusively, a record that cannot be read or parsed refuses
 //! the start, because the other role may run with the same key. A record
-//! whose lock is free (a crash leftover) is never read. User-tier records are
-//! private (`0o600`); machine-tier records are world-readable (`0o644`) so a
-//! user start can read the system service's identity. No secret key is ever
-//! written.
+//! whose lock is free (a crash leftover) is never read. The identity check
+//! looks only at the claimant's own tier. User-tier records are private
+//! (`0o600`); system-tier records are world-readable (`0o644`). No secret key
+//! is ever written.
 //!
 //! The process only refuses; it never stops another process (RO-03).
 
@@ -49,6 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CliError;
 use crate::role::Role;
+use crate::Tier;
 
 /// Test-only stand-in for the root-owned machine lock directory.
 ///
@@ -75,6 +80,10 @@ pub(crate) struct MachineDir {
 #[cfg(unix)]
 const OTHERS_READ: u32 = 0o004;
 
+/// Mode of the machine-dir lock and presence files: every account must be
+/// able to open them for reading.
+const MACHINE_FILE_MODE: u32 = 0o644;
+
 /// Who is recorded as running a role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnerRecord {
@@ -89,15 +98,6 @@ pub struct OwnerRecord {
     pub started_at: u64,
 }
 
-/// Where a running owner was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    /// The per-user lock directory.
-    User,
-    /// The machine-wide lock directory.
-    Machine,
-}
-
 /// Result of probing a role for a live owner.
 #[derive(Debug)]
 pub enum Liveness {
@@ -105,7 +105,7 @@ pub enum Liveness {
     NotRunning,
     /// A process holds the role.
     Running {
-        /// Which lock tier is held.
+        /// Which tier's lock is held.
         tier: Tier,
         /// The owner record, when it can be read.
         owner: Option<OwnerRecord>,
@@ -125,13 +125,13 @@ fn start_refused(msg: String) -> anyhow::Error {
 fn user_dir() -> Result<PathBuf> {
     match std::env::var_os("HOME").map(PathBuf::from) {
         Some(home) if home.is_absolute() => Ok(home.join(".local/state/iroh-tunnel")),
-        _ => crate::paths::default_state_dir(),
+        _ => crate::paths::default_state_dir_for(Tier::User),
     }
 }
 
 #[cfg(not(all(windows, feature = "test-utils")))]
 fn user_dir() -> Result<PathBuf> {
-    crate::paths::default_state_dir()
+    crate::paths::default_state_dir_for(Tier::User)
 }
 
 /// The machine lock directory; `Ok(None)` only where the platform defines
@@ -181,6 +181,24 @@ pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
     machine_dir_from_program_data(crate::service::program_data_dir())
 }
 
+/// The platform's machine lock directory; `None` where it defines none.
+/// Compiled for tests on every non-Windows target so the real paths are
+/// asserted even when `test-utils` replaces the resolver.
+#[cfg(all(not(windows), any(test, not(feature = "test-utils"))))]
+fn platform_machine_dir() -> Option<MachineDir> {
+    let path = if cfg!(target_os = "linux") {
+        PathBuf::from("/run/iroh-tunnel")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/var/run/iroh-tunnel")
+    } else {
+        return None;
+    };
+    Some(MachineDir {
+        path,
+        verify: false,
+    })
+}
+
 /// The machine lock directory; `Ok(None)` where the platform defines none.
 ///
 /// # Errors
@@ -192,49 +210,71 @@ pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
     reason = "signature shared with the Windows and test-utils variants, which can fail"
 )]
 pub(crate) fn machine_dir() -> Result<Option<MachineDir>> {
-    let path = if cfg!(target_os = "linux") {
-        PathBuf::from("/run/iroh-tunnel")
-    } else if cfg!(target_os = "macos") {
-        PathBuf::from("/var/run/iroh-tunnel")
-    } else {
-        return Ok(None);
-    };
-    Ok(Some(MachineDir {
-        path,
-        verify: false,
-    }))
+    Ok(platform_machine_dir())
 }
 
-/// Both tiers' directories, resolved before any lock is taken so a
-/// resolution error never leaves a half-taken claim.
+/// The directories one claim or probe needs, resolved before any lock is
+/// taken so a resolution error never leaves a half-taken claim.
 #[derive(Debug)]
 struct TierDirs {
-    user: PathBuf,
-    /// `None` only where the platform defines no machine tier.
+    /// The user tier's directory; `None` when the tier does not need it.
+    user: Option<PathBuf>,
+    /// The machine directory; `None` where the platform defines none or
+    /// (user tier only) it could not be resolved.
     machine: Option<MachineDir>,
 }
 
 impl TierDirs {
-    /// Resolve both tiers with the platform machine resolver.
+    /// Resolve the directories `tier` needs with the platform resolver.
     ///
     /// # Errors
     ///
-    /// As [`TierDirs::resolve_with`].
-    fn resolve() -> Result<TierDirs> {
-        Self::resolve_with(machine_dir)
+    /// As [`TierDirs::resolve_for_with`].
+    fn resolve_for(tier: Tier) -> Result<TierDirs> {
+        Self::resolve_for_with(tier, machine_dir)
     }
 
-    /// Resolve both tiers, the machine tier through `machine` (first).
+    /// Resolve the directories `tier` needs, the machine one through
+    /// `machine`. The system tier requires it; the user tier only uses it to
+    /// notice the presence file, so a failure there is logged and ignored.
     ///
     /// # Errors
     ///
-    /// The machine or the user directory cannot be resolved.
-    fn resolve_with(machine: impl FnOnce() -> Result<Option<MachineDir>>) -> Result<TierDirs> {
-        let machine = machine()?;
-        Ok(TierDirs {
-            user: user_dir()?,
-            machine,
-        })
+    /// System tier: the machine directory cannot be resolved. User tier: the
+    /// user state directory cannot be resolved.
+    fn resolve_for_with(
+        tier: Tier,
+        machine: impl FnOnce() -> Result<Option<MachineDir>>,
+    ) -> Result<TierDirs> {
+        match tier {
+            Tier::System => Ok(TierDirs {
+                user: None,
+                machine: machine()?,
+            }),
+            Tier::User => {
+                let machine = machine().unwrap_or_else(|e| {
+                    tracing::debug!("machine lock directory unavailable: {e:#}");
+                    None
+                });
+                Ok(TierDirs {
+                    user: Some(user_dir()?),
+                    machine,
+                })
+            }
+        }
+    }
+
+    /// The directory holding `tier`'s own lock and owner record.
+    ///
+    /// # Errors
+    ///
+    /// The tier has no directory here.
+    fn own_dir(&self, tier: Tier) -> Result<&Path> {
+        let dir = match tier {
+            Tier::User => self.user.as_deref(),
+            Tier::System => self.machine.as_ref().map(|m| m.path.as_path()),
+        };
+        dir.with_context(|| format!("no lock directory for the {}", tier.label()))
     }
 }
 
@@ -242,6 +282,10 @@ fn lock_name(role: Role) -> String {
     format!("{}.lock", role.name())
 }
 
+/// The presence file user processes hold shared while they run.
+fn presence_name(role: Role) -> String {
+    format!("{}.user.lock", role.name())
+}
 fn owner_name(role: Role) -> String {
     format!("{}.owner.json", role.name())
 }
@@ -456,6 +500,24 @@ fn held_exclusively(path: &Path) -> Result<bool> {
     Ok(matches!(lock, Lock::Busy))
 }
 
+/// Whether some process holds the lock at `path` in any mode; a missing file
+/// is not held. Tested with an exclusive lock on a read-only open, released
+/// again before returning.
+///
+/// # Errors
+///
+/// The lock exists but cannot be opened or tested.
+fn held_shared(path: &Path) -> Result<bool> {
+    let Some(file) = open_existing(path, false)
+        .with_context(|| format!("cannot open lock {}", path.display()))?
+    else {
+        return Ok(false);
+    };
+    let lock = try_lock(file, LockKind::Exclusive)
+        .with_context(|| format!("cannot test lock {}", path.display()))?;
+    Ok(matches!(lock, Lock::Busy))
+}
+
 /// Mode of an owner record in the user tier: private to the account.
 const USER_RECORD_MODE: u32 = 0o600;
 /// Mode of an owner record in the machine tier: every account must be able to
@@ -534,22 +596,12 @@ pub fn describe_owner(owner: Option<&OwnerRecord>) -> String {
     }
 }
 
-impl Tier {
-    /// Who holds the role at this tier, for messages.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Tier::User => "this user",
-            Tier::Machine => "the system service or another machine-wide process",
-        }
-    }
-}
-
-/// The refusal for a start that finds `role` already running at `scope`.
-fn already_running(role: Role, scope: &str, owner: Option<&OwnerRecord>) -> anyhow::Error {
+/// The refusal for a start that finds `role` already running in `tier`.
+fn already_running(role: Role, tier: Tier, owner: Option<&OwnerRecord>) -> anyhow::Error {
     start_refused(format!(
-        "{} is already running ({scope}; {}); {}",
+        "{} is already running ({}; {}); {}",
         role.name(),
+        tier.label(),
         describe_owner(owner),
         stop_hint(role)
     ))
@@ -578,32 +630,57 @@ fn stop_hint_for(role: Role, flag_suffix: &str) -> String {
 #[derive(Debug)]
 pub(crate) struct RoleClaim {
     role: Role,
+    tier: Tier,
     /// The directories this claim was taken in.
     dirs: TierDirs,
-    /// Whether this process holds the machine tier exclusively.
-    holds_machine: bool,
+    /// The own-tier lock, plus the shared presence file for a user claim
+    /// when it exists.
     _locks: Vec<File>,
 }
 
-/// Claim `role` for this process, refusing while another process runs it.
+/// Claim `role` in the current tier, refusing while another process runs it
+/// there. The other tier is never consulted (see [`other_tier_running`]).
 ///
 /// # Errors
 ///
-/// [`CliError::Conflict`] when the role already runs (any start mode, any
-/// executable); [`CliError::Config`] when the user state directory cannot be
-/// resolved; the machine lock directory cannot be resolved (checked before
-/// any lock is taken); other I/O errors with the failing path.
+/// [`CliError::Conflict`] when the role already runs in this tier (any start
+/// mode, any executable); [`CliError::Config`] when the user state directory
+/// cannot be resolved (user tier); the machine lock directory cannot be
+/// resolved or created (system tier, checked before any lock is taken); other
+/// I/O errors with the failing path.
 pub(crate) fn claim(role: Role) -> Result<RoleClaim> {
-    claim_in(role, TierDirs::resolve()?)
+    let tier = Tier::current();
+    claim_in(role, tier, TierDirs::resolve_for(tier)?)
 }
 
-/// [`claim`] in already resolved directories.
+/// [`claim`] for `tier` in already resolved directories.
 ///
 /// # Errors
 ///
 /// As [`claim`], except resolution.
-fn claim_in(role: Role, dirs: TierDirs) -> Result<RoleClaim> {
-    let user_dir = &dirs.user;
+fn claim_in(role: Role, tier: Tier, dirs: TierDirs) -> Result<RoleClaim> {
+    let locks = match tier {
+        Tier::User => claim_user(role, &dirs)?,
+        Tier::System => claim_system(role, &dirs)?,
+    };
+    let claim = RoleClaim {
+        role,
+        tier,
+        dirs,
+        _locks: locks,
+    };
+    // Replace any record a crashed predecessor left, before anyone can read
+    // it as ours: its pid may equal the pid in a stale status snapshot.
+    // A failure drops `claim`, which releases the locks.
+    let (dir, mode) = claim.record_dir()?;
+    write_owner(dir, role, None, mode)?;
+    Ok(claim)
+}
+
+/// Take the user tier: its own lock exclusively, then the system tier's
+/// presence file shared when it exists. Never creates a machine-dir file.
+fn claim_user(role: Role, dirs: &TierDirs) -> Result<Vec<File>> {
+    let user_dir = dirs.own_dir(Tier::User)?;
     create_dir(user_dir, 0o700)
         .with_context(|| format!("cannot create state directory {}", user_dir.display()))?;
     let user_path = user_dir.join(lock_name(role));
@@ -614,62 +691,72 @@ fn claim_in(role: Role, dirs: TierDirs) -> Result<RoleClaim> {
         Lock::Busy => {
             return Err(already_running(
                 role,
-                Tier::User.label(),
+                Tier::User,
                 read_owner(user_dir, role).as_ref(),
             ))
         }
     };
-
     let mut locks = vec![user_lock];
-    let mut holds_machine = false;
-    if let Some(MachineDir { path: dir, verify }) = &dirs.machine {
-        match claim_machine(role, dir, *verify)? {
-            MachineClaim::Exclusive(file) => {
-                locks.push(file);
-                holds_machine = true;
+    if let Some(machine) = &dirs.machine {
+        locks.extend(hold_presence(&machine.path.join(presence_name(role))));
+    }
+    Ok(locks)
+}
+
+/// Hold the presence file shared through a read-only open. Best effort: it
+/// only lets the system tier notice this process, so every failure (absent
+/// file, no permission, a probe holding it) is logged and the start goes on.
+fn hold_presence(path: &Path) -> Option<File> {
+    let file = match open_existing(path, false) {
+        Ok(Some(file)) => file,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::debug!("cannot open presence file {}: {e}", path.display());
+            return None;
+        }
+    };
+    // The system tier's probe holds the file exclusively for microseconds.
+    const ATTEMPTS: u32 = 4;
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+    for attempt in 1..=ATTEMPTS {
+        match file.try_lock_shared() {
+            Ok(()) => return Some(file),
+            Err(TryLockError::WouldBlock) if attempt < ATTEMPTS => std::thread::sleep(PAUSE),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => {
+                tracing::debug!("cannot lock presence file {}: {e}", path.display());
+                return None;
             }
-            MachineClaim::Shared(file) => locks.push(file),
-            MachineClaim::Absent => {}
         }
     }
-    let claim = RoleClaim {
-        role,
-        dirs,
-        holds_machine,
-        _locks: locks,
-    };
-    // Replace any record a crashed predecessor left, before anyone can read
-    // it as ours: its pid may equal the pid in a stale status snapshot.
-    // A failure drops `claim`, which releases the locks.
-    for (dir, mode) in claim.record_dirs() {
-        write_owner(dir, role, None, mode)?;
-    }
-    Ok(claim)
+    None
 }
 
-/// Errors that mean "this account may not create the machine lock".
-fn is_not_elevated(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        std::io::ErrorKind::PermissionDenied
-            | std::io::ErrorKind::ReadOnlyFilesystem
-            | std::io::ErrorKind::NotFound
-    )
+/// Take the system tier: the machine lock exclusively, then make sure the
+/// presence file exists.
+fn claim_system(role: Role, dirs: &TierDirs) -> Result<Vec<File>> {
+    let machine = dirs
+        .machine
+        .as_ref()
+        .context("this platform defines no machine lock directory")?;
+    let lock = claim_system_lock(role, &machine.path, machine.verify)?;
+    ensure_presence_in(role, &machine.path)?;
+    Ok(vec![lock])
 }
 
-enum MachineClaim {
-    Exclusive(File),
-    Shared(File),
-    Absent,
-}
-
-/// Claim the machine tier. `verify` (Windows only) requires an existing
-/// directory to pass the machine trust check before anything is created in it.
-fn claim_machine(role: Role, dir: &Path, verify: bool) -> Result<MachineClaim> {
+/// Create the machine directory (verifying an existing one where `verify`),
+/// then take `<role>.lock` there exclusively.
+///
+/// `verify` (Windows only) requires an existing directory to pass the machine
+/// trust check before anything is created in it; a refusal is a permission
+/// error and the directory is never repaired.
+///
+/// # Errors
+///
+/// [`CliError::Conflict`] when the lock is held; [`CliError::Permission`] for
+/// an untrusted directory; the create/open error with the path otherwise.
+fn claim_system_lock(role: Role, dir: &Path, verify: bool) -> Result<File> {
     let path = dir.join(lock_name(role));
-    // An existing machine directory must be trusted before anything is
-    // created in it, and is never repaired. A refusal is a permission error,
-    // never "not elevated".
     #[cfg(windows)]
     let dir_exists = std::fs::symlink_metadata(dir).is_ok();
     #[cfg(windows)]
@@ -677,16 +764,17 @@ fn claim_machine(role: Role, dir: &Path, verify: bool) -> Result<MachineClaim> {
         crate::service::verify_machine_dir(dir)?;
     }
     #[cfg(not(windows))]
-    let (dir_exists, _) = (false, verify);
-    // Elevated side: able to create the directory and write the lock. Only
-    // "no permission" means "not elevated"; any other failure is real.
+    let _ = verify;
     // Windows creates only a missing directory (`CreateDirectoryW` fails on an
     // existing one); Unix keeps its idempotent create.
-    let ensure_dir = if cfg!(windows) && dir_exists {
+    #[cfg(windows)]
+    let ensure_dir = if dir_exists {
         Ok(())
     } else {
         create_machine_dir(dir)
     };
+    #[cfg(not(windows))]
+    let ensure_dir = create_machine_dir(dir);
     // Another process may have created the directory since the check above:
     // trust it only after verification.
     #[cfg(windows)]
@@ -699,50 +787,57 @@ fn claim_machine(role: Role, dir: &Path, verify: bool) -> Result<MachineClaim> {
         }
         other => other,
     };
-    match ensure_dir.and_then(|()| create_lock_file(&path, 0o644)) {
-        Ok(file) => {
-            return match claim_lock(file)? {
-                Lock::Held(file) => Ok(MachineClaim::Exclusive(file)),
-                Lock::Busy => Err(already_running(
-                    role,
-                    Tier::Machine.label(),
-                    read_owner(dir, role).as_ref(),
-                )),
-            };
-        }
-        Err(e) if is_not_elevated(&e) => {}
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!(
-                "cannot create machine role lock {}",
-                path.display()
-            )))
-        }
-    }
-    // Non-elevated side: read-only, shared. Never create anything here.
-    let file = match base_options().read(true).open(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(MachineClaim::Absent),
-        Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("cannot open machine role lock {}", path.display())))
-        }
-    };
-    match try_lock(file, LockKind::Shared)? {
-        Lock::Held(file) => Ok(MachineClaim::Shared(file)),
+    let file = ensure_dir
+        .and_then(|()| create_lock_file(&path, MACHINE_FILE_MODE))
+        .with_context(|| format!("cannot create machine role lock {}", path.display()))?;
+    match claim_lock(file)? {
+        Lock::Held(file) => Ok(file),
         Lock::Busy => Err(already_running(
             role,
-            "a system service",
+            Tier::System,
             read_owner(dir, role).as_ref(),
         )),
     }
 }
 
+/// Create `<role>.user.lock` in `dir` when missing, readable by everyone and
+/// not locked.
+fn ensure_presence_in(role: Role, dir: &Path) -> Result<()> {
+    let path = dir.join(presence_name(role));
+    create_lock_file(&path, MACHINE_FILE_MODE)
+        .map(drop)
+        .with_context(|| format!("cannot create presence file {}", path.display()))
+}
+
+/// Make sure the system tier's presence file of `role` exists (created when
+/// missing, never locked), so user instances started afterwards are visible
+/// to the system tier. Called by a system `run` claim and by a system
+/// `service install`.
+///
+/// # Errors
+///
+/// The machine directory cannot be resolved, created or trusted, or the file
+/// cannot be created.
+#[expect(
+    dead_code,
+    reason = "the system install calls this from the service layer; claims go through claim_system"
+)]
+pub(crate) fn ensure_presence_file(role: Role) -> Result<()> {
+    let machine = machine_dir()?.context("this platform defines no machine lock directory")?;
+    #[cfg(windows)]
+    ensure_machine_dir(&machine)?;
+    #[cfg(not(windows))]
+    create_machine_dir(&machine.path)
+        .with_context(|| format!("cannot create machine directory {}", machine.path.display()))?;
+    ensure_presence_in(role, &machine.path)
+}
+
 impl Drop for RoleClaim {
-    /// Remove this process's owner records on a graceful stop. The lock files
+    /// Remove this process's owner record on a graceful stop. The lock files
     /// stay (unlinking a lock inode would allow split ownership), and a
     /// record is removed only while it still names this process.
     fn drop(&mut self) {
-        for (dir, _) in self.record_dirs() {
+        if let Ok((dir, _)) = self.record_dir() {
             if read_owner(dir, self.role).is_some_and(|o| o.pid == std::process::id()) {
                 if let Err(e) = std::fs::remove_file(dir.join(owner_name(self.role))) {
                     tracing::debug!("could not remove owner record in {}: {e}", dir.display());
@@ -753,17 +848,14 @@ impl Drop for RoleClaim {
 }
 
 impl RoleClaim {
-    /// The directories this process publishes owner records in: the user
-    /// tier, plus the machine tier while it is held exclusively, each with
-    /// its record file mode.
-    fn record_dirs(&self) -> impl Iterator<Item = (&Path, u32)> {
-        let machine = self
-            .dirs
-            .machine
-            .as_ref()
-            .filter(|_| self.holds_machine)
-            .map(|m| (m.path.as_path(), MACHINE_RECORD_MODE));
-        std::iter::once((self.dirs.user.as_path(), USER_RECORD_MODE)).chain(machine)
+    /// The directory this process publishes its owner record in (its own
+    /// tier's) with the record's file mode.
+    fn record_dir(&self) -> Result<(&Path, u32)> {
+        let mode = match self.tier {
+            Tier::User => USER_RECORD_MODE,
+            Tier::System => MACHINE_RECORD_MODE,
+        };
+        Ok((self.dirs.own_dir(self.tier)?, mode))
     }
 
     /// Publish this process as the owner with its public `node_id` and reject
@@ -771,23 +863,19 @@ impl RoleClaim {
     ///
     /// The record is written *before* the other role is inspected, so two
     /// racing starts with one key can only both back off, never both run.
-    /// Only tiers whose other-role lock is held exclusively are inspected, so
-    /// a crash leftover never blocks a start.
+    /// Only this tier's directory is inspected, and only while the other
+    /// role's lock there is held exclusively, so a crash leftover or the other
+    /// tier's record never blocks a start.
     ///
     /// # Errors
     ///
     /// The record cannot be published; [`CliError::Conflict`] when the other
     /// role runs with this identity or runs with an unreadable record.
     pub(crate) fn publish_identity(&self, node_id: &str) -> Result<()> {
-        for (dir, mode) in self.record_dirs() {
-            write_owner(dir, self.role, Some(node_id), mode)?;
-        }
+        let (dir, mode) = self.record_dir()?;
+        write_owner(dir, self.role, Some(node_id), mode)?;
         let other = other_role(self.role);
-        let machine = self.dirs.machine.as_ref().map(|m| m.path.as_path());
-        for dir in std::iter::once(self.dirs.user.as_path()).chain(machine) {
-            let Some(owner) = running_owner(dir, other)? else {
-                continue;
-            };
+        if let Some(owner) = running_owner(dir, other)? {
             if owner.node_id.as_deref() == Some(node_id) {
                 return Err(start_refused(format!(
                     "the {} role already runs with the same public identity ({}); \
@@ -844,42 +932,68 @@ fn running_owner(dir: &Path, role: Role) -> Result<Option<OwnerRecord>> {
     }
 }
 
-/// Test whether `role` is running, without taking ownership.
+/// Test whether `role` is running in the current tier, without taking
+/// ownership.
 ///
 /// Never creates or modifies a lock file.
 ///
 /// # Errors
 ///
-/// I/O errors other than "no such lock" when opening or testing a lock.
+/// The tier's directory cannot be resolved; I/O errors other than "no such
+/// lock" when opening or testing the lock.
 pub(crate) fn probe(role: Role) -> Result<Liveness> {
-    Ok(probe_tiers(role)?
-        .into_iter()
-        .next()
-        .unwrap_or(Liveness::NotRunning))
+    probe_tier(role, Tier::current())
 }
 
-/// Every tier at which `role` is running (user first), empty when none.
+/// Test whether `role` is running in `tier`, without taking ownership.
 ///
 /// # Errors
 ///
-/// A tier directory cannot be resolved (checked before any lock is tested);
-/// otherwise as [`probe_tiers_in`].
-fn probe_tiers(role: Role) -> Result<Vec<Liveness>> {
-    probe_tiers_in(role, &TierDirs::resolve()?)
+/// As [`probe`].
+pub(crate) fn probe_tier(role: Role, tier: Tier) -> Result<Liveness> {
+    let dirs = TierDirs::resolve_for(tier)?;
+    tier_liveness_in(role, tier, dirs.own_dir(tier)?)
 }
 
-/// [`probe_tiers`] in already resolved directories.
-///
-/// # Errors
-///
-/// As [`tier_liveness_in`].
-fn probe_tiers_in(role: Role, dirs: &TierDirs) -> Result<Vec<Liveness>> {
-    let mut seen = vec![tier_liveness_in(role, Tier::User, &dirs.user)?];
-    if let Some(MachineDir { path: dir, .. }) = &dirs.machine {
-        seen.push(tier_liveness_in(role, Tier::Machine, dir)?);
+/// Whether `role` also runs in the tier other than `tier`, as seen from
+/// `tier`: a user process tests the system lock, a system process tests the
+/// presence file. Only a lock is read, never an owner record. Any I/O error
+/// is logged at debug level and reads as "not running", so the notice can
+/// never block a start.
+#[must_use]
+pub fn other_tier_running(role: Role, tier: Tier) -> Option<Tier> {
+    let machine = match machine_dir() {
+        Ok(Some(machine)) => machine,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::debug!("cannot resolve the machine lock directory: {e:#}");
+            return None;
+        }
+    };
+    other_tier_running_in(role, tier, &machine.path)
+}
+
+/// [`other_tier_running`] in an explicit machine directory.
+fn other_tier_running_in(role: Role, tier: Tier, machine: &Path) -> Option<Tier> {
+    let (name, other) = match tier {
+        Tier::User => (lock_name(role), Tier::System),
+        Tier::System => (presence_name(role), Tier::User),
+    };
+    let path = machine.join(name);
+    // A shared test sees the system's exclusive hold; an exclusive test sees
+    // any shared presence hold.
+    let held = match tier {
+        Tier::User => held_exclusively(&path),
+        Tier::System => held_shared(&path),
+    };
+    match held {
+        Ok(true) => Some(other),
+        Ok(false) => None,
+        Err(e) => {
+            tracing::debug!("cannot probe the {}: {e:#}", other.label());
+            None
+        }
     }
-    seen.retain(|l| matches!(l, Liveness::Running { .. }));
-    Ok(seen)
 }
 
 /// Both tiers' lock directories in one value.
@@ -931,16 +1045,13 @@ impl LockDirs {
 /// The seam the install path resolves lock directories through.
 pub(crate) type LockResolver<'a> = &'a dyn Fn(Option<&Path>) -> Result<LockDirs>;
 
-/// Probe exactly `dir` for `role`'s lock and report it as `tier`.
+/// Probe exactly `dir` for `role`'s own lock and report it as `tier`.
 ///
 /// # Errors
 ///
 /// I/O errors other than "no such lock" when opening or testing the lock.
 pub(crate) fn tier_liveness_in(role: Role, tier: Tier, dir: &Path) -> Result<Liveness> {
-    // A prober that can open the machine lock for writing tests it
-    // exclusively, or it would miss shared (non-elevated) holders.
-    let prefer_write = matches!(tier, Tier::Machine);
-    if lock_is_held(&dir.join(lock_name(role)), prefer_write)? {
+    if held_exclusively(&dir.join(lock_name(role)))? {
         Ok(Liveness::Running {
             tier,
             owner: read_owner(dir, role),
@@ -952,17 +1063,13 @@ pub(crate) fn tier_liveness_in(role: Role, tier: Tier, dir: &Path) -> Result<Liv
 
 /// Liveness of `role` at one tier of `dirs`.
 ///
-/// The machine tier probes with a write lock, so another account's shared
-/// hold there is seen as running: root running `install --user` can be
-/// refused by someone else's user process. This mirrors `probe_tiers`.
-///
 /// # Errors
 ///
 /// As [`tier_liveness_in`].
 pub(crate) fn tier_liveness(role: Role, tier: Tier, dirs: &LockDirs) -> Result<Liveness> {
     let dir = match tier {
         Tier::User => Some(&dirs.user),
-        Tier::Machine => dirs.machine.as_ref(),
+        Tier::System => dirs.machine.as_ref(),
     };
     dir.map_or(Ok(Liveness::NotRunning), |dir| {
         tier_liveness_in(role, tier, dir)
@@ -990,35 +1097,6 @@ pub(crate) fn hold_for_test(role: Role, dir: &Path, kind: LockKind) -> Result<Te
     }
 }
 
-/// Whether another process holds the lock at `path`; a missing lock is not
-/// held. The lock is released again before returning.
-fn lock_is_held(path: &Path, prefer_write: bool) -> Result<bool> {
-    let writable = if prefer_write {
-        match open_existing(path, true) {
-            Ok(file) => file,
-            Err(e) if is_not_elevated(&e) => None,
-            Err(e) => {
-                return Err(anyhow::Error::new(e)
-                    .context(format!("cannot open role lock {}", path.display())))
-            }
-        }
-    } else {
-        None
-    };
-    let (file, kind) = match writable {
-        Some(file) => (Some(file), LockKind::Exclusive),
-        None => (
-            open_existing(path, false)
-                .with_context(|| format!("cannot open role lock {}", path.display()))?,
-            LockKind::Shared,
-        ),
-    };
-    match file {
-        Some(file) => Ok(matches!(try_lock(file, kind)?, Lock::Busy)),
-        None => Ok(false),
-    }
-}
-
 fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
     match base_options().read(true).write(write).open(path) {
         Ok(file) => Ok(Some(file)),
@@ -1027,7 +1105,8 @@ fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
     }
 }
 
-/// Wait until no process holds `role`, polling every 100 ms.
+/// Wait until no process holds `role` in the current tier, polling every
+/// 100 ms.
 ///
 /// # Errors
 ///
@@ -1038,10 +1117,27 @@ fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
     expect(dead_code, reason = "only the Windows system verbs wait for release")
 )]
 pub(crate) fn wait_released(role: Role, timeout: std::time::Duration) -> Result<()> {
-    wait_released_with(role, timeout, probe)
+    wait_released_in(role, Tier::current(), timeout)
 }
 
-/// [`wait_released`] with the probe injected, so tests need no real lock.
+/// Wait until no process holds `role` in `tier`; a holder in the other tier
+/// is ignored.
+///
+/// # Errors
+///
+/// As [`wait_released`], with [`probe_tier`].
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "only the Windows system verbs wait for release; the service layer adopts it in a later task"
+    )
+)]
+pub(crate) fn wait_released_in(role: Role, tier: Tier, timeout: std::time::Duration) -> Result<()> {
+    wait_released_with(role, timeout, |role| probe_tier(role, tier))
+}
+
+/// [`wait_released_in`] with the probe injected, so tests need no real lock.
 fn wait_released_with(
     role: Role,
     timeout: std::time::Duration,
@@ -1072,9 +1168,7 @@ fn wait_released_with(
 pub(crate) fn ensure_not_running(role: Role) -> Result<()> {
     match probe(role)? {
         Liveness::NotRunning => Ok(()),
-        Liveness::Running { tier, owner } => {
-            Err(already_running(role, tier.label(), owner.as_ref()))
-        }
+        Liveness::Running { tier, owner } => Err(already_running(role, tier, owner.as_ref())),
     }
 }
 
@@ -1085,7 +1179,7 @@ mod tests {
 
     #[test]
     fn a_refused_start_says_so() {
-        let text = already_running(Role::Serve, "this user", None).to_string();
+        let text = already_running(Role::Serve, Tier::User, None).to_string();
         assert!(text.starts_with("start refused:"), "{text}");
     }
 
@@ -1157,10 +1251,21 @@ mod tests {
 
     #[test]
     fn tier_dirs_resolution_fails_when_program_data_cannot_be_resolved() {
-        let err =
-            TierDirs::resolve_with(|| machine_dir_from_program_data(Err(anyhow::anyhow!("hr"))))
-                .expect_err("must fail closed");
+        let err = TierDirs::resolve_for_with(Tier::System, || {
+            machine_dir_from_program_data(Err(anyhow::anyhow!("hr")))
+        })
+        .expect_err("must fail closed");
         assert!(format!("{err:#}").contains("%ProgramData%"), "{err:#}");
+    }
+
+    #[test]
+    fn user_tier_resolution_survives_a_machine_directory_failure() {
+        let dirs = TierDirs::resolve_for_with(Tier::User, || {
+            machine_dir_from_program_data(Err(anyhow::anyhow!("hr")))
+        })
+        .expect("a user claim never needs the machine directory");
+        assert!(dirs.machine.is_none());
+        assert!(dirs.user.is_some());
     }
 
     #[test]
@@ -1173,10 +1278,9 @@ mod tests {
     }
 
     #[test]
-    fn machine_lock_exclusive_then_shared_is_refused() {
+    fn system_lock_is_exclusive_and_readable_by_others() {
         let dir = tempfile::tempdir().unwrap();
-        let first = claim_machine(Role::Serve, dir.path(), false).unwrap();
-        assert!(matches!(first, MachineClaim::Exclusive(_)));
+        let first = claim_system_lock(Role::Serve, dir.path(), false).unwrap();
         let path = dir.path().join(lock_name(Role::Serve));
         let reader = base_options().read(true).open(&path).unwrap();
         assert!(matches!(
@@ -1287,7 +1391,7 @@ mod tests {
             .unwrap();
         assert!(grant.status.success(), "{grant:?}");
         let before = sddl_of(&dir);
-        let err = claim_machine(Role::Serve, &dir, true)
+        let err = claim_system_lock(Role::Serve, &dir, true)
             .err()
             .expect("refused");
         match err.downcast_ref::<CliError>() {
@@ -1311,9 +1415,7 @@ mod tests {
         }
         let guard = ProgramDataDir::new();
         create_machine_dir(&guard.0).unwrap();
-        let claim = claim_machine(Role::Serve, &guard.0, true).unwrap();
-        assert!(matches!(claim, MachineClaim::Exclusive(_)));
-        drop(claim);
+        drop(claim_system_lock(Role::Serve, &guard.0, true).unwrap());
     }
 
     #[cfg(windows)]
@@ -1355,12 +1457,12 @@ mod tests {
     fn tier_liveness_in_reports_a_held_lock() {
         let dir = tempfile::tempdir().unwrap();
         let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Exclusive).unwrap();
-        let seen = tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap();
+        let seen = tier_liveness_in(Role::Serve, Tier::System, dir.path()).unwrap();
         assert!(
             matches!(
                 seen,
                 Liveness::Running {
-                    tier: Tier::Machine,
+                    tier: Tier::System,
                     ..
                 }
             ),
@@ -1382,7 +1484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Exclusive).unwrap();
         let Liveness::Running { owner, .. } =
-            tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap()
+            tier_liveness_in(Role::Serve, Tier::System, dir.path()).unwrap()
         else {
             panic!("a held lock must read as Running")
         };
@@ -1393,32 +1495,26 @@ mod tests {
     fn tier_liveness_in_is_not_running_for_an_existing_but_unlocked_file() {
         let dir = tempfile::tempdir().unwrap();
         create_lock_file(&dir.path().join(lock_name(Role::Serve)), 0o600).unwrap();
-        let seen = tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap();
+        let seen = tier_liveness_in(Role::Serve, Tier::System, dir.path()).unwrap();
         assert!(matches!(seen, Liveness::NotRunning), "{seen:?}");
     }
 
     #[test]
-    fn a_shared_hold_is_seen_on_the_machine_tier_only() {
-        // probe_tiers prefers a write lock on the machine tier, so an exclusive
-        // probe collides with another account's shared hold. Pinned because it
-        // means root running `install --user` can be refused by someone else's
-        // user process. Not changed here; recorded.
+    fn a_shared_hold_is_not_an_owner_in_either_tier() {
         let dir = tempfile::tempdir().unwrap();
         let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Shared).unwrap();
-        assert!(matches!(
-            tier_liveness_in(Role::Serve, Tier::Machine, dir.path()).unwrap(),
-            Liveness::Running { .. }
-        ));
-        assert!(matches!(
-            tier_liveness_in(Role::Serve, Tier::User, dir.path()).unwrap(),
-            Liveness::NotRunning
-        ));
+        for tier in [Tier::System, Tier::User] {
+            assert!(matches!(
+                tier_liveness_in(Role::Serve, tier, dir.path()).unwrap(),
+                Liveness::NotRunning
+            ));
+        }
     }
 
     /// Fresh user and machine tier directories under `tmp`.
     fn temp_dirs(tmp: &tempfile::TempDir) -> TierDirs {
         TierDirs {
-            user: tmp.path().join("user"),
+            user: Some(tmp.path().join("user")),
             machine: Some(MachineDir {
                 path: tmp.path().join("machine"),
                 verify: false,
@@ -1428,6 +1524,10 @@ mod tests {
 
     fn machine_path(dirs: &TierDirs) -> PathBuf {
         dirs.machine.as_ref().unwrap().path.clone()
+    }
+
+    fn user_path(dirs: &TierDirs) -> PathBuf {
+        dirs.user.clone().unwrap()
     }
 
     fn conflict_message(err: &anyhow::Error) -> String {
@@ -1505,30 +1605,33 @@ mod tests {
         }
     }
 
+    /// Claim `role` in `tier` over a fresh pair of directories under `tmp`.
+    fn claim_tier(role: Role, tier: Tier, tmp: &tempfile::TempDir) -> RoleClaim {
+        claim_in(role, tier, temp_dirs(tmp)).unwrap()
+    }
+
     #[test]
     fn publish_identity_refuses_the_same_key_in_the_other_role() {
-        let tmp = tempfile::tempdir().unwrap();
-        let serve = claim_in(Role::Serve, temp_dirs(&tmp)).unwrap();
-        serve.publish_identity("K").unwrap();
-        let access = claim_in(Role::Access, temp_dirs(&tmp)).unwrap();
-        let err = access.publish_identity("K").expect_err("same key refused");
-        let msg = conflict_message(&err);
-        assert!(msg.contains("same public identity"), "{msg}");
+        for tier in [Tier::User, Tier::System] {
+            let tmp = tempfile::tempdir().unwrap();
+            let serve = claim_tier(Role::Serve, tier, &tmp);
+            serve.publish_identity("K").unwrap();
+            let access = claim_tier(Role::Access, tier, &tmp);
+            let err = access.publish_identity("K").expect_err("same key refused");
+            let msg = conflict_message(&err);
+            assert!(msg.contains("same public identity"), "{msg}");
+        }
     }
 
     #[test]
     fn publish_identity_refuses_when_the_running_other_role_record_is_corrupt() {
-        for machine_tier in [false, true] {
+        for tier in [Tier::User, Tier::System] {
             let tmp = tempfile::tempdir().unwrap();
             let dirs = temp_dirs(&tmp);
-            let record_dir = if machine_tier {
-                machine_path(&dirs)
-            } else {
-                dirs.user.clone()
-            };
-            let _serve = claim_in(Role::Serve, temp_dirs(&tmp)).unwrap();
+            let record_dir = dirs.own_dir(tier).unwrap().to_path_buf();
+            let _serve = claim_tier(Role::Serve, tier, &tmp);
             std::fs::write(record_dir.join("serve.owner.json"), CORRUPT).unwrap();
-            let access = claim_in(Role::Access, dirs).unwrap();
+            let access = claim_in(Role::Access, tier, dirs).unwrap();
             let err = access.publish_identity("A").expect_err("must refuse");
             let msg = conflict_message(&err);
             assert!(msg.starts_with("start refused:"), "{msg}");
@@ -1542,11 +1645,11 @@ mod tests {
     fn publish_identity_refuses_when_the_running_other_role_record_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = temp_dirs(&tmp);
-        let record = dirs.user.join("serve.owner.json");
-        let _serve = claim_in(Role::Serve, temp_dirs(&tmp)).unwrap();
+        let record = user_path(&dirs).join("serve.owner.json");
+        let _serve = claim_tier(Role::Serve, Tier::User, &tmp);
         std::fs::remove_file(&record).unwrap();
         std::fs::create_dir(&record).unwrap();
-        let access = claim_in(Role::Access, dirs).unwrap();
+        let access = claim_in(Role::Access, Tier::User, dirs).unwrap();
         let err = access.publish_identity("A").expect_err("must refuse");
         let msg = conflict_message(&err);
         assert!(msg.contains("identity cannot be determined"), "{msg}");
@@ -1555,46 +1658,51 @@ mod tests {
 
     #[test]
     fn publish_identity_proceeds_while_the_other_role_has_no_record() {
-        let tmp = tempfile::tempdir().unwrap();
-        let serve = claim_in(Role::Serve, temp_dirs(&tmp)).unwrap();
-        let access = claim_in(Role::Access, temp_dirs(&tmp)).unwrap();
-        access.publish_identity("A").unwrap();
-        let dirs = temp_dirs(&tmp);
-        std::fs::remove_file(dirs.user.join("serve.owner.json")).unwrap();
-        std::fs::remove_file(machine_path(&dirs).join("serve.owner.json")).unwrap();
-        access.publish_identity("A").unwrap();
-        drop((access, serve));
-
-        let tmp = tempfile::tempdir().unwrap();
-        let dirs = temp_dirs(&tmp);
-        let machine = machine_path(&dirs);
-        std::fs::create_dir_all(&machine).unwrap();
-        let _hold = hold_for_test(Role::Serve, &machine, LockKind::Shared).unwrap();
-        let access = claim_in(Role::Access, dirs).unwrap();
-        access.publish_identity("A").unwrap();
+        for tier in [Tier::User, Tier::System] {
+            let tmp = tempfile::tempdir().unwrap();
+            let serve = claim_tier(Role::Serve, tier, &tmp);
+            let access = claim_tier(Role::Access, tier, &tmp);
+            access.publish_identity("A").unwrap();
+            let dirs = temp_dirs(&tmp);
+            std::fs::remove_file(dirs.own_dir(tier).unwrap().join("serve.owner.json")).unwrap();
+            access.publish_identity("A").unwrap();
+            drop((access, serve));
+        }
     }
 
     #[test]
     fn publish_identity_ignores_a_corrupt_record_of_a_stopped_role() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dirs = temp_dirs(&tmp);
-        for dir in [dirs.user.clone(), machine_path(&dirs)] {
+        for tier in [Tier::User, Tier::System] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dirs = temp_dirs(&tmp);
+            let dir = dirs.own_dir(tier).unwrap().to_path_buf();
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("serve.owner.json"), CORRUPT).unwrap();
+            let access = claim_in(Role::Access, tier, dirs).unwrap();
+            access.publish_identity("A").unwrap();
         }
-        let access = claim_in(Role::Access, dirs).unwrap();
-        access.publish_identity("A").unwrap();
     }
 
     #[test]
-    fn publish_identity_ignores_a_machine_record_under_a_shared_hold() {
+    fn identity_check_ignores_other_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = claim_tier(Role::Serve, Tier::System, &tmp);
+        system.publish_identity("K").unwrap();
+        let user = claim_tier(Role::Access, Tier::User, &tmp);
+        user.publish_identity("K").unwrap();
+        let access_system = claim_tier(Role::Access, Tier::System, &tmp);
+        drop(access_system);
+    }
+
+    #[test]
+    fn corrupt_machine_record_ignored_for_user_claim() {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = temp_dirs(&tmp);
         let machine = machine_path(&dirs);
         std::fs::create_dir_all(&machine).unwrap();
-        let _hold = hold_for_test(Role::Serve, &machine, LockKind::Shared).unwrap();
+        let _hold = hold_for_test(Role::Serve, &machine, LockKind::Exclusive).unwrap();
         std::fs::write(machine.join("serve.owner.json"), CORRUPT).unwrap();
-        let access = claim_in(Role::Access, dirs).unwrap();
+        let access = claim_in(Role::Access, Tier::User, dirs).unwrap();
         access.publish_identity("A").unwrap();
     }
 
@@ -1614,13 +1722,11 @@ mod tests {
     fn a_leftover_temp_record_does_not_block_publishing() {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = temp_dirs(&tmp);
-        std::fs::create_dir_all(&dirs.user).unwrap();
-        let leftover = dirs
-            .user
-            .join(format!("serve.owner.json.{}.tmp", std::process::id()));
+        let user = user_path(&dirs);
+        std::fs::create_dir_all(&user).unwrap();
+        let leftover = user.join(format!("serve.owner.json.{}.tmp", std::process::id()));
         std::fs::write(&leftover, "stale").unwrap();
-        let user = dirs.user.clone();
-        let _serve = claim_in(Role::Serve, dirs).unwrap();
+        let _serve = claim_in(Role::Serve, Tier::User, dirs).unwrap();
         let owner = read_owner(&user, Role::Serve).expect("record published");
         assert_eq!(owner.pid, std::process::id());
     }
@@ -1629,11 +1735,308 @@ mod tests {
     fn claim_fails_when_the_owner_record_cannot_be_written() {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = temp_dirs(&tmp);
-        let blocker = dirs.user.join("serve.owner.json");
+        let blocker = user_path(&dirs).join("serve.owner.json");
         std::fs::create_dir_all(blocker.join("inner")).unwrap();
-        let err = claim_in(Role::Serve, dirs).expect_err("publish failure must fail the claim");
+        let err = claim_in(Role::Serve, Tier::User, dirs)
+            .expect_err("publish failure must fail the claim");
         assert!(format!("{err:#}").contains("serve.owner.json"), "{err:#}");
         std::fs::remove_dir_all(&blocker).unwrap();
-        claim_in(Role::Serve, temp_dirs(&tmp)).expect("the failed claim released its locks");
+        claim_tier(Role::Serve, Tier::User, &tmp);
+    }
+
+    // --- tier claims ---
+
+    fn presence(dirs: &TierDirs) -> PathBuf {
+        machine_path(dirs).join(presence_name(Role::Serve))
+    }
+
+    #[test]
+    fn system_claim_creates_presence_file_unlocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = temp_dirs(&tmp);
+        let path = presence(&dirs);
+        let _claim = claim_in(Role::Serve, Tier::System, dirs).unwrap();
+        assert!(path.exists());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        let file = File::open(&path).unwrap();
+        file.try_lock().expect("the system claim must not hold it");
+    }
+
+    #[test]
+    fn user_claim_holds_presence_shared_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = temp_dirs(&tmp);
+        let path = presence(&dirs);
+        drop(claim_in(Role::Serve, Tier::System, temp_dirs(&tmp)).unwrap());
+        let claim = claim_in(Role::Serve, Tier::User, dirs).unwrap();
+        assert!(held_shared(&path).unwrap(), "presence must be held");
+        // Shared: a second user process can hold it too.
+        let other = File::open(&path).unwrap();
+        other.try_lock_shared().unwrap();
+        drop(other);
+        drop(claim);
+        assert!(!held_shared(&path).unwrap(), "released on drop");
+    }
+
+    #[test]
+    fn user_claim_without_machine_dir_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = temp_dirs(&tmp);
+        let machine = machine_path(&dirs);
+        let _claim = claim_in(Role::Serve, Tier::User, dirs).unwrap();
+        assert!(!machine.exists(), "no machine directory may be created");
+    }
+
+    #[test]
+    fn user_claim_with_a_machine_dir_but_no_presence_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = temp_dirs(&tmp);
+        let machine = machine_path(&dirs);
+        std::fs::create_dir_all(&machine).unwrap();
+        let _claim = claim_in(Role::Serve, Tier::User, dirs).unwrap();
+        assert_eq!(std::fs::read_dir(&machine).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn user_claim_survives_an_unresolvable_machine_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut dirs = temp_dirs(&tmp);
+        dirs.machine = None;
+        claim_in(Role::Serve, Tier::User, dirs).unwrap();
+    }
+
+    #[test]
+    fn system_claim_without_a_machine_dir_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut dirs = temp_dirs(&tmp);
+        dirs.machine = None;
+        claim_in(Role::Serve, Tier::System, dirs).expect_err("no machine dir");
+    }
+
+    #[test]
+    fn system_and_user_claims_coexist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = claim_tier(Role::Serve, Tier::System, &tmp);
+        let user = claim_tier(Role::Serve, Tier::User, &tmp);
+        let dirs = temp_dirs(&tmp);
+        assert!(read_owner(&machine_path(&dirs), Role::Serve).is_some());
+        assert!(read_owner(&user_path(&dirs), Role::Serve).is_some());
+        drop((system, user));
+    }
+
+    #[test]
+    fn second_system_claim_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _first = claim_tier(Role::Serve, Tier::System, &tmp);
+        let err = claim_in(Role::Serve, Tier::System, temp_dirs(&tmp)).expect_err("refused");
+        let msg = conflict_message(&err);
+        assert!(msg.contains("already running"), "{msg}");
+        assert!(msg.contains("system service"), "{msg}");
+    }
+
+    #[test]
+    fn second_user_claim_is_refused_and_names_the_user_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _first = claim_tier(Role::Serve, Tier::User, &tmp);
+        let err = claim_in(Role::Serve, Tier::User, temp_dirs(&tmp)).expect_err("refused");
+        let msg = conflict_message(&err);
+        assert!(msg.contains("already running"), "{msg}");
+        assert!(msg.contains("user session"), "{msg}");
+    }
+
+    // --- probes ---
+
+    /// `probe_tier` in already resolved directories.
+    fn probe_in(role: Role, tier: Tier, dirs: &TierDirs) -> Liveness {
+        tier_liveness_in(role, tier, dirs.own_dir(tier).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn probe_tier_sees_only_its_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
+        let _user = claim_tier(Role::Serve, Tier::User, &tmp);
+        let dirs = temp_dirs(&tmp);
+        for tier in [Tier::User, Tier::System] {
+            let Liveness::Running { tier: seen, owner } = probe_in(Role::Serve, tier, &dirs) else {
+                panic!("{tier:?} must read as running");
+            };
+            assert_eq!(seen, tier);
+            assert_eq!(owner.expect("own record").pid, std::process::id());
+        }
+        let system_dir = machine_path(&dirs);
+        assert!(system_dir.join("serve.owner.json").exists());
+        assert!(user_path(&dirs).join("serve.owner.json").exists());
+    }
+
+    #[test]
+    fn probe_tier_does_not_see_the_other_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
+        let dirs = temp_dirs(&tmp);
+        std::fs::create_dir_all(user_path(&dirs)).unwrap();
+        assert!(matches!(
+            probe_in(Role::Serve, Tier::User, &dirs),
+            Liveness::NotRunning
+        ));
+    }
+
+    #[test]
+    fn wait_released_in_ignores_other_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _user = claim_tier(Role::Serve, Tier::User, &tmp);
+        let dirs = temp_dirs(&tmp);
+        std::fs::create_dir_all(machine_path(&dirs)).unwrap();
+        wait_released_with(Role::Serve, Duration::from_millis(300), |role| {
+            Ok(probe_in(role, Tier::System, &dirs))
+        })
+        .expect("a user holder must not delay a system wait");
+    }
+
+    #[test]
+    fn user_sees_system_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = machine_path(&temp_dirs(&tmp));
+        assert_eq!(
+            other_tier_running_in(Role::Serve, Tier::User, &machine),
+            None
+        );
+        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
+        assert_eq!(
+            other_tier_running_in(Role::Serve, Tier::User, &machine),
+            Some(Tier::System)
+        );
+        assert_eq!(
+            other_tier_running_in(Role::Access, Tier::User, &machine),
+            None,
+            "another role is not the same instance"
+        );
+    }
+
+    #[test]
+    fn system_sees_shared_user_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = machine_path(&temp_dirs(&tmp));
+        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
+        let _user = claim_tier(Role::Serve, Tier::User, &tmp);
+        assert_eq!(
+            other_tier_running_in(Role::Serve, Tier::System, &machine),
+            Some(Tier::User)
+        );
+    }
+
+    #[test]
+    fn system_sees_none_after_last_user_exits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = machine_path(&temp_dirs(&tmp));
+        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
+        let presence_path = machine.join(presence_name(Role::Serve));
+        let first = hold_presence(&presence_path).unwrap();
+        let second = hold_presence(&presence_path).unwrap();
+        drop(first);
+        assert_eq!(
+            other_tier_running_in(Role::Serve, Tier::System, &machine),
+            Some(Tier::User),
+            "one user holder is left"
+        );
+        drop(second);
+        assert_eq!(
+            other_tier_running_in(Role::Serve, Tier::System, &machine),
+            None
+        );
+    }
+
+    #[test]
+    fn blind_spot_user_before_presence_is_not_seen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = machine_path(&temp_dirs(&tmp));
+        let _user = claim_tier(Role::Serve, Tier::User, &tmp);
+        let _system = claim_tier(Role::Serve, Tier::System, &tmp);
+        assert_eq!(
+            other_tier_running_in(Role::Serve, Tier::System, &machine),
+            None
+        );
+    }
+
+    #[test]
+    fn probe_io_error_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The machine "directory" is a regular file: opening anything under
+        // it fails with something other than NotFound.
+        let machine = tmp.path().join("machine-is-a-file");
+        std::fs::write(&machine, "").unwrap();
+        for tier in [Tier::User, Tier::System] {
+            assert_eq!(other_tier_running_in(Role::Serve, tier, &machine), None);
+        }
+        // A lock path that is a directory is not a holder either.
+        let dir = tmp.path().join("m");
+        std::fs::create_dir_all(dir.join(lock_name(Role::Serve))).unwrap();
+        assert_eq!(other_tier_running_in(Role::Serve, Tier::User, &dir), None);
+    }
+
+    #[test]
+    fn ensure_presence_in_is_idempotent_and_never_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_presence_in(Role::Access, tmp.path()).unwrap();
+        ensure_presence_in(Role::Access, tmp.path()).unwrap();
+        assert!(!held_shared(&tmp.path().join(presence_name(Role::Access))).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_and_presence_readable_under_umask_077() {
+        use std::os::unix::fs::PermissionsExt;
+        // The umask is process-global, so a narrowed creation mode is
+        // simulated by pre-creating both files 0600 (what umask 077 yields
+        // for a 0644 request).
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = temp_dirs(&tmp);
+        let machine = machine_path(&dirs);
+        std::fs::create_dir_all(&machine).unwrap();
+        for name in [lock_name(Role::Serve), presence_name(Role::Serve)] {
+            let path = machine.join(name);
+            std::fs::write(&path, "").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let _claim = claim_in(Role::Serve, Tier::System, dirs).unwrap();
+        for name in [lock_name(Role::Serve), presence_name(Role::Serve)] {
+            let mode = std::fs::metadata(machine.join(&name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o644, "{name}: {mode:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_owner_record_is_world_readable_under_umask_077() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = temp_dirs(&tmp);
+        let machine = machine_path(&dirs);
+        std::fs::create_dir_all(&machine).unwrap();
+        let temp = machine.join(format!("serve.owner.json.{}.tmp", std::process::id()));
+        std::fs::write(&temp, "").unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _claim = claim_in(Role::Serve, Tier::System, dirs).unwrap();
+        let mode = std::fs::metadata(machine.join("serve.owner.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o644, "{mode:o}");
+    }
+
+    #[cfg(all(unix, not(windows)))]
+    #[test]
+    fn machine_dir_is_platform_runtime_path() {
+        let machine = platform_machine_dir().expect("a machine dir on this platform");
+        #[cfg(target_os = "linux")]
+        assert_eq!(machine.path, Path::new("/run/iroh-tunnel"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(machine.path, Path::new("/var/run/iroh-tunnel"));
+        assert!(!machine.verify);
     }
 }

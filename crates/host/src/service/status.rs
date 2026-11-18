@@ -147,7 +147,8 @@ mod tests {
     #[cfg(unix)]
     use super::super::fixtures::{in_isolated_home, run_status};
     use super::*;
-    use crate::ownership::{Liveness, OwnerRecord, Tier};
+    use crate::ownership::{Liveness, OwnerRecord};
+    use crate::Tier;
 
     #[test]
     fn role_note_describes_the_probed_owner() {

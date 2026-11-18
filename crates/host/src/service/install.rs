@@ -22,8 +22,9 @@ use super::types::{
     ScopeDecision, ServiceFailure, ServiceScope,
 };
 use crate::error::CliError;
-use crate::ownership::{self, Liveness, LockDirs, LockResolver, Tier};
+use crate::ownership::{self, Liveness, LockDirs, LockResolver};
 use crate::role::Role;
+use crate::Tier;
 
 /// The argv (after `sudo`) that repeats an install with absolute paths.
 pub(crate) fn install_rerun(
@@ -709,7 +710,7 @@ fn ensure_no_cross_scope_conflict_in(
     dirs: &LockDirs,
 ) -> Result<()> {
     let (other_tier, other_scope) = match registering {
-        ServiceScope::User => (Tier::Machine, ServiceScope::System),
+        ServiceScope::User => (Tier::System, ServiceScope::System),
         ServiceScope::System => (Tier::User, ServiceScope::User),
     };
     if let Liveness::Running { tier, owner } = ownership::tier_liveness(role, other_tier, dirs)? {
@@ -865,7 +866,7 @@ mod tests {
         assert!(text.contains("service stop --system"), "{text}");
         assert!(text.contains("Ctrl+C"), "{text}");
         assert!(text.contains("nothing is stopped automatically"), "{text}");
-        assert!(text.contains("machine-wide"), "{text}");
+        assert!(text.contains("system service"), "{text}");
         assert!(!text.contains("start refused"), "{text}");
     }
 
@@ -888,7 +889,7 @@ mod tests {
         assert!(text.contains("service stop --user"), "{text}");
         assert!(text.contains("Ctrl+C"), "{text}");
         assert!(text.contains("nothing is stopped automatically"), "{text}");
-        assert!(text.contains("this user"), "{text}");
+        assert!(text.contains("user session"), "{text}");
         assert!(!text.contains("start refused"), "{text}");
     }
 
