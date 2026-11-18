@@ -38,7 +38,7 @@ pub fn set_node(role: Role, req: &SetNode) -> Result<SetNodeOutcome> {
 }
 
 /// What one `[node]` key should become.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum Slot<T> {
     /// Leave the key as it is.
     Keep,
@@ -49,7 +49,8 @@ enum Slot<T> {
 }
 
 /// The planned edit of `[node]`: the per-key writes and the report.
-#[derive(Debug, PartialEq, Eq)]
+/// Not `Debug`: `token` holds the secret and must never be formattable.
+#[derive(PartialEq, Eq)]
 struct NodePlan {
     relays: Slot<Vec<String>>,
     token: Slot<String>,
@@ -446,6 +447,19 @@ mod tests {
     #[test]
     fn token_edit_debug_redacts() {
         let dbg = format!("{:?}", TokenEdit::Replace("s3cret".into()));
+        assert!(!dbg.contains("s3cret"), "{dbg}");
+    }
+
+    #[test]
+    fn token_change_report_never_carries_value() {
+        // The plan holds the token, but nothing that is formatted or returned does.
+        let (_d, path) = file(Some("[node]\n"));
+        let out = set_node(
+            Role::Serve,
+            &req(&path, replace(&[A]), TokenEdit::Replace("s3cret".into())),
+        )
+        .unwrap();
+        let dbg = format!("{out:?}");
         assert!(!dbg.contains("s3cret"), "{dbg}");
     }
 }
