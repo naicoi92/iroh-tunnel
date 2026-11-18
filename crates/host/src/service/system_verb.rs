@@ -99,24 +99,27 @@ mod glue {
     use anyhow::Result;
 
     use super::super::backend::windows_scm::{
-        not_installed, service_name, status_with, ScmStatus, SystemClock,
+        not_installed, service_name, status_with, RecordingPort, ScmStatus, SystemClock,
     };
     use super::super::backend::windows_scm_impl::Scm;
-    use super::super::native::ServiceNote;
+    use super::super::native::{Native, ServiceNote};
     use super::super::trust_windows::verify_binary;
     use super::super::types::Registration;
     use super::super::verb::Verb;
     use super::system_verb_with;
     use crate::role::Role;
 
-    /// Run `verb` against the real SCM for the system scope.
+    /// Run `verb` against the real SCM for the system scope, recording every
+    /// change into `native` as it happens.
     pub(crate) fn system_verb(
         verb: Verb,
         role: Role,
+        native: &mut Native,
         notes: &mut dyn FnMut(&ServiceNote),
     ) -> Result<()> {
+        let mut record = |effect| native.applied(effect);
         system_verb_with(
-            &mut Scm,
+            &mut RecordingPort::new(&mut Scm, &mut record),
             &mut SystemClock::new(),
             verify_binary,
             |t| crate::ownership::wait_released(role, t),
@@ -202,6 +205,28 @@ mod tests {
         result.unwrap();
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("Uninstalled"), "{notes:?}");
+    }
+
+    #[test]
+    fn restart_whose_start_fails_still_reports_the_stop() {
+        use super::super::backend::windows_scm::RecordingPort;
+        use super::super::types::AppliedEffect;
+
+        let mut port = registered(ScmState::Running);
+        port.fail_once.insert("start");
+        let mut applied = Vec::new();
+        let mut record = |effect| applied.push(effect);
+        let result = system_verb_with(
+            &mut RecordingPort::new(&mut port, &mut record),
+            &mut FakeClock::default(),
+            |_| Ok(()),
+            |_| Ok(()),
+            &mut |_| {},
+            Verb::Restart,
+            "serve",
+        );
+        assert!(result.is_err());
+        assert_eq!(applied, [AppliedEffect::Stopped]);
     }
 
     #[test]

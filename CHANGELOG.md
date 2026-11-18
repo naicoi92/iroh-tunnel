@@ -29,6 +29,15 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   it ends; flows waiting for a share stay opening, queue their datagrams and
   still give up at the resolve timeout. While hung lookups hold every share,
   new flows of that service time out even after the resolver recovers.
+- Windows system service (#223): install, start, stop, restart and
+  uninstall through the Service Control Manager now list the changes they
+  made (including a rollback's), as the other backends do; a reinstall over
+  an existing service reports `Stopped`, `Disabled`, `Enabled`, `Started`.
+  A refused `Running` or `Stopped` status report is logged and retried; a
+  `Running` report that keeps failing stops the service with a
+  service-specific failure code instead of leaving it start-pending. A poisoned internal state lock or a
+  failure to start the status ticker ends the service with a failure code
+  (100–102) instead of continuing or aborting the process.
 
 ## [0.6.0] - 2026-11-12
 
