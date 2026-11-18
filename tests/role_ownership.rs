@@ -506,46 +506,167 @@ async fn running_role_status_names_role_and_owner_pid() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn system_tier_lock_refuses_user_start_and_blocks_a_system_start() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    // Root ignores file modes, so the non-elevated view cannot be simulated.
-    if running_as_root() {
-        eprintln!("skipped: running as root");
-        return Ok(());
+impl World {
+    /// A command forced into the system tier: its lock lives in the machine
+    /// directory (`IROH_TUNNEL_TEST_TIER` stands in for elevation).
+    fn system_command(&self, exe: &str, prefix: Option<&str>, state: &Path) -> Command {
+        let mut command = self.command(exe, prefix, state);
+        command.env("IROH_TUNNEL_TEST_TIER", "system");
+        command
     }
+
+    fn user_command(&self, exe: &str, prefix: Option<&str>, state: &Path) -> Command {
+        let mut command = self.command(exe, prefix, state);
+        command.env("IROH_TUNNEL_TEST_TIER", "user");
+        command
+    }
+}
+
+/// Start a serve in the system tier (status file under the state override).
+fn start_system_serve(world: &World, relay: &str, key: &Path, state: &Path) -> Result<Process> {
+    let mut process = spawn(
+        world.system_command(ALL_IN_ONE, Some("serve"), state),
+        &serve_args(relay, key),
+    )?;
+    wait_running(&state.join("serve-status.json"), &mut process)?;
+    Ok(process)
+}
+
+#[tokio::test]
+async fn system_and_user_tiers_run_side_by_side() -> Result<()> {
     let (relay, _server) = relay().await?;
     let world = World::new()?;
     let (key, _) = write_key(world.root.path(), "k.key")?;
 
-    // A "system service": the test holds the machine lock exclusively on a
-    // file the user process cannot open for writing (read-only, like a
-    // root-owned file seen by a non-elevated user).
-    let machine_lock = world.machine().join("serve.lock");
-    drop(File::create(&machine_lock)?);
-    let _restore = RestoreMode(world.machine());
-    std::fs::set_permissions(&machine_lock, std::fs::Permissions::from_mode(0o444))?;
-    std::fs::set_permissions(world.machine(), std::fs::Permissions::from_mode(0o555))?;
-    let system = File::open(&machine_lock)?;
-    system.try_lock()?;
-    let refused = spawn(
-        world.command(ALL_IN_ONE, Some("serve"), &world.state("user")),
-        &serve_args(&relay, &key),
-    )?;
-    assert_refused(wait_refused(refused)?, "system service");
-    drop(system);
+    let system = start_system_serve(&world, &relay, &key, &world.state("system"))?;
+    // The system start creates the presence file, unlocked and readable.
+    assert!(world.machine().join("serve.user.lock").exists());
+    assert!(world.machine().join("serve.lock").exists());
 
-    // Reverse order: a running user process stops a later system start.
+    let user_state = world.state("user");
     let mut user = spawn(
-        world.command(ALL_IN_ONE, Some("serve"), &world.state("user2")),
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
         &serve_args(&relay, &key),
     )?;
-    wait_running(&world.state("user2").join("serve-status.json"), &mut user)?;
-    let later = File::open(&machine_lock)?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+    // Both hold their own lock; neither refused the other.
+    assert!(system.0.id() != user.0.id());
+    let machine_lock = File::open(world.machine().join("serve.lock"))?;
     assert!(
-        matches!(later.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
-        "a running user role must hold the machine lock shared"
+        matches!(
+            machine_lock.try_lock_shared(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ),
+        "the system process holds its lock exclusively"
     );
+    let presence = File::open(world.machine().join("serve.user.lock"))?;
+    assert!(
+        matches!(presence.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "the user process holds the presence file shared"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn second_system_instance_is_refused() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let _first = start_system_serve(&world, &relay, &key, &world.state("first"))?;
+    let second = spawn(
+        world.system_command(SERVE, None, &world.state("second")),
+        &serve_args(&relay, &key),
+    )?;
+    assert_refused(wait_refused(second)?, "already running");
+    Ok(())
+}
+
+#[tokio::test]
+async fn system_lock_ignores_state_override() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let _first = start_system_serve(&world, &relay, &key, &world.state("one"))?;
+    // A different override and a different binary still hit the same lock.
+    let second = spawn(
+        world.system_command(SERVE, None, &world.state("two")),
+        &serve_args(&relay, &key),
+    )?;
+    assert_refused(wait_refused(second)?, "already running");
+    Ok(())
+}
+
+/// Whether the system tier still sees a user instance, from outside any
+/// process: an exclusive test of the presence file.
+fn user_instance_visible(world: &World) -> Result<bool> {
+    let presence = File::open(world.machine().join("serve.user.lock"))?;
+    Ok(matches!(
+        presence.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ))
+}
+
+#[tokio::test]
+async fn several_user_holders_keep_presence_until_last_exits() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key_a, _) = write_key(world.root.path(), "a.key")?;
+    // The presence file exists once a system instance has run on this boot.
+    drop(start_system_serve(
+        &world,
+        &relay,
+        &key_a,
+        &world.state("system"),
+    )?);
+    assert!(!user_instance_visible(&world)?);
+
+    // Two "users": distinct HOME, one shared machine directory.
+    let other = World::new()?;
+    let state_a = world.state("a");
+    let mut first = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &state_a),
+        &serve_args(&relay, &key_a),
+    )?;
+    wait_running(&state_a.join("serve-status.json"), &mut first)?;
+    let state_b = other.state("b");
+    let mut second = spawn(
+        {
+            let mut command = other.user_command(ALL_IN_ONE, Some("serve"), &state_b);
+            command.env("IROH_TUNNEL_MACHINE_LOCK_DIR", world.machine());
+            command
+        },
+        &serve_args(&relay, &key_a),
+    )?;
+    wait_running(&state_b.join("serve-status.json"), &mut second)?;
+    assert!(user_instance_visible(&world)?);
+
+    drop(first);
+    assert!(user_instance_visible(&world)?, "one holder is left");
+    // kill -9: the kernel drops the shared lock.
+    second.0.kill()?;
+    second.0.wait()?;
+    assert!(!user_instance_visible(&world)?, "no holder is left");
+    Ok(())
+}
+
+#[tokio::test]
+async fn blind_spot_user_before_presence_is_not_seen() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let user_state = world.state("user");
+    let mut user = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
+        &serve_args(&relay, &key),
+    )?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+    assert!(
+        !world.machine().join("serve.user.lock").exists(),
+        "a user start never creates the presence file"
+    );
+    // The system instance starts anyway, and the earlier user stays unseen.
+    let _system = start_system_serve(&world, &relay, &key, &world.state("system"))?;
+    assert!(!user_instance_visible(&world)?);
     Ok(())
 }
 
@@ -571,23 +692,4 @@ fn out(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
-}
-
-fn running_as_root() -> bool {
-    // `id -u` avoids an unsafe libc call in the test.
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false)
-}
-
-/// Gives a directory its write bit back so the tempdir can be removed even
-/// when an assertion fails.
-struct RestoreMode(PathBuf);
-impl Drop for RestoreMode {
-    fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
-    }
 }

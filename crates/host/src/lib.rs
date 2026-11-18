@@ -23,6 +23,7 @@ pub mod update;
 #[cfg(test)]
 mod fixtures;
 
+pub use ownership::other_tier_running;
 pub use role::Role;
 pub use tier::Tier;
 

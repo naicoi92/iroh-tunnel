@@ -124,7 +124,7 @@ fn freshness_warning(role: Role, freshness: &Freshness, payload: &StatusPayload)
 /// One line naming the live owner when no snapshot is readable here.
 fn describe_running(role: Role, tier: Tier, owner: Option<&OwnerRecord>, path: &Path) -> String {
     format!(
-        "{} is running for {} ({}); no status snapshot at {} (it may use another state directory)",
+        "{} is running for the {} ({}); no status snapshot at {} (it may use another state directory)",
         role.name(),
         tier.label(),
         describe_owner(owner),
