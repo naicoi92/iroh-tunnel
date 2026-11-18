@@ -233,6 +233,25 @@ fn strip_retired_fields(doc: &mut DocumentMut) {
 ///
 /// [`CliError::Config`] (exit 2) when `node` exists but is not a table.
 pub(crate) fn set_node_secret_key(doc: &mut DocumentMut, path: &Path, key: &str) -> Result<()> {
+    let node = node_table_mut(doc, path)?;
+    // Assign in place when present: `insert` would reset the key's decor
+    // and drop the operator's comment above it.
+    match node.get_mut("secret_key") {
+        Some(item) => *item = toml_edit::value(key),
+        None => {
+            node.insert("secret_key", toml_edit::value(key));
+        }
+    }
+    Ok(())
+}
+
+/// The `[node]` table of `doc`, created when absent.
+///
+/// A `[node]` that is not a table is a config error naming `path`.
+pub(crate) fn node_table_mut<'a>(
+    doc: &'a mut DocumentMut,
+    path: &Path,
+) -> Result<&'a mut dyn toml_edit::TableLike> {
     let node = doc
         .entry("node")
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
@@ -243,15 +262,7 @@ pub(crate) fn set_node_secret_key(doc: &mut DocumentMut, path: &Path, key: &str)
                 path.display()
             ))
         })?;
-    // Assign in place when present: `insert` would reset the key's decor
-    // and drop the operator's comment above it.
-    match node.get_mut("secret_key") {
-        Some(item) => *item = toml_edit::value(key),
-        None => {
-            node.insert("secret_key", toml_edit::value(key));
-        }
-    }
-    Ok(())
+    Ok(node)
 }
 
 /// The non-empty `[node].secret_key` of `doc`, if any.

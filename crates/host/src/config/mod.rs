@@ -18,12 +18,14 @@ mod quick_node;
 mod quick_serve_config;
 mod random_identity;
 mod read_key_file;
+mod relay_list;
 mod remove_service;
 mod require_existing;
 mod require_present;
 mod resolve_config_path;
 mod resolve_secret_key;
 mod resolve_write_target;
+mod set_node;
 mod set_service;
 mod show_config;
 mod store;
@@ -48,13 +50,15 @@ pub use require_present::require_present;
 pub use resolve_config_path::resolve_config_path;
 pub use resolve_secret_key::resolve_secret_key;
 pub use resolve_write_target::resolve_write_target;
+pub use set_node::set_node;
 pub use set_service::set_service;
 pub use show_config::show_config;
 pub(crate) use store::{load_role_config, parse_role_config, resolve_and_persist_key};
 pub use to_settings::{access_settings, serve_settings};
 pub use types::{
     Disclosure, EditAttempt, EditOutcome, EditRejection, GeneratedIdentity, IdentityState,
-    KeygenOutcome, Mutation, QuickAccess, QuickServe, RotationConsent, ServiceList, ServiceRow,
-    SetError, SetOutcome, SetService, ShownConfig,
+    KeygenOutcome, Mutation, NodeChange, QuickAccess, QuickServe, RelayEdit, RotationConsent,
+    ServiceList, ServiceRow, SetError, SetNode, SetNodeOutcome, SetOutcome, SetService,
+    ShownConfig, TokenChange, TokenEdit,
 };
 pub use types::{FieldChange, ServiceField};
