@@ -16,12 +16,14 @@
 - **Branch**: `config-set-relay-flag`
 - **Base branch**: `main`
 - **Final state**: `pr-open`
-- **PR URL**: `<filled after PR creation>`
+- **PR URL**: `https://github.com/naicoi92/iroh-tunnel/pull/259`
 
 Closeout steps:
 - `config-set-relay-flag` was fast-forwarded from `690fe4c` to `d637737`, which merged the worktree branch `config-relay-flags`.
 - The feature branch is checked out in a Herdr-managed worktree, so the merge ran there instead of in the main checkout. The main checkout is on `main` and was not touched.
 - The user explicitly approved the push and the PR in chat, as `AGENTS.md` requires.
+- Push: SSH was refused for the remote owner, so the branch was pushed over HTTPS with the `gh` credential helper after switching `gh` to `naicoi92` (per `AGENTS.md`); upstream is set to `origin/config-set-relay-flag`.
+- Outcome is `pr-created` rather than `pr-updated`: no spec pre-review PR existed, so the PR was created at finalize (step 11, option 1).
 
 ---
 
@@ -34,7 +36,7 @@ Closeout steps:
 
 ## PR comment
 
-- **PR comment status**: `<filled after the comment subroutine>`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/259#issuecomment-6979927591)
 
 ---
 
