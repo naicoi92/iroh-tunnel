@@ -386,7 +386,12 @@ pub struct NodeArgs {
     #[arg(short = 'r', long = "relay-url")]
     pub(crate) relay_url: Vec<String>,
     /// Relay token (visible in shell history and process lists; prefer --relay-token-file).
-    #[arg(long, conflicts_with = "relay_token_file")]
+    #[arg(
+        long,
+        conflicts_with = "relay_token_file",
+        allow_hyphen_values = true,
+        value_parser = RelayTokenParser
+    )]
     pub(crate) relay_token: Option<String>,
     /// File holding the relay token; '-' reads stdin.
     #[arg(long)]
@@ -394,6 +399,40 @@ pub struct NodeArgs {
     /// Remove the node relay list and token (use the n0 relays).
     #[arg(long, conflicts_with_all = ["relay_url", "relay_token", "relay_token_file"])]
     pub(crate) clear_relays: bool,
+}
+
+/// `config node` flags a `--relay-token` value must not be mistaken for.
+const NODE_FLAGS: [&str; 6] = [
+    "-c",
+    "--config",
+    "-r",
+    "--relay-url",
+    "--relay-token-file",
+    "--clear-relays",
+];
+
+/// Accepts any token (including hyphen-prefixed ones) except a bare `config node`
+/// flag name, which means the value is missing. The error never echoes the value.
+#[derive(Clone)]
+struct RelayTokenParser;
+
+impl clap::builder::TypedValueParser for RelayTokenParser {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<String, clap::Error> {
+        let token = value.to_str().filter(|t| !NODE_FLAGS.contains(t));
+        token.map(str::to_owned).ok_or_else(|| {
+            cmd.clone().error(
+                clap::error::ErrorKind::InvalidValue,
+                "--relay-token is missing its value",
+            )
+        })
+    }
 }
 
 impl std::fmt::Debug for NodeArgs {
@@ -1148,26 +1187,82 @@ mod tests {
         }
     }
 
+    fn node_of(cli: Cli) -> NodeArgs {
+        let Role::Serve {
+            cmd:
+                Some(RoleCmd::Config {
+                    action: ConfigAction::Node(n),
+                }),
+            ..
+        } = cli.role
+        else {
+            panic!("config node")
+        };
+        n
+    }
+
+    fn parse_node(extra: &[&str]) -> Result<NodeArgs, clap::Error> {
+        let mut v = vec!["its", "config", "node"];
+        v.extend(extra);
+        let cli = parse_cli(Binary::Serve, argv(&v))?;
+        Ok(node_of(cli))
+    }
+
+    #[test]
+    fn hyphen_prefixed_relay_token_is_accepted() {
+        let mut n = parse_node(&["-r", "https://a.example", "--relay-token", "--s3cret"]).unwrap();
+        let token = n.relay_token.take();
+        assert_eq!(token.as_deref(), Some("--s3cret"));
+        assert_eq!(
+            n.into_request(token).token,
+            TokenEdit::Replace("--s3cret".into())
+        );
+    }
+
+    #[test]
+    fn relay_token_equal_to_a_flag_is_a_usage_error_without_echo() {
+        for flag in [
+            "--clear-relays",
+            "-r",
+            "-c",
+            "--config",
+            "--relay-url",
+            "--relay-token-file",
+        ] {
+            let err = parse_node(&["--relay-token", flag]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{flag}");
+            let text = err.to_string();
+            assert!(
+                text.contains("--relay-token is missing its value"),
+                "{text}"
+            );
+            assert!(!text.contains("unexpected argument"), "{text}");
+            assert!(!text.contains(&format!("'{flag}'")), "{text}");
+        }
+    }
+
     #[test]
     fn parsed_cli_debug_redacts_token() {
-        let tail = [
-            "config",
-            "node",
-            "-r",
-            "https://a.example",
-            "--relay-token",
-            "s3cret",
-        ];
-        for (b, head) in [
-            (Binary::AllInOne, vec!["it", "serve"]),
-            (Binary::AllInOne, vec!["it", "access"]),
-            (Binary::Serve, vec!["its"]),
-        ] {
-            let mut args = head;
-            args.extend(tail);
-            let dbg = format!("{:?}", parse_cli(b, argv(&args)));
-            assert!(dbg.contains("NodeArgs"), "{dbg}");
-            assert!(!dbg.contains("s3cret"), "{dbg}");
+        for secret in ["s3cret", "--s3cret"] {
+            let tail = [
+                "config",
+                "node",
+                "-r",
+                "https://a.example",
+                "--relay-token",
+                secret,
+            ];
+            for (b, head) in [
+                (Binary::AllInOne, vec!["it", "serve"]),
+                (Binary::AllInOne, vec!["it", "access"]),
+                (Binary::Serve, vec!["its"]),
+            ] {
+                let mut args = head;
+                args.extend(tail);
+                let dbg = format!("{:?}", parse_cli(b, argv(&args)));
+                assert!(dbg.contains("NodeArgs"), "{dbg}");
+                assert!(!dbg.contains("s3cret"), "{dbg}");
+            }
         }
     }
 
