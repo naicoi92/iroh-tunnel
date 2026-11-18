@@ -209,7 +209,7 @@ pub(crate) fn describe_location(text: &str, span: Option<std::ops::Range<usize>>
 
 /// Drop fields retired from the schema (legacy `multiplex`, CFG-03) so every
 /// write removes them while keeping comments and formatting.
-pub(crate) fn strip_retired_fields(doc: &mut DocumentMut) {
+fn strip_retired_fields(doc: &mut DocumentMut) {
     let Some(services) = doc.get_mut("services") else {
         return;
     };
@@ -283,21 +283,53 @@ pub(crate) fn persist_generated_key<D: RoleDoc>(path: &Path, encoded: &str) -> R
         return Ok(existing.to_string());
     }
     set_node_secret_key(&mut doc, &path, encoded)?;
-    strip_retired_fields(&mut doc);
-    let text = doc.to_string();
-    let parsed: D = toml::from_str(&text).map_err(|e| {
+    let text = render_role_doc::<D>(&mut doc, &path)?;
+    write_atomic(&path, text.as_bytes())?;
+    Ok(encoded.to_string())
+}
+
+/// The one parse-and-validate path of every role config entry point.
+///
+/// A malformed document reads `<malformed> <path> (line N): <message>`, an
+/// invalid one `invalid config at <path>: <reason>`; both are config errors
+/// (exit 2). `toml` errors quote the offending source line, which can hold a
+/// secret, so the diagnostic carries the message and line only (RS-10).
+fn parse_role_doc<D: RoleDoc>(text: &str, path: &Path, malformed: &str) -> Result<D> {
+    let doc: D = toml::from_str(text).map_err(|e| {
         CliError::Config(format!(
-            "invalid config at {}{}: {}",
+            "{malformed} {}{}: {}",
             path.display(),
-            describe_location(&text, e.span()),
+            describe_location(text, e.span()),
             e.message()
         ))
     })?;
-    parsed
-        .validate()
-        .map_err(|e| CliError::Config(format!("invalid config at {}: {e}", path.display())))?;
-    write_atomic(&path, text.as_bytes())?;
-    Ok(encoded.to_string())
+    doc.validate()
+        .map_err(|e| CliError::Config(format!("invalid config at {}: {e:#}", path.display())))?;
+    Ok(doc)
+}
+
+/// Validate a document about to be written or checked; any failure is an
+/// `invalid config at <path>` config error (exit 2).
+///
+/// # Errors
+///
+/// [`CliError::Config`] when `text` is not valid TOML for `D` or fails
+/// validation.
+pub(crate) fn check_role_doc<D: RoleDoc>(text: &str, path: &Path) -> Result<D> {
+    parse_role_doc(text, path, "invalid config at")
+}
+
+/// Drop retired fields from `doc` and render it, refusing a result that is
+/// not a valid `D`. Returns the text to write.
+///
+/// # Errors
+///
+/// See [`check_role_doc`].
+pub(crate) fn render_role_doc<D: RoleDoc>(doc: &mut DocumentMut, path: &Path) -> Result<String> {
+    strip_retired_fields(doc);
+    let text = doc.to_string();
+    check_role_doc::<D>(&text, path)?;
+    Ok(text)
 }
 
 /// Read, parse and validate a role config from a TOML file.
@@ -321,19 +353,7 @@ pub(crate) fn load_role_config<D: RoleDoc>(path: &Path) -> Result<D> {
 /// (the message carries the path and line only, never the offending source
 /// line) or fails validation.
 pub(crate) fn parse_role_config<D: RoleDoc>(content: &str, path: &Path) -> Result<D> {
-    // `toml` errors quote the offending source line, which can hold a
-    // secret; report the message and line only (RS-10).
-    let cfg: D = toml::from_str(content).map_err(|e| {
-        CliError::Config(format!(
-            "failed to parse config: {}{}: {}",
-            path.display(),
-            describe_location(content, e.span()),
-            e.message()
-        ))
-    })?;
-    cfg.validate()
-        .map_err(|e| CliError::Config(format!("invalid config at {}: {e:#}", path.display())))?;
-    Ok(cfg)
+    parse_role_doc(content, path, "failed to parse config:")
 }
 
 /// Resolve the node secret key; if it was just generated, persist it back
@@ -453,6 +473,75 @@ mod tests {
             config_error_message(&err),
             "invalid config at serve.toml: invalid port: must be 1-65535"
         );
+    }
+
+    /// Rejected text, per entry point: `(text, load, check, writers)`, where
+    /// the writers are a mutation, an edit commit and key persistence.
+    fn entry_point_diagnostics(p: &str) -> Vec<(&'static str, String, String, String)> {
+        const SCHEMA: &str = "[[services]]\nname = \"a\"\nprotocol = \"tcp\"\nport = 1\nmultiplex = true\n\n[[services]]\nname = \"b\"\nprotocol = \"tcp\"\nport = \"x\"\n";
+        let syntax = "unclosed array, expected `]`";
+        let schema = toml::from_str::<ServeConfig>(SCHEMA)
+            .unwrap_err()
+            .message()
+            .to_string();
+        let port = "invalid port: must be 1-65535";
+        vec![
+            (
+                "not = [valid",
+                format!("failed to parse config: {p} (line 1): {syntax}"),
+                format!("invalid config at {p} (line 1): {syntax}"),
+                format!("failed to parse config {p} (line 1): {syntax}"),
+            ),
+            // Writers check the document after dropping `multiplex`, so
+            // their line is one less than the source line.
+            (
+                SCHEMA,
+                format!("failed to parse config: {p} (line 10): {schema}"),
+                format!("invalid config at {p} (line 10): {schema}"),
+                format!("invalid config at {p} (line 9): {schema}"),
+            ),
+            (
+                "[[services]]\nname = \"db\"\nprotocol = \"tcp\"\nport = 0\n",
+                format!("invalid config at {p}: {port}"),
+                format!("invalid config at {p}: {port}"),
+                format!("invalid config at {p}: {port}"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_entry_point_keeps_its_rejection_diagnostic() {
+        use crate::role::Role;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("serve.toml");
+        let shown = p.display().to_string();
+        for (text, load, check, writers) in entry_point_diagnostics(&shown) {
+            std::fs::write(&p, text).unwrap();
+            let msg = |r: Result<()>| config_error_message(&r.unwrap_err()).to_string();
+            assert_eq!(msg(load_role_config::<ServeConfig>(&p).map(drop)), load);
+            assert_eq!(
+                msg(crate::config::check_config(Role::Serve, Some(&p)).map(drop)),
+                check
+            );
+            assert_eq!(
+                msg(super::super::mutate::mutate(Role::Serve, &p, |_| Ok(()))),
+                writers
+            );
+            assert_eq!(
+                msg(persist_generated_key::<ServeConfig>(&p, "k").map(drop)),
+                writers
+            );
+            let attempt = crate::config::prepare_edit(Role::Serve, Some(&p)).unwrap();
+            std::fs::write(attempt.scratch_path(), format!("{text}\n")).unwrap();
+            match attempt.commit().unwrap() {
+                crate::config::EditOutcome::Rejected { message, .. } => assert!(
+                    message.starts_with(&format!("config error: {writers}; ")),
+                    "{message}"
+                ),
+                other => panic!("unexpected {other:?}"),
+            }
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), text);
+        }
     }
 
     #[test]

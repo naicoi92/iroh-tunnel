@@ -6,7 +6,10 @@ use std::path::Path;
 use anyhow::Result;
 use toml_edit::DocumentMut;
 
-use super::store::{parse_doc, read_optional, strip_retired_fields, write_atomic, ConfigLock};
+use super::dto::{AccessConfig, ServeConfig};
+use super::store::{
+    check_role_doc, parse_doc, read_optional, render_role_doc, write_atomic, ConfigLock,
+};
 use crate::error::CliError;
 use crate::role::Role;
 
@@ -46,9 +49,7 @@ pub(super) fn mutate_deciding<T>(
         Edit::Keep(value) => return Ok(value),
         Edit::Apply(value) => value,
     };
-    strip_retired_fields(&mut doc);
-    let rendered = doc.to_string();
-    validate_role_doc(role, &rendered, path)?;
+    let rendered = render_valid(role, &mut doc, path)?;
     write_atomic(path, rendered.as_bytes())?;
     Ok(value)
 }
@@ -76,31 +77,23 @@ pub(super) fn find_service_index(
         .position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name)))
 }
 
-/// Re-parse `content` through the role's schema to enforce all validation rules
-/// (name regex/length, port range, node_id length, duplicate names, https
+/// Check `content` against the role's schema and validation rules (name
+/// regex/length, port range, node_id length, duplicate names, https
 /// relay_urls). A failure is a `CliError::Config` → exit 2.
 pub(super) fn validate_role_doc(role: Role, content: &str, path: &Path) -> Result<()> {
-    let invalid = |detail: String| -> anyhow::Error {
-        CliError::Config(format!("invalid config at {}{detail}", path.display())).into()
-    };
-    // `toml` errors quote the offending source line, which can hold a secret;
-    // report the message and line only (RS-10).
-    let parse_failure = |e: toml::de::Error| {
-        invalid(format!(
-            "{}: {}",
-            super::store::describe_location(content, e.span()),
-            e.message()
-        ))
-    };
     match role {
-        Role::Access => toml::from_str::<crate::config::AccessConfig>(content)
-            .map_err(parse_failure)?
-            .validate(),
-        Role::Serve => toml::from_str::<crate::config::ServeConfig>(content)
-            .map_err(parse_failure)?
-            .validate(),
+        Role::Access => check_role_doc::<AccessConfig>(content, path).map(drop),
+        Role::Serve => check_role_doc::<ServeConfig>(content, path).map(drop),
     }
-    .map_err(|e| invalid(format!(": {e}")))
+}
+
+/// Drop retired fields from `doc` and render it, refusing a result that is
+/// not valid for `role`. Returns the text to write.
+pub(super) fn render_valid(role: Role, doc: &mut DocumentMut, path: &Path) -> Result<String> {
+    match role {
+        Role::Access => render_role_doc::<AccessConfig>(doc, path),
+        Role::Serve => render_role_doc::<ServeConfig>(doc, path),
+    }
 }
 
 /// Placeholder printed by `config show` instead of a secret.

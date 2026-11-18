@@ -7,6 +7,8 @@
 pub mod access;
 pub mod conn_path;
 pub mod endpoint;
+mod fault;
+mod locked;
 pub mod observation;
 mod proto;
 pub mod runtime;

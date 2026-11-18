@@ -6,6 +6,8 @@ use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 
+use crate::fault::Fault;
+use crate::locked::Locked;
 use crate::runtime::RunContext;
 
 // One budget from stop receipt across every service/connection, not one grace
@@ -83,35 +85,63 @@ pub(crate) async fn join(tasks: &mut JoinSet<()>) {
 /// A sink outlives its connection (it holds a socket for `QUARANTINE`) but not
 /// the role: finished sinks are reaped while the role runs, and `shutdown`
 /// joins the rest, aborting at the drain deadline.
-#[derive(Default)]
+///
+/// The set is role-wide state: a poisoned lock raises a role fault. Sinks it
+/// can no longer track are dropped (releasing their slots) or aborted when
+/// the set itself is dropped at the end of the role.
 pub(crate) struct QuarantineSinks {
-    // Never held across an await.
-    tasks: std::sync::Mutex<JoinSet<()>>,
+    tasks: Locked<JoinSet<()>>,
+    fault: Fault,
 }
 
 impl QuarantineSinks {
+    pub(crate) fn new(fault: Fault) -> Self {
+        Self {
+            tasks: Locked::default(),
+            fault,
+        }
+    }
+
+    /// Own `sink` until it ends or the role stops. A sink that cannot be
+    /// tracked is dropped unpolled.
     pub(crate) fn spawn(&self, sink: impl std::future::Future<Output = ()> + Send + 'static) {
         self.reap();
-        self.lock().spawn(sink);
+        let spawned = self.tasks.with(|tasks| {
+            tasks.spawn(sink);
+        });
+        self.check(spawned);
     }
 
     /// Observe sinks that have already finished, without waiting.
     pub(crate) fn reap(&self) {
-        let mut tasks = self.lock();
-        while let Some(result) = tasks.try_join_next() {
-            observe(result);
+        let finished = self
+            .tasks
+            .with(|tasks| std::iter::from_fn(|| tasks.try_join_next()).collect::<Vec<_>>());
+        if let Some(finished) = self.check(finished) {
+            finished.into_iter().for_each(observe);
         }
     }
 
     /// Join every sink, aborting those still running at `deadline`.
     pub(crate) async fn shutdown(&self, deadline: Instant) {
-        let mut tasks = std::mem::take(&mut *self.lock());
-        drain(&mut tasks, deadline).await;
+        let taken = self.tasks.with(std::mem::take);
+        if let Some(mut tasks) = self.check(taken) {
+            drain(&mut tasks, deadline).await;
+        }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, JoinSet<()>> {
-        self.tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Poison the set by panicking inside its section.
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        let _ = self.tasks.with(|_| panic!("poison the quarantine sinks"));
+    }
+
+    fn check<T>(&self, result: Result<T, crate::locked::Poisoned>) -> Option<T> {
+        result
+            .map_err(|poisoned| {
+                self.fault
+                    .raise(anyhow::Error::new(poisoned).context("quarantine sinks"));
+            })
+            .ok()
     }
 }

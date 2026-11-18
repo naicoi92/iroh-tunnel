@@ -42,14 +42,17 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::endpoint;
+use crate::fault::{self, Fault};
+use crate::locked::{Locked, Poisoned};
 use crate::observation::{AccessObservation, AccessServiceObservation, STATUS_FLUSH_INTERVAL};
 use crate::proto;
 use crate::runtime::support;
-use crate::runtime::{AccessReady, ReadyReport, ReadyServices};
+use crate::runtime::{AccessReady, ReadyServices};
 use crate::runtime::{RoleHooks, RunCompletion, RunContext, StatusSink};
 use crate::settings::{AccessServiceSettings, AccessSettings, Protocol, UdpLimits};
 use crate::shutdown;
@@ -69,27 +72,15 @@ pub async fn run_access(
     hooks: RoleHooks<AccessObservation>,
     shutdown: impl Future<Output = ()>,
 ) -> RunCompletion {
-    let RoleHooks {
-        on_ready,
-        status: sink,
-    } = hooks;
-    let report = ReadyReport {
-        node_id: endpoint::node_id_string(&ep),
-        home_relay: endpoint::home_relay(&ep).map(|relay| relay.to_string()),
-        services: ready_services(&settings),
-    };
-    if let Err(error) = on_ready(&report) {
-        ep.close().await;
+    let RoleHooks { on_ready, status } = hooks;
+    if let Err(error) = support::announce_ready(&ep, ready_services(&settings), on_ready).await {
         return RunCompletion {
             result: Err(error),
             status_quiesced: true,
         };
     }
-    tracing::info!("endpoint ready");
-    let cfg = settings;
-
     // Failures before the flush task spawns leave no writer to wait for.
-    let (dialers, status_services) = match build_dialers(&ep, &cfg) {
+    let (dialers, status_services) = match build_dialers(&ep, &settings) {
         Ok(built) => built,
         Err(error) => {
             return RunCompletion {
@@ -98,85 +89,86 @@ pub async fn run_access(
             }
         }
     };
-    let mut listeners = JoinSet::new();
-    // The initial status write happens BEFORE any listener spawns (the
-    // same ordering as serve): no local client can have connected yet,
-    // so the first snapshot deterministically carries every service's
-    // configured peer with empty transports.
-
-    // Operator-facing status snapshot (issue #59), refreshed by the
-    // flush task below as connections come and go. Best-effort: a
-    // failure to write status is logged but does not stop the tunnel.
-    // Same seeding contract as serve's: the initial write seeds the
-    // change detection when it succeeds; a failure seeds `None` so the
-    // first tick retries it.
-    let status = AccessStatusTemplate {
-        node_id: endpoint::node_id_string(&ep),
-        pid: std::process::id(),
-        started_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        services: status_services,
-    };
-    let initial = render_access_status(&status, &dialers).await;
-    let mut sink = sink;
-    let seeded = match sink.as_mut() {
-        Some(sink) => match sink.save(initial.clone()).await {
-            Ok(()) => Some(initial),
-            Err(e) => {
-                tracing::warn!("failed to write status file: {e:#}");
-                None
-            }
-        },
-        None => None,
-    };
-
-    // Cooperative stop channel for the flush task.
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-
-    tracing::info!("access endpoint ready, listening for local clients");
-    let flush = sink.map(|sink| {
-        tokio::spawn(access_status_flush_loop(
-            status,
-            dialers.clone(),
-            sink,
-            seeded,
-            stop_rx,
-            STATUS_FLUSH_INTERVAL,
-        ))
-    });
-    let (stop, stop_rx) = shutdown::channel();
-    for dialer in &dialers {
-        listeners.spawn(listen_loop(dialer.clone(), stop_rx.clone()));
-    }
-    tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut shutdown => break,
-            Some(result) = listeners.join_next(), if !listeners.is_empty() => shutdown::observe(result),
-        }
-    }
-    shutdown::begin(&stop, &ctx);
-    // Listeners seal admission and join their own channels against the
-    // shared deadline. Never abort a supervisor with live descendants.
-    shutdown::join(&mut listeners).await;
-    for dialer in &dialers {
-        dialer.stop_auxiliary_tasks().await;
-    }
-    // Stop the flush task and bound its join; the run owner removes the
-    // status file only when this reports the writer quiesced.
-    let status_quiesced = match flush {
-        Some(flush) => support::stop_flush(stop_tx, flush).await,
-        None => true,
-    };
+    let (fault, mut faults) = fault::channel();
+    let mut role = AccessRole::start(&ep, dialers, status_services, status, fault).await;
+    let result = support::run_until(&mut role.listeners, shutdown, &mut faults).await;
+    let status_quiesced = role.shutdown(&ctx).await;
     // Test-utils seam: simulate a shutdown stuck in the endpoint close.
     crate::testing::hang_point().await;
     ep.close().await;
-    RunCompletion {
-        result: Ok(()),
-        status_quiesced,
+    support::completion(result, &mut faults, status_quiesced)
+}
+
+/// One running Access role: a listener per service, the dialers they share
+/// with the status writer, and the writer itself.
+struct AccessRole {
+    listeners: JoinSet<()>,
+    dialers: Vec<Arc<ServiceDialer>>,
+    stop: watch::Sender<Option<Instant>>,
+    flush: support::StatusFlush,
+}
+
+impl AccessRole {
+    /// Save the initial status, then spawn the listeners: no local client
+    /// can have connected yet, so the first snapshot deterministically
+    /// carries every service's configured peer with empty transports.
+    async fn start(
+        ep: &iroh::Endpoint,
+        dialers: Vec<Arc<ServiceDialer>>,
+        services: Vec<AccessStatusServiceRow>,
+        mut sink: Option<StatusSink<AccessObservation>>,
+        fault: Fault,
+    ) -> Self {
+        // Operator-facing status snapshot (issue #59), refreshed by the
+        // flush task as connections come and go. Best-effort: a failure to
+        // write status is logged but does not stop the tunnel.
+        let status = AccessStatusTemplate {
+            node_id: endpoint::node_id_string(ep),
+            pid: std::process::id(),
+            started_at: support::unix_now_secs(),
+            services,
+        };
+        let initial = render_access_status(&status, &dialers).await;
+        let seeded = support::save_initial(sink.as_mut(), initial).await;
+
+        tracing::info!("access endpoint ready, listening for local clients");
+        let flush = support::StatusFlush::spawn(sink, |sink, stop| {
+            access_status_flush_loop(
+                status,
+                dialers.clone(),
+                sink,
+                seeded,
+                stop,
+                STATUS_FLUSH_INTERVAL,
+            )
+        });
+        let (stop, stop_rx) = shutdown::channel();
+        let mut listeners = JoinSet::new();
+        for dialer in &dialers {
+            listeners.spawn(listen_loop(dialer.clone(), stop_rx.clone(), fault.clone()));
+        }
+        Self {
+            listeners,
+            dialers,
+            stop,
+            flush,
+        }
+    }
+
+    /// Stop admission and drain the listeners against one deadline, then
+    /// stop the dialers' tasks and the status writer; returns whether the
+    /// writer quiesced.
+    async fn shutdown(mut self, ctx: &RunContext) -> bool {
+        shutdown::begin(&self.stop, ctx);
+        // Listeners seal admission and join their own channels against the
+        // shared deadline. Never abort a supervisor with live descendants.
+        shutdown::join(&mut self.listeners).await;
+        for dialer in &self.dialers {
+            dialer.stop_auxiliary_tasks().await;
+        }
+        // The run owner removes the status file only when the writer
+        // quiesced.
+        self.flush.stop().await
     }
 }
 
@@ -506,10 +498,12 @@ impl ServiceDialer {
         Ok(conn)
     }
 
+    /// Abort and join the connection's watcher and poller. The set is taken
+    /// out of `state` first, so the join never holds the lock.
     async fn stop_auxiliary_tasks(&self) {
-        let mut state = self.state.lock().await;
-        state.tasks.abort_all();
-        shutdown::join(&mut state.tasks).await;
+        let mut tasks = std::mem::take(&mut self.state.lock().await.tasks);
+        tasks.abort_all();
+        shutdown::join(&mut tasks).await;
     }
 
     /// Drop the cached multiplexed connection (it died); the next channel
@@ -559,9 +553,9 @@ impl ServiceDialer {
 ///
 /// Stop seals admission before draining owned clients. Per-client errors are
 /// logged, not propagated.
-async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
+async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop, fault: Fault) {
     if dialer.protocol == Protocol::Udp {
-        return udp_listen_loop(dialer, stop).await;
+        return udp_listen_loop(dialer, stop, fault).await;
     }
     let listen_addr = dialer.listen_addr.clone();
     let listener = tokio::select! {
@@ -613,7 +607,7 @@ async fn listen_loop(dialer: Arc<ServiceDialer>, mut stop: shutdown::Stop) {
 /// Binds the service's listen address and runs [`udp_forward_loop`] on it
 /// with the production redial back-off.
 /// Contract: `docs/udp-integration-contract.md`.
-async fn udp_listen_loop(dialer: Arc<ServiceDialer>, stop: shutdown::Stop) {
+async fn udp_listen_loop(dialer: Arc<ServiceDialer>, stop: shutdown::Stop, fault: Fault) {
     let listen_addr = dialer.listen_addr.clone();
     let socket = match UdpSocket::bind(&listen_addr).await {
         Ok(socket) => Arc::new(socket),
@@ -623,7 +617,7 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, stop: shutdown::Stop) {
         }
     };
     tracing::info!(%listen_addr, "listening for local udp clients");
-    udp_forward_loop(UdpForwardCtx::new(dialer), socket, stop).await;
+    udp_forward_loop(UdpForwardCtx::new(dialer, fault), socket, stop).await;
 }
 
 /// Serializes dial admission with failure recording and eviction for one
@@ -633,12 +627,15 @@ async fn udp_listen_loop(dialer: Arc<ServiceDialer>, stop: shutdown::Stop) {
 type UdpDialGate = Arc<tokio::sync::Mutex<()>>;
 
 /// Shared state of one UDP service's forwarding loop and its reply readers.
+///
+/// A poisoned back-off or flow table raises `fault`, which ends the role
+/// (#226); the forwarding loop and its readers stop at once.
 #[derive(Clone)]
 struct UdpForwardCtx {
     dialer: Arc<ServiceDialer>,
-    /// Never held across an `.await`.
-    backoff: Arc<std::sync::Mutex<RedialBackoff>>,
+    backoff: Arc<Locked<RedialBackoff>>,
     gate: UdpDialGate,
+    fault: Fault,
     #[cfg(test)]
     hooks: Option<Arc<UdpTestHooks>>,
 }
@@ -685,21 +682,26 @@ impl Drop for ReaderAlive {
 }
 
 impl UdpForwardCtx {
-    fn new(dialer: Arc<ServiceDialer>) -> Self {
+    fn new(dialer: Arc<ServiceDialer>, fault: Fault) -> Self {
         Self {
             dialer,
             backoff: Arc::default(),
             gate: UdpDialGate::default(),
+            fault,
             #[cfg(test)]
             hooks: None,
         }
     }
 }
 
+/// The client flows of one UDP service's session incarnation, shared with
+/// its reply reader.
+type UdpClientFlows = Arc<Locked<crate::udp::ClientFlows>>;
+
 /// The adopted session incarnation of one UDP service: its flows, its reply
 /// readers and the connection they belong to.
 struct UdpSession {
-    flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
+    flows: UdpClientFlows,
     readers: JoinSet<()>,
     /// Holding the adopted connection keeps its allocation alive, so its
     /// `stable_id()` cannot be reused by a later connection while compared.
@@ -729,10 +731,10 @@ async fn udp_forward_loop(ctx: UdpForwardCtx, socket: Arc<UdpSocket>, mut stop: 
         let (n, client) = tokio::select! {
             biased;
             _ = shutdown::stopped(&mut stop) => break,
-            _ = sweep.tick() => {
-                session.expire_idle(&ctx);
-                continue;
-            }
+            _ = sweep.tick() => match session.expire_idle(&ctx) {
+                Ok(()) => continue,
+                Err(Poisoned) => break,
+            },
             Some(result) = session.readers.join_next(), if !session.readers.is_empty() => {
                 shutdown::observe(result);
                 continue;
@@ -764,36 +766,43 @@ async fn udp_forward_loop(ctx: UdpForwardCtx, socket: Arc<UdpSocket>, mut stop: 
             _ = shutdown::stopped(&mut stop) => break,
             admitted = session.admit(&ctx, &socket, deadline) => admitted,
         };
-        let Some((conn, incarnation)) = admitted else {
-            continue;
+        let (conn, incarnation) = match admitted {
+            Ok(Some(admitted)) => admitted,
+            Ok(None) => continue,
+            Err(Poisoned) => break,
         };
         #[expect(
             clippy::indexing_slicing,
             reason = "invariant: recv_from never reports more bytes than the buffer holds"
         )]
         let datagram = &buf[..n];
-        session
+        let forwarded = session
             .forward(&ctx, &conn, incarnation, client, datagram)
             .await;
+        if forwarded.is_err() {
+            break;
+        }
     }
     session.readers.abort_all();
     shutdown::join(&mut session.readers).await;
 }
 
 impl UdpSession {
-    fn expire_idle(&self, ctx: &UdpForwardCtx) {
-        let mut flows = self
-            .flows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let ended = flows.expire(
-            std::time::Instant::now(),
-            ctx.dialer.udp_limits.idle_timeout,
-        );
-        ctx.dialer.udp_stats.set_active_flows(flows.len());
+    /// End idle flows.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] flow table; the role fault is raised.
+    fn expire_idle(&self, ctx: &UdpForwardCtx) -> Result<(), Poisoned> {
+        let now = std::time::Instant::now();
+        let idle = ctx.dialer.udp_limits.idle_timeout;
+        let (ended, live) =
+            ctx.flows(&self.flows, |flows| (flows.expire(now, idle), flows.len()))?;
+        ctx.dialer.udp_stats.set_active_flows(live);
         if ended > 0 {
             tracing::debug!(svc = %ctx.dialer.svc_name, ended, "udp flows expired");
         }
+        Ok(())
     }
 
     /// The connection a client datagram goes out on, or `None` to drop it.
@@ -801,19 +810,23 @@ impl UdpSession {
     /// Holds the dial gate from the back-off check through the setup check,
     /// so a reader cannot record a failure between them; it is released
     /// before the datagram is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] back-off; the role fault is raised.
     async fn admit(
         &mut self,
         ctx: &UdpForwardCtx,
         socket: &Arc<UdpSocket>,
         deadline: tokio::time::Instant,
-    ) -> Option<(iroh::endpoint::Connection, Incarnation)> {
+    ) -> Result<Option<(iroh::endpoint::Connection, Incarnation)>, Poisoned> {
         #[cfg(test)]
         ctx.bump_hook(|hooks| &hooks.gate_waiting);
         let _gate = ctx.gate.lock().await;
-        if !ctx.dial_allowed() {
+        if !ctx.dial_allowed()? {
             #[cfg(test)]
             ctx.bump_hook(|hooks| &hooks.waiting_dropped);
-            return None;
+            return Ok(None);
         }
         #[cfg(test)]
         ctx.bump_hook(|hooks| &hooks.admitted);
@@ -821,7 +834,7 @@ impl UdpSession {
             Ok(conn) => conn,
             Err(error) => {
                 tracing::warn!(svc = %ctx.dialer.svc_name, "udp datagram dropped, no connection: {error:#}");
-                return None;
+                return Ok(None);
             }
         };
         self.adopt(ctx, socket, conn).await
@@ -829,24 +842,28 @@ impl UdpSession {
 
     /// Keep the current incarnation, or start a new one for a newly dialed
     /// connection.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] back-off; the role fault is raised.
     async fn adopt(
         &mut self,
         ctx: &UdpForwardCtx,
         socket: &Arc<UdpSocket>,
         conn: iroh::endpoint::Connection,
-    ) -> Option<(iroh::endpoint::Connection, Incarnation)> {
+    ) -> Result<Option<(iroh::endpoint::Connection, Incarnation)>, Poisoned> {
         if let Some((current, incarnation)) = &self.current {
             if current.stable_id() == conn.stable_id() {
-                return Some((conn, *incarnation));
+                return Ok(Some((conn, *incarnation)));
             }
         }
         self.retire().await;
         ctx.dialer.udp_stats.set_active_flows(0);
         // Begun after retiring, so a late record from an old reader is stale.
-        let incarnation = ctx.lock_backoff().begin();
+        let incarnation = ctx.backoff(RedialBackoff::begin)?;
         if !crate::udp::carries_datagrams(conn.max_datagram_size()) {
-            reject_unusable(ctx, &conn, incarnation).await;
-            return None;
+            reject_unusable(ctx, &conn, incarnation).await?;
+            return Ok(None);
         }
         self.readers.spawn(relay_peer_replies(
             conn.clone(),
@@ -856,23 +873,25 @@ impl UdpSession {
             ctx.clone(),
         ));
         self.current = Some((conn.clone(), incarnation));
-        Some((conn, incarnation))
+        Ok(Some((conn, incarnation)))
     }
 
     /// End the current incarnation: no flow or reader survives it.
     async fn retire(&mut self) {
         self.readers.abort_all();
         while self.readers.join_next().await.is_some() {}
-        *self
-            .flows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            crate::udp::ClientFlows::default();
+        // A fresh table, not a reset of the shared one: with the old reader
+        // gone nothing else holds it, and a poisoned table is never reused.
+        self.flows = UdpClientFlows::default();
         self.current = None;
     }
 
     /// Send one client payload on `conn`, applying the datagram limit and
     /// the flow cap.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] flow table or back-off; the role fault is raised.
     async fn forward(
         &mut self,
         ctx: &UdpForwardCtx,
@@ -880,7 +899,7 @@ impl UdpSession {
         incarnation: Incarnation,
         client: std::net::SocketAddr,
         payload: &[u8],
-    ) {
+    ) -> Result<(), Poisoned> {
         use crate::udp::{send_decision, DropReason, SendDecision};
         let dialer = &ctx.dialer;
         let stats = &dialer.udp_stats;
@@ -893,7 +912,7 @@ impl UdpSession {
             SendDecision::Drop(DropReason::LimitShrink) => {
                 stats.record_drop(DropReason::LimitShrink);
                 tracing::warn!(svc = %dialer.svc_name, "datagrams unusable on this connection, dropping");
-                return;
+                return Ok(());
             }
             SendDecision::Drop(reason) => {
                 // Only an oversize decision reaches here, which needs a usable limit.
@@ -904,25 +923,21 @@ impl UdpSession {
                     limit = limit.unwrap_or_default(),
                     "dropping oversize udp datagram"
                 );
-                return;
+                return Ok(());
             }
         }
-        let flow = self
-            .flows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .touch(
-                client,
-                std::time::Instant::now(),
-                dialer.udp_limits.max_flows,
-            );
+        let now = std::time::Instant::now();
+        let max_flows = dialer.udp_limits.max_flows;
+        let (flow, live) = ctx.flows(&self.flows, |flows| {
+            (flows.touch(client, now, max_flows), flows.len())
+        })?;
         let flow = match flow {
             Ok(flow) => flow,
             Err(crate::udp::Refused::Cap) => {
                 // Over the Access cap: drop before it costs Serve anything.
                 stats.record_drop(DropReason::Cap);
                 tracing::debug!(svc = %dialer.svc_name, %client, "udp flow refused: access flow cap reached");
-                return;
+                return Ok(());
             }
             Err(crate::udp::Refused::Exhausted) => {
                 // Identifiers are never reused within an incarnation, so the
@@ -934,15 +949,10 @@ impl UdpSession {
                     "udp flow identifiers exhausted, ending the session incarnation"
                 );
                 dialer.invalidate(conn).await;
-                return;
+                return Ok(());
             }
         };
-        stats.set_active_flows(
-            self.flows
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len(),
-        );
+        stats.set_active_flows(live);
         if let Err(error) = conn.send_datagram(crate::udp::encode(flow, payload)) {
             tracing::debug!(svc = %dialer.svc_name, "udp datagram not sent: {error}");
             // A lost connection never recovers. Evict it so the next datagram
@@ -955,12 +965,13 @@ impl UdpSession {
                     .close_reason()
                     .is_some_and(|reason| crate::udp::closed_for_unsupported_datagrams(&reason))
                 {
-                    ctx.lock_backoff()
-                        .record(incarnation, std::time::Instant::now());
+                    let now = std::time::Instant::now();
+                    ctx.backoff(|backoff| backoff.record(incarnation, now))?;
                 }
                 dialer.invalidate(conn).await;
             }
         }
+        Ok(())
     }
 }
 
@@ -970,7 +981,7 @@ async fn reject_unusable(
     ctx: &UdpForwardCtx,
     conn: &iroh::endpoint::Connection,
     incarnation: Incarnation,
-) {
+) -> Result<(), Poisoned> {
     tracing::error!(
         peer = %conn.remote_id(),
         svc = %ctx.dialer.svc_name,
@@ -980,24 +991,54 @@ async fn reject_unusable(
         iroh::endpoint::VarInt::from_u32(crate::udp::DATAGRAMS_UNSUPPORTED_CODE),
         crate::udp::DATAGRAMS_UNSUPPORTED_REASON,
     );
-    ctx.lock_backoff()
-        .record(incarnation, std::time::Instant::now());
+    let now = std::time::Instant::now();
+    ctx.backoff(|backoff| backoff.record(incarnation, now))?;
     ctx.dialer.invalidate(conn).await;
+    Ok(())
 }
 
 impl UdpForwardCtx {
-    fn lock_backoff(&self) -> std::sync::MutexGuard<'_, RedialBackoff> {
-        self.backoff
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Run `section` on the redial back-off.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] back-off; the role fault is raised.
+    fn backoff<R>(&self, section: impl FnOnce(&mut RedialBackoff) -> R) -> Result<R, Poisoned> {
+        self.check(self.backoff.with(section), "udp redial back-off")
+    }
+
+    /// Run `section` on a session's flow table.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] flow table; the role fault is raised.
+    fn flows<R>(
+        &self,
+        flows: &UdpClientFlows,
+        section: impl FnOnce(&mut crate::udp::ClientFlows) -> R,
+    ) -> Result<R, Poisoned> {
+        self.check(flows.with(section), "udp client flows")
+    }
+
+    fn check<R>(&self, result: Result<R, Poisoned>, what: &'static str) -> Result<R, Poisoned> {
+        result.inspect_err(|poisoned| {
+            let error = anyhow::Error::new(*poisoned)
+                .context(format!("service '{}': {what}", self.dialer.svc_name));
+            self.fault.raise(error);
+        })
     }
 
     /// Whether the back-off lets this datagram dial; logs the drop if not.
     /// Drops during the back-off record no drop counter.
-    fn dial_allowed(&self) -> bool {
-        let check = self.lock_backoff().check(std::time::Instant::now());
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] back-off; the role fault is raised.
+    fn dial_allowed(&self) -> Result<bool, Poisoned> {
+        let now = std::time::Instant::now();
+        let check = self.backoff(|backoff| backoff.check(now))?;
         let svc = &self.dialer.svc_name;
-        match check {
+        Ok(match check {
             crate::udp::BackoffCheck::Clear => true,
             crate::udp::BackoffCheck::Waiting {
                 first: true,
@@ -1018,15 +1059,17 @@ impl UdpForwardCtx {
                 );
                 false
             }
-        }
+        })
     }
 
     /// Record the failure of `conn`'s incarnation and evict it, under the
-    /// dial gate so no datagram is admitted between the two.
+    /// dial gate so no datagram is admitted between the two. A poisoned
+    /// back-off has raised the role fault, which ends the loop; the
+    /// connection is evicted anyway.
     async fn fail_incarnation(&self, conn: &iroh::endpoint::Connection, incarnation: Incarnation) {
         let _gate = self.gate.lock().await;
-        self.lock_backoff()
-            .record(incarnation, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        let _ = self.backoff(|backoff| backoff.record(incarnation, now));
         self.dialer.invalidate(conn).await;
     }
 
@@ -1044,7 +1087,7 @@ async fn relay_peer_replies(
     conn: iroh::endpoint::Connection,
     incarnation: Incarnation,
     socket: Arc<UdpSocket>,
-    flows: Arc<std::sync::Mutex<crate::udp::ClientFlows>>,
+    flows: UdpClientFlows,
     ctx: UdpForwardCtx,
 ) {
     use crate::udp::DropReason;
@@ -1073,10 +1116,11 @@ async fn relay_peer_replies(
             tracing::debug!("dropping malformed udp datagram from peer");
             continue;
         };
-        let client = flows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .client_of(flow, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        // A poisoned table raised the role fault: this reader is done.
+        let Ok(client) = ctx.flows(&flows, |flows| flows.client_of(flow, now)) else {
+            return;
+        };
         match client {
             Some(client) => {
                 if let Err(error) = socket.send_to(&payload, client).await {
@@ -1566,13 +1610,10 @@ mod tests {
 
     impl Drop for ChildrenGuard {
         fn drop(&mut self) {
-            for handle in self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-            {
-                handle.abort();
+            // Runs during a panic unwind: a second panic would abort, so a
+            // poisoned list is left to the runtime's teardown.
+            if let Ok(children) = self.0.lock() {
+                children.iter().for_each(tokio::task::JoinHandle::abort);
             }
         }
     }
@@ -1587,18 +1628,11 @@ mod tests {
     /// for the next caller. Only the harness (never the
     /// supervisor) drains, so the supervisor's cancellation cannot lose it.
     async fn drain_children(children: &PeerChildren) {
-        for handle in children
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-        {
+        for handle in children.lock().expect("children lock").iter() {
             handle.abort();
         }
         loop {
-            let next = children
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop();
+            let next = children.lock().expect("children lock").pop();
             let Some(handle) = next else { break };
             let _ = handle.await;
         }
@@ -1694,7 +1728,7 @@ mod tests {
                             let _ = conn.send_datagram(datagram);
                         }
                     });
-                    children.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(child);
+                    children.lock().expect("children lock").push(child);
                 }
             }
         }
@@ -1775,9 +1809,10 @@ mod tests {
         client: UdpSocket,
         access_addr: std::net::SocketAddr,
         dialer: Arc<ServiceDialer>,
-        backoff: Arc<std::sync::Mutex<RedialBackoff>>,
+        backoff: Arc<Locked<RedialBackoff>>,
         gate: UdpDialGate,
         hooks: Arc<UdpTestHooks>,
+        faults: crate::fault::Faults,
         stop: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
         task: OwnedTask,
     }
@@ -1787,10 +1822,12 @@ mod tests {
         let access_addr = socket.local_addr().expect("access addr");
         let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind client");
         let hooks = Arc::new(UdpTestHooks::default());
+        let (fault, faults) = fault::channel();
         let ctx = UdpForwardCtx {
             dialer: dialer.clone(),
-            backoff: Arc::new(std::sync::Mutex::new(RedialBackoff::with_window(window))),
+            backoff: Arc::new(Locked::new(RedialBackoff::with_window(window))),
             gate: UdpDialGate::default(),
+            fault,
             hooks: Some(hooks.clone()),
         };
         let (backoff, gate) = (ctx.backoff.clone(), ctx.gate.clone());
@@ -1803,6 +1840,7 @@ mod tests {
             backoff,
             gate,
             hooks,
+            faults,
             stop,
             task: OwnedTask(Some(task)),
         }
@@ -1832,9 +1870,8 @@ mod tests {
 
         fn waiting_until(&self) -> Option<std::time::Instant> {
             self.backoff
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .waiting_until()
+                .with(|backoff| backoff.waiting_until())
+                .expect("back-off not poisoned")
         }
 
         /// The open window's end, asserting enough of it is left to observe.
@@ -1986,6 +2023,38 @@ mod tests {
             }
             other => panic!("expected the dedicated application close, got {other:?}"),
         }
+    }
+
+    /// #226: a poisoned back-off is never recovered: the forwarding loop
+    /// ends at once and raises the role fault with the service named.
+    #[tokio::test]
+    async fn a_poisoned_back_off_ends_the_loop_with_a_role_fault() {
+        let peer = test_peer(true).await;
+        let mut h = forward(udp_dialer(&peer).await, TEST_WINDOW).await;
+        let backoff = h.backoff.clone();
+        let poisoner = std::thread::spawn(move || {
+            backoff.with(|_| panic!("poison the back-off")).ok();
+        });
+        assert!(poisoner.join().is_err(), "the holder panicked");
+
+        h.send(b"after-poison").await;
+        let fault = tokio::time::timeout(POLL_LIMIT, h.faults.first())
+            .await
+            .expect("the role fault is raised");
+        assert!(
+            format!("{fault:#}").contains("udp redial back-off"),
+            "{fault:#}"
+        );
+        let task = h.task.take();
+        tokio::time::timeout(POLL_LIMIT, task)
+            .await
+            .expect("the loop ends without a stop signal")
+            .expect("the loop does not panic");
+        // The loop is joined; the shared cleanup still checks its readers.
+        h.task = OwnedTask(Some(tokio::spawn(async {})));
+
+        h.shutdown().await;
+        peer.shutdown().await;
     }
 
     #[tokio::test]
