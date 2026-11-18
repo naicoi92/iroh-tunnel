@@ -43,15 +43,7 @@ use windows_sys::Win32::System::WindowsProgramming::{
 use super::ace::ace_layout;
 use super::model::{self, Ace, Descriptor, Refusal, Sid, TrustedSet};
 use crate::error::CliError;
-
-/// Size of a fixed Win32 structure, as the `u32` length the API takes.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "invariant: fixed Win32 structures are far smaller than u32::MAX bytes"
-)]
-pub(crate) const fn win32_size_of<T>() -> u32 {
-    std::mem::size_of::<T>() as u32
-}
+use crate::win32_ffi::win32_size_of;
 
 /// Bytes requested per `ReadFile` call of a verified read.
 const READ_CHUNK: u32 = 64 * 1024;

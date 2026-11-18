@@ -18,6 +18,9 @@ pub mod runtime;
 pub mod service;
 pub mod status;
 pub mod update;
+// Win32 FFI helpers, compiled elsewhere only for their tests.
+#[cfg(any(windows, test))]
+pub(crate) mod win32_ffi;
 
 #[cfg(test)]
 mod fixtures;
