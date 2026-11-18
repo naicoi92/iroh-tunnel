@@ -313,7 +313,7 @@ fn base_options() -> OpenOptions {
 fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::DirBuilderExt;
         let mut missing: Vec<&Path> = dir
             .ancestors()
             .take_while(|p| !p.as_os_str().is_empty() && std::fs::symlink_metadata(p).is_err())
@@ -321,7 +321,7 @@ fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
         missing.reverse();
         for path in missing {
             match std::fs::DirBuilder::new().mode(mode).create(path) {
-                Ok(()) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?,
+                Ok(()) => finalize_dir_mode(path, mode)?,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
             }
@@ -336,6 +336,31 @@ fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
         let _ = mode;
         std::fs::create_dir_all(dir)
     }
+}
+
+/// Set `mode` on a directory this process just created. The directory is
+/// opened `O_DIRECTORY | O_NOFOLLOW` and checked through the handle (a
+/// directory owned by the current euid) before `fchmod`, so a path swapped for
+/// a symlink or a foreign object after `mkdir` is refused, never chmodded.
+#[cfg(unix)]
+fn finalize_dir_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)?;
+    let meta = dir.metadata()?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not a directory created by this process",
+                path.display()
+            ),
+        ));
+    }
+    dir.set_permissions(std::fs::Permissions::from_mode(mode))
 }
 
 /// SDDL of the machine directory (D7): owner and group are Administrators and
@@ -1191,6 +1216,33 @@ pub(crate) fn ensure_not_running(role: Role) -> Result<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_dir_mode_refuses_a_symlink_and_leaves_its_target_alone() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = root.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(finalize_dir_mode(&link, 0o755).is_err());
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_dir_mode_sets_the_mode_of_a_real_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        finalize_dir_mode(&dir, 0o755).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+    }
 
     #[test]
     fn a_refused_start_says_so() {
