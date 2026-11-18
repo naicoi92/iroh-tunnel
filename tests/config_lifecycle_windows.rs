@@ -77,6 +77,15 @@ fn invalid_mutation_fails_and_leaves_file_bytes_unchanged() {
             "3",
         ],
         vec!["serve", "config", "rm", "--config", p(&cfg), "-n", "X"],
+        vec![
+            "serve",
+            "config",
+            "node",
+            "--config",
+            p(&cfg),
+            "-r",
+            "https://a.example",
+        ],
         vec!["serve", "config", "keygen", "--config", p(&cfg), "--yes"],
     ] {
         let o = run(&args);

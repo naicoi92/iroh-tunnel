@@ -179,7 +179,8 @@ Edit the node relay settings with `config node` (both roles):
 - `-r` without a token flag also removes `relay_token`; pass the token again
   to keep one.
 - `--relay-token TOKEN` or `--relay-token-file PATH` (`-` reads stdin) replaces
-  the token and keeps the relay list. Prefer the file form: a `--relay-token`
+  the token and keeps the relay list (one leading UTF-8 BOM and one trailing
+  newline in the file are dropped). Prefer the file form: a `--relay-token`
   value is visible in shell history and process lists.
 - `--clear-relays` removes the relay list and token, returning to the n0
   relays.

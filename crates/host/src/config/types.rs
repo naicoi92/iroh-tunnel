@@ -224,7 +224,7 @@ pub struct SetService {
     pub relays: RelayEdit,
 }
 
-/// How `config node` changes `[node].relay_urls`.
+/// How a `relay_urls` list changes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RelayEdit {
     /// Leave `relay_urls` as it is.

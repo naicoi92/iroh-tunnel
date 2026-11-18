@@ -106,7 +106,7 @@ pub fn set<S: ServiceArgs>(args: S, extra: S::SetExtra, config: Option<PathBuf>)
 }
 
 /// Read the relay token from `path` (`-` reads `stdin`), dropping one
-/// trailing `\n` or `\r\n`. Errors name the flag and path, never the content.
+/// leading UTF-8 BOM and one trailing `\n` or `\r\n`. Errors name the flag and path, never the content.
 fn read_token_source(path: &Path, mut stdin: impl std::io::Read) -> Result<String> {
     let mut text = String::new();
     let read = if path == Path::new("-") {
@@ -116,6 +116,9 @@ fn read_token_source(path: &Path, mut stdin: impl std::io::Read) -> Result<Strin
     };
     read.with_context(|| format!("--relay-token-file {}: cannot read", path.display()))
         .map_err(|e| CliError::Config(format!("{e:#}")))?;
+    if let Some(t) = text.strip_prefix('\u{feff}') {
+        text = t.to_owned();
+    }
     if let Some(t) = text.strip_suffix('\n') {
         text = t.strip_suffix('\r').unwrap_or(t).to_owned();
     }
@@ -231,6 +234,12 @@ mod tests {
             Ok(t) => t,
             Err(e) => format!("ERR {e}"),
         }
+    }
+
+    #[test]
+    fn token_source_strips_utf8_bom() {
+        assert_eq!(from_file("\u{feff}secret-token\r\n"), "secret-token");
+        assert_eq!(from_file("\u{feff}\u{feff}x"), "\u{feff}x");
     }
 
     #[test]

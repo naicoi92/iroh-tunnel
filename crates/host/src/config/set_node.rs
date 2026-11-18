@@ -349,7 +349,16 @@ mod tests {
             "[[services]]\nname = \"api\"\nprotocol = \"tcp\"\nnode_id = \"0000000000000000000000000000000000000000000000000000000000000000\"\nport = 9\nmultiplex = true\n",
         ));
         set_node(Role::Access, &req(&path, replace(&[A]), TokenEdit::Keep)).unwrap();
-        assert!(!read(&path).contains("multiplex"));
+        let after = read(&path);
+        assert!(!after.contains("multiplex"));
+        for line in [
+            "name = \"api\"",
+            "protocol = \"tcp\"",
+            "node_id = \"0000000000000000000000000000000000000000000000000000000000000000\"",
+            "port = 9",
+        ] {
+            assert!(after.contains(line), "{line} missing in {after}");
+        }
     }
 
     #[test]

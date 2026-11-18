@@ -402,13 +402,15 @@ pub struct NodeArgs {
 }
 
 /// `config node` flags a `--relay-token` value must not be mistaken for.
-const NODE_FLAGS: [&str; 6] = [
+const NODE_FLAGS: [&str; 8] = [
     "-c",
     "--config",
     "-r",
     "--relay-url",
     "--relay-token-file",
     "--clear-relays",
+    "-h",
+    "--help",
 ];
 
 /// Accepts any token (including hyphen-prefixed ones) except a bare `config node`
@@ -1228,6 +1230,8 @@ mod tests {
             "--config",
             "--relay-url",
             "--relay-token-file",
+            "-h",
+            "--help",
         ] {
             let err = parse_node(&["--relay-token", flag]).unwrap_err();
             assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{flag}");
@@ -1237,7 +1241,9 @@ mod tests {
                 "{text}"
             );
             assert!(!text.contains("unexpected argument"), "{text}");
-            assert!(!text.contains(&format!("'{flag}'")), "{text}");
+            // clap's own "try '--help'" hint is not an echo of the value.
+            let hint = text.replace("try '--help'", "");
+            assert!(!hint.contains(&format!("'{flag}'")), "{text}");
         }
     }
 
