@@ -1354,6 +1354,7 @@ type LookupOutcome = Result<Vec<std::net::SocketAddr>, Arc<std::io::Error>>;
 /// Where a finished lookup is published to the opens sharing it; `None`
 /// while it runs.
 type OutcomeSender = tokio::sync::watch::Sender<Option<LookupOutcome>>;
+/// Where an open waits for the outcome of the lookup it shares.
 type OutcomeReceiver = tokio::sync::watch::Receiver<Option<LookupOutcome>>;
 
 /// Resolves a UDP service's target address when one of its flows opens; the
@@ -1396,6 +1397,8 @@ struct ResolveState {
 /// A lookup new opens of the service may join.
 struct InFlight {
     id: u64,
+    /// When the leading open planned it, including its wait for a share of
+    /// the bound: what that open's resolve timeout counts from.
     started: tokio::time::Instant,
     outcome: OutcomeReceiver,
 }
@@ -1404,8 +1407,11 @@ struct InFlight {
 enum ResolvePlan {
     Cached(Vec<std::net::SocketAddr>),
     Join(OutcomeReceiver),
-    /// Start lookup `id` and publish its outcome on the sender.
-    Lead(u64, OutcomeSender),
+    /// Start lookup `id` and publish its outcome on `sender`.
+    Lead {
+        id: u64,
+        sender: OutcomeSender,
+    },
 }
 
 impl ResolveState {
@@ -1431,7 +1437,7 @@ impl ResolveState {
             started: now,
             outcome,
         });
-        ResolvePlan::Lead(id, sender)
+        ResolvePlan::Lead { id, sender }
     }
 
     /// Record lookup `id`'s outcome before it is published, so an open that
@@ -1474,6 +1480,9 @@ impl UpstreamResolver {
     /// Serve a fresh cached resolution, or share the outcome of the lookup
     /// in flight, starting one when there is none to share.
     ///
+    /// The cache and the lookup in flight are not keyed by `local_addr`: a
+    /// resolver serves one service, whose target never changes.
+    ///
     /// # Errors
     ///
     /// The lookup's error, or a poisoned state when an earlier holder
@@ -1485,7 +1494,7 @@ impl UpstreamResolver {
             let mut outcome = match plan {
                 ResolvePlan::Cached(addrs) => return Ok(addrs),
                 ResolvePlan::Join(outcome) => outcome,
-                ResolvePlan::Lead(id, sender) => {
+                ResolvePlan::Lead { id, sender } => {
                     let outcome = sender.subscribe();
                     self.start_lookup(local_addr, id, sender).await?;
                     outcome
@@ -1526,6 +1535,7 @@ impl UpstreamResolver {
             .map_err(std::io::Error::other)?;
         let lookup = (self.lookup)(local_addr.to_string());
         let (state, fault) = (self.state.clone(), self.fault.clone());
+        let publisher = OutcomePublisher(sender);
         tokio::spawn(async move {
             let outcome = {
                 let _permit = permit;
@@ -1533,10 +1543,37 @@ impl UpstreamResolver {
             };
             // A poisoned state raised the fault; the opens sharing this
             // lookup still get its outcome.
-            let _ = check_state(&fault, state.with(|state| state.finish(id, &outcome)));
-            sender.send_replace(Some(outcome));
+            check_state(&fault, state.with(|state| state.finish(id, &outcome))).ok();
+            publisher.publish(outcome);
         });
         Ok(())
+    }
+}
+
+/// Publishes a lookup's outcome to the opens sharing it, and an error when
+/// the lookup task ends without one (its future panicked or the runtime
+/// dropped it). Then a closed channel without an outcome only ever means the
+/// leading open was cancelled before starting the lookup, and the opens
+/// sharing it never start lookup after lookup.
+struct OutcomePublisher(OutcomeSender);
+
+impl OutcomePublisher {
+    fn publish(self, outcome: LookupOutcome) {
+        self.0.send_replace(Some(outcome));
+    }
+}
+
+impl Drop for OutcomePublisher {
+    fn drop(&mut self) {
+        self.0.send_if_modified(|published| {
+            if published.is_some() {
+                return false;
+            }
+            *published = Some(Err(Arc::new(std::io::Error::other(
+                "udp target lookup ended without an outcome",
+            ))));
+            true
+        });
     }
 }
 
@@ -2474,6 +2511,138 @@ mod tests {
             .await
             .expect("fresh lookup");
         assert_eq!(started.load(Ordering::Relaxed), 2);
+    }
+
+    /// A resolver whose lookups wait for `release`, then answer with
+    /// `answer(n)` for the n-th lookup (0-based).
+    fn gated_resolver(
+        release: Arc<tokio::sync::Semaphore>,
+        answer: fn(usize) -> std::io::Result<Vec<std::net::SocketAddr>>,
+    ) -> (UpstreamResolver, Arc<std::sync::atomic::AtomicUsize>) {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = UpstreamResolver::new(
+            Arc::new({
+                let started = started.clone();
+                move |_local_addr: String| {
+                    let call = started.fetch_add(1, Ordering::Relaxed);
+                    let release = release.clone();
+                    Box::pin(async move {
+                        drop(release.acquire().await);
+                        answer(call)
+                    })
+                }
+            }),
+            Fault::detached(),
+        );
+        (resolver, started)
+    }
+
+    /// Start `count` resolutions of one service at once.
+    fn spawn_resolves(
+        resolves: &mut JoinSet<std::io::Result<Vec<std::net::SocketAddr>>>,
+        resolver: &UpstreamResolver,
+        count: usize,
+    ) {
+        for _ in 0..count {
+            let resolver = resolver.clone();
+            resolves.spawn(async move { resolver.resolve("shared.test:9").await });
+        }
+    }
+
+    /// #252: when the open leading a lookup is cancelled while it waits for
+    /// a share of the bound, the opens sharing it start one lookup of their
+    /// own and all get its outcome.
+    #[tokio::test(start_paused = true)]
+    async fn joiners_take_over_a_lead_cancelled_before_its_lookup() {
+        let target: std::net::SocketAddr = ([127, 0, 0, 1], 9).into();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (resolver, started) = gated_resolver(release.clone(), move |call| {
+            if call < MAX_RESOLVES_PER_SERVICE {
+                Err(std::io::ErrorKind::NotFound.into())
+            } else {
+                Ok(vec![([127, 0, 0, 1], 9).into()])
+            }
+        });
+        hang_lookups(&resolver, MAX_RESOLVES_PER_SERVICE).await;
+        let mut leader = JoinSet::new();
+        spawn_resolves(&mut leader, &resolver, 1);
+        settle().await;
+        let mut joiners = JoinSet::new();
+        spawn_resolves(&mut joiners, &resolver, 3);
+        settle().await;
+        assert_eq!(started.load(Ordering::Relaxed), MAX_RESOLVES_PER_SERVICE);
+
+        leader.abort_all();
+        // One hung lookup ends and frees a share for the new lead, which is
+        // then released too.
+        release.add_permits(2);
+        while let Some(resolved) = joiners.join_next().await {
+            let addrs = resolved.expect("resolve task").expect("the new lookup");
+            assert_eq!(addrs, vec![target]);
+        }
+        assert_eq!(
+            started.load(Ordering::Relaxed),
+            MAX_RESOLVES_PER_SERVICE + 1
+        );
+    }
+
+    /// #252: the opens sharing a lookup get its outcome even when the open
+    /// that started it was cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn joiners_get_the_outcome_of_a_lookup_whose_lead_was_cancelled() {
+        let target: std::net::SocketAddr = ([127, 0, 0, 1], 9).into();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (resolver, started) =
+            gated_resolver(release.clone(), |_| Ok(vec![([127, 0, 0, 1], 9).into()]));
+        let mut leader = JoinSet::new();
+        spawn_resolves(&mut leader, &resolver, 1);
+        settle().await;
+        let mut joiners = JoinSet::new();
+        spawn_resolves(&mut joiners, &resolver, 3);
+        settle().await;
+        assert_eq!(started.load(Ordering::Relaxed), 1);
+
+        leader.abort_all();
+        release.add_permits(1);
+        while let Some(resolved) = joiners.join_next().await {
+            let addrs = resolved.expect("resolve task").expect("the shared lookup");
+            assert_eq!(addrs, vec![target]);
+        }
+        assert_eq!(started.load(Ordering::Relaxed), 1);
+    }
+
+    /// #252: a lookup that ends without an outcome (its future panicked)
+    /// fails the opens sharing it instead of making them start lookup after
+    /// lookup.
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_ending_without_an_outcome_fails_its_opens_once() {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = UpstreamResolver::new(
+            Arc::new({
+                let started = started.clone();
+                move |_local_addr: String| {
+                    // Only the first lookup panics; a retry fails at once, so
+                    // a regression shows as a failed assertion, not a hang.
+                    let call = started.fetch_add(1, Ordering::Relaxed);
+                    Box::pin(async move {
+                        if call == 0 {
+                            panic!("the lookup panics");
+                        }
+                        Err(std::io::ErrorKind::NotFound.into())
+                    })
+                }
+            }),
+            Fault::detached(),
+        );
+        let mut resolves = JoinSet::new();
+        spawn_resolves(&mut resolves, &resolver, 3);
+        while let Some(resolved) = resolves.join_next().await {
+            let err = resolved
+                .expect("resolve task")
+                .expect_err("no outcome to share");
+            assert!(err.to_string().contains("without an outcome"), "{err}");
+        }
+        assert_eq!(started.load(Ordering::Relaxed), 1);
     }
 
     /// #226: a poisoned resolver state fails the open and raises the role
