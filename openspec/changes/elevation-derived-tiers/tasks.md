@@ -15,11 +15,11 @@ Blocked by: 1
 
 Files: `crates/host/src/ownership.rs`, `crates/host/src/status/mod.rs` (re-export), `crates/host/src/lib.rs` (export `other_tier_running`), `src/status_cmd.rs` (tier label), `crates/host/src/service/install.rs` (compile adaptation `Tier::Machine` → `Tier::System` only), `tests/role_ownership.rs`.
 
-- [ ] 2.1 Replace `ownership::Tier` with `crate::Tier` (`Machine` → `System`), keeping a `pub use crate::Tier` where `status` re-exported it; `claim(role)` claims only the current tier: user = user-dir lock exclusive + presence file shared read-only when present; system = machine `<role>.lock` exclusive + create `<role>.user.lock` 0644 unlocked (design D5).
-- [ ] 2.2 Restrict `publish_identity`/`running_owner` to the claimant's tier; remove cross-tier refusal messages.
-- [ ] 2.3 Add `probe_tier(role, tier)`, `wait_released_in(role, tier, timeout)`; `probe(role)`/`wait_released(role, timeout)` delegate with `Tier::current()` so status and Windows restart see only their own tier.
-- [ ] 2.4 Add public `other_tier_running(role, tier) -> Option<Tier>` (I/O errors → debug + `None`) and `pub(crate) ensure_presence_file(role)`; lock and presence files 0644 with the mode set on the open file; machine-dir failure fails a system claim only.
-- [ ] 2.5 Keep `LockDirs::resolve(home)` and `stop_hint_scoped` compiling for `service/install.rs` until Task 4 removes their callers; update `tests/role_ownership.rs` (coexistence, second system instance, state override, several user holders incl. `kill -9`, blind spot, umask 077).
+- [x] 2.1 Replace `ownership::Tier` with `crate::Tier` (`Machine` → `System`), keeping a `pub use crate::Tier` where `status` re-exported it; `claim(role)` claims only the current tier: user = user-dir lock exclusive + presence file shared read-only when present; system = machine `<role>.lock` exclusive + create `<role>.user.lock` 0644 unlocked (design D5).
+- [x] 2.2 Restrict `publish_identity`/`running_owner` to the claimant's tier; remove cross-tier refusal messages.
+- [x] 2.3 Add `probe_tier(role, tier)`, `wait_released_in(role, tier, timeout)`; `probe(role)`/`wait_released(role, timeout)` delegate with `Tier::current()` so status and Windows restart see only their own tier.
+- [x] 2.4 Add public `other_tier_running(role, tier) -> Option<Tier>` (I/O errors → debug + `None`) and `pub(crate) ensure_presence_file(role)`; lock and presence files 0644 with the mode set on the open file; machine-dir failure fails a system claim only.
+- [x] 2.5 Keep `LockDirs::resolve(home)` and `stop_hint_scoped` compiling for `service/install.rs` until Task 4 removes their callers; update `tests/role_ownership.rs` (coexistence, second system instance, state override, several user holders incl. `kill -9`, blind spot, umask 077).
 
 ## 3. Run-path trust, key persistence and legacy refusal
 
