@@ -15,10 +15,10 @@ Blocked by: 1
 
 Files: `crates/host/src/config/set_service.rs`, `crates/host/src/config/types.rs` (`SetService`, `ServiceField` only), `crates/host/src/config/fixtures.rs`.
 
-- [ ] 2.1 Extend `SetService` with `relays: RelayEdit` (serve requests always `Keep`), and `ServiceField::RelayUrls` with label `relay_urls`. Reuse `RelayEdit` from group 1.
-- [ ] 2.2 Write failing unit tests for "Set override on existing service", "Replace override", "Clear override", "Override kept without relay flags", "Create with override", "Insecure override", "Duplicate override URL" and "Relay override report" (old shown as `(node)` when absent, list as `[a, b]`).
-- [ ] 2.3 Implement: on create, insert `relay_urls` when `Replace`; on update, replace or remove the key and push a `FieldChange`; reject duplicates before writing. `[node]` is never touched.
-- [ ] 2.4 `cargo test -p iroh-tunnel-host` passes.
+- [x] 2.1 Extend `SetService` with `relays: RelayEdit` (serve requests always `Keep`), and `ServiceField::RelayUrls` with label `relay_urls`. Reuse `RelayEdit` from group 1.
+- [x] 2.2 Write failing unit tests for "Set override on existing service", "Replace override", "Clear override", "Override kept without relay flags", "Create with override", "Insecure override", "Duplicate override URL" and "Relay override report" (old shown as `(node)` when absent, list as `[a, b]`).
+- [x] 2.3 Implement: on create, insert `relay_urls` when `Replace`; on update, replace or remove the key and push a `FieldChange`; reject duplicates before writing. `[node]` is never touched.
+- [x] 2.4 `cargo test -p iroh-tunnel-host` passes.
 
 ## 3. CLI: `config node` command and access `config set` relay flags
 
