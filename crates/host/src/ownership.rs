@@ -1458,9 +1458,7 @@ mod tests {
             .unwrap();
         assert!(grant.status.success(), "{grant:?}");
         let before = sddl_of(&dir);
-        let err = claim_system_lock(Role::Serve, &dir, true)
-            .err()
-            .expect("refused");
+        let err = claim_system_lock(Role::Serve, &dir, true).expect_err("refused");
         match err.downcast_ref::<CliError>() {
             Some(CliError::Permission(m)) => {
                 assert!(m.contains("S-1-1-0"), "{m}");

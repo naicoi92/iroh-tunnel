@@ -1516,15 +1516,15 @@ mod unix_binary_tests {
             elevated: false,
             can_answer: false,
         };
-        let err = plan_user_install(
+        let Err(err) = plan_user_install(
             &req,
             env,
             &mut |_, _| panic!("no probe before the privilege refusal"),
             &|_| panic!("no lock directories before the privilege refusal"),
             true,
-        )
-        .err()
-        .expect("must be refused");
+        ) else {
+            panic!("must be refused");
+        };
         let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
             panic!("expected Permission, got {err:?}");
         };
@@ -1723,7 +1723,7 @@ mod windows_plan_tests {
             can_answer: false,
         };
         let mut probed = false;
-        let err = plan_install(
+        let Err(err) = plan_install(
             &req,
             env,
             &mut |_, _| {
@@ -1731,9 +1731,9 @@ mod windows_plan_tests {
                 Ok(true)
             },
             &|_| anyhow::bail!("the lock directories must not be resolved"),
-        )
-        .err()
-        .expect("must be refused");
+        ) else {
+            panic!("must be refused");
+        };
         assert!(!probed, "the probe must not run before the privilege check");
         assert!(
             matches!(
@@ -1881,7 +1881,9 @@ mod windows_plan_tests {
             icacls(&[config.to_str().unwrap()]),
         );
         let _ = std::fs::remove_dir_all(&root);
-        let err = planned.err().expect("a readable config must be refused");
+        let Err(err) = planned else {
+            panic!("a readable config must be refused");
+        };
         assert!(
             matches!(
                 err.downcast_ref::<CliError>(),
