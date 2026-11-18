@@ -945,10 +945,6 @@ pub(crate) fn owner_of(path: &Path) -> Result<Sid> {
 /// # Errors
 ///
 /// An error naming the HRESULT when the shell cannot resolve the folder.
-#[cfg_attr(
-    all(feature = "test-utils", not(test)),
-    expect(dead_code, reason = "test-utils builds use a temp machine dir")
-)]
 pub(crate) fn program_data_dir() -> Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;

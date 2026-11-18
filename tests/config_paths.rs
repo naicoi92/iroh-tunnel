@@ -462,3 +462,87 @@ fn keygen_print_rejects_config_path_instead_of_ignoring_it() {
     assert!(!target.exists());
     assert!(!stdout(&out).contains("Secret key"));
 }
+
+/// System-tier processes: `IROH_TUNNEL_TEST_TIER=system` makes the binary
+/// resolve machine-wide paths without root.
+mod system_tier {
+    use super::*;
+
+    fn system_tunnel(home: Option<&Path>, envs: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        cmd.args(args)
+            .env_remove("HOME")
+            .env_remove("SUDO_USER")
+            .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
+            .env_remove("IROH_TUNNEL_STATE_DIR")
+            .env("IROH_TUNNEL_TEST_TIER", "system");
+        if let Some(home) = home {
+            cmd.env("HOME", home);
+        }
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("spawn iroh-tunnel")
+    }
+
+    fn system_config(role: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("/Library/Application Support/iroh-tunnel/config/{role}.toml")
+        } else {
+            format!("/etc/iroh-tunnel/{role}.toml")
+        }
+    }
+
+    #[test]
+    fn system_tier_ignores_home_and_sudo_user() {
+        let out = system_tunnel(
+            Some(Path::new("/home/alice")),
+            &[("SUDO_USER", "alice")],
+            &["serve", "config", "path"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out).trim(), system_config("serve"));
+        assert!(!stdout(&out).contains("/home/alice"));
+    }
+
+    #[test]
+    fn system_tier_without_home_succeeds() {
+        let out = system_tunnel(None, &[], &["access", "config", "path"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out).trim(), system_config("access"));
+    }
+
+    #[test]
+    fn system_tier_status_names_runtime_dir() {
+        let expected = if cfg!(target_os = "macos") {
+            "/var/run/iroh-tunnel/serve-status.json"
+        } else {
+            "/run/iroh-tunnel/serve-status.json"
+        };
+        let out = system_tunnel(None, &[], &["serve", "status"]);
+        assert!(
+            stderr(&out).contains(expected) || out.status.success(),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_tier_does_not_migrate_macos_legacy() {
+        let (_tmp, home) = home();
+        let legacy = home.join("Library/Application Support/iroh-tunnel/serve.toml");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "x").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let cfg = home.join("cfg");
+        let out = system_tunnel(
+            Some(&home),
+            &[("IROH_TUNNEL_TEST_CONFIG_DIR", cfg.to_str().unwrap())],
+            &["serve", "config", "keygen"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(!stderr(&out).contains("migrated"), "{}", stderr(&out));
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}

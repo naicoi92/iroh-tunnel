@@ -71,10 +71,6 @@ pub use stop::stop;
 #[cfg(unix)]
 pub use system::unknown_user;
 #[cfg(windows)]
-#[cfg_attr(
-    all(feature = "test-utils", not(test)),
-    expect(unused_imports, reason = "test-utils builds use a temp machine dir")
-)]
 pub(crate) use trust_windows::{create_dir_with_sddl, program_data_dir, verify_machine_dir};
 pub use types::{
     AppliedEffect, Environment, Fact, InstallNeed, InstallOutcome, InstallRequest, Registration,

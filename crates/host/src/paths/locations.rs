@@ -64,6 +64,43 @@ pub(super) fn default_config_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".config").join(APP_DIR))
 }
 
+/// Machine-wide config directory of the system tier.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the Windows `ProgramData` folder cannot be
+/// resolved.
+pub(super) fn system_config_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    return Ok(PathBuf::from("/etc").join(APP_DIR));
+    #[cfg(all(unix, not(target_os = "linux")))]
+    return Ok(PathBuf::from("/Library/Application Support")
+        .join(APP_DIR)
+        .join("config"));
+    #[cfg(windows)]
+    return Ok(program_data()?.join(APP_DIR).join("config"));
+}
+
+/// Machine-wide runtime state directory of the system tier.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the Windows `ProgramData` folder cannot be
+/// resolved.
+pub(super) fn system_state_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    return Ok(PathBuf::from("/run").join(APP_DIR));
+    #[cfg(all(unix, not(target_os = "linux")))]
+    return Ok(PathBuf::from("/var/run").join(APP_DIR));
+    #[cfg(windows)]
+    return Ok(program_data()?.join(APP_DIR).join("state"));
+}
+
+#[cfg(windows)]
+fn program_data() -> Result<PathBuf> {
+    crate::service::program_data_dir().map_err(|e| config_err(format!("{e:#}")))
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(not(windows))]
