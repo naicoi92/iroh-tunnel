@@ -48,6 +48,9 @@ pub(crate) mod trust_windows;
 mod types;
 mod uninstall;
 mod verb;
+// Win32 FFI helpers, compiled elsewhere only for their tests.
+#[cfg(any(windows, test))]
+mod win32_ffi;
 
 mod log_file;
 pub use account_name::account_name;
