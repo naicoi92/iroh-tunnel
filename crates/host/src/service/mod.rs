@@ -94,6 +94,83 @@ pub fn __test_verify_binary(path: &std::path::Path) -> anyhow::Result<()> {
 /// binary knows the SCM started it and enters the service dispatcher.
 pub const ENV_SCM: &str = "IROH_TUNNEL_SCM";
 
+/// Set to `1` in the environment of every Unix registration (systemd,
+/// launchd, BusyBox) so `run` knows a service manager started it.
+pub const ENV_SERVICE: &str = "IROH_TUNNEL_SERVICE";
+
+/// Test builds only (`test-utils`, unit tests): one uid (Unix) or SID (Windows) added to the admin-only
+/// trusted set, so trust success paths are testable without root.
+#[cfg(any(test, feature = "test-utils"))]
+const ENV_TEST_TRUSTED_OWNER: &str = "IROH_TUNNEL_TEST_TRUSTED_OWNER";
+
+/// An environment lookup, injected so the policy is testable without
+/// touching the process environment.
+pub(crate) type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<std::ffi::OsString>;
+
+/// The real process environment.
+pub(crate) fn process_env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name)
+}
+
+/// Whether this process runs as a system service: the system tier and the
+/// service marker of its registration. A user service carries the marker
+/// too but runs in the user tier, and a foreground elevated run has no
+/// marker; neither is a system service.
+pub(crate) fn under_system_service() -> bool {
+    system_service_marked(crate::Tier::current(), &process_env)
+}
+
+/// [`under_system_service`] for an explicit tier and environment.
+pub(crate) fn system_service_marked(tier: crate::Tier, env: EnvLookup<'_>) -> bool {
+    tier == crate::Tier::System
+        && [ENV_SERVICE, ENV_SCM]
+            .iter()
+            .any(|name| env(name).is_some_and(|value| value == "1"))
+}
+
+/// The test-build trusted owner from `env`; always `None` in production
+/// builds, which trust admin principals only.
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(dead_code, reason = "no trust policy on this target")
+)]
+pub(crate) fn test_trusted_owner(env: EnvLookup<'_>) -> Option<std::ffi::OsString> {
+    #[cfg(any(test, feature = "test-utils"))]
+    return env(ENV_TEST_TRUSTED_OWNER);
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let _ = env;
+        None
+    }
+}
+
+/// The admin-only trust policy of a system service on this platform.
+#[cfg(unix)]
+pub(crate) type AdminTrust = trust::TrustedOwners;
+/// The admin-only trust policy of a system service on this platform.
+#[cfg(windows)]
+pub(crate) type AdminTrust = trust_windows::model::TrustedSet;
+
+/// The admin-only trust policy (plus the test-build owner from `env`).
+///
+/// # Errors
+///
+/// [`crate::error::CliError::Config`] for a malformed test owner.
+#[cfg(unix)]
+pub(crate) fn admin_trust(env: EnvLookup<'_>) -> anyhow::Result<AdminTrust> {
+    trust::admin_owners(test_trusted_owner(env).as_deref())
+}
+
+/// The admin-only trust policy (plus the test-build owner from `env`).
+///
+/// # Errors
+///
+/// [`crate::error::CliError::Config`] for a malformed test owner.
+#[cfg(windows)]
+pub(crate) fn admin_trust(env: EnvLookup<'_>) -> anyhow::Result<AdminTrust> {
+    trust_windows::admin_set(test_trusted_owner(env).as_deref())
+}
+
 /// SCM name of the role's system service (plus the test-only instance suffix).
 #[must_use]
 pub fn system_service_name(role: &str) -> String {

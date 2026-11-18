@@ -84,6 +84,63 @@ fn private_options() -> OpenOptions {
     options
 }
 
+/// Whether `dir` names the system-tier config directory `system`, compared
+/// the way Windows resolves paths: case-insensitive, `/` and `\\` alike, a
+/// verbatim `\\?\\` prefix and trailing separators ignored. Callers pass
+/// canonical paths where they exist.
+#[cfg(any(test, windows))]
+fn is_system_config_dir(dir: &Path, system: &Path) -> bool {
+    fn normalized(path: &Path) -> String {
+        let text = path.to_string_lossy().replace('/', "\\");
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        text.trim_end_matches('\\').to_lowercase()
+    }
+    normalized(dir) == normalized(system)
+}
+
+/// Whether a write to `config` must first prove the config directory and
+/// file confidential: an elevated process writing into the system-tier
+/// config directory, the only place the confidentiality rule covers. A
+/// write elsewhere (an explicit `--config` in a user's folder) is not
+/// checked.
+#[cfg(any(test, windows))]
+fn requires_confidentiality(config: &Path, elevated: bool) -> bool {
+    if !elevated {
+        return false;
+    }
+    let Some(dir) = config.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return false;
+    };
+    let system = crate::paths::default_config_path_for("serve", crate::Tier::System);
+    let Some(system_dir) = system.ok().and_then(|p| p.parent().map(Path::to_path_buf)) else {
+        return false;
+    };
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    is_system_config_dir(&canonical(dir), &canonical(&system_dir))
+}
+
+/// Refuse a write when the existing config directory or file of `config`
+/// grants read access to a principal outside `trusted`. A missing directory
+/// or file has nothing to check. Never changes a DACL.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the path and the offending SID.
+#[cfg(windows)]
+fn verify_config_confidential(
+    config: &Path,
+    trusted: &crate::service::trust_windows::model::TrustedSet,
+) -> Result<()> {
+    use crate::service::trust_windows::verify_confidential_with;
+    if let Some(dir) = config.parent().filter(|p| p.exists()) {
+        verify_confidential_with(dir, trusted)?;
+    }
+    if config.exists() {
+        verify_confidential_with(config, trusted)?;
+    }
+    Ok(())
+}
+
 /// Advisory lock serializing writers of one config file; released on drop.
 #[derive(Debug)]
 pub(crate) struct ConfigLock {
@@ -98,7 +155,39 @@ impl ConfigLock {
     ///
     /// Fails when the lock file cannot be opened, or when another process
     /// still holds the lock after [`lock_timeout`].
+    ///
+    /// On Windows an elevated write into the system-tier config directory
+    /// first refuses a directory or file readable by non-admins, before any
+    /// file is created.
     pub(crate) fn acquire(config: &Path) -> Result<Self> {
+        #[cfg(windows)]
+        {
+            let trusted = if requires_confidentiality(config, crate::service::is_elevated()) {
+                Some(crate::service::admin_trust(&crate::service::process_env)?)
+            } else {
+                None
+            };
+            Self::acquire_with(config, trusted.as_ref())
+        }
+        #[cfg(not(windows))]
+        Self::acquire_unchecked(config)
+    }
+
+    /// [`Self::acquire`] with the confidentiality decision injected: `Some`
+    /// checks against that trusted set before any file is created.
+    #[cfg(windows)]
+    fn acquire_with(
+        config: &Path,
+        confidential: Option<&crate::service::trust_windows::model::TrustedSet>,
+    ) -> Result<Self> {
+        if let Some(trusted) = confidential {
+            verify_config_confidential(config, trusted)?;
+        }
+        Self::acquire_unchecked(config)
+    }
+
+    /// Take the lock without any confidentiality check.
+    fn acquire_unchecked(config: &Path) -> Result<Self> {
         ensure_parent(config)?;
         let lock_path = sibling(config, ".lock");
         let file = private_options()
@@ -396,6 +485,42 @@ pub(crate) fn resolve_and_persist_key<D: RoleDoc>(cfg: &mut D, path: &Path) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elevated_write_outside_the_system_config_dir_is_not_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        assert!(!requires_confidentiality(&config, true));
+        assert!(!requires_confidentiality(Path::new("serve.toml"), true));
+    }
+
+    #[test]
+    fn elevated_write_into_the_system_config_dir_is_checked() {
+        let system = crate::paths::default_config_path_for("access", crate::Tier::System).unwrap();
+        assert!(requires_confidentiality(&system, true));
+        assert!(!requires_confidentiality(&system, false));
+    }
+
+    #[test]
+    fn system_config_dir_match_ignores_case_separators_and_prefix() {
+        let system = Path::new(r"C:\ProgramData\iroh-tunnel\config");
+        for same in [
+            r"C:\ProgramData\iroh-tunnel\config",
+            r"c:\programdata\IROH-TUNNEL\Config\",
+            r"\\?\C:\ProgramData\iroh-tunnel\config",
+            "C:/ProgramData/iroh-tunnel/config",
+        ] {
+            assert!(is_system_config_dir(Path::new(same), system), "{same}");
+        }
+        for other in [
+            r"C:\ProgramData\iroh-tunnel",
+            r"C:\ProgramData\iroh-tunnel\config\sub",
+            r"C:\Users\alice\AppData\Local\iroh-tunnel",
+            r"D:\ProgramData\iroh-tunnel\config",
+        ] {
+            assert!(!is_system_config_dir(Path::new(other), system), "{other}");
+        }
+    }
     use crate::config::fixtures::VALID_SERVE;
     use crate::config::{AccessConfig, NodeConfig, ServeConfig};
 
@@ -658,5 +783,67 @@ mod tests {
                 "persisted key differs"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(windows)]
+mod windows_tests {
+    use super::*;
+    use crate::service::trust_windows::model::TrustedSet;
+    use crate::service::trust_windows::token_user;
+
+    fn admin_and_me() -> TrustedSet {
+        TrustedSet::admin_with_test_owner(token_user().unwrap())
+    }
+
+    fn icacls(args: &[&str]) -> Vec<u8> {
+        let out = std::process::Command::new("icacls")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "icacls {args:?}");
+        out.stdout
+    }
+
+    #[test]
+    fn elevated_store_write_refuses_readable_dir_before_creating_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("config");
+        std::fs::create_dir(&dir).unwrap();
+        let dir_text = dir.to_str().unwrap();
+        icacls(&[dir_text, "/grant", "*S-1-5-32-545:(OI)(CI)R"]);
+        let before = icacls(&[dir_text]);
+        let err =
+            ConfigLock::acquire_with(&dir.join("serve.toml"), Some(&admin_and_me())).unwrap_err();
+        assert!(
+            matches!(err.downcast_ref::<CliError>(), Some(CliError::Permission(m)) if m.contains("S-1-5-32-545") && m.contains("Users")),
+            "{err:#}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "no lock/temp/config"
+        );
+        assert_eq!(icacls(&[dir_text]), before, "DACL unchanged");
+    }
+
+    #[test]
+    fn elevated_store_write_into_a_confidential_dir_takes_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        let _lock = ConfigLock::acquire_with(&config, Some(&admin_and_me())).unwrap();
+        assert!(tmp.path().join("serve.toml.lock").exists());
+    }
+
+    #[test]
+    fn unchecked_write_ignores_a_readable_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        icacls(&[
+            tmp.path().to_str().unwrap(),
+            "/grant",
+            "*S-1-5-32-545:(OI)(CI)R",
+        ]);
+        let _lock = ConfigLock::acquire_with(&tmp.path().join("serve.toml"), None).unwrap();
     }
 }

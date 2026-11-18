@@ -121,6 +121,15 @@ impl TrustedSet {
         Self::for_binary()
     }
 
+    /// The admin-only set of a system service's files plus the one SID a
+    /// test build adds through `IROH_TUNNEL_TEST_TRUSTED_OWNER`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn admin_with_test_owner(owner: Sid) -> Self {
+        let mut set = Self::machine();
+        set.0.push(owner);
+        set
+    }
+
     fn contains(&self, sid: &Sid) -> bool {
         self.0.contains(sid)
     }
@@ -177,6 +186,11 @@ pub(crate) enum Refusal {
     },
     /// No elements were supplied.
     EmptyChain,
+    /// A secret-holding element grants read access to an untrusted SID.
+    Readable {
+        path: PathBuf,
+        sid: Sid,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -229,6 +243,16 @@ impl fmt::Display for Refusal {
                 )
             }
             Self::EmptyChain => write!(f, "nothing to verify"),
+            Self::Readable { path, sid } => write!(
+                f,
+                "{} grants read access to SID {}{}, but it holds secret keys: only SYSTEM and \
+                 Administrators may read it; nothing was changed. Remove that access and re-run",
+                path.display(),
+                sid.0,
+                well_known_name(sid)
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default()
+            ),
         }
     }
 }
@@ -238,6 +262,16 @@ impl std::error::Error for Refusal {}
 impl From<Refusal> for CliError {
     fn from(r: Refusal) -> Self {
         CliError::Permission(r.to_string())
+    }
+}
+
+/// The name of a well-known group SID a refusal may name.
+fn well_known_name(sid: &Sid) -> Option<&'static str> {
+    match sid.0.as_str() {
+        "S-1-5-32-545" => Some("Users"),
+        "S-1-1-0" => Some("Everyone"),
+        "S-1-5-11" => Some("Authenticated Users"),
+        _ => None,
     }
 }
 
@@ -296,6 +330,39 @@ fn names(mask: u32) -> Vec<&'static str> {
         .filter(|(bit, _)| mask & bit != 0)
         .map(|(_, n)| *n)
         .collect()
+}
+
+/// Read rights that expose a file's content or a directory's entries:
+/// `FILE_READ_DATA` (= `FILE_LIST_DIRECTORY`), `GENERIC_READ` and
+/// `GENERIC_ALL`.
+pub(crate) const READ_MASK: u32 = FILE_READ_DATA | GENERIC_READ | GENERIC_ALL;
+pub(crate) const FILE_READ_DATA: u32 = 0x1;
+pub(crate) const GENERIC_READ: u32 = 0x8000_0000;
+
+/// Whether `d` keeps its content confidential: no allow ACE grants a read
+/// right to a SID outside `trusted`. A NULL or unreadable DACL is refused.
+/// Inherit-only ACEs do not apply to `d` itself and are skipped.
+///
+/// # Errors
+///
+/// [`Refusal::NoDacl`] or [`Refusal::Readable`] naming the first offending
+/// ACE in DACL order.
+pub(crate) fn evaluate_confidential(d: &Descriptor, trusted: &TrustedSet) -> Result<(), Refusal> {
+    let Some(dacl) = &d.dacl else {
+        return Err(Refusal::NoDacl {
+            path: d.path.clone(),
+        });
+    };
+    let offending = dacl.iter().find(|ace| {
+        ace.allow && !ace.inherit_only && ace.mask & READ_MASK != 0 && !trusted.contains(&ace.sid)
+    });
+    match offending {
+        Some(ace) => Err(Refusal::Readable {
+            path: d.path.clone(),
+            sid: ace.sid.clone(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Evaluate a chain ordered from the volume root to the target. The last
@@ -591,6 +658,103 @@ mod tests {
             allow: false,
         });
         assert_eq!(evaluate(&c, &set()), Ok(()));
+    }
+
+    const USERS: &str = "S-1-5-32-545";
+
+    fn admin_dir(aces: Vec<Ace>) -> Descriptor {
+        d(
+            "C:\\ProgramData\\iroh-tunnel\\config",
+            s(ADMINISTRATORS),
+            aces,
+            false,
+            true,
+        )
+    }
+
+    #[test]
+    fn admin_only_dir_is_confidential() {
+        let dir = admin_dir(vec![allow(s(SYSTEM), FA), allow(s(ADMINISTRATORS), FA)]);
+        assert_eq!(evaluate_confidential(&dir, &TrustedSet::machine()), Ok(()));
+    }
+
+    #[test]
+    fn config_dir_readable_by_users_is_refused() {
+        for mask in [RX, FILE_READ_DATA, GENERIC_READ, GENERIC_ALL, GXGR] {
+            let dir = admin_dir(vec![allow(s(SYSTEM), FA), allow(s(USERS), mask)]);
+            let refusal = evaluate_confidential(&dir, &TrustedSet::machine()).unwrap_err();
+            assert_eq!(
+                refusal,
+                Refusal::Readable {
+                    path: "C:\\ProgramData\\iroh-tunnel\\config".into(),
+                    sid: s(USERS)
+                },
+                "{mask:#x}"
+            );
+            let text = refusal.to_string();
+            assert!(text.contains("Users") && text.contains("config"), "{text}");
+            assert!(matches!(CliError::from(refusal), CliError::Permission(_)));
+        }
+    }
+
+    #[test]
+    fn confidentiality_ignores_deny_inherit_only_and_non_read_aces() {
+        let mut deny = allow(s(USERS), FA);
+        deny.allow = false;
+        let mut inherit_only = allow(s(EVERYONE), FA);
+        inherit_only.inherit_only = true;
+        let traverse_only = allow(s(USERS), 0x20);
+        let dir = admin_dir(vec![deny, inherit_only, traverse_only]);
+        assert_eq!(evaluate_confidential(&dir, &TrustedSet::machine()), Ok(()));
+    }
+
+    #[test]
+    fn confidentiality_refuses_a_null_dacl() {
+        let mut dir = admin_dir(vec![]);
+        dir.dacl = None;
+        assert!(matches!(
+            evaluate_confidential(&dir, &TrustedSet::machine()),
+            Err(Refusal::NoDacl { .. })
+        ));
+    }
+
+    #[test]
+    fn test_owner_extends_the_admin_set_only() {
+        let set = TrustedSet::admin_with_test_owner(pinned());
+        let dir = admin_dir(vec![allow(pinned(), FA)]);
+        assert_eq!(evaluate_confidential(&dir, &set), Ok(()));
+        assert!(evaluate_confidential(&dir, &TrustedSet::machine()).is_err());
+        assert!(set.contains(&s(SYSTEM)) && set.contains(&s(TRUSTED_INSTALLER)));
+        assert!(!set.contains(&bob()));
+    }
+
+    #[test]
+    fn config_in_user_profile_is_refused() {
+        // An elevated service trusts no user SID for a profile config.
+        assert_eq!(
+            evaluate(&good_chain(), &TrustedSet::machine()),
+            Err(Refusal::Owner {
+                path: "C:\\u".into(),
+                owner: pinned()
+            })
+        );
+    }
+
+    #[test]
+    fn machine_dir_users_read_still_accepted() {
+        // The machine directory keeps Users read; only write rights matter
+        // for the ownership walk.
+        let chain = vec![
+            d("C:\\", s(SYSTEM), vec![allow(s(SYSTEM), FA)], false, true),
+            d(
+                "C:\\ProgramData\\iroh-tunnel",
+                s(ADMINISTRATORS),
+                vec![allow(s(SYSTEM), FA), allow(s(USERS), RX)],
+                false,
+                true,
+            ),
+        ];
+        assert_eq!(evaluate(&chain, &TrustedSet::machine()), Ok(()));
     }
 
     #[test]
