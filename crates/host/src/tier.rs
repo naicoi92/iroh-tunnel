@@ -67,18 +67,4 @@ mod tests {
         assert_eq!(Tier::User.label(), "user session");
         assert_eq!(Tier::System.label(), "system service");
     }
-
-    #[cfg(feature = "test-utils")]
-    #[test]
-    fn test_tier_override_wins() {
-        // Single test owns the variable, so no cross-test race.
-        let privilege = Tier::from_elevated(crate::service::is_elevated());
-        std::env::set_var(ENV_TEST_TIER, "system");
-        assert_eq!(Tier::current(), Tier::System);
-        std::env::set_var(ENV_TEST_TIER, "user");
-        assert_eq!(Tier::current(), Tier::User);
-        std::env::set_var(ENV_TEST_TIER, "bogus");
-        assert_eq!(Tier::current(), privilege);
-        std::env::remove_var(ENV_TEST_TIER);
-    }
 }

@@ -1,10 +1,16 @@
 //! Platform configuration and state locations, plus the macOS legacy
 //! configuration migration (CFG-01, CFG-02; issue #84).
 //!
-//! macOS and Linux use `~/.config/iroh-tunnel` and `~/.local/state/iroh-tunnel`
-//! and ignore the XDG variables. Windows uses the `LocalAppData` known folder
-//! (`iroh-tunnel/config`, `iroh-tunnel/state`). Explicit overrides (`--config`,
-//! `IROH_TUNNEL_STATE_DIR`) are applied by the callers before these defaults.
+//! Paths depend on the [`crate::Tier`]. The user tier (macOS and Linux) uses
+//! `~/.config/iroh-tunnel` and `~/.local/state/iroh-tunnel` and ignores the XDG
+//! variables; Windows uses the `LocalAppData` known folder
+//! (`iroh-tunnel/config`, `iroh-tunnel/state`). The system tier uses fixed
+//! machine-wide paths and never reads the home directory: Linux
+//! `/etc/iroh-tunnel` and `/run/iroh-tunnel`; macOS
+//! `/Library/Application Support/iroh-tunnel/config` and `/var/run/iroh-tunnel`;
+//! Windows `%ProgramData%\iroh-tunnel\{config,state}`. Explicit overrides
+//! (`--config`, `IROH_TUNNEL_STATE_DIR`) are applied by the callers before
+//! these defaults.
 
 mod default_config_path;
 mod default_config_path_for;

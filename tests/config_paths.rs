@@ -519,12 +519,52 @@ mod system_tier {
         } else {
             "/run/iroh-tunnel/serve-status.json"
         };
+        // No HOME: also proves the system state dir never needs one. Fails
+        // ("not running") only while no real system status file exists.
         let out = system_tunnel(None, &[], &["serve", "status"]);
-        assert!(
-            stderr(&out).contains(expected) || out.status.success(),
-            "{}",
-            stderr(&out)
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(stderr(&out).contains(expected), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn test_tier_override_selects_the_tier_in_a_subprocess() {
+        let (_tmp, home) = home();
+        let path_with = |tier: Option<&str>| {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+            cmd.args(["serve", "config", "path"])
+                .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
+                .env_remove("IROH_TUNNEL_TEST_TIER")
+                .env("HOME", &home);
+            if let Some(tier) = tier {
+                cmd.env("IROH_TUNNEL_TEST_TIER", tier);
+            }
+            let out = cmd.output().expect("spawn iroh-tunnel");
+            assert!(out.status.success(), "{}", stderr(&out));
+            stdout(&out).trim().to_string()
+        };
+        assert_eq!(path_with(Some("system")), system_config("serve"));
+        assert_eq!(
+            path_with(Some("user")),
+            new_config(&home, "serve").display().to_string()
         );
+        // Any other value falls back to privilege, i.e. to the unset result.
+        assert_eq!(path_with(Some("bogus")), path_with(None));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_tier_config_path_skips_legacy_migration() {
+        let (_tmp, home) = home();
+        let legacy = home.join("Library/Application Support/iroh-tunnel/serve.toml");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "x").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = system_tunnel(Some(&home), &[], &["serve", "config", "path"]);
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out).trim(), system_config("serve"));
+        assert!(!stderr(&out).contains("migrated"), "{}", stderr(&out));
+        assert!(!home.join(".config").exists());
     }
 
     #[cfg(target_os = "macos")]
