@@ -4,10 +4,10 @@ Blocked by: none
 
 Files: `crates/host/src/tier.rs` (new), `crates/host/src/lib.rs`, `crates/host/src/paths/{mod,locations,default_config_path,default_state_dir}.rs`, `tests/config_paths.rs`, `tests/config_paths_windows.rs`.
 
-- [ ] 1.1 Add public `Tier { User, System }` with `from_elevated`, `current()` (production: `is_elevated()`; `test-utils`: `IROH_TUNNEL_TEST_TIER=system|user`) and `label()` (design D1; spec tunnel-configuration "Tier is derived from privilege").
-- [ ] 1.2 Add `default_config_path_for(role, tier)` and `default_state_dir_for(tier)` returning the D2 table; system tier never reads `HOME`/`SUDO_USER`/profile and skips the macOS legacy migration; `IROH_TUNNEL_TEST_CONFIG_DIR` still overrides the config dir in test builds.
-- [ ] 1.3 Keep `default_config_path(role)` / `default_state_dir()` signatures, now delegating with `Tier::current()`, so every existing caller (config ops, status, ownership, install) compiles unchanged and gains system-tier behaviour; leave `paths/in_home.rs` for its current callers (deleted in 4.8).
-- [ ] 1.4 Process tests with `IROH_TUNNEL_TEST_TIER=system`: system paths, `HOME`/`SUDO_USER` ignored, no `HOME` needed, no macOS migration, status names the runtime dir; existing user-tier tests unchanged.
+- [x] 1.1 Add public `Tier { User, System }` with `from_elevated`, `current()` (production: `is_elevated()`; `test-utils`: `IROH_TUNNEL_TEST_TIER=system|user`) and `label()` (design D1; spec tunnel-configuration "Tier is derived from privilege").
+- [x] 1.2 Add `default_config_path_for(role, tier)` and `default_state_dir_for(tier)` returning the D2 table; system tier never reads `HOME`/`SUDO_USER`/profile and skips the macOS legacy migration; `IROH_TUNNEL_TEST_CONFIG_DIR` still overrides the config dir in test builds.
+- [x] 1.3 Keep `default_config_path(role)` / `default_state_dir()` signatures, now delegating with `Tier::current()`, so every existing caller (config ops, status, ownership, install) compiles unchanged and gains system-tier behaviour; leave `paths/in_home.rs` for its current callers (deleted in 4.8).
+- [x] 1.4 Process tests with `IROH_TUNNEL_TEST_TIER=system`: system paths, `HOME`/`SUDO_USER` ignored, no `HOME` needed, no macOS migration, status names the runtime dir; existing user-tier tests unchanged.
 
 ## 2. Ownership per tier, presence lock and other-tier probe
 
