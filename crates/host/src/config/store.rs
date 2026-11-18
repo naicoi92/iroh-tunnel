@@ -808,24 +808,29 @@ mod windows_tests {
 
     #[test]
     fn elevated_store_write_refuses_readable_dir_before_creating_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("config");
-        std::fs::create_dir(&dir).unwrap();
-        let dir_text = dir.to_str().unwrap();
-        icacls(&[dir_text, "/grant", "*S-1-5-32-545:(OI)(CI)R"]);
-        let before = icacls(&[dir_text]);
-        let err =
-            ConfigLock::acquire_with(&dir.join("serve.toml"), Some(&admin_and_me())).unwrap_err();
-        assert!(
-            matches!(err.downcast_ref::<CliError>(), Some(CliError::Permission(m)) if m.contains("S-1-5-32-545") && m.contains("Users")),
-            "{err:#}"
-        );
-        assert_eq!(
-            std::fs::read_dir(&dir).unwrap().count(),
-            0,
-            "no lock/temp/config"
-        );
-        assert_eq!(icacls(&[dir_text]), before, "DACL unchanged");
+        // `(OI)(IO)R` does not apply to the directory itself but to the secret
+        // temp/config the write would create in it.
+        for grant in ["*S-1-5-32-545:(OI)(CI)R", "*S-1-5-32-545:(OI)(IO)R"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("config");
+            std::fs::create_dir(&dir).unwrap();
+            let dir_text = dir.to_str().unwrap();
+            icacls(&[dir_text, "/grant", grant]);
+            let before = icacls(&[dir_text]);
+            let config = dir.join("serve.toml");
+            assert!(!config.exists());
+            let err = ConfigLock::acquire_with(&config, Some(&admin_and_me())).unwrap_err();
+            assert!(
+                matches!(err.downcast_ref::<CliError>(), Some(CliError::Permission(m)) if m.contains("S-1-5-32-545") && m.contains("Users")),
+                "{grant}: {err:#}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&dir).unwrap().count(),
+                0,
+                "{grant}: no lock/temp/config"
+            );
+            assert_eq!(icacls(&[dir_text]), before, "{grant}: DACL unchanged");
+        }
     }
 
     #[test]

@@ -1819,6 +1819,101 @@ mod windows_plan_tests {
         assert_eq!(icacls(&[dir_text]), before, "DACL unchanged");
     }
 
+    /// Serializes the tests that set the test-owner variable.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const OWNER_VAR: &str = "IROH_TUNNEL_TEST_TRUSTED_OWNER";
+    const USERS_SID: &str = "S-1-5-32-545";
+    const KEY_CONFIG: &str = "[node]\nsecret_key = \"x\"\nrelay_urls = []\n\n[[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n";
+
+    /// Plan a system install of `config` (under the token user's LocalAppData)
+    /// with the token user trusted as an admin principal; the result of
+    /// `plan_install`, which never registers anything itself.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "test setup; only the plan's result is under test"
+    )]
+    fn plan_for(root: &Path, config: PathBuf) -> Result<Planned> {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(OWNER_VAR, token_user().unwrap().0);
+        let mut req = request(Some(ServiceScope::System));
+        req.config = Some(config);
+        req.state_dir_override = Some(root.join("state"));
+        let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set");
+        req.tunnel_executable = PathBuf::from(system_root).join("System32\\cmd.exe");
+        let env = Environment {
+            elevated: true,
+            can_answer: false,
+        };
+        let user = tempfile::tempdir().unwrap();
+        let resolve = |_: Option<&Path>| {
+            Ok(LockDirs {
+                user: user.path().to_path_buf(),
+                machine: None,
+            })
+        };
+        let planned = plan_install(&req, env, &mut |_, _| Ok(false), &resolve);
+        std::env::remove_var(OWNER_VAR);
+        planned
+    }
+
+    /// A config under a fresh root with `KEY_CONFIG`; `grant` is applied to
+    /// `target` (the directory or the file) before planning.
+    fn assert_plan_refuses(name: &str, on_file: bool, grant: &str) {
+        let root = crate::paths::local_app_data().unwrap().join(name);
+        let dir = root.join("config");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        let config = dir.join("serve.toml");
+        std::fs::write(&config, KEY_CONFIG).unwrap();
+        let target = if on_file { &config } else { &dir };
+        icacls(&[target.to_str().unwrap(), "/grant", grant]);
+        let (dir_acl, file_acl) = (
+            icacls(&[dir.to_str().unwrap()]),
+            icacls(&[config.to_str().unwrap()]),
+        );
+        let planned = plan_for(&root, config.clone());
+        let bytes = std::fs::read(&config).unwrap();
+        let (dir_after, file_after) = (
+            icacls(&[dir.to_str().unwrap()]),
+            icacls(&[config.to_str().unwrap()]),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let err = planned.err().expect("a readable config must be refused");
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(m)) if m.contains(USERS_SID)
+            ),
+            "{err:#}"
+        );
+        assert_eq!(bytes, KEY_CONFIG.as_bytes(), "config bytes unchanged");
+        assert_eq!(dir_after, dir_acl, "directory DACL unchanged");
+        assert_eq!(file_after, file_acl, "file DACL unchanged");
+    }
+
+    fn e2e_enabled() -> bool {
+        std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_some_and(|v| v == "1")
+    }
+
+    /// `plan_install` returns a plan or an error; registration only happens
+    /// when the caller executes a returned plan, so an `Err` means the
+    /// registration step is never reached.
+    #[test]
+    fn plan_install_refuses_a_user_readable_config_dir() {
+        if e2e_enabled() {
+            assert_plan_refuses("iroh-tunnel-plan-dir", false, "*S-1-5-32-545:(OI)(CI)R");
+        }
+    }
+
+    #[test]
+    fn plan_install_refuses_a_user_readable_config_file_with_a_key() {
+        if e2e_enabled() {
+            assert_plan_refuses("iroh-tunnel-plan-file", true, "*S-1-5-32-545:R");
+        }
+    }
+
     #[test]
     fn install_refuses_a_user_readable_config_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1833,30 +1928,5 @@ mod windows_plan_tests {
         let config = tmp.path().join("serve.toml");
         refused_untouched(tmp.path(), &config, "*S-1-5-32-545:(OI)(IO)R");
         assert!(!config.exists());
-    }
-
-    #[test]
-    fn install_refuses_a_user_readable_config_file_with_a_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = tmp.path().join("serve.toml");
-        std::fs::write(&config, "[node]\nsecret_key = \"x\"\n").unwrap();
-        icacls(&[config.to_str().unwrap(), "/grant", "*S-1-5-32-545:R"]);
-        let before = icacls(&[config.to_str().unwrap()]);
-        let err = verify_config_confidential(&config, &|p| {
-            if p == config {
-                check(p)
-            } else {
-                Ok(())
-            }
-        })
-        .unwrap_err();
-        assert!(
-            matches!(
-                err.downcast_ref::<CliError>(),
-                Some(CliError::Permission(_))
-            ),
-            "{err:#}"
-        );
-        assert_eq!(icacls(&[config.to_str().unwrap()]), before);
     }
 }
