@@ -69,8 +69,9 @@ when missing. `list`, `show`, `rm`, `check` and `run` on a missing file fail
 with exit code `2`, name the path, point to `config set` / `config keygen`,
 and create nothing. `config node` edits the `[node]` relay settings (see
 [Relays](#relays)) and prints `Updated node settings in <path>:` with
-`field: old -> new` lines, or `Node settings unchanged (<path>).`; the token is
-always shown as `<redacted>`. `config check` only validates and prints
+`field: old -> new` lines, or `Node settings unchanged (<path>).`; a present
+token is shown as `<redacted>`, an absent one as `(none)`, and a replacement as
+`<redacted> -> <redacted> (changed)`. `config check` only validates and prints
 `OK: <path> is a valid <role> config.`
 
 ## Serve file

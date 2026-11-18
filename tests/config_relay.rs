@@ -234,7 +234,8 @@ fn config_node_token_with_whitespace() {
 #[test]
 fn config_node_token_file_extra_line() {
     let (_w, cfg, o) = token_case("secret-token\n\n");
-    assert_eq!(o.code, 2, "{}", o.stderr);
+    assert_runtime_error(&o);
+    assert!(o.stderr.contains("invalid relay_token"), "{}", o.stderr);
     assert!(!all(&o).contains("secret-token"), "{}", all(&o));
     assert!(!cfg.exists());
 }
@@ -295,4 +296,25 @@ fn config_node_never_prints_token() {
         assert!(!text.contains("t1") && !text.contains("t2"), "{text}");
     }
     assert!(second.stdout.contains("<redacted> -> <redacted> (changed)"));
+
+    // Change report: relays replaced without a token flag drop the stored token.
+    let seeded = w.file(
+        "seeded.toml",
+        "[node]\nrelay_urls = [\"https://old.example\"]\nrelay_token = \"t1\"\n",
+    );
+    let report = w.run(&[
+        "serve",
+        "config",
+        "node",
+        "-c",
+        s(&seeded),
+        "-r",
+        "https://a.example",
+    ]);
+    assert_eq!(report.code, 0, "{}", report.stderr);
+    assert!(report
+        .stdout
+        .contains("relay_urls: [https://old.example] -> [https://a.example]"));
+    assert!(report.stdout.contains("relay_token: <redacted> -> (none)"));
+    assert!(!all(&report).contains("t1"), "{}", all(&report));
 }
