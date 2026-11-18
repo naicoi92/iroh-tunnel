@@ -352,7 +352,6 @@ mod tests {
 
     /// Execute the rendered script against a temporary layout and fake daemon.
     mod exec {
-        use super::super::super::super::policy::shell_quote;
         use super::*;
         use std::cell::RefCell;
         use std::os::unix::fs::PermissionsExt;
@@ -414,6 +413,36 @@ mod tests {
             true
         }
 
+        /// The fake daemon executable for `kind`, written once per test
+        /// process. macOS has syspolicyd scan every new executable inode on
+        /// its first exec, one at a time; a fresh daemon per test queued
+        /// those scans past `wait_record`'s deadline under parallel load
+        /// (#246). Each harness symlinks its `DAEMON` path here instead, and
+        /// the daemon writes its record next to the path it was run as.
+        fn shared_daemon(kind: DaemonKind) -> PathBuf {
+            // Never dropped (statics are not): one small temp dir per run.
+            static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            let dir = DIR.get_or_init(|| {
+                let dir = tempfile::tempdir().unwrap();
+                for (name, trap) in [("exits", ""), ("ignores-term", "trap '' TERM\n")] {
+                    write_executable(
+                        &dir.path().join(name),
+                        &format!(
+                            "#!/bin/sh\n{trap}{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; \
+                             printf 'STATE=%s\\n' \"$IROH_TUNNEL_STATE_DIR\"; }} \
+                             > \"${{0%/*}}/record\"\nexec sleep 30\n"
+                        ),
+                    );
+                }
+                dir
+            });
+            let name = match kind {
+                DaemonKind::Exits => "exits",
+                DaemonKind::IgnoresTerm => "ignores-term",
+            };
+            dir.path().join(name)
+        }
+
         impl ScriptHarness {
             pub(super) fn new(
                 binary_name: &str,
@@ -426,19 +455,7 @@ mod tests {
                 let root = dir.path();
                 let record = root.join("record");
                 let binary = root.join(binary_name);
-                let trap = match daemon {
-                    DaemonKind::Exits => "",
-                    DaemonKind::IgnoresTerm => "trap '' TERM\n",
-                };
-                let record_q = shell_quote(record.to_str().unwrap());
-                write_executable(
-                    &binary,
-                    &format!(
-                        "#!/bin/sh\n{trap}{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; \
-                         printf 'STATE=%s\\n' \"$IROH_TUNNEL_STATE_DIR\"; }} > {record_q}\n\
-                         exec sleep 30\n"
-                    ),
-                );
+                std::os::unix::fs::symlink(shared_daemon(daemon), &binary).unwrap();
                 let config = root.join(config_name);
                 let state = root.join(state_name);
                 let layout = ScriptLayout {
@@ -568,7 +585,14 @@ mod tests {
                             return text;
                         }
                     }
-                    assert!(Instant::now() < deadline, "daemon never wrote its record");
+                    assert!(
+                        Instant::now() < deadline,
+                        "daemon never wrote its record {}: record={:?} log={:?} pidfile={:?}",
+                        self.record.display(),
+                        std::fs::read_to_string(&self.record).ok(),
+                        std::fs::read_to_string(&self.layout.logfile).ok(),
+                        self.pidfile_text(),
+                    );
                     std::thread::sleep(Duration::from_millis(20));
                 }
             }
