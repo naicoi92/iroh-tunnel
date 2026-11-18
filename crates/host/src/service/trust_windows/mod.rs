@@ -19,7 +19,7 @@ pub(crate) mod win32;
 #[cfg(windows)]
 pub(crate) use win32::{
     account_of, create_dir_with_sddl, owner_of, program_data_dir, publish, read_in, read_verified,
-    remove_in, token_user, verify_binary, verify_dir,
+    remove_in, token_user, verify_binary, verify_confidential_with, verify_dir,
 };
 
 /// Serialised, scoped process-environment edits shared by every test that
@@ -95,6 +95,51 @@ pub(crate) fn map_create_error(code: u32) -> std::io::ErrorKind {
     }
 }
 
+/// The admin-only trusted set of a system service's files (SYSTEM,
+/// Administrators, TrustedInstaller), plus the SID a test build names in
+/// `test_owner` (always `None` in production).
+///
+/// # Errors
+///
+/// [`CliError::Config`] when `test_owner` is not a SID.
+pub(crate) fn admin_set(test_owner: Option<&std::ffi::OsStr>) -> anyhow::Result<model::TrustedSet> {
+    let Some(text) = test_owner else {
+        return Ok(model::TrustedSet::machine());
+    };
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        text.to_str()
+            .and_then(model::parse_sid)
+            .map(model::TrustedSet::admin_with_test_owner)
+            .ok_or_else(|| {
+                CliError::Config(format!(
+                    "IROH_TUNNEL_TEST_TRUSTED_OWNER must be a SID, got {}",
+                    text.to_string_lossy()
+                ))
+                .into()
+            })
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let _ = text;
+        Ok(model::TrustedSet::machine())
+    }
+}
+
+/// Refuse `path` (a config directory or file) when its DACL grants any read
+/// right to a SID outside SYSTEM, Administrators and TrustedInstaller (and
+/// the test-build owner). Never changes the DACL.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the path and the offending SID, or when
+/// the path cannot be inspected.
+#[cfg(windows)]
+pub(crate) fn verify_confidential(path: &std::path::Path) -> anyhow::Result<()> {
+    let trusted = super::admin_trust(&super::process_env)?;
+    verify_confidential_with(path, &trusted)
+}
+
 /// Set by the SCM registration of a system service: the SID whose files the
 /// service may trust besides the system principals.
 pub const ENV_TRUSTED_SID: &str = "IROH_TUNNEL_TRUSTED_SID";
@@ -104,12 +149,26 @@ pub const ENV_TRUSTED_SID: &str = "IROH_TUNNEL_TRUSTED_SID";
 /// # Errors
 ///
 /// [`CliError::Config`] when the variable is set but is not a SID.
+#[cfg_attr(
+    windows,
+    expect(
+        dead_code,
+        reason = "the run path refuses this pin as legacy; removed with the installer pin"
+    )
+)]
 pub(crate) fn trusted_sid_from_env() -> anyhow::Result<Option<Sid>> {
     trusted_sid_from(std::env::var(ENV_TRUSTED_SID))
 }
 
 /// [`trusted_sid_from_env`] with the lookup injected, so it is testable
 /// without touching the process environment.
+#[cfg_attr(
+    all(windows, not(test)),
+    expect(
+        dead_code,
+        reason = "only the legacy pin reader calls it; removed with the installer pin"
+    )
+)]
 fn trusted_sid_from(value: Result<String, std::env::VarError>) -> anyhow::Result<Option<Sid>> {
     match value {
         Ok(text) => model::parse_sid(&text).map(Some).ok_or_else(|| {
@@ -143,6 +202,14 @@ mod tests {
             Some(CliError::Config(m)) => m.clone(),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn admin_set_is_machine_without_a_test_owner_and_refuses_a_bad_one() {
+        assert!(admin_set(None).is_ok());
+        assert!(admin_set(Some(std::ffi::OsStr::new("S-1-5-21-1-2-3-1001"))).is_ok());
+        let msg = config_message(admin_set(Some(std::ffi::OsStr::new("alice"))).map(|_| None));
+        assert!(msg.contains("IROH_TUNNEL_TEST_TRUSTED_OWNER"), "{msg}");
     }
 
     #[test]

@@ -243,6 +243,7 @@ unsafe fn read_dacl(acl: *const ACL) -> Option<Vec<Ace>> {
             sid,
             mask: layout.mask,
             inherit_only: layout.inherit_only,
+            object_inherit: layout.object_inherit,
             allow: layout.allow,
         });
     }
@@ -407,6 +408,26 @@ pub(crate) fn verify_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
         return Err(not_a("directory", d));
     }
     Ok(())
+}
+
+/// Refuse `path` when its DACL grants a read right to a SID outside
+/// `trusted` (see [`model::evaluate_confidential`]). A reparse point in the
+/// path is refused; nothing is changed.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the path and the offending SID, or when
+/// the path cannot be inspected.
+pub(crate) fn verify_confidential_with(path: &Path, trusted: &TrustedSet) -> Result<()> {
+    let expected = components_of(path)?.len();
+    let chain = open_chain(path, LastAccess::Inspect)?;
+    let (_, d) = chain.target()?;
+    if chain.descriptors.len() != expected || d.reparse {
+        return Err(refusal(Refusal::Reparse {
+            path: d.path.clone(),
+        }));
+    }
+    model::evaluate_confidential(d, trusted).map_err(refusal)
 }
 
 /// Verify `path` and return its text, read from the verified handle.
