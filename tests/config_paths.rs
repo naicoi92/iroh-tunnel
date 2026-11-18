@@ -512,18 +512,46 @@ mod system_tier {
         assert_eq!(stdout(&out).trim(), system_config("access"));
     }
 
+    /// Marker: when set, `state_dir_probe` prints the resolved state dirs
+    /// instead of acting as a no-op test (re-exec pattern; no production seam).
+    const PROBE: &str = "IROH_TUNNEL_STATE_DIR_PROBE";
+
     #[test]
-    fn system_tier_status_names_runtime_dir() {
+    fn state_dir_probe() {
+        if std::env::var_os(PROBE).is_none() {
+            return;
+        }
+        let explicit =
+            iroh_tunnel_host::paths::default_state_dir_for(iroh_tunnel_host::Tier::System).unwrap();
+        let current = iroh_tunnel_host::paths::default_state_dir().unwrap();
+        println!(
+            "PROBE explicit={} current={}",
+            explicit.display(),
+            current.display()
+        );
+    }
+
+    #[test]
+    fn system_tier_state_dir_is_runtime_dir_without_home() {
         let expected = if cfg!(target_os = "macos") {
-            "/var/run/iroh-tunnel/serve-status.json"
+            "/var/run/iroh-tunnel"
         } else {
-            "/run/iroh-tunnel/serve-status.json"
+            "/run/iroh-tunnel"
         };
-        // No HOME: also proves the system state dir never needs one. Fails
-        // ("not running") only while no real system status file exists.
-        let out = system_tunnel(None, &[], &["serve", "status"]);
-        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-        assert!(stderr(&out).contains(expected), "{}", stderr(&out));
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "system_tier::state_dir_probe", "--nocapture"])
+            .env(PROBE, "1")
+            .env("IROH_TUNNEL_TEST_TIER", "system")
+            .env_remove("HOME")
+            .env_remove("SUDO_USER")
+            .output()
+            .expect("re-exec test binary");
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(
+            stdout(&out).contains(&format!("PROBE explicit={expected} current={expected}")),
+            "{}",
+            stdout(&out)
+        );
     }
 
     #[test]
