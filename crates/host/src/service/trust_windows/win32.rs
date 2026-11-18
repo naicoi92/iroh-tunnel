@@ -243,6 +243,7 @@ unsafe fn read_dacl(acl: *const ACL) -> Option<Vec<Ace>> {
             sid,
             mask: layout.mask,
             inherit_only: layout.inherit_only,
+            object_inherit: layout.object_inherit,
             allow: layout.allow,
         });
     }

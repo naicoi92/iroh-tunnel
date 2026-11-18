@@ -592,8 +592,21 @@ fn verify_windows_trust(
     let trusted = TrustedSet::for_user_files(&target.sid);
     verify_dir(&target.state, &trusted)?;
     let text = read_verified(&target.config, &trusted)?;
+    verify_config_confidential(&target.config, &super::trust_windows::verify_confidential)?;
     check_installable_text(req.role, &text, &target.config)?;
     verify_binary(&req.tunnel_executable)
+}
+
+/// Refuse a config whose directory or file is readable by a non-admin
+/// principal: LocalSystem would run it and the key it holds must stay
+/// confidential. `verify` is the admin-only check (injected for tests); a
+/// directory is checked even before the config exists.
+#[cfg(windows)]
+fn verify_config_confidential(config: &Path, verify: &dyn Fn(&Path) -> Result<()>) -> Result<()> {
+    if let Some(dir) = config.parent().filter(|d| !d.as_os_str().is_empty()) {
+        verify(dir)?;
+    }
+    verify(config)
 }
 
 /// The retarget decision needed before replacing the role's current Windows
@@ -1773,5 +1786,77 @@ mod windows_plan_tests {
         };
         let pin = plan.pin.expect("a system plan pins its owner");
         assert_eq!(pin.owner, PinOwner::Sid(token_user().unwrap().0));
+    }
+
+    fn icacls(args: &[&str]) -> Vec<u8> {
+        let out = std::process::Command::new("icacls")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "icacls {args:?}");
+        out.stdout
+    }
+
+    /// Admins plus the test user, as `verify_confidential` with a test owner.
+    fn check(path: &Path) -> Result<()> {
+        let trusted =
+            super::super::trust_windows::model::TrustedSet::admin_with_test_owner(token_user()?);
+        super::super::trust_windows::verify_confidential_with(path, &trusted)
+    }
+
+    fn refused_untouched(dir: &Path, config: &Path, grant: &str) {
+        let dir_text = dir.to_str().unwrap();
+        icacls(&[dir_text, "/grant", grant]);
+        let before = icacls(&[dir_text]);
+        let err = verify_config_confidential(config, &check).unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(m)) if m.contains("S-1-5-32-545")
+            ),
+            "{err:#}"
+        );
+        assert_eq!(icacls(&[dir_text]), before, "DACL unchanged");
+    }
+
+    #[test]
+    fn install_refuses_a_user_readable_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        refused_untouched(tmp.path(), &config, "*S-1-5-32-545:(OI)(CI)R");
+        assert!(!config.exists());
+    }
+
+    #[test]
+    fn install_refuses_a_config_dir_with_inheritable_only_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        refused_untouched(tmp.path(), &config, "*S-1-5-32-545:(OI)(IO)R");
+        assert!(!config.exists());
+    }
+
+    #[test]
+    fn install_refuses_a_user_readable_config_file_with_a_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        std::fs::write(&config, "[node]\nsecret_key = \"x\"\n").unwrap();
+        icacls(&[config.to_str().unwrap(), "/grant", "*S-1-5-32-545:R"]);
+        let before = icacls(&[config.to_str().unwrap()]);
+        let err = verify_config_confidential(&config, &|p| {
+            if p == config {
+                check(p)
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ),
+            "{err:#}"
+        );
+        assert_eq!(icacls(&[config.to_str().unwrap()]), before);
     }
 }

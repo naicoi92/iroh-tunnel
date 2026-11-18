@@ -17,6 +17,7 @@ pub(super) struct AceLayout {
     pub allow: bool,
     pub mask: u32,
     pub inherit_only: bool,
+    pub object_inherit: bool,
     /// Byte offset of the SID from the start of the ACE.
     pub sid_offset: usize,
     /// Byte length of that SID (`8 + 4 * SubAuthorityCount`).
@@ -25,6 +26,7 @@ pub(super) struct AceLayout {
 
 const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 const INHERIT_ONLY_ACE: u8 = 0x8;
+const OBJECT_INHERIT_ACE: u8 = 0x1;
 /// `ACE_OBJECT_TYPE_PRESENT` / `ACE_INHERITED_OBJECT_TYPE_PRESENT`.
 const OBJECT_TYPE_PRESENT: u32 = 0x1;
 const INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x2;
@@ -80,6 +82,7 @@ pub(super) fn ace_layout(bytes: &[u8]) -> Option<AceLayout> {
         allow: ace_type != ACCESS_DENIED_ACE_TYPE,
         mask,
         inherit_only: flags & INHERIT_ONLY_ACE != 0,
+        object_inherit: flags & OBJECT_INHERIT_ACE != 0,
         sid_offset,
         sid_len,
     })
@@ -119,6 +122,7 @@ mod tests {
             allow,
             mask,
             inherit_only,
+            object_inherit: false,
             sid_offset,
             sid_len: 20,
         }
@@ -170,7 +174,10 @@ mod tests {
     fn inherit_only_flag_is_read() {
         assert_eq!(
             ace_layout(&ace(0, INHERIT_ONLY_ACE | 0x3, 0x1000_0000, &sid())),
-            Some(layout(true, 0x1000_0000, true, 8))
+            Some(AceLayout {
+                object_inherit: true,
+                ..layout(true, 0x1000_0000, true, 8)
+            })
         );
         assert!(!ace_layout(&ace(0, 0x10, 0x1, &sid())).unwrap().inherit_only);
     }

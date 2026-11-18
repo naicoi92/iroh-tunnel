@@ -135,10 +135,6 @@ pub(crate) fn admin_set(test_owner: Option<&std::ffi::OsStr>) -> anyhow::Result<
 /// [`CliError::Permission`] naming the path and the offending SID, or when
 /// the path cannot be inspected.
 #[cfg(windows)]
-#[expect(
-    dead_code,
-    reason = "the elevated install's config check calls it once the installer stops pinning a user"
-)]
 pub(crate) fn verify_confidential(path: &std::path::Path) -> anyhow::Result<()> {
     let trusted = super::admin_trust(&super::process_env)?;
     verify_confidential_with(path, &trusted)

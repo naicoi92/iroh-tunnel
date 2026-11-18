@@ -17,7 +17,6 @@ pub(crate) const TRUSTED_INSTALLER: &str =
     "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 #[cfg(test)]
 pub(crate) const EVERYONE: &str = "S-1-1-0";
-#[cfg(test)]
 pub(crate) const CREATOR_OWNER: &str = "S-1-3-0";
 
 pub(crate) const FILE_WRITE_DATA: u32 = 0x2;
@@ -85,6 +84,8 @@ pub(crate) struct Ace {
     pub sid: Sid,
     pub mask: u32,
     pub inherit_only: bool,
+    /// `OBJECT_INHERIT_ACE`: files created in the directory inherit it.
+    pub object_inherit: bool,
     pub allow: bool,
 }
 
@@ -341,7 +342,12 @@ pub(crate) const GENERIC_READ: u32 = 0x8000_0000;
 
 /// Whether `d` keeps its content confidential: no allow ACE grants a read
 /// right to a SID outside `trusted`. A NULL or unreadable DACL is refused.
-/// Inherit-only ACEs do not apply to `d` itself and are skipped.
+/// An inherit-only ACE does not apply to `d` itself and is skipped, except on
+/// a directory: there an ACE that files created inside inherit
+/// (`OBJECT_INHERIT_ACE`, inherit-only or not) and that grants a read right
+/// to an untrusted SID is refused too, because the secret file the store
+/// creates there would become readable by that SID. `CREATOR OWNER` is
+/// exempt: it resolves to the creating administrator.
 ///
 /// # Errors
 ///
@@ -354,7 +360,12 @@ pub(crate) fn evaluate_confidential(d: &Descriptor, trusted: &TrustedSet) -> Res
         });
     };
     let offending = dacl.iter().find(|ace| {
-        ace.allow && !ace.inherit_only && ace.mask & READ_MASK != 0 && !trusted.contains(&ace.sid)
+        let applies = !ace.inherit_only || (d.is_dir && ace.object_inherit);
+        ace.allow
+            && applies
+            && ace.mask & READ_MASK != 0
+            && !trusted.contains(&ace.sid)
+            && !(ace.inherit_only && ace.sid.0 == CREATOR_OWNER)
     });
     match offending {
         Some(ace) => Err(Refusal::Readable {
@@ -441,6 +452,7 @@ mod tests {
             sid,
             mask,
             inherit_only: false,
+            object_inherit: false,
             allow: true,
         }
     }
@@ -559,6 +571,7 @@ mod tests {
             sid: s(CREATOR_OWNER),
             mask: GENERIC_ALL,
             inherit_only: true,
+            object_inherit: false,
             allow: true,
         });
         assert_eq!(evaluate(&c, &set()), Ok(()));
@@ -655,6 +668,7 @@ mod tests {
             sid: bob(),
             mask: GENERIC_ALL,
             inherit_only: false,
+            object_inherit: false,
             allow: false,
         });
         assert_eq!(evaluate(&c, &set()), Ok(()));
@@ -695,6 +709,42 @@ mod tests {
             assert!(text.contains("Users") && text.contains("config"), "{text}");
             assert!(matches!(CliError::from(refusal), CliError::Permission(_)));
         }
+    }
+
+    #[test]
+    fn config_dir_with_inheritable_users_read_is_refused() {
+        // `(OI)(IO)R` does not apply to the directory but to the secret file
+        // created in it; so does `(OI)(CI)R`.
+        for inherit_only in [true, false] {
+            let mut ace = allow(s(USERS), RX);
+            ace.inherit_only = inherit_only;
+            ace.object_inherit = true;
+            let dir = admin_dir(vec![allow(s(SYSTEM), FA), ace]);
+            assert_eq!(
+                evaluate_confidential(&dir, &TrustedSet::machine()),
+                Err(Refusal::Readable {
+                    path: "C:\\ProgramData\\iroh-tunnel\\config".into(),
+                    sid: s(USERS)
+                }),
+                "inherit_only={inherit_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn inheritable_read_is_not_checked_on_files_and_skips_container_only() {
+        let mut container_only = allow(s(USERS), RX);
+        container_only.inherit_only = true; // (CI)(IO): never reaches files
+        let mut creator = allow(s(CREATOR_OWNER), FA);
+        creator.inherit_only = true;
+        creator.object_inherit = true;
+        let dir = admin_dir(vec![container_only.clone(), creator]);
+        assert_eq!(evaluate_confidential(&dir, &TrustedSet::machine()), Ok(()));
+        let mut object = container_only;
+        object.object_inherit = true;
+        let mut file = admin_dir(vec![object]);
+        file.is_dir = false;
+        assert_eq!(evaluate_confidential(&file, &TrustedSet::machine()), Ok(()));
     }
 
     #[test]
@@ -911,6 +961,7 @@ mod tests {
             sid: bob(),
             mask: GENERIC_ALL,
             inherit_only: false,
+            object_inherit: false,
             allow: true,
         });
         assert!(matches!(evaluate(&c, &set()), Err(Refusal::Access { .. })));
@@ -1016,6 +1067,7 @@ mod tests {
             sid,
             mask,
             inherit_only: true,
+            object_inherit: false,
             allow: true,
         };
         let fa3 = || {
