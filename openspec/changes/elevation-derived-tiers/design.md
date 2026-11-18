@@ -123,8 +123,10 @@ builds for both tiers.
   verifies. Existing directories are never re-moded.
 - Every elevated config write goes through the store's lock boundary
   (`ConfigLock::acquire`), which on Windows verifies the config directory's
-  confidentiality before creating the lock, temp or config file; this covers
-  explicit `--config` too. A foreground
+  confidentiality before creating the lock, temp or config file when the
+  target lies in the system-tier config directory (the spec's scope; an
+  elevated write elsewhere, e.g. an explicit `--config` in a temp dir, is not
+  confidentiality-checked). A foreground
   elevated run is not walked: root picks its own files, and container images
   bind-mount configs owned by host uids. `TrustedOwners::RootAnd` and
   `TrustedSet::for_user_files` are deleted.
