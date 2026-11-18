@@ -1,5 +1,5 @@
-//! Platform-neutral helpers for calling Win32 APIs, shared by the Windows
-//! adapters (trust model, privilege detection).
+//! Pure, OS-independent helpers for Win32 FFI calls, shared by the Windows
+//! adapters.
 
 /// Size of a fixed Win32 structure, as the `u32` length the API takes.
 #[expect(
