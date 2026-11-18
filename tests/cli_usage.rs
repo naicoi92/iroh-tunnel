@@ -135,13 +135,110 @@ fn wrong_role_flag_on_set() {
 #[test]
 fn relay_flag_rejected_on_set() {
     let w = World::new();
-    for role in ["serve", "access"] {
-        let o = w.it(&[role, "config", "set", "-n", "web", "--relay", "x"]);
+    let o = w.it(&[
+        "serve",
+        "config",
+        "set",
+        "-n",
+        "web",
+        "-t",
+        "3000",
+        "-r",
+        "https://relay.example",
+    ]);
+    o.assert_usage();
+    assert!(o.first_paragraph().contains("-r"), "{}", o.stderr);
+    assert!(o.stderr.contains("Usage: iroh-tunnel serve config set"));
+    let o = w.its(&[
+        "config",
+        "set",
+        "-n",
+        "web",
+        "-t",
+        "3000",
+        "-r",
+        "https://relay.example",
+    ]);
+    o.assert_usage();
+    assert!(o.first_paragraph().contains("-r"), "{}", o.stderr);
+    assert!(o.stderr.contains("Usage: iroh-tunnel-serve config set"));
+}
+
+#[test]
+fn node_conflicts_show_node_help() {
+    let w = World::new();
+    let u = "https://a.example";
+    let cases: [&[&str]; 4] = [
+        &["--clear-relays", "-r", u],
+        &["--clear-relays", "--relay-token", "t"],
+        &["--clear-relays", "--relay-token-file", "f"],
+        &["--relay-token", "t", "--relay-token-file", "f"],
+    ];
+    for extra in cases {
+        let mut args = vec!["serve", "config", "node"];
+        args.extend(extra);
+        let o = w.it(&args);
         o.assert_usage();
-        assert!(o.first_paragraph().contains("--relay"), "{}", o.stderr);
-        assert!(o
-            .stderr
-            .contains(&format!("Usage: iroh-tunnel {role} config set")));
+        assert!(
+            o.stderr.contains("Usage: iroh-tunnel serve config node"),
+            "{args:?}: {}",
+            o.stderr
+        );
+    }
+}
+
+#[test]
+fn access_set_override_conflict_shows_set_help() {
+    let o = World::new().it(&[
+        "access",
+        "config",
+        "set",
+        "-n",
+        "web",
+        "-r",
+        "https://a.example",
+        "--clear-relays",
+    ]);
+    o.assert_usage();
+    assert!(o.stderr.contains("Usage: iroh-tunnel access config set"));
+}
+
+#[test]
+fn bare_config_node_shows_help() {
+    let w = World::new();
+    let cfg = w.dir("home").join("c.toml");
+    let cfg_s = cfg.to_str().unwrap();
+    for args in [
+        vec!["serve", "config", "node"],
+        vec!["serve", "config", "node", "-c", cfg_s],
+    ] {
+        let o = w.it(&args);
+        o.assert_usage();
+        assert!(o.stderr.contains("Usage: iroh-tunnel serve config node"));
+        assert!(!cfg.exists());
+    }
+}
+
+#[test]
+fn config_node_help_on_every_binary() {
+    let w = World::new();
+    let outs = [
+        w.it(&["serve", "config", "node", "--help"]),
+        w.it(&["access", "config", "node", "--help"]),
+        w.its(&["config", "node", "--help"]),
+        w.ita(&["config", "node", "--help"]),
+    ];
+    for o in outs {
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        let text = format!("{}{}", o.stdout, o.stderr);
+        for flag in [
+            "--relay-url",
+            "--relay-token",
+            "--relay-token-file",
+            "--clear-relays",
+        ] {
+            assert!(text.contains(flag), "{flag} missing: {text}");
+        }
     }
 }
 

@@ -1,0 +1,3 @@
+Updated node settings in <TMP>/cfg.toml:
+  relay_urls: [https://old.example] -> [https://a.example]
+  relay_token: <redacted> -> (none)
