@@ -5,9 +5,10 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use super::display_addr::display_addr;
 use super::mutate::{find_service_index, mutate_deciding, Edit};
+use super::relay_list::{display_list, ensure_unique, read_list, write_list};
 use super::resolve_config_path::resolve_config_path;
 use super::store::resolve_target;
-use super::types::{FieldChange, ServiceField, SetError, SetOutcome, SetService};
+use super::types::{FieldChange, RelayEdit, ServiceField, SetError, SetOutcome, SetService};
 use crate::error::CliError;
 use crate::role::Role;
 
@@ -97,6 +98,10 @@ fn create(
             entry.insert("node_id", toml_edit::value(node_id));
         }
     }
+    if let RelayEdit::Replace(urls) = &req.relays {
+        ensure_unique(urls)?;
+        write_list(&mut entry, urls);
+    }
     doc.entry("services")
         .or_insert_with(|| Item::ArrayOfTables(Default::default()))
         .as_array_of_tables_mut()
@@ -170,6 +175,32 @@ fn update(
                 old: cur,
                 new: node_id.to_owned(),
             });
+        }
+    }
+
+    match &req.relays {
+        RelayEdit::Keep => {}
+        RelayEdit::Replace(urls) => {
+            ensure_unique(urls)?;
+            let cur = read_list(entry);
+            if cur.as_deref() != Some(urls.as_slice()) {
+                write_list(entry, urls);
+                changes.push(FieldChange {
+                    field: ServiceField::RelayUrls,
+                    old: display_list(cur.as_deref().unwrap_or_default(), "(node)"),
+                    new: display_list(urls, "(node)"),
+                });
+            }
+        }
+        RelayEdit::Clear => {
+            if let Some(cur) = read_list(entry) {
+                entry.remove("relay_urls");
+                changes.push(FieldChange {
+                    field: ServiceField::RelayUrls,
+                    old: display_list(&cur, "(node)"),
+                    new: "(node)".to_owned(),
+                });
+            }
         }
     }
     Ok(changes)
@@ -519,5 +550,176 @@ mod tests {
         );
         let got = std::fs::read_to_string(&path).unwrap();
         assert!(got.contains("protocol = \"udp\""), "{got}");
+    }
+
+    const RELAY_A: &str = "https://a.example";
+    const RELAY_B: &str = "https://b.example";
+    const RELAY_OLD: &str = "https://old.example";
+
+    fn relay_req(path: &std::path::Path, name: &str, relays: RelayEdit) -> SetService {
+        SetService {
+            relays,
+            ..req(path, name)
+        }
+    }
+
+    fn access_file(extra: &str) -> String {
+        format!("[[services]]\nname = \"web\"\nprotocol = \"tcp\"\nnode_id = \"{NODE}\"\nport = 8080\n{extra}")
+    }
+
+    #[test]
+    fn set_override_on_existing() {
+        let (_d, path) = file(Some(&access_file("")));
+        let r = relay_req(
+            &path,
+            "web",
+            RelayEdit::Replace(vec![RELAY_A.into(), RELAY_B.into()]),
+        );
+        let out = set_service(Role::Access, &r).unwrap();
+        assert_eq!(
+            out,
+            SetOutcome::Updated {
+                service: "web".into(),
+                path: path.clone(),
+                changes: vec![FieldChange {
+                    field: ServiceField::RelayUrls,
+                    old: "(node)".into(),
+                    new: "[https://a.example, https://b.example]".into(),
+                }],
+            }
+        );
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            got.contains("relay_urls = [\"https://a.example\", \"https://b.example\"]"),
+            "{got}"
+        );
+    }
+
+    #[test]
+    fn replace_override() {
+        let (_d, path) = file(Some(&access_file(
+            "relay_urls = [\"https://old.example\"]\n",
+        )));
+        let r = relay_req(&path, "web", RelayEdit::Replace(vec![RELAY_A.into()]));
+        let out = set_service(Role::Access, &r).unwrap();
+        let SetOutcome::Updated { changes, .. } = out else {
+            panic!("expected Updated");
+        };
+        assert_eq!(changes[0].old, "[https://old.example]");
+        assert_eq!(changes[0].new, "[https://a.example]");
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            got.contains("relay_urls = [\"https://a.example\"]"),
+            "{got}"
+        );
+        assert!(!got.contains(RELAY_OLD), "{got}");
+    }
+
+    #[test]
+    fn clear_override() {
+        let (_d, path) = file(Some(&access_file(
+            "relay_urls = [\"https://old.example\"]\n",
+        )));
+        let r = relay_req(&path, "web", RelayEdit::Clear);
+        let SetOutcome::Updated { changes, .. } = set_service(Role::Access, &r).unwrap() else {
+            panic!("expected Updated");
+        };
+        assert_eq!(changes[0].new, "(node)");
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("relay_urls"));
+    }
+
+    #[test]
+    fn clear_override_removes_explicit_empty_array() {
+        let (_d, path) = file(Some(&access_file("relay_urls = []\n")));
+        let r = relay_req(&path, "web", RelayEdit::Clear);
+        let out = set_service(Role::Access, &r).unwrap();
+        assert!(matches!(out, SetOutcome::Updated { .. }), "{out:?}");
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("relay_urls"));
+    }
+
+    #[test]
+    fn override_kept_without_flags() {
+        let text = access_file("relay_urls = [\"https://old.example\"]\n");
+        let (_d, path) = file(Some(&text));
+        let r = SetService {
+            port: Some(9090),
+            ..relay_req(&path, "web", RelayEdit::Keep)
+        };
+        set_service(Role::Access, &r).unwrap();
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            got.contains("relay_urls = [\"https://old.example\"]"),
+            "{got}"
+        );
+    }
+
+    #[test]
+    fn create_with_override() {
+        let (_d, path) = file(None);
+        let r = SetService {
+            port: Some(8080),
+            node_id: Some(NODE.into()),
+            ..relay_req(&path, "web", RelayEdit::Replace(vec![RELAY_A.into()]))
+        };
+        set_service(Role::Access, &r).unwrap();
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            got.contains("relay_urls = [\"https://a.example\"]"),
+            "{got}"
+        );
+    }
+
+    #[test]
+    fn insecure_override_rejected() {
+        let text = access_file("");
+        let (_d, path) = file(Some(&text));
+        let r = relay_req(
+            &path,
+            "web",
+            RelayEdit::Replace(vec!["http://a.example".into()]),
+        );
+        let err = set_service(Role::Access, &r).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid relay_url 'http://a.example' on service 'web'"),
+            "{err:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn duplicate_override_rejected() {
+        let text = access_file("");
+        let (_d, path) = file(Some(&text));
+        let r = relay_req(
+            &path,
+            "web",
+            RelayEdit::Replace(vec![RELAY_A.into(), RELAY_A.into()]),
+        );
+        let err = set_service(Role::Access, &r).unwrap_err();
+        assert!(err.to_string().contains("duplicate relay_url"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn relay_only_on_missing_service_needs_address() {
+        let (_d, path) = file(None);
+        let r = relay_req(&path, "web", RelayEdit::Replace(vec![RELAY_A.into()]));
+        let err = set_service(Role::Access, &r).unwrap_err();
+        match err.downcast_ref::<SetError>() {
+            Some(SetError::MissingForCreate { flags, .. }) => {
+                assert_eq!(flags, &vec!["--listen", "--node-id"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_urls_label() {
+        assert_eq!(ServiceField::RelayUrls.label(Role::Access), "relay_urls");
     }
 }

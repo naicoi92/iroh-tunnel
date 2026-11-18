@@ -19,13 +19,6 @@ pub(super) fn ensure_unique(urls: &[String]) -> Result<()> {
 }
 
 /// Render a list as `[a, b]`, or `empty` when it has no URLs.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the config node report in a later task"
-    )
-)]
 pub(super) fn display_list(urls: &[String], empty: &str) -> String {
     if urls.is_empty() {
         return empty.to_owned();

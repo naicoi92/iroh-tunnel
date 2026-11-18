@@ -220,6 +220,8 @@ pub struct SetService {
     pub protocol: Option<Protocol>,
     /// Peer node id (access role).
     pub node_id: Option<String>,
+    /// Per-service `relay_urls` override.
+    pub relays: RelayEdit,
 }
 
 /// How `config node` changes `[node].relay_urls`.
@@ -364,7 +366,7 @@ pub enum SetOutcome {
         service: String,
         /// Config file that was written.
         path: PathBuf,
-        /// Changed fields in the order address, protocol, node_id.
+        /// Changed fields in the order address, protocol, node_id, relay_urls.
         changes: Vec<FieldChange>,
     },
     /// The entry already had every requested value; the file is untouched.
@@ -396,6 +398,8 @@ pub enum ServiceField {
     Protocol,
     /// The peer node id.
     NodeId,
+    /// The per-service `relay_urls` override.
+    RelayUrls,
 }
 
 impl ServiceField {
@@ -407,6 +411,7 @@ impl ServiceField {
             (ServiceField::Address, Role::Access) => "listen",
             (ServiceField::Protocol, _) => "protocol",
             (ServiceField::NodeId, _) => "node_id",
+            (ServiceField::RelayUrls, _) => "relay_urls",
         }
     }
 }

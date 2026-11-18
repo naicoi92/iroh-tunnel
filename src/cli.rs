@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli_args::{AccessServiceArgs, ColorArg, ProtocolArg, ServeServiceArgs, ServiceAddr};
 use anyhow::Context as _;
-use iroh_tunnel_host::config::SetService;
+use iroh_tunnel_host::config::{RelayEdit, SetService};
 use iroh_tunnel_host::Role as StatusRole;
 
 /// App version resolved at build time from the git tag (see `build.rs`).
@@ -349,6 +349,7 @@ fn set_request(
         port: addr.map(|a| a.port.get()),
         protocol: protocol.map(Into::into),
         node_id,
+        relays: RelayEdit::Keep,
     })
 }
 
