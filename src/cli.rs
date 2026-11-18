@@ -6,13 +6,13 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli_args::{AccessServiceArgs, ColorArg, ProtocolArg, ServeServiceArgs, ServiceAddr};
 use anyhow::Context as _;
-use iroh_tunnel_host::config::{RelayEdit, SetService};
+use iroh_tunnel_host::config::{RelayEdit, SetNode, SetService, TokenEdit};
 use iroh_tunnel_host::Role as StatusRole;
 
 /// App version resolved at build time from the git tag (see `build.rs`).
@@ -235,7 +235,10 @@ fn examples(role: clap::Command, prefix: &str, access: bool) -> clap::Command {
     let (quick, set) = if access {
         (
             format!("{prefix} -n web -l 8080 -N <NODE_ID>"),
-            vec![format!("{prefix} config set -n web -l 8080 -N <NODE_ID>")],
+            vec![
+                format!("{prefix} config set -n web -l 8080 -N <NODE_ID>"),
+                format!("{prefix} config set -n web -r https://relay.example.com"),
+            ],
         )
     } else {
         (
@@ -248,6 +251,12 @@ fn examples(role: clap::Command, prefix: &str, access: bool) -> clap::Command {
     };
     let block = |lines: &[String]| format!("Examples:\n  {}", lines.join("\n  "));
     let rm = block(&[format!("{prefix} config rm -n web")]);
+    let node = block(&[
+        format!(
+            "{prefix} config node -r https://relay.example.com -r https://relay2.example.com --relay-token-file token.txt"
+        ),
+        format!("{prefix} config node --clear-relays"),
+    ]);
     let keygen = block(&[
         format!("{prefix} config keygen"),
         format!("{prefix} config keygen --print"),
@@ -256,6 +265,7 @@ fn examples(role: clap::Command, prefix: &str, access: bool) -> clap::Command {
         .mut_subcommand("config", |config| {
             config
                 .mut_subcommand("set", |c| c.after_help(block(&set)))
+                .mut_subcommand("node", |c| c.after_help(node))
                 .mut_subcommand("rm", |c| c.after_help(rm))
                 .mut_subcommand("keygen", |c| c.after_help(keygen))
         })
@@ -325,13 +335,103 @@ pub trait ServiceArgs: Args + FromArgMatches {
     /// The role these flags belong to.
     const ROLE: StatusRole;
 
+    /// Role-specific `config set` flags (relay override for access only).
+    type SetExtra: Args + FromArgMatches + std::fmt::Debug + Send + 'static;
+
     /// Build the `config set` request. A missing name never gets here because
     /// [`build_command`] makes `-n` required; it is an internal error if it does.
     ///
     /// # Errors
     ///
     /// Fails when the service name is missing.
-    fn into_set(self, config: Option<PathBuf>) -> anyhow::Result<SetService>;
+    fn into_set(self, extra: Self::SetExtra, config: Option<PathBuf>)
+        -> anyhow::Result<SetService>;
+}
+
+/// Serve `config set` takes no extra flags.
+#[derive(Args, Debug)]
+pub struct NoSetExtra {}
+
+/// Access `config set` relay override flags.
+#[derive(Args, Debug)]
+pub struct AccessSetRelayArgs {
+    /// Per-service relay URL (repeatable); replaces the service's list.
+    #[arg(short = 'r', long = "relay-url")]
+    relay_url: Vec<String>,
+    /// Remove the per-service relay override (fall back to the node relays).
+    #[arg(long, conflicts_with = "relay_url")]
+    clear_relays: bool,
+}
+
+impl AccessSetRelayArgs {
+    fn into_edit(self) -> RelayEdit {
+        if self.clear_relays {
+            RelayEdit::Clear
+        } else if self.relay_url.is_empty() {
+            RelayEdit::Keep
+        } else {
+            RelayEdit::Replace(self.relay_url)
+        }
+    }
+}
+
+/// `config node` flags: edit the `[node]` relay settings.
+#[derive(Args)]
+#[group(skip)]
+pub struct NodeArgs {
+    /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
+    #[arg(short, long)]
+    pub(crate) config: Option<PathBuf>,
+    /// Relay URL (repeatable); replaces the node's relay list and drops the stored token.
+    #[arg(short = 'r', long = "relay-url")]
+    pub(crate) relay_url: Vec<String>,
+    /// Relay token (visible in shell history and process lists; prefer --relay-token-file).
+    #[arg(long, conflicts_with = "relay_token_file")]
+    pub(crate) relay_token: Option<String>,
+    /// File holding the relay token; '-' reads stdin.
+    #[arg(long)]
+    pub(crate) relay_token_file: Option<PathBuf>,
+    /// Remove the node relay list and token (use the n0 relays).
+    #[arg(long, conflicts_with_all = ["relay_url", "relay_token", "relay_token_file"])]
+    pub(crate) clear_relays: bool,
+}
+
+impl std::fmt::Debug for NodeArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeArgs")
+            .field("config", &self.config)
+            .field("relay_url", &self.relay_url)
+            .field(
+                "relay_token",
+                &self.relay_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("relay_token_file", &self.relay_token_file)
+            .field("clear_relays", &self.clear_relays)
+            .finish()
+    }
+}
+
+impl NodeArgs {
+    /// Build the host request; `token` is the already-resolved token value.
+    /// `-r` without a token deletes the stored token; no `-r` keeps the list.
+    pub(crate) fn into_request(self, token: Option<String>) -> SetNode {
+        let relays = if self.clear_relays {
+            RelayEdit::Clear
+        } else if self.relay_url.is_empty() {
+            RelayEdit::Keep
+        } else {
+            RelayEdit::Replace(self.relay_url)
+        };
+        let token = match token {
+            Some(t) => TokenEdit::Replace(t),
+            None => TokenEdit::Delete,
+        };
+        SetNode {
+            config: self.config,
+            relays,
+            token,
+        }
+    }
 }
 
 fn set_request(
@@ -340,6 +440,7 @@ fn set_request(
     addr: Option<ServiceAddr>,
     protocol: Option<ProtocolArg>,
     node_id: Option<String>,
+    relays: RelayEdit,
 ) -> anyhow::Result<SetService> {
     let name = name.context("internal: config set requires --name")?;
     Ok(SetService {
@@ -349,23 +450,45 @@ fn set_request(
         port: addr.map(|a| a.port.get()),
         protocol: protocol.map(Into::into),
         node_id,
-        relays: RelayEdit::Keep,
+        relays,
     })
 }
 
 impl ServiceArgs for ServeServiceArgs {
     const ROLE: StatusRole = StatusRole::Serve;
 
-    fn into_set(self, config: Option<PathBuf>) -> anyhow::Result<SetService> {
-        set_request(config, self.name, self.target, self.protocol, None)
+    type SetExtra = NoSetExtra;
+
+    fn into_set(self, _: NoSetExtra, config: Option<PathBuf>) -> anyhow::Result<SetService> {
+        set_request(
+            config,
+            self.name,
+            self.target,
+            self.protocol,
+            None,
+            RelayEdit::Keep,
+        )
     }
 }
 
 impl ServiceArgs for AccessServiceArgs {
     const ROLE: StatusRole = StatusRole::Access;
 
-    fn into_set(self, config: Option<PathBuf>) -> anyhow::Result<SetService> {
-        set_request(config, self.name, self.listen, self.protocol, self.node_id)
+    type SetExtra = AccessSetRelayArgs;
+
+    fn into_set(
+        self,
+        extra: AccessSetRelayArgs,
+        config: Option<PathBuf>,
+    ) -> anyhow::Result<SetService> {
+        set_request(
+            config,
+            self.name,
+            self.listen,
+            self.protocol,
+            self.node_id,
+            extra.into_edit(),
+        )
     }
 }
 
@@ -378,7 +501,7 @@ pub enum RoleCmd<S: ServiceArgs> {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
-    /// Config management (set/rm/list/show/edit/path/check/keygen).
+    /// Config management (set/node/rm/list/show/edit/path/check/keygen).
     #[command(arg_required_else_help = true)]
     Config {
         #[command(subcommand)]
@@ -407,10 +530,20 @@ pub enum ConfigAction<S: ServiceArgs> {
     Set {
         #[command(flatten)]
         service: S,
+        #[command(flatten)]
+        extra: S::SetExtra,
         /// Config file path (default: OS-specific ~/.config/iroh-tunnel/{role}.toml).
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
+    /// Set the node relay list and token.
+    #[command(group(
+        ArgGroup::new("edit")
+            .required(true)
+            .multiple(true)
+            .args(["relay_url", "relay_token", "relay_token_file", "clear_relays"])
+    ))]
+    Node(NodeArgs),
     /// Remove a service from config by name.
     Rm {
         /// Name of the service to remove.
@@ -777,7 +910,18 @@ mod tests {
     fn long_only_options() {
         for_each_command(&mut |b, path, cmd| {
             for arg in cmd.get_arguments() {
-                if matches!(arg.get_long(), Some("reveal" | "print" | "system" | "user")) {
+                if matches!(
+                    arg.get_long(),
+                    Some(
+                        "reveal"
+                            | "print"
+                            | "system"
+                            | "user"
+                            | "relay-token"
+                            | "relay-token-file"
+                            | "clear-relays"
+                    )
+                ) {
                     assert_eq!(arg.get_short(), None, "{b:?} {path:?} {:?}", arg.get_long());
                 }
             }
@@ -844,15 +988,187 @@ mod tests {
         }
     }
 
+    fn set_cmd<'a>(root: &'a clap::Command, role: &[&str]) -> &'a clap::Command {
+        let mut path = role.to_vec();
+        path.extend(["config", "set"]);
+        find(root, &path)
+    }
+
     #[test]
-    fn config_set_has_no_relay_flag() {
-        for_each_command(&mut |_, path, cmd| {
-            if path.ends_with(&["config".to_owned(), "set".to_owned()]) {
-                assert!(cmd
-                    .get_arguments()
-                    .all(|a| a.get_long() != Some("relay-url")));
+    fn serve_config_set_has_no_relay_flag() {
+        let all = build_command(Binary::AllInOne);
+        let serve = build_command(Binary::Serve);
+        for set in [set_cmd(&all, &["serve"]), set_cmd(&serve, &[])] {
+            assert!(set
+                .get_arguments()
+                .all(|a| a.get_long() != Some("relay-url")));
+        }
+    }
+
+    #[test]
+    fn access_config_set_has_relay_flags() {
+        let all = build_command(Binary::AllInOne);
+        let access = build_command(Binary::Access);
+        for set in [set_cmd(&all, &["access"]), set_cmd(&access, &[])] {
+            let get = |l: &str| set.get_arguments().find(|a| a.get_long() == Some(l));
+            assert_eq!(get("relay-url").unwrap().get_short(), Some('r'));
+            assert_eq!(get("clear-relays").unwrap().get_short(), None);
+        }
+    }
+
+    #[test]
+    fn config_node_exists_everywhere() {
+        let all = build_command(Binary::AllInOne);
+        let serve = build_command(Binary::Serve);
+        let access = build_command(Binary::Access);
+        let nodes = [
+            find(&all, &["serve", "config", "node"]),
+            find(&all, &["access", "config", "node"]),
+            find(&serve, &["config", "node"]),
+            find(&access, &["config", "node"]),
+        ];
+        for node in nodes {
+            for l in [
+                "relay-url",
+                "relay-token",
+                "relay-token-file",
+                "clear-relays",
+            ] {
+                assert!(node.get_arguments().any(|a| a.get_long() == Some(l)), "{l}");
             }
-        });
+            let help = node
+                .get_arguments()
+                .find(|a| a.get_long() == Some("relay-token"))
+                .unwrap()
+                .get_help()
+                .unwrap()
+                .to_string();
+            assert!(help.contains("shell history"), "{help}");
+            assert!(help.contains("--relay-token-file"), "{help}");
+        }
+    }
+
+    fn node_args(relay_url: &[&str], clear: bool) -> NodeArgs {
+        NodeArgs {
+            config: None,
+            relay_url: relay_url.iter().map(|s| (*s).to_owned()).collect(),
+            relay_token: None,
+            relay_token_file: None,
+            clear_relays: clear,
+        }
+    }
+
+    #[test]
+    fn node_request_mapping() {
+        const A: &str = "https://a.example";
+        type Case = (
+            &'static [&'static str],
+            Option<&'static str>,
+            bool,
+            RelayEdit,
+            TokenEdit,
+        );
+        let cases: [Case; 4] = [
+            (
+                &[A],
+                None,
+                false,
+                RelayEdit::Replace(vec![A.into()]),
+                TokenEdit::Delete,
+            ),
+            (
+                &[A],
+                Some("t"),
+                false,
+                RelayEdit::Replace(vec![A.into()]),
+                TokenEdit::Replace("t".into()),
+            ),
+            (
+                &[],
+                Some("t"),
+                false,
+                RelayEdit::Keep,
+                TokenEdit::Replace("t".into()),
+            ),
+            (&[], None, true, RelayEdit::Clear, TokenEdit::Delete),
+        ];
+        for (urls, token, clear, relays, tok) in cases {
+            let req = node_args(urls, clear).into_request(token.map(str::to_owned));
+            assert_eq!((req.relays, req.token), (relays, tok));
+        }
+    }
+
+    #[test]
+    fn parse_conflicts() {
+        let u = "https://a.example";
+        let node = |extra: &[&'static str]| {
+            let mut v = vec!["its", "config", "node"];
+            v.extend(extra);
+            v
+        };
+        let cases = [
+            node(&["--clear-relays", "-r", u]),
+            node(&["--clear-relays", "--relay-token", "t"]),
+            node(&["--clear-relays", "--relay-token-file", "f"]),
+            node(&["--relay-token", "t", "--relay-token-file", "f"]),
+            vec![
+                "ita",
+                "config",
+                "set",
+                "-n",
+                "web",
+                "-r",
+                u,
+                "--clear-relays",
+            ],
+        ];
+        for args in cases {
+            let b = if args[0] == "ita" {
+                Binary::Access
+            } else {
+                Binary::Serve
+            };
+            let err = parse_cli(b, argv(&args)).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_config_node_is_missing_argument() {
+        for args in [
+            vec!["its", "config", "node"],
+            vec!["its", "config", "node", "-c", "x"],
+        ] {
+            let err = parse_cli(Binary::Serve, argv(&args)).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        }
+    }
+
+    #[test]
+    fn parsed_cli_debug_redacts_token() {
+        let tail = [
+            "config",
+            "node",
+            "-r",
+            "https://a.example",
+            "--relay-token",
+            "s3cret",
+        ];
+        for (b, head) in [
+            (Binary::AllInOne, vec!["it", "serve"]),
+            (Binary::AllInOne, vec!["it", "access"]),
+            (Binary::Serve, vec!["its"]),
+        ] {
+            let mut args = head;
+            args.extend(tail);
+            let dbg = format!("{:?}", parse_cli(b, argv(&args)));
+            assert!(dbg.contains("NodeArgs"), "{dbg}");
+            assert!(!dbg.contains("s3cret"), "{dbg}");
+        }
     }
 
     #[test]
