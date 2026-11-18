@@ -1,4 +1,4 @@
-==== role=serve invocation=Combined scope=User ====
+==== role=serve invocation=Combined tier=User ====
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -39,7 +39,7 @@
     </Exec>
   </Actions>
 </Task>
-==== role=serve invocation=Standalone scope=User ====
+==== role=serve invocation=Standalone tier=User ====
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -80,7 +80,7 @@
     </Exec>
   </Actions>
 </Task>
-==== role=access invocation=Combined scope=User ====
+==== role=access invocation=Combined tier=User ====
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -121,7 +121,7 @@
     </Exec>
   </Actions>
 </Task>
-==== role=access invocation=Standalone scope=User ====
+==== role=access invocation=Standalone tier=User ====
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>

@@ -48,18 +48,20 @@ pub enum InstalledAt {
     Path(PathBuf),
     /// A per-user Task Scheduler task (Windows).
     WindowsTask,
-    /// A Windows service in the Service Control Manager (system scope).
+    /// A Windows service in the Service Control Manager (system tier).
     WindowsService,
 }
 
 /// A user-facing message from a service operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceNote {
-    /// BusyBox init has no per-user services: a user-scope request installs
-    /// the system-wide script.
-    BusyboxSystemWide {
-        /// The system-wide script that was installed.
-        script: PathBuf,
+    /// The role also runs in the tier other than the caller's. The
+    /// operation proceeds; this is informational only.
+    OtherTierRunning {
+        /// Role name.
+        role: String,
+        /// The tier in which the role also runs.
+        other: crate::Tier,
     },
     /// `launchctl bootstrap` failed; points at the disable list and a retry.
     LaunchdBootstrapHint {

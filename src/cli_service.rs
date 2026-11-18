@@ -1,18 +1,16 @@
-//! CLI glue for `service` commands: builds requests, answers the structured
-//! needs of [`iroh_tunnel_host::service`] with prompts, and prints notes.
+//! CLI glue for `service` commands: builds requests for
+//! [`iroh_tunnel_host::service`], and prints notes. Every verb acts in the
+//! tier of this process's privilege; nothing is asked.
 
-use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::Context as _;
 
-use crate::cli::{Binary, ScopeArgs, ServiceAction};
+use crate::cli::{Binary, ServiceAction};
 use crate::render::print_service_note;
-use iroh_tunnel_host::error::CliError;
 use iroh_tunnel_host::service::Environment;
 use iroh_tunnel_host::service::{
-    self, InstallNeed, InstallOutcome, InstallRequest, OutputMode, RunningExecutable, ServiceCall,
-    ServiceInvocation, ServiceScope,
+    self, InstallRequest, OutputMode, RunningExecutable, ServiceCall, ServiceInvocation,
 };
 use iroh_tunnel_host::Role;
 
@@ -35,11 +33,10 @@ fn running_executable() -> anyhow::Result<RunningExecutable> {
     Ok(RunningExecutable { display, read_from })
 }
 
-/// Probe the running process for the install-time scope decision.
+/// The privilege of the running process, which selects the service tier.
 pub(crate) fn detect_environment() -> Environment {
     Environment {
         elevated: service::is_elevated(),
-        can_answer: is_interactive(),
     }
 }
 
@@ -96,79 +93,48 @@ fn cli_call(notes: &mut dyn FnMut(&service::ServiceNote)) -> ServiceCall<'_> {
     }
 }
 
-fn explicit_scope(args: &ScopeArgs) -> Option<ServiceScope> {
-    match (args.user, args.system) {
-        (_, true) => Some(ServiceScope::System),
-        (true, _) => Some(ServiceScope::User),
-        _ => None,
-    }
-}
-
-/// Run one `service` action: map flags to a request, answer the needs the
-/// operation reports, and print notes and native output.
+/// Run one `service` action in this process's tier and print notes and
+/// native output. The legacy `--user`/`--system` flags are still parsed but
+/// no longer select anything (removed from the CLI separately).
 pub(crate) fn dispatch(
     role: Role,
     action: ServiceAction,
     invocation: ServiceInvocation,
 ) -> anyhow::Result<()> {
     let env = detect_environment();
-    // Verbs on an existing service: no prompt, and the scope follows privilege
-    // when it is not given.
-    let existing = |args: &ScopeArgs| {
-        explicit_scope(args).unwrap_or_else(|| service::default_scope(env.elevated))
-    };
     let mut notes = |note: &service::ServiceNote| print_service_note(note, &invocation);
     let mut call = cli_call(&mut notes);
     match action {
-        ServiceAction::Install { config, scope } => install(
-            role,
-            config,
-            explicit_scope(&scope),
-            env,
-            &mut call,
-            &invocation,
-        ),
-        ServiceAction::Uninstall { scope } => {
-            service::uninstall(role, &invocation, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Start { scope } => {
-            service::start(role, &invocation, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Stop { scope } => {
-            service::stop(role, &invocation, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Restart { scope } => {
-            service::restart(role, &invocation, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
-        ServiceAction::Status { scope } => {
-            service::status(role, &invocation, existing(&scope), env, &mut call)
-                .map(drop)
-                .map_err(Into::into)
-        }
+        ServiceAction::Install { config, .. } => install(role, config, env, &mut call, &invocation),
+        ServiceAction::Uninstall { .. } => service::uninstall(role, &invocation, env, &mut call)
+            .map(drop)
+            .map_err(Into::into),
+        ServiceAction::Start { .. } => service::start(role, &invocation, env, &mut call)
+            .map(drop)
+            .map_err(Into::into),
+        ServiceAction::Stop { .. } => service::stop(role, &invocation, env, &mut call)
+            .map(drop)
+            .map_err(Into::into),
+        ServiceAction::Restart { .. } => service::restart(role, &invocation, env, &mut call)
+            .map(drop)
+            .map_err(Into::into),
+        ServiceAction::Status { .. } => service::status(role, &invocation, env, &mut call)
+            .map(drop)
+            .map_err(Into::into),
     }
 }
 
-/// Install, answering each [`InstallNeed`] with the prompt the CLI always had.
+/// Install in this process's tier.
 fn install(
     role: Role,
     config: Option<PathBuf>,
-    scope: Option<ServiceScope>,
     env: Environment,
     call: &mut ServiceCall,
     invocation: &ServiceInvocation,
 ) -> anyhow::Result<()> {
-    let mut request = InstallRequest {
+    let request = InstallRequest {
         invocation: invocation.clone(),
         role,
-        scope,
         config,
         tunnel_executable: resolve_tunnel_executable_with(
             invocation,
@@ -176,131 +142,12 @@ fn install(
             || std::env::current_exe().context("failed to resolve current executable"),
         )?,
         running_executable: running_executable()?,
-        sudo_user: std::env::var("SUDO_USER").ok(),
-        invoking_user: None,
         state_dir_override: std::env::var_os("IROH_TUNNEL_STATE_DIR")
             .filter(|d| !d.is_empty())
             .map(PathBuf::from),
-        retarget: None,
     };
-    let mut input = std::io::stdin().lock();
-    let mut prompt = std::io::stderr();
-    loop {
-        match service::install(&request, env, call)? {
-            InstallOutcome::Installed(_) => return Ok(()),
-            InstallOutcome::Needs(InstallNeed::ScopeChoice) => {
-                request.scope = Some(ask_scope(&mut input, &mut prompt)?);
-            }
-            InstallOutcome::Needs(InstallNeed::InvokingUser) => {
-                request.invoking_user = Some(ask_user(role, &mut input, &mut prompt)?);
-            }
-            InstallOutcome::Needs(InstallNeed::Retarget { previous, proposed }) => {
-                request.retarget = Some(confirm_retarget(
-                    previous,
-                    proposed,
-                    env.can_answer,
-                    &mut input,
-                    &mut prompt,
-                )?);
-            }
-        }
-    }
-}
-
-fn ask_scope(input: &mut impl BufRead, prompt: &mut impl Write) -> anyhow::Result<ServiceScope> {
-    write!(
-        prompt,
-        "Install as a `user` service (no privileges, runs for your account) \
-         or a `system` service (needs sudo/root)? [user]: "
-    )?;
-    prompt.flush()?;
-    let mut answer = String::new();
-    if input.read_line(&mut answer)? == 0 {
-        return Err(CliError::Config(
-            "no answer to the scope prompt; pass --user or --system".into(),
-        )
-        .into());
-    }
-    service::parse_scope_answer(&answer)
-}
-
-/// The user a person names for a system install. An unknown name is reported
-/// by the retried install; no answer at all is reported here.
-#[cfg(unix)]
-fn ask_user(
-    role: Role,
-    input: &mut impl BufRead,
-    prompt: &mut impl Write,
-) -> anyhow::Result<String> {
-    write!(
-        prompt,
-        "Which user's configuration should the system service use? (user name): "
-    )?;
-    prompt.flush()?;
-    let mut answer = String::new();
-    if input.read_line(&mut answer)? == 0 {
-        return Err(service::unknown_user(
-            "no answer to the user prompt",
-            role.name(),
-        ));
-    }
-    Ok(answer.trim().to_owned())
-}
-
-#[cfg(not(unix))]
-fn ask_user(
-    _role: Role,
-    _input: &mut impl BufRead,
-    _prompt: &mut impl Write,
-) -> anyhow::Result<String> {
-    Err(CliError::Service("system services are not supported on this platform".into()).into())
-}
-
-/// Ask before replacing a system registration that belongs to another user
-/// (or whose owner cannot be told), or refuse without a terminal.
-fn confirm_retarget(
-    previous: Option<service::Pin>,
-    proposed: service::Pin,
-    can_answer: bool,
-    input: &mut impl BufRead,
-    prompt: &mut impl Write,
-) -> anyhow::Result<service::RetargetConsent> {
-    let owner = match &previous {
-        Some(p) => format!(
-            "user {} ({}, config {})",
-            service::account_name(&p.owner),
-            p.owner,
-            p.config.display()
-        ),
-        None => "an unknown owner (no pin recorded)".to_owned(),
-    };
-    let question = format!(
-        "A system service is already installed for {owner}. Retarget it to user {} (config {})? \
-         Both users' config files are kept. [y/N]: ",
-        service::account_name(&proposed.owner),
-        proposed.config.display()
-    );
-    let declined = |why: &str| -> anyhow::Error {
-        CliError::Service(format!(
-            "{why}; the existing service and both users' config files are unchanged"
-        ))
-        .into()
-    };
-    if !can_answer {
-        return Err(declined(&format!(
-            "a system service already exists for {owner} and retargeting needs a confirmation \
-             that cannot be asked without a terminal; run this install interactively"
-        )));
-    }
-    write!(prompt, "{question}")?;
-    prompt.flush()?;
-    let mut answer = String::new();
-    input.read_line(&mut answer)?;
-    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        Ok(service::RetargetConsent { previous, proposed })
-    } else {
-        Err(declined("retarget declined"))
-    }
+    service::install(&request, env, call)?;
+    Ok(())
 }
 
 #[cfg(test)]

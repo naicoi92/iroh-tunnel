@@ -1,4 +1,4 @@
-//! Windows system-scope verbs and status through the Service Control Manager.
+//! Windows system-tier verbs and status through the Service Control Manager.
 //!
 //! The pure seam ([`start_system_checked`]) compiles everywhere for its tests;
 //! the glue that binds it to the real [`Scm`](super::backend::windows_scm_impl::Scm)
@@ -38,10 +38,11 @@ pub(crate) fn start_system_checked(
     start()
 }
 
-/// Run `verb` over `port` for the system scope.
+/// Run `verb` over `port` for the system tier.
 ///
 /// Start and restart re-verify the recorded binary first; restart waits for
-/// the role lock between stop and start.
+/// the role's system-tier lock between stop and start (a user-tier holder of
+/// the role is never waited for).
 ///
 /// # Errors
 ///
@@ -91,6 +92,13 @@ pub(crate) fn system_verb_with(
     }
 }
 
+/// The wait between stop and start of a system restart: until no process
+/// holds `role`'s lock in the system tier. A user-tier holder of the role is
+/// another instance and is never waited for.
+pub(crate) fn system_release_wait(role: crate::Role) -> impl FnOnce(Duration) -> Result<()> {
+    move |timeout| crate::ownership::wait_released_in(role, crate::Tier::System, timeout)
+}
+
 #[cfg(windows)]
 pub(crate) use glue::{system_registration, system_verb};
 
@@ -109,7 +117,7 @@ mod glue {
     use super::system_verb_with;
     use crate::role::Role;
 
-    /// Run `verb` against the real SCM for the system scope, recording every
+    /// Run `verb` against the real SCM for the system tier, recording every
     /// change into `native` as it happens.
     pub(crate) fn system_verb(
         verb: Verb,
@@ -122,7 +130,7 @@ mod glue {
             &mut RecordingPort::new(&mut Scm, &mut record),
             &mut SystemClock::new(),
             verify_binary,
-            |t| crate::ownership::wait_released(role, t),
+            super::system_release_wait(role),
             notes,
             verb,
             role.name(),
@@ -261,6 +269,50 @@ mod tests {
         assert_eq!(port.calls.borrow().as_slice(), ["stop", "start"]);
     }
 
+    /// Claim serve in `tier` through the production claim.
+    #[cfg(all(unix, feature = "test-utils"))]
+    fn claim_in(tier: crate::Tier) -> crate::ownership::RoleClaim {
+        let name = if tier == crate::Tier::System {
+            "system"
+        } else {
+            "user"
+        };
+        // SAFETY: single test thread in an isolated child process.
+        unsafe { std::env::set_var("IROH_TUNNEL_TEST_TIER", name) };
+        crate::ownership::claim(crate::Role::Serve).unwrap()
+    }
+
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[test]
+    fn system_restart_waits_for_system_holder_only() {
+        const NAME: &str =
+            "service::system_verb::tests::system_restart_waits_for_system_holder_only";
+        crate::fixtures::in_isolated_home(NAME, |home| {
+            // SAFETY: single test thread in an isolated child process.
+            unsafe { std::env::set_var("IROH_TUNNEL_MACHINE_LOCK_DIR", home.join("machine")) };
+            // A user-tier serve runs: the system restart goes straight on.
+            let user = claim_in(crate::Tier::User);
+            let mut port = registered(ScmState::Running);
+            let (result, _) = run(
+                &mut port,
+                Verb::Restart,
+                |_| Ok(()),
+                system_release_wait(crate::Role::Serve),
+            );
+            result.unwrap_or_else(|e| panic!("a user holder must not block: {e:#}"));
+            assert_eq!(port.calls.borrow().as_slice(), ["stop", "start"]);
+            drop(user);
+            // The system-tier serve still holds its lock: nothing is started.
+            let _system = claim_in(crate::Tier::System);
+            let err = system_release_wait(crate::Role::Serve)(Duration::from_millis(200))
+                .expect_err("the system holder is waited for");
+            assert!(
+                matches!(err.downcast_ref::<CliError>(), Some(CliError::Service(_))),
+                "{err:?}"
+            );
+        });
+    }
+
     #[test]
     fn verb_start_system_checks_binary_first() {
         let started = Cell::new(false);
@@ -321,7 +373,9 @@ mod tests {
         assert!(!started.get());
         match err.downcast_ref::<CliError>() {
             Some(CliError::Service(m)) => {
-                assert!(m.contains("service install --system"), "{m}");
+                assert!(m.contains("service install"), "{m}");
+                assert!(m.contains("elevated terminal"), "{m}");
+                assert!(!m.contains("--system"), "{m}");
             }
             other => panic!("expected Service, got {other:?}"),
         }

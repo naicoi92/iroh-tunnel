@@ -1,12 +1,12 @@
 //! Test-only non-terminal caller of the host service API.
 //!
 //! `manage_service --role serve|access --action install|status|uninstall
-//! [--config <abs>] [--exe <abs iroh-tunnel>] [--scope user|system]`
+//! [--config <abs>] [--exe <abs iroh-tunnel>]`
 //!
-//! It captures native output and prints the `Debug` of the outcome to stdout,
-//! so a test can show the host API works without a terminal. Stderr stays empty
-//! on success. Exit code: 0 on success (including an install that needs a
-//! decision), 1 on error with the message on stderr.
+//! It acts in the tier of its own privilege, captures native output and prints
+//! the `Debug` of the outcome to stdout, so a test can show the host API works
+//! without a terminal. Stderr stays empty on success. Exit code: 0 on success,
+//! 1 on error with the message on stderr.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use iroh_tunnel_host::role::Role;
 use iroh_tunnel_host::service::{
     self, Environment, InstallRequest, RunningExecutable, ServiceCall, ServiceInvocation,
-    ServiceNote, ServiceScope,
+    ServiceNote,
 };
 
 /// This process's executable, read through `/proc/self/exe` on Linux like the
@@ -32,7 +32,6 @@ fn running_executable() -> Result<RunningExecutable> {
 
 struct Args {
     role: Role,
-    scope: ServiceScope,
     action: String,
     config: Option<PathBuf>,
     exe: Option<PathBuf>,
@@ -40,7 +39,6 @@ struct Args {
 
 fn parse_args() -> Result<Args> {
     let mut role = None;
-    let mut scope = ServiceScope::User;
     let mut action = None;
     let mut config = None;
     let mut exe = None;
@@ -55,13 +53,6 @@ fn parse_args() -> Result<Args> {
                     other => bail!("unknown role {other:?}"),
                 });
             }
-            "--scope" => {
-                scope = match value()?.as_str() {
-                    "user" => ServiceScope::User,
-                    "system" => ServiceScope::System,
-                    other => bail!("unknown scope {other:?}"),
-                };
-            }
             "--action" => action = Some(value()?),
             "--config" => config = Some(PathBuf::from(value()?)),
             "--exe" => exe = Some(PathBuf::from(value()?)),
@@ -70,7 +61,6 @@ fn parse_args() -> Result<Args> {
     }
     Ok(Args {
         role: role.context("--role is required")?,
-        scope,
         action: action.context("--action is required")?,
         config,
         exe,
@@ -81,7 +71,6 @@ fn run() -> Result<String> {
     let args = parse_args()?;
     let env = Environment {
         elevated: service::is_elevated(),
-        can_answer: false,
     };
     let mut notes = |_: &ServiceNote| {};
     let mut call = ServiceCall::capture(&mut notes);
@@ -90,16 +79,12 @@ fn run() -> Result<String> {
             let request = InstallRequest {
                 invocation: ServiceInvocation::Combined,
                 role: args.role,
-                scope: Some(args.scope),
                 config: args.config,
                 tunnel_executable: args.exe.context("--exe is required for install")?,
                 running_executable: running_executable()?,
-                sudo_user: None,
-                invoking_user: None,
                 state_dir_override: std::env::var_os("IROH_TUNNEL_STATE_DIR")
                     .filter(|dir| !dir.is_empty())
                     .map(PathBuf::from),
-                retarget: None,
             };
             Ok(format!(
                 "{:#?}",
@@ -108,23 +93,11 @@ fn run() -> Result<String> {
         }
         "status" => Ok(format!(
             "{:#?}",
-            service::status(
-                args.role,
-                &ServiceInvocation::Combined,
-                args.scope,
-                env,
-                &mut call
-            )?
+            service::status(args.role, &ServiceInvocation::Combined, env, &mut call)?
         )),
         "uninstall" => Ok(format!(
             "{:#?}",
-            service::uninstall(
-                args.role,
-                &ServiceInvocation::Combined,
-                args.scope,
-                env,
-                &mut call
-            )?
+            service::uninstall(args.role, &ServiceInvocation::Combined, env, &mut call)?
         )),
         other => bail!("unknown action {other:?}"),
     }

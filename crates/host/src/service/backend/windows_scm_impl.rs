@@ -2,14 +2,13 @@
 //! [`ScmPort`](super::windows_scm::ScmPort) on the `windows-service` crate.
 //!
 //! Registry layout (all under `HKLM\SYSTEM\CurrentControlSet\Services\<name>`):
-//! `Description` (REG_SZ, written by `set_description`, read back here) and
+//! `Description` (REG_SZ, written by `set_description`) and
 //! `Environment` (REG_MULTI_SZ of `K=V` strings, written here; the SCM hands
 //! it to the service process as its environment block).
 
-use std::ffi::{OsStr, OsString};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::ptr;
 
 use anyhow::{Context, Result};
 use windows_service::service::{
@@ -19,16 +18,10 @@ use windows_service::service::{
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::Error as ScmError;
-use windows_sys::Win32::System::Registry::{
-    RegGetValueW, RegSetKeyValueW, HKEY_LOCAL_MACHINE, REG_MULTI_SZ, RRF_RT_REG_SZ,
-};
+use windows_sys::Win32::System::Registry::{RegSetKeyValueW, HKEY_LOCAL_MACHINE, REG_MULTI_SZ};
 
 use super::windows_scm::{first_command_line_arg, ScmPort, ScmState, ServiceSpec};
 
-/// `ERROR_FILE_NOT_FOUND`.
-const ERROR_FILE_NOT_FOUND: u32 = 2;
-/// `ERROR_PATH_NOT_FOUND`.
-const ERROR_PATH_NOT_FOUND: u32 = 3;
 /// `ERROR_SERVICE_DOES_NOT_EXIST`: the service is not registered.
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 /// `ERROR_SERVICE_NOT_ACTIVE`: stop requested for a service that is not running.
@@ -132,57 +125,6 @@ fn write_environment(name: &str, env: &[(String, String)]) -> Result<()> {
             .with_context(|| format!("cannot write the environment of service `{name}`"));
     }
     Ok(())
-}
-
-/// Read the REG_SZ `value` under the service key; `None` when absent.
-fn read_service_string(name: &str, value: &str) -> Result<Option<String>> {
-    let key = service_key(name);
-    let value_w = wide(value);
-    let mut bytes: u32 = 0;
-    // SAFETY: both names are NUL-terminated; a null data pointer with a
-    // valid size pointer only queries the required size.
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            key.as_ptr(),
-            value_w.as_ptr(),
-            RRF_RT_REG_SZ,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut bytes,
-        )
-    };
-    if matches!(status, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
-        return Ok(None);
-    }
-    if status != 0 {
-        return Err(std::io::Error::from_raw_os_error(status.cast_signed()))
-            .with_context(|| format!("cannot read `{value}` of service `{name}`"));
-    }
-    let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
-    let mut capacity = u32::try_from(buf.len() * 2).context("registry value too large")?;
-    // SAFETY: `buf` provides `capacity` writable bytes; `capacity` is updated
-    // with the number of bytes written.
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            key.as_ptr(),
-            value_w.as_ptr(),
-            RRF_RT_REG_SZ,
-            ptr::null_mut(),
-            buf.as_mut_ptr().cast(),
-            &mut capacity,
-        )
-    };
-    if status != 0 {
-        return Err(std::io::Error::from_raw_os_error(status.cast_signed()))
-            .with_context(|| format!("cannot read `{value}` of service `{name}`"));
-    }
-    let units = capacity as usize / 2;
-    let text = OsString::from_wide(buf.get(..units).unwrap_or(&buf));
-    Ok(Some(
-        text.to_string_lossy().trim_end_matches('\0').to_string(),
-    ))
 }
 
 /// Description, environment and failure actions of a just-created service.
@@ -293,10 +235,6 @@ impl ScmPort for Scm {
         }
     }
 
-    fn description(&mut self, name: &str) -> Result<Option<String>> {
-        read_service_string(name, "Description")
-    }
-
     /// The program of the service, i.e. argv[0] of its `binPath` (the SCM
     /// stores the whole command line). A service marked for delete (1072) is
     /// `Ok(None)` by design: it is going away and has no usable binary.
@@ -332,8 +270,67 @@ fn command_line(name: &str) -> Result<Option<String>> {
 mod tests {
     use super::*;
     use crate::service::backend::windows_scm::FailurePlan;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::ptr;
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::System::Registry::RRF_RT_REG_MULTI_SZ;
+    use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ};
+
+    /// `ERROR_FILE_NOT_FOUND`.
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    /// `ERROR_PATH_NOT_FOUND`.
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
+
+    /// Read the REG_SZ `value` under the service key; `None` when absent.
+    fn read_service_string(name: &str, value: &str) -> Result<Option<String>> {
+        let key = service_key(name);
+        let value_w = wide(value);
+        let mut bytes: u32 = 0;
+        // SAFETY: both names are NUL-terminated; a null data pointer with a
+        // valid size pointer only queries the required size.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                value_w.as_ptr(),
+                RRF_RT_REG_SZ,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut bytes,
+            )
+        };
+        if matches!(status, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
+            return Ok(None);
+        }
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status.cast_signed()))
+                .with_context(|| format!("cannot read `{value}` of service `{name}`"));
+        }
+        let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+        let mut capacity = u32::try_from(buf.len() * 2).context("registry value too large")?;
+        // SAFETY: `buf` provides `capacity` writable bytes; `capacity` is updated
+        // with the number of bytes written.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                value_w.as_ptr(),
+                RRF_RT_REG_SZ,
+                ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut capacity,
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status.cast_signed()))
+                .with_context(|| format!("cannot read `{value}` of service `{name}`"));
+        }
+        let units = capacity as usize / 2;
+        let text = OsString::from_wide(buf.get(..units).unwrap_or(&buf));
+        Ok(Some(
+            text.to_string_lossy().trim_end_matches('\0').to_string(),
+        ))
+    }
 
     /// Deletes the service on drop so a failing assertion leaves nothing.
     struct Cleanup(String);
@@ -421,7 +418,9 @@ mod tests {
         scm.create(&spec).unwrap();
         assert_eq!(scm.state(&name).unwrap(), Some(ScmState::Stopped));
         assert_eq!(
-            scm.description(&name).unwrap().as_deref(),
+            read_service_string(&name, "Description")
+                .unwrap()
+                .as_deref(),
             Some("scm test description")
         );
         assert_eq!(scm.executable(&name).unwrap(), Some(exe.clone()));

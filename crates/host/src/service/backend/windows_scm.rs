@@ -19,13 +19,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::error::CliError;
 use crate::service::registration::RegistrationInput;
-use crate::service::trust_windows::ENV_TRUSTED_SID;
 use crate::service::types::{AppliedEffect, RestartPolicy};
-use crate::service::{PinOwner, ENV_SCM};
+use crate::service::ENV_SCM;
 use crate::status::writer::ENV_STATE_DIR;
 
 /// Poll interval while waiting for a state change.
@@ -82,8 +81,7 @@ pub(crate) struct ServiceSpec {
     pub launch_arguments: Vec<OsString>,
     /// Service environment, in fixed order.
     pub env: Vec<(String, String)>,
-    /// The pin record in comment-line form (`# iroh-tunnel-pin …`), the only
-    /// shape `Pin::find` accepts, so a later install can detect retargeting.
+    /// Human-readable description shown by the Services console.
     pub description: String,
     pub failure: Option<FailurePlan>,
 }
@@ -93,8 +91,7 @@ impl ServiceSpec {
     ///
     /// # Errors
     ///
-    /// [`CliError::Service`] when the role is not `serve`/`access` or the
-    /// pin is missing or not a SID pin.
+    /// [`CliError::Service`] when the role is not `serve`/`access`.
     pub(crate) fn render(reg: &RegistrationInput<'_>) -> Result<Self> {
         let RegistrationInput {
             role,
@@ -110,16 +107,8 @@ impl ServiceSpec {
             ))
             .into());
         }
-        let pin = reg.pin.context("internal: a Windows service needs a pin")?;
-        let PinOwner::Sid(sid) = &pin.owner else {
-            return Err(CliError::Service(
-                "internal: Windows service registration needs a SID pin".into(),
-            )
-            .into());
-        };
         let mut env = vec![
             (ENV_STATE_DIR.into(), state.to_string_lossy().into_owned()),
-            (ENV_TRUSTED_SID.into(), sid.clone()),
             (ENV_SCM.into(), "1".into()),
         ];
         env.extend(test_env());
@@ -137,7 +126,7 @@ impl ServiceSpec {
                 args
             },
             env,
-            description: format!("# {}", pin.record()),
+            description: format!("Iroh Tunnel ({role}), system tier"),
             failure: FailurePlan::from_policy(policy),
         })
     }
@@ -201,8 +190,6 @@ pub(crate) trait ScmPort {
     fn delete(&mut self, name: &str) -> Result<()>;
     fn start(&mut self, name: &str) -> Result<()>;
     fn stop(&mut self, name: &str) -> Result<()>;
-    /// Description of `name` (the pin record), if any.
-    fn description(&mut self, name: &str) -> Result<Option<String>>;
     /// Executable of `name`'s command line, if any.
     fn executable(&mut self, name: &str) -> Result<Option<PathBuf>>;
 }
@@ -255,9 +242,6 @@ impl ScmPort for RecordingPort<'_, '_> {
         let result = self.port.stop(name);
         self.recorded(result, AppliedEffect::Stopped)
     }
-    fn description(&mut self, name: &str) -> Result<Option<String>> {
-        self.port.description(name)
-    }
     fn executable(&mut self, name: &str) -> Result<Option<PathBuf>> {
         self.port.executable(name)
     }
@@ -290,7 +274,8 @@ impl Clock for SystemClock {
 
 pub(crate) fn not_installed(name: &str, role: &str) -> anyhow::Error {
     CliError::Service(format!(
-        "service {name} is not installed; run `iroh-tunnel {role} service install --system`"
+        "service {name} is not installed; run `iroh-tunnel {role} service install` from an \
+         elevated terminal (Run as administrator)"
     ))
     .into()
 }
@@ -390,7 +375,7 @@ fn delete_and_wait(port: &mut dyn ScmPort, clock: &mut dyn Clock, name: &str) ->
     wait_or_fail(port, clock, name, GONE_TIMEOUT, "gone", |s| s.is_none())
 }
 
-/// Register, start and announce the SCM service of `reg` (system scope).
+/// Register, start and announce the SCM service of `reg` (system tier).
 /// Every change reaches `native`'s applied list as it happens.
 #[cfg(windows)]
 pub(crate) fn install(
@@ -496,27 +481,6 @@ pub(crate) fn restart_with(
     start_with(port, clock, role)
 }
 
-/// The text a retarget decision reads from an existing registration.
-///
-/// `None` only when the service is absent. A service that exists without a
-/// readable description yields `Some("")`, which carries no pin: an unknown
-/// owner, never "nothing installed".
-pub(crate) fn existing_registration_body(
-    port: &mut dyn ScmPort,
-    name: &str,
-) -> Result<Option<String>> {
-    if port.state(name)?.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(port.description(name)?.unwrap_or_default()))
-}
-
-/// Whether the role's SCM service exists (any state, including pending
-/// delete). A failed query is an error, never "absent".
-pub(crate) fn service_registered(port: &mut dyn ScmPort, role: &str) -> Result<bool> {
-    Ok(port.state(&service_name(role))?.is_some())
-}
-
 /// State of the role's service.
 pub(crate) fn status_with(port: &mut dyn ScmPort, role: &str) -> Result<ScmStatus> {
     Ok(port
@@ -573,8 +537,6 @@ pub(crate) mod fake {
         pub(crate) never_gone: bool,
         /// Operations (`"stop"`, `"delete"`, `"create"`, `"start"`) to fail once.
         pub(crate) fail_once: HashSet<&'static str>,
-        /// What `description` returns for any existing service.
-        pub(crate) description: Option<String>,
         /// What `executable` returns for any existing service.
         pub(crate) exe: Option<PathBuf>,
     }
@@ -588,7 +550,6 @@ pub(crate) mod fake {
                 stop_script: vec![ScmState::Stopped],
                 never_gone: false,
                 fail_once: HashSet::new(),
-                description: None,
                 exe: None,
             };
             if let Some(state) = state {
@@ -674,9 +635,6 @@ pub(crate) mod fake {
             self.svc(name)?.script = script;
             Ok(())
         }
-        fn description(&mut self, _: &str) -> Result<Option<String>> {
-            Ok(self.description.clone())
-        }
         fn executable(&mut self, name: &str) -> Result<Option<PathBuf>> {
             Ok(self
                 .services
@@ -710,14 +668,12 @@ mod tests {
         let mut all = String::new();
         for case in cases()
             .into_iter()
-            .filter(|c| c.scope == crate::service::ServiceScope::System)
+            .filter(|c| c.tier == crate::Tier::System)
         {
             let config = PathBuf::from(format!(r"C:\Users\a b\it's & <cfg>\{}.toml", case.role));
-            let pin = pin(&config);
             let mut spec = ServiceSpec::render(&RegistrationInput {
                 invocation: &case.invocation,
-                scope: case.scope,
-                pin: Some(&pin),
+                tier: case.tier,
                 ..registration(
                     case.role,
                     Path::new(r"C:\Program Files\iroh tunnel\iroh-tunnel.exe"),
@@ -768,10 +724,8 @@ mod tests {
                     executable: r"C:\Program Files\renamed.exe".into(),
                 },
             ] {
-                let pin = pin(cfg);
                 let spec = ServiceSpec::render(&RegistrationInput {
                     invocation: &invocation,
-                    pin: Some(&pin),
                     ..registration(role, Path::new(r"C:\Program Files\renamed.exe"), cfg, cfg)
                 })
                 .unwrap();
@@ -794,29 +748,13 @@ mod tests {
     use super::fake::{FakeClock, FakeScm, SERVE};
     use super::*;
     use crate::service::fixtures::registration;
-    use crate::service::{Pin, PinOwner};
     use std::path::Path;
     use std::rc::Rc;
 
-    const SID: &str = "S-1-5-21-1-2-3-1001";
-    fn pin(config: &Path) -> Pin {
-        Pin {
-            config: config.to_path_buf(),
-            owner: PinOwner::Sid(SID.into()),
-        }
-    }
-
-    /// Render a system service of `role` pinned to `pin`.
-    fn render(
-        role: &str,
-        executable: &Path,
-        config: &Path,
-        state: &Path,
-        pin: &Pin,
-    ) -> Result<ServiceSpec> {
+    /// Render a system service of `role`.
+    fn render(role: &str, executable: &Path, config: &Path, state: &Path) -> Result<ServiceSpec> {
         ServiceSpec::render(&RegistrationInput {
-            scope: crate::service::ServiceScope::System,
-            pin: Some(pin),
+            tier: crate::Tier::System,
             ..registration(role, executable, config, state)
         })
     }
@@ -828,58 +766,12 @@ mod tests {
             Path::new(r"C:\bin\iroh-tunnel.exe"),
             Path::new(&cfg),
             Path::new(r"C:\ProgramData\iroh-tunnel"),
-            &pin(Path::new(&cfg)),
         )
         .unwrap()
     }
 
     fn spec() -> ServiceSpec {
         spec_for("serve")
-    }
-
-    #[test]
-    fn rendered_description_round_trips_through_pin_find() {
-        let s = spec();
-        assert_eq!(
-            Pin::find(&s.description),
-            Some(pin(Path::new(r"C:\cfg\serve.toml")))
-        );
-    }
-
-    #[test]
-    fn service_registered_reflects_scm_state() {
-        assert!(!service_registered(&mut FakeScm::with(None), "serve").unwrap());
-        assert!(service_registered(&mut FakeScm::with(Some(ScmState::Stopped)), "serve").unwrap());
-        assert!(service_registered(&mut FakeScm::with(Some(ScmState::Running)), "serve").unwrap());
-    }
-
-    #[test]
-    fn registration_body_is_none_only_when_absent() {
-        let mut port = FakeScm::with(None);
-        assert_eq!(existing_registration_body(&mut port, SERVE).unwrap(), None);
-    }
-
-    #[test]
-    fn registration_body_returns_the_pin_description() {
-        let mut port = FakeScm::with(Some(ScmState::Running));
-        port.description = Some("iroh-tunnel-pin config=C:/a.toml sid=S-1-5-18".into());
-        assert_eq!(
-            existing_registration_body(&mut port, SERVE)
-                .unwrap()
-                .as_deref(),
-            Some("iroh-tunnel-pin config=C:/a.toml sid=S-1-5-18")
-        );
-    }
-
-    #[test]
-    fn registration_body_of_a_pinless_service_is_empty_not_absent() {
-        let mut port = FakeScm::with(Some(ScmState::Stopped));
-        assert_eq!(
-            existing_registration_body(&mut port, SERVE)
-                .unwrap()
-                .as_deref(),
-            Some("")
-        );
     }
 
     fn service_msg(err: anyhow::Error) -> String {
@@ -909,15 +801,39 @@ mod tests {
                     "IROH_TUNNEL_STATE_DIR".to_string(),
                     r"C:\ProgramData\iroh-tunnel".to_string()
                 ),
-                ("IROH_TUNNEL_TRUSTED_SID".to_string(), SID.to_string()),
                 ("IROH_TUNNEL_SCM".to_string(), "1".to_string()),
             ]
         );
-        assert_eq!(
-            s.description,
-            format!("# {}", pin(Path::new(r"C:\cfg\serve.toml")).record())
-        );
+        assert_eq!(s.description, "Iroh Tunnel (serve), system tier");
         assert!(s.failure.is_some());
+    }
+
+    #[test]
+    fn windows_service_env_has_scm_marker_and_no_sid() {
+        let cfg = Path::new(r"C:\ProgramData\iroh-tunnel\config\serve.toml");
+        let s = ServiceSpec::render(&RegistrationInput {
+            tier: crate::Tier::System,
+            ..registration(
+                "serve",
+                Path::new(r"C:\bin\iroh-tunnel.exe"),
+                cfg,
+                Path::new(r"C:\ProgramData\iroh-tunnel\state"),
+            )
+        })
+        .unwrap();
+        let keys: Vec<&str> = s
+            .env
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| !k.starts_with("IROH_TUNNEL_TEST_") && *k != "IROH_TUNNEL_MACHINE_LOCK_DIR")
+            .collect();
+        assert_eq!(keys, ["IROH_TUNNEL_STATE_DIR", "IROH_TUNNEL_SCM"]);
+        assert!(s.env.contains(&("IROH_TUNNEL_SCM".into(), "1".into())));
+        assert!(
+            !s.description.contains("iroh-tunnel-pin"),
+            "{}",
+            s.description
+        );
     }
 
     #[test]
@@ -934,7 +850,7 @@ mod tests {
     #[test]
     fn render_rejects_unknown_role() {
         let cfg = Path::new(r"C:\cfg\x.toml");
-        let err = render("bogus", cfg, cfg, cfg, &pin(cfg)).unwrap_err();
+        let err = render("bogus", cfg, cfg, cfg).unwrap_err();
         assert!(service_msg(err).contains("bogus"));
     }
 
@@ -942,14 +858,7 @@ mod tests {
     fn service_spec_keeps_paths_with_spaces_and_unicode() {
         let exe = Path::new(r"C:\Program Files\iroh-tunnel\iroh-tunnel.exe");
         let cfg = Path::new(r"C:\Users\Nguyễn Văn\AppData\Local\iroh-tunnel\config\serve.toml");
-        let s = render(
-            "serve",
-            exe,
-            cfg,
-            Path::new(r"C:\ProgramData\iroh-tunnel"),
-            &pin(cfg),
-        )
-        .unwrap();
+        let s = render("serve", exe, cfg, Path::new(r"C:\ProgramData\iroh-tunnel")).unwrap();
         assert_eq!(s.executable, exe);
         assert_eq!(s.launch_arguments[3], OsString::from(cfg));
     }
@@ -975,15 +884,39 @@ mod tests {
         assert_eq!(FailurePlan::from_policy(&p), None);
     }
 
+    /// The service's exit code 6 (clean stop, no recovery) comes only from a
+    /// system-tier claim refused by another system-tier holder; user-tier
+    /// holders of the role never refuse the system service's claim.
+    #[cfg(all(unix, feature = "test-utils"))]
     #[test]
-    fn render_requires_a_sid_pin() {
-        let cfg = Path::new("/etc/cfg.toml");
-        let uid = Pin {
-            config: cfg.to_path_buf(),
-            owner: PinOwner::Uid(1000),
-        };
-        let err = render("serve", cfg, cfg, cfg, &uid).unwrap_err();
-        assert!(service_msg(err).contains("needs a SID pin"));
+    fn scm_conflict_exit_only_for_same_tier() {
+        const NAME: &str =
+            "service::backend::windows_scm::tests::scm_conflict_exit_only_for_same_tier";
+        crate::fixtures::in_isolated_home(NAME, |home| {
+            let set_tier = |tier: &str| {
+                // SAFETY: single test thread in an isolated child process.
+                unsafe { std::env::set_var("IROH_TUNNEL_TEST_TIER", tier) };
+            };
+            // SAFETY: as above.
+            unsafe { std::env::set_var("IROH_TUNNEL_MACHINE_LOCK_DIR", home.join("machine")) };
+            let role = crate::Role::Serve;
+            // A first system start creates the presence file; a user instance
+            // then holds it shared.
+            set_tier("system");
+            drop(crate::ownership::claim(role).unwrap());
+            set_tier("user");
+            let _user = crate::ownership::claim(role).unwrap();
+            set_tier("system");
+            let service = crate::ownership::claim(role)
+                .unwrap_or_else(|e| panic!("a user instance must not stop the service: {e:#}"));
+            // A second system-tier start is the conflict the SCM sees as 6.
+            let err = crate::ownership::claim(role).expect_err("same-tier holder");
+            assert!(
+                matches!(err.downcast_ref::<CliError>(), Some(CliError::Conflict(_))),
+                "{err:?}"
+            );
+            drop(service);
+        });
     }
 
     #[test]
@@ -1244,7 +1177,7 @@ mod tests {
     fn stop_absent_is_install_hint() {
         let mut port = FakeScm::with(None);
         let err = stop_with(&mut port, &mut FakeClock::default(), "serve").unwrap_err();
-        assert!(service_msg(err).contains("service install --system"));
+        assert!(service_msg(err).contains("service install` from an elevated terminal"));
     }
 
     #[test]
@@ -1276,7 +1209,7 @@ mod tests {
     fn start_absent_is_service_error_with_install_hint() {
         let mut port = FakeScm::with(None);
         let err = start_with(&mut port, &mut FakeClock::default(), "serve").unwrap_err();
-        assert!(service_msg(err).contains("service install --system"));
+        assert!(service_msg(err).contains("service install` from an elevated terminal"));
     }
 
     #[test]

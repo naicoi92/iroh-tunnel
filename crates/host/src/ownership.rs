@@ -648,20 +648,9 @@ fn already_running(role: Role, tier: Tier, owner: Option<&OwnerRecord>) -> anyho
 }
 
 fn stop_hint(role: Role) -> String {
-    stop_hint_for(role, "")
-}
-
-/// [`stop_hint`] whose service command carries `scope_flag` (for example
-/// `--system`), for a holder in the other service scope. An empty flag adds
-/// nothing.
-pub(crate) fn stop_hint_scoped(role: Role, scope_flag: &str) -> String {
-    stop_hint_for(role, &format!(" {scope_flag}"))
-}
-
-fn stop_hint_for(role: Role, flag_suffix: &str) -> String {
     let name = role.name();
     format!(
-        "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop{flag_suffix}` for a service); \
+        "stop it first (Ctrl+C for a foreground run, `iroh-tunnel {name} service stop` for a service); \
          nothing is stopped automatically"
     )
 }
@@ -858,10 +847,6 @@ fn ensure_presence_in(role: Role, dir: &Path) -> Result<()> {
 ///
 /// The machine directory cannot be resolved, created or trusted, or the file
 /// cannot be created.
-#[expect(
-    dead_code,
-    reason = "the system install calls this from the service layer; claims go through claim_system"
-)]
 pub(crate) fn ensure_presence_file(role: Role) -> Result<()> {
     let machine = machine_dir()?.context("this platform defines no machine lock directory")?;
     #[cfg(windows)]
@@ -1036,55 +1021,6 @@ fn other_tier_running_in(role: Role, tier: Tier, machine: &Path) -> Option<Tier>
     }
 }
 
-/// Both tiers' lock directories in one value.
-#[derive(Debug, Clone)]
-pub(crate) struct LockDirs {
-    /// The user tier's directory.
-    pub user: PathBuf,
-    /// The machine tier's directory; `None` where the platform defines none.
-    pub machine: Option<PathBuf>,
-}
-
-impl LockDirs {
-    /// Resolve both directories; `home` selects an explicit account home for
-    /// the user tier (Unix only), otherwise the invoking user's directory.
-    ///
-    /// # Errors
-    ///
-    /// The machine lock directory or the user state directory cannot be
-    /// resolved.
-    pub(crate) fn resolve(home: Option<&Path>) -> Result<LockDirs> {
-        Self::resolve_with(home, machine_dir)
-    }
-
-    /// [`LockDirs::resolve`] with the machine resolver injected (called
-    /// first).
-    ///
-    /// # Errors
-    ///
-    /// As [`LockDirs::resolve`].
-    fn resolve_with(
-        home: Option<&Path>,
-        machine: impl FnOnce() -> Result<Option<MachineDir>>,
-    ) -> Result<LockDirs> {
-        let machine = machine()?.map(|m| m.path);
-        #[cfg(unix)]
-        let user = match home {
-            Some(home) => crate::paths::state_dir_in(home),
-            None => user_dir()?,
-        };
-        #[cfg(not(unix))]
-        let user = {
-            let _ = home;
-            user_dir()?
-        };
-        Ok(LockDirs { user, machine })
-    }
-}
-
-/// The seam the install path resolves lock directories through.
-pub(crate) type LockResolver<'a> = &'a dyn Fn(Option<&Path>) -> Result<LockDirs>;
-
 /// Probe exactly `dir` for `role`'s own lock and report it as `tier`.
 ///
 /// # Errors
@@ -1099,21 +1035,6 @@ pub(crate) fn tier_liveness_in(role: Role, tier: Tier, dir: &Path) -> Result<Liv
     } else {
         Ok(Liveness::NotRunning)
     }
-}
-
-/// Liveness of `role` at one tier of `dirs`.
-///
-/// # Errors
-///
-/// As [`tier_liveness_in`].
-pub(crate) fn tier_liveness(role: Role, tier: Tier, dirs: &LockDirs) -> Result<Liveness> {
-    let dir = match tier {
-        Tier::User => Some(&dirs.user),
-        Tier::System => dirs.machine.as_ref(),
-    };
-    dir.map_or(Ok(Liveness::NotRunning), |dir| {
-        tier_liveness_in(role, tier, dir)
-    })
 }
 
 /// A lock held by a test at an explicit directory; released on drop.
@@ -1145,33 +1066,16 @@ fn open_existing(path: &Path, write: bool) -> std::io::Result<Option<File>> {
     }
 }
 
-/// Wait until no process holds `role` in the current tier, polling every
-/// 100 ms.
+/// Wait until no process holds `role` in `tier`, polling every 100 ms; a
+/// holder in the other tier is ignored.
 ///
 /// # Errors
 ///
-/// [`CliError::Service`] when the role still runs after `timeout`; errors from
-/// [`probe`].
-#[cfg_attr(
-    not(windows),
-    expect(dead_code, reason = "only the Windows system verbs wait for release")
-)]
-pub(crate) fn wait_released(role: Role, timeout: std::time::Duration) -> Result<()> {
-    wait_released_in(role, Tier::current(), timeout)
-}
-
-/// Wait until no process holds `role` in `tier`; a holder in the other tier
-/// is ignored.
-///
-/// # Errors
-///
-/// As [`wait_released`], with [`probe_tier`].
+/// [`CliError::Service`] when the role still runs in `tier` after `timeout`;
+/// errors from [`probe_tier`].
 #[cfg_attr(
     not(any(windows, test)),
-    expect(
-        dead_code,
-        reason = "only the Windows system verbs wait for release; the service layer adopts it in a later task"
-    )
+    expect(dead_code, reason = "only the Windows system verbs wait for release")
 )]
 pub(crate) fn wait_released_in(role: Role, tier: Tier, timeout: std::time::Duration) -> Result<()> {
     wait_released_with(role, timeout, |role| probe_tier(role, tier))
@@ -1200,13 +1104,14 @@ fn wait_released_with(
     }
 }
 
-/// Refuse when `role` is running; used before `service start`.
+/// Refuse when `role` is running in `tier`; used before `service start`.
+/// A holder in the other tier never refuses.
 ///
 /// # Errors
 ///
-/// [`CliError::Conflict`] when a process of the role is detected.
-pub(crate) fn ensure_not_running(role: Role) -> Result<()> {
-    match probe(role)? {
+/// [`CliError::Conflict`] when a process of the role runs in `tier`.
+pub(crate) fn ensure_not_running_in(role: Role, tier: Tier) -> Result<()> {
+    match probe_tier(role, tier)? {
         Liveness::NotRunning => Ok(()),
         Liveness::Running { tier, owner } => Err(already_running(role, tier, owner.as_ref())),
     }
@@ -1333,15 +1238,6 @@ mod tests {
         .expect("a user claim never needs the machine directory");
         assert!(dirs.machine.is_none());
         assert!(dirs.user.is_some());
-    }
-
-    #[test]
-    fn lock_dirs_resolution_fails_when_program_data_cannot_be_resolved() {
-        let err = LockDirs::resolve_with(None, || {
-            machine_dir_from_program_data(Err(anyhow::anyhow!("hr")))
-        })
-        .expect_err("must fail closed");
-        assert!(format!("{err:#}").contains("%ProgramData%"), "{err:#}");
     }
 
     #[test]
@@ -1499,23 +1395,6 @@ mod tests {
             dacl == format!("P{aces}") || dacl == format!("PAI{aces}"),
             "{sddl}"
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn lock_dirs_resolve_uses_the_given_home() {
-        let home = tempfile::tempdir().unwrap();
-        let dirs = LockDirs::resolve(Some(home.path())).unwrap();
-        assert_eq!(dirs.user, crate::paths::state_dir_in(home.path()));
-    }
-
-    #[test]
-    fn lock_dirs_resolve_without_home_matches_the_ambient_dirs() {
-        let dirs = LockDirs::resolve(None).ok();
-        assert_eq!(dirs.as_ref().map(|d| d.user.clone()), user_dir().ok());
-        if let Some(dirs) = dirs {
-            assert_eq!(dirs.machine, machine_dir().ok().flatten().map(|m| m.path));
-        }
     }
 
     #[test]

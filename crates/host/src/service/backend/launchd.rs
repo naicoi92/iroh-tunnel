@@ -1,9 +1,9 @@
 //! launchd (macOS) service backend.
 //!
-//! User scope (`--user`) uses `~/Library/LaunchAgents` under the user's own GUI
-//! login domain (`gui/<uid>`) and needs no privileges. System scope
-//! (`--system`) uses a LaunchDaemon under `/Library/LaunchDaemons` and requires
-//! root; the CLI refuses it without privilege before reaching this module.
+//! The user tier (a non-root caller) uses `~/Library/LaunchAgents` under the
+//! user's own GUI login domain (`gui/<uid>`) and needs no privileges. The
+//! system tier (a root caller) uses a LaunchDaemon under
+//! `/Library/LaunchDaemons`.
 //!
 //! Uses the modern launchctl vocabulary (`bootstrap`/`bootout`/`kickstart`/
 //! `kill`/`print`) with explicit domain targets, instead of the legacy
@@ -22,10 +22,9 @@
 
 use super::super::effective_binary::{parse_launchctl_print, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
-use super::super::pin::Pin;
 use super::super::registration::{instance_suffix, write_registration, RegistrationInput};
 use super::super::types::AppliedEffect;
-use super::super::types::ServiceScope;
+use crate::Tier;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,32 +45,32 @@ fn plist_file(role: &str) -> String {
     format!("{}.plist", label(role))
 }
 
-/// Where the plist lives for the given scope.
+/// Where the plist lives for the given tier.
 ///
 /// `User` → `~/Library/LaunchAgents`; `System` → `/Library/LaunchDaemons`.
-fn plist_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
-    Ok(match scope {
-        ServiceScope::System => PathBuf::from("/Library/LaunchDaemons").join(plist_file(role)),
-        ServiceScope::User => {
+fn plist_path(role: &str, tier: Tier) -> Result<PathBuf> {
+    Ok(match tier {
+        Tier::System => PathBuf::from("/Library/LaunchDaemons").join(plist_file(role)),
+        Tier::User => {
             let home = dirs::home_dir().context("no home directory")?;
             home.join("Library/LaunchAgents").join(plist_file(role))
         }
     })
 }
 
-/// Domain target for `bootstrap`/`bootout`: `system` for System scope,
-/// `gui/<uid>` for User scope (the per-user GUI login domain).
-fn domain_target(scope: ServiceScope) -> String {
-    match scope {
-        ServiceScope::System => "system".to_string(),
-        ServiceScope::User => format!("gui/{}", uid()),
+/// Domain target for `bootstrap`/`bootout`: `system` for System tier,
+/// `gui/<uid>` for User tier (the per-user GUI login domain).
+fn domain_target(tier: Tier) -> String {
+    match tier {
+        Tier::System => "system".to_string(),
+        Tier::User => format!("gui/{}", uid()),
     }
 }
 
 /// Fully-qualified service target for `kickstart`/`kill`/`print`:
 /// `system/<label>` or `gui/<uid>/<label>`.
-fn service_target(role: &str, scope: ServiceScope) -> String {
-    format!("{}/{}", domain_target(scope), label(role))
+fn service_target(role: &str, tier: Tier) -> String {
+    format!("{}/{}", domain_target(tier), label(role))
 }
 
 /// Escape `&`, `<`, `>` for safe inclusion in a plist `<string>` element.
@@ -93,7 +92,6 @@ fn format_plist(reg: &RegistrationInput<'_>) -> String {
         binary,
         config,
         state,
-        pin,
         policy,
         ..
     } = *reg;
@@ -118,18 +116,10 @@ fn format_plist(reg: &RegistrationInput<'_>) -> String {
     } else {
         ""
     };
-    // A system daemon reads a user's files as root: say whose (SM-04).
-    let pin_comment = pin.map_or_else(String::new, |p| format!("<!-- {} -->\n", p.record()));
-    // A SID pin is rejected by `install` before this runs.
-    let trust_env = pin.and_then(Pin::unix_uid).map_or_else(String::new, |uid| {
-        format!(
-            "\t\t<key>{}</key>\n\t\t<string>{uid}</string>\n",
-            super::super::trust::ENV_TRUSTED_UID,
-        )
-    });
+    // The service marker tells `run` a service manager started it.
+    let marker = super::super::ENV_SERVICE;
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         {pin_comment}\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
          <dict>\n\
@@ -147,7 +137,8 @@ fn format_plist(reg: &RegistrationInput<'_>) -> String {
          \t<dict>\n\
          \t\t<key>IROH_TUNNEL_STATE_DIR</key>\n\
          \t\t<string>{state}</string>\n\
-         {trust_env}\
+         \t\t<key>{marker}</key>\n\
+         \t\t<string>1</string>\n\
          \t</dict>\n\
          \t<key>RunAtLoad</key>\n\
          \t<true/>\n\
@@ -168,13 +159,8 @@ fn run_launchctl(native: &mut Native, args: &[&str]) -> Result<()> {
 }
 
 /// Where the plist is (or would be).
-pub(crate) fn registration_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
-    plist_path(role, scope)
-}
-
-/// The installed plist's text, if any (to read its pin).
-pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
-    super::super::registration::read_registration(&plist_path(role, scope).ok()?)
+pub(crate) fn registration_path(role: &str, tier: Tier) -> Result<PathBuf> {
+    plist_path(role, tier)
 }
 
 pub(crate) fn install(
@@ -182,13 +168,12 @@ pub(crate) fn install(
     notes: &mut dyn FnMut(&ServiceNote),
     reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    super::super::pin::require_unix_pin(reg.pin)?;
     let plist = format_plist(reg);
-    let (role, scope) = (reg.role, reg.scope);
-    let path = plist_path(role, scope)?;
+    let (role, tier) = (reg.role, reg.tier);
+    let path = plist_path(role, tier)?;
     write_registration(&path, &plist)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));
-    load(native, notes, role, scope, &path)?;
+    load(native, notes, role, tier, &path)?;
     notes(&ServiceNote::Installed {
         name: label(role),
         at: InstalledAt::Path(path),
@@ -204,11 +189,11 @@ fn load(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
     path: &Path,
 ) -> Result<()> {
-    let target = service_target(role, scope);
-    let domain = domain_target(scope);
+    let target = service_target(role, tier);
+    let domain = domain_target(tier);
     let path_str = path.to_string_lossy().into_owned();
 
     // Clear any persistent per-domain disable flag for this label first;
@@ -291,12 +276,12 @@ pub(crate) fn uninstall(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<()> {
-    let path = plist_path(role, scope)?;
+    let path = plist_path(role, tier)?;
     // Best-effort bootout: the job may not be loaded. A bounded wait follows a
     // successful bootout so the release step usually sees the job gone.
-    if bootout_job(native, &service_target(role, scope), UNLOAD_POLL) {
+    if bootout_job(native, &service_target(role, tier), UNLOAD_POLL) {
         native.applied(AppliedEffect::Stopped);
         native.applied(AppliedEffect::Disabled);
     }
@@ -309,10 +294,10 @@ pub(crate) fn uninstall(
     Ok(())
 }
 
-pub(crate) fn start(native: &mut Native, role: &str, scope: ServiceScope) -> Result<()> {
+pub(crate) fn start(native: &mut Native, role: &str, tier: Tier) -> Result<()> {
     // `kickstart` starts the job now if stopped, or restarts it if running.
-    run_launchctl(native, &["kickstart", &service_target(role, scope)])
-        .with_context(|| not_loaded_hint(role, scope))?;
+    run_launchctl(native, &["kickstart", &service_target(role, tier)])
+        .with_context(|| not_loaded_hint(role, tier))?;
     native.applied(AppliedEffect::Started);
     Ok(())
 }
@@ -321,7 +306,7 @@ pub(crate) fn stop(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<()> {
     // SIGTERM triggers our graceful shutdown (src/shutdown.rs). Because the
     // plist's KeepAlive only respawns on *unsuccessful* exit, a clean
@@ -332,7 +317,7 @@ pub(crate) fn stop(
     // stopped. Like `systemctl stop` on an inactive unit, treat that as
     // success (idempotent) rather than an error, so operators can re-run
     // `stop` safely.
-    let target = service_target(role, scope);
+    let target = service_target(role, tier);
     // Always captured, even when inheriting: the stderr text decides the
     // outcome below.
     let output = native
@@ -353,7 +338,7 @@ pub(crate) fn stop(
     // Genuine failure (e.g. service not loaded at all): distinguish via a
     // probe so the hint is accurate.
     if !is_loaded(native, &target)? {
-        bail!("{}", not_loaded_hint(role, scope));
+        bail!("{}", not_loaded_hint(role, tier));
     }
     bail!(
         "launchctl kill SIGTERM {target} failed with {status}: {stderr}",
@@ -363,7 +348,7 @@ pub(crate) fn stop(
 
 /// What launchd will run for the role's system job, from the loaded job.
 pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBinary {
-    print_definition(native, &service_target(role, ServiceScope::System))
+    print_definition(native, &service_target(role, Tier::System))
 }
 
 /// Classify `launchctl print <target>` into the definition launchd holds.
@@ -393,31 +378,30 @@ pub(crate) fn restart(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<()> {
     // `kickstart -k` kills any running instance before starting a fresh
     // one. Without `-k`, kickstart is a no-op when the service is already
     // running (it only satisfies the "run now" condition), so a plain
     // `kickstart` would silently fail to restart a live service.
-    run_launchctl(native, &["kickstart", "-k", &service_target(role, scope)])
-        .with_context(|| not_loaded_hint(role, scope))?;
+    run_launchctl(native, &["kickstart", "-k", &service_target(role, tier)])
+        .with_context(|| not_loaded_hint(role, tier))?;
     native.applied(AppliedEffect::Started);
     Ok(())
 }
 
 /// Hint shown when `kickstart`/`kill` fail: either the service was never
-/// installed in this scope, or it was installed in a *different* scope.
-fn not_loaded_hint(role: &str, scope: ServiceScope) -> String {
-    let (this_scope, other_flag) = match scope {
-        // Default is User, so the more common mismatch is "installed as
-        // system, tried without --system".
-        ServiceScope::User => ("user (LaunchAgent)", "--system"),
-        ServiceScope::System => ("system (LaunchDaemon)", "--user"),
+/// installed in this tier, or it was installed in the other tier, which the
+/// same command reaches with (or without) elevation.
+fn not_loaded_hint(role: &str, tier: Tier) -> String {
+    let (this_tier, other) = match tier {
+        Tier::User => ("user (LaunchAgent)", "with sudo"),
+        Tier::System => ("system (LaunchDaemon)", "without sudo"),
     };
     format!(
-        "no service '{0}' is loaded in the {this_scope} domain. \
+        "no service '{0}' is loaded in the {this_tier} domain. \
          Install it first with `iroh-tunnel {role} service install`, \
-         or it may be installed in the other scope (try {other_flag}).",
+         or it may be installed in the other tier (run the command {other}).",
         label(role)
     )
 }
@@ -426,7 +410,7 @@ pub(crate) fn status(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<NativeOutput> {
     // `launchctl print <target>` shows pid/state/last exit code. Read-only,
     // so no root requirement is enforced (system-domain prints may still be
@@ -434,7 +418,7 @@ pub(crate) fn status(
     // Non-zero typically means the job isn't loaded; informative, not fatal,
     // so the status is not checked.
     native
-        .run(std::process::Command::new("launchctl").args(["print", &service_target(role, scope)]))
+        .run(std::process::Command::new("launchctl").args(["print", &service_target(role, tier)]))
         .context("failed to run launchctl print")
 }
 
@@ -442,16 +426,14 @@ pub(crate) fn status(
 mod tests {
     #[test]
     fn plist_matches_golden_for_every_case() {
-        use super::super::super::fixtures::{assert_golden, cases, unix_paths, unix_pin};
+        use super::super::super::fixtures::{assert_golden, cases, unix_paths};
         let mut all = String::new();
         for case in cases() {
             let paths = unix_paths(case.role);
-            let pin = unix_pin(case.scope, &paths.config);
             all.push_str(&case.header());
             all.push_str(&format_plist(&RegistrationInput {
                 invocation: &case.invocation,
-                scope: case.scope,
-                pin: pin.as_ref(),
+                tier: case.tier,
                 ..registration(case.role, &paths.binary, &paths.config, &paths.state)
             }));
         }
@@ -534,7 +516,7 @@ mod tests {
         );
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
-        let target = service_target("serve", ServiceScope::System);
+        let target = service_target("serve", Tier::System);
         assert!(bootout_job(&mut native, &target, fast_poll(5)));
         assert_eq!(
             *events.borrow(),
@@ -560,7 +542,7 @@ mod tests {
         );
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
-        let target = service_target("serve", ServiceScope::System);
+        let target = service_target("serve", Tier::System);
         assert!(!bootout_job(&mut native, &target, fast_poll(5)));
         assert_eq!(events.borrow().len(), 1, "no print after a failed bootout");
     }
@@ -579,7 +561,7 @@ mod tests {
         );
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
-        let target = service_target("serve", ServiceScope::System);
+        let target = service_target("serve", Tier::System);
         assert!(!wait_until_unloaded(&mut native, &target, fast_poll(3)));
         assert_eq!(events.borrow().len(), 3, "exactly the check limit");
     }
@@ -593,7 +575,7 @@ mod tests {
         );
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
-        let target = service_target("serve", ServiceScope::System);
+        let target = service_target("serve", Tier::System);
         assert!(!wait_until_unloaded(&mut native, &target, fast_poll(5)));
         assert_eq!(
             events.borrow().len(),
@@ -662,7 +644,7 @@ mod tests {
         let mut fake = FakeRunner::new(&events, vec![output(0, "state = running\n", "")]);
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Capture, &mut runner);
-        let out = status(&mut native, &mut |_| {}, "serve", ServiceScope::System).unwrap();
+        let out = status(&mut native, &mut |_| {}, "serve", Tier::System).unwrap();
         assert_eq!(out.stdout, b"state = running\n");
         assert_eq!(
             *events.borrow(),
@@ -688,7 +670,7 @@ mod tests {
             &mut native,
             &mut |_| {},
             "serve",
-            ServiceScope::System,
+            Tier::System,
             Path::new("/tmp/x.plist"),
         )
         .unwrap();
@@ -724,7 +706,7 @@ mod tests {
             &mut native,
             &mut |_| {},
             "serve",
-            ServiceScope::User,
+            Tier::User,
             Path::new("/tmp/x.plist"),
         )
         .unwrap_err();
@@ -749,7 +731,7 @@ mod tests {
             &mut native,
             &mut |_| {},
             "serve",
-            ServiceScope::System,
+            Tier::System,
             Path::new("/tmp/x.plist"),
         )
         .unwrap();
@@ -767,14 +749,7 @@ mod tests {
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
         let mut notes = note_sink(&events);
         let plist = PathBuf::from("/tmp/x.plist");
-        let err = load(
-            &mut native,
-            &mut notes,
-            "serve",
-            ServiceScope::System,
-            &plist,
-        )
-        .unwrap_err();
+        let err = load(&mut native, &mut notes, "serve", Tier::System, &plist).unwrap_err();
         assert!(format!("{err:#}").contains("failed to load service into launchd"));
         assert_eq!(
             *events.borrow(),
@@ -809,7 +784,7 @@ mod tests {
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
         let mut notes = note_sink(&events);
-        stop(&mut native, &mut notes, "serve", ServiceScope::System).unwrap();
+        stop(&mut native, &mut notes, "serve", Tier::System).unwrap();
         assert_eq!(
             *events.borrow(),
             vec![
@@ -849,6 +824,42 @@ mod tests {
     }
 
     #[test]
+    fn not_loaded_hint_names_elevation_not_scope_flags() {
+        let user = not_loaded_hint("serve", Tier::User);
+        assert!(user.contains("user (LaunchAgent)"), "{user}");
+        assert!(user.contains("with sudo"), "{user}");
+        let system = not_loaded_hint("serve", Tier::System);
+        assert!(system.contains("system (LaunchDaemon)"), "{system}");
+        assert!(system.contains("without sudo"), "{system}");
+        for text in [user, system] {
+            assert!(
+                !text.contains("--system") && !text.contains("--user"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn launchd_plist_has_service_marker_and_no_pin() {
+        let body = format_plist(&RegistrationInput {
+            tier: Tier::System,
+            ..registration(
+                "serve",
+                Path::new("/usr/local/bin/iroh-tunnel"),
+                Path::new("/Library/Application Support/iroh-tunnel/config/serve.toml"),
+                Path::new("/private/var/run/iroh-tunnel"),
+            )
+        });
+        assert!(
+            body.contains("<key>IROH_TUNNEL_SERVICE</key>\n\t\t<string>1</string>"),
+            "{body}"
+        );
+        assert!(body.contains("<key>IROH_TUNNEL_STATE_DIR</key>"), "{body}");
+        assert!(!body.contains("iroh-tunnel-pin"), "{body}");
+        assert!(!body.contains("IROH_TUNNEL_TRUSTED_UID"), "{body}");
+    }
+
+    #[test]
     fn plist_pins_config_argument_and_state_dir_environment() {
         let body = format_plist(&registration(
             "serve",
@@ -866,7 +877,7 @@ mod tests {
     #[test]
     fn plist_path_user_is_under_launchagents() {
         // We can't assert the exact home in CI, but the suffix is stable.
-        let p = plist_path("serve", ServiceScope::User).unwrap();
+        let p = plist_path("serve", Tier::User).unwrap();
         assert!(p.ends_with("Library/LaunchAgents/dev.iroh-tunnel.serve.plist"));
     }
 
@@ -896,24 +907,24 @@ mod tests {
         // service target MUST be domain-qualified so launchctl looks in the
         // right domain, not the caller's GUI domain.
         assert_eq!(
-            service_target("access", ServiceScope::System),
+            service_target("access", Tier::System),
             "system/dev.iroh-tunnel.access"
         );
     }
 
     #[test]
     fn service_target_uses_gui_domain_for_user_scope() {
-        // User scope targets the per-user GUI domain: gui/<uid>/<label>.
-        let t = service_target("serve", ServiceScope::User);
+        // User tier targets the per-user GUI domain: gui/<uid>/<label>.
+        let t = service_target("serve", Tier::User);
         assert!(
             t.starts_with("gui/") && t.ends_with("/dev.iroh-tunnel.serve"),
-            "unexpected user-scope target: {t}"
+            "unexpected user-tier target: {t}"
         );
     }
 
     #[test]
     fn domain_target_system_is_plain_system() {
-        assert_eq!(domain_target(ServiceScope::System), "system");
+        assert_eq!(domain_target(Tier::System), "system");
     }
 
     #[test]

@@ -159,10 +159,7 @@ mod tests {
     fn task_matches_golden_for_every_user_case() {
         use super::super::fixtures::{assert_golden, cases};
         let mut all = String::new();
-        for case in cases()
-            .into_iter()
-            .filter(|c| c.scope == super::super::types::ServiceScope::User)
-        {
+        for case in cases().into_iter().filter(|c| c.tier == crate::Tier::User) {
             let config = format!(r"C:\Users\a b\it's & <cfg>\{}.toml", case.role);
             let action = task_action(&RegistrationInput {
                 invocation: &case.invocation,

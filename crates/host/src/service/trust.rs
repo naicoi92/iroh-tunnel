@@ -1,11 +1,11 @@
 //! Privileged configuration trust policy (SM-04, SM-05; issue #79 / #91).
 //!
-//! A system service runs as root but reads files in the installing user's
-//! home. Root must therefore refuse a path that an *untrusted* principal can
-//! change, or it would act on attacker-chosen content (or write through an
+//! A system service runs as root and reads its machine-wide config and state
+//! directory. Root must therefore refuse a path that an *untrusted* principal
+//! can change, or it would act on attacker-chosen content (or write through an
 //! attacker-chosen link).
 //!
-//! - **Trusted principals:** root and the one UID recorded at install time.
+//! - **Trusted principals:** root only (plus one test-build owner).
 //! - **Check:** descend from `/` one component at a time with no-follow,
 //!   handle-relative `openat`, `fstat` every opened handle and refuse when an
 //!   untrusted principal can write to the file or any directory above it. The
@@ -29,9 +29,6 @@ use anyhow::{Context, Result};
 
 use crate::error::CliError;
 
-/// Set by the root-owned registration of a system service: the UID whose
-/// files the service may trust besides root. Its presence turns the checks on.
-pub const ENV_TRUSTED_UID: &str = "IROH_TUNNEL_TRUSTED_UID";
 const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
 
 const S_IFMT: u32 = 0o170_000;
@@ -47,15 +44,11 @@ fn refuse(msg: String) -> anyhow::Error {
 /// The principals whose ownership the trust walk accepts.
 ///
 /// A system service trusts only root ([`TrustedOwners::RootOnly`]) for its
-/// binary, config, state directory and status files. [`TrustedOwners::RootAnd`]
-/// is the pinned-user policy of the installer, kept until the installer
-/// stops pinning a user.
+/// binary, config, state directory and status files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrustedOwners {
     /// Only root (uid 0).
     RootOnly,
-    /// Root and the given uid.
-    RootAnd(u32),
     /// Root and the one uid a test build adds through
     /// `IROH_TUNNEL_TEST_TRUSTED_OWNER`; never built in production.
     #[cfg(any(test, feature = "test-utils"))]
@@ -67,7 +60,6 @@ impl TrustedOwners {
     pub(crate) fn trusts(self, owner: u32) -> bool {
         match self {
             Self::RootOnly => owner == 0,
-            Self::RootAnd(uid) => owner == 0 || owner == uid,
             #[cfg(any(test, feature = "test-utils"))]
             Self::TestOwner(uid) => owner == 0 || owner == uid,
         }
@@ -76,7 +68,6 @@ impl TrustedOwners {
     fn describe(self) -> String {
         match self {
             Self::RootOnly => "root".to_owned(),
-            Self::RootAnd(uid) => format!("root or the installing user (uid {uid})"),
             #[cfg(any(test, feature = "test-utils"))]
             Self::TestOwner(uid) => format!("root or the test owner (uid {uid})"),
         }
@@ -418,39 +409,13 @@ fn create_child_dir(
     Entry::new(child.file, child.path)
 }
 
-/// Verify a directory (e.g. the state directory) the root service writes in.
-///
-/// # Errors
-///
-/// [`CliError::Permission`] naming the unsafe path, owner and mode, or when the
-/// directory is missing (the service never creates it as root).
-pub fn verify_dir(path: &Path, trusted_uid: u32) -> Result<()> {
-    if !path.exists() {
-        return Err(refuse(format!(
-            "{} does not exist; create it as the installing user (`mkdir -p`) — the service \
-             does not create directories in a user's home as root",
-            path.display()
-        )));
-    }
-    walk(path, TrustedOwners::RootAnd(trusted_uid), EntryKind::Dir).map(drop)
-}
-
-/// Verify `path` and return its text read from the verified handle.
-///
-/// # Errors
-///
-/// [`CliError::Permission`] when the path or any parent is unsafe.
-pub fn read_verified(path: &Path, trusted_uid: u32) -> Result<String> {
-    read_verified_with(path, TrustedOwners::RootAnd(trusted_uid))
-}
-
 /// Verify the existing directory `path` against `owners`.
 ///
 /// # Errors
 ///
 /// [`CliError::Permission`] naming the unsafe path, owner and mode, or when the
 /// directory is missing.
-fn verify_dir_with(path: &Path, owners: TrustedOwners) -> Result<()> {
+pub(crate) fn verify_dir_with(path: &Path, owners: TrustedOwners) -> Result<()> {
     if !path.exists() {
         return Err(refuse(format!(
             "{} does not exist; re-run the elevated `service install`, which creates it",
@@ -466,7 +431,7 @@ fn verify_dir_with(path: &Path, owners: TrustedOwners) -> Result<()> {
 /// # Errors
 ///
 /// [`CliError::Permission`] when the path or any parent is unsafe.
-fn read_verified_with(path: &Path, owners: TrustedOwners) -> Result<String> {
+pub(crate) fn read_verified_with(path: &Path, owners: TrustedOwners) -> Result<String> {
     let mut entry = walk(path, owners, EntryKind::File)?;
     let mut text = String::new();
     entry
@@ -662,24 +627,6 @@ fn cstring(text: &str) -> Result<CString> {
     CString::new(text).with_context(|| format!("{text:?} contains a NUL byte"))
 }
 
-/// The trust policy requested by the registration, if any.
-#[expect(
-    dead_code,
-    reason = "the run path refuses this pin as legacy; removed with the installer pin"
-)]
-pub(crate) fn trusted_uid_from_env() -> Result<Option<u32>> {
-    match std::env::var(ENV_TRUSTED_UID) {
-        Ok(value) => value.trim().parse().map(Some).map_err(|_| {
-            CliError::Config(format!(
-                "{ENV_TRUSTED_UID} must be a numeric uid; re-run the service install"
-            ))
-            .into()
-        }),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(CliError::Config(format!("{ENV_TRUSTED_UID}: {e}")).into()),
-    }
-}
-
 /// The config text of a system service, read from a verified handle after
 /// the state directory (`IROH_TUNNEL_STATE_DIR` in `env`) and the config were
 /// verified against the admin-only owners.
@@ -742,14 +689,6 @@ mod tests {
             TrustedOwners::TestOwner(4242)
         );
         assert!(admin_owners(Some(OsStr::new("alice"))).is_err());
-    }
-
-    #[test]
-    fn pinned_read_verified_still_trusts_the_pinned_uid() {
-        // Kept for the installer until it stops pinning a user.
-        let (_tmp, file) = fixture();
-        assert_eq!(read_verified(&file, me()).unwrap(), "x = 1\n");
-        verify_dir(file.parent().unwrap(), me()).unwrap();
     }
 
     #[test]

@@ -16,7 +16,6 @@ mod default_config_path;
 mod default_config_path_for;
 mod default_state_dir;
 mod default_state_dir_for;
-mod in_home;
 mod locations;
 mod set_migration_notice;
 
@@ -24,10 +23,6 @@ pub use default_config_path::default_config_path;
 pub use default_config_path_for::default_config_path_for;
 pub use default_state_dir::default_state_dir;
 pub use default_state_dir_for::default_state_dir_for;
-#[cfg(unix)]
-pub(crate) use in_home::{config_path_in, state_dir_in};
-#[cfg(any(windows, test))]
-pub(crate) use in_home::{windows_config_path_in, windows_state_path_in};
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) use locations::local_app_data;
 pub use set_migration_notice::{set_migration_notice, MigrationNotice};

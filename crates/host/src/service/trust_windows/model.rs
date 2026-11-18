@@ -60,7 +60,8 @@ const RIGHT_NAMES: [(u32, &str); 9] = [
     (GENERIC_WRITE, "GENERIC_WRITE"),
 ];
 
-/// Parse `^S-1-\d+(-\d+)+$`.
+/// Parse `^S-1-\d+(-\d+)+$` (the test-build trusted owner).
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn parse_sid(s: &str) -> Option<Sid> {
     let rest = s.strip_prefix("S-1-")?;
     let mut parts = rest.split('-');
@@ -103,13 +104,6 @@ pub(crate) struct Descriptor {
 pub(crate) struct TrustedSet(Vec<Sid>);
 
 impl TrustedSet {
-    /// Config/state files: system principals plus the pinned user.
-    pub(crate) fn for_user_files(pinned: &Sid) -> Self {
-        let mut set = Self::for_binary();
-        set.0.push(pinned.clone());
-        set
-    }
-
     pub(crate) fn for_binary() -> Self {
         Self(vec![
             Sid(SYSTEM.into()),
@@ -466,7 +460,7 @@ mod tests {
         }
     }
     fn set() -> TrustedSet {
-        TrustedSet::for_user_files(&pinned())
+        TrustedSet::admin_with_test_owner(pinned())
     }
     fn good_chain() -> Vec<Descriptor> {
         vec![
@@ -1151,6 +1145,9 @@ mod tests {
                 false,
             ),
         ];
-        assert_eq!(evaluate(&chain, &TrustedSet::for_user_files(&la)), Ok(()));
+        assert_eq!(
+            evaluate(&chain, &TrustedSet::admin_with_test_owner(la)),
+            Ok(())
+        );
     }
 }

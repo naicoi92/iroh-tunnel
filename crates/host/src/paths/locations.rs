@@ -1,6 +1,6 @@
 //! Platform base directories shared by the path operations.
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -40,13 +40,13 @@ pub(crate) fn local_app_data() -> Result<PathBuf> {
 }
 
 /// Config directory under a Windows LocalAppData `root`.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(super) fn windows_config_dir(root: &Path) -> PathBuf {
     root.join(APP_DIR).join("config")
 }
 
 /// State directory under a Windows LocalAppData `root`.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(super) fn windows_state_dir(root: &Path) -> PathBuf {
     root.join(APP_DIR).join("state")
 }

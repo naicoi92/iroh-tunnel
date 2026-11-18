@@ -1,10 +1,6 @@
 //! #90: install and manage a user service, driven through the real binary.
 //!
 //! Acceptance map:
-//! - SM-SCOPE-01 (90.CL1): the non-elevated interactive install offers
-//!   user/system; `system` without privilege stops with rerun guidance that
-//!   keeps the intended arguments and absolute paths, never elevates, never
-//!   falls back to a user service and registers nothing.
 //! - SM-PERMISSION-01 (90.AC2): a denied registration fails with guidance and
 //!   leaves scope and account unchanged.
 //! - SM-USER-01 / SM-PATH-01 (90.AC1, 90.CL2): the real user-service manager
@@ -114,21 +110,6 @@ impl Fixture {
     fn run(&self, args: &[&str]) -> Result<Output> {
         Ok(self.command(args).output()?)
     }
-    /// Answers a prompt through the root crate's `test-utils` seam
-    /// `IROH_TUNNEL_TEST_INTERACTIVE`; only built with that feature.
-    #[cfg(feature = "test-utils")]
-    fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Result<Output> {
-        use std::io::Write;
-        let mut child = self
-            .command(args)
-            .env("IROH_TUNNEL_TEST_INTERACTIVE", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        child.stdin.take().unwrap().write_all(stdin.as_bytes())?;
-        Ok(child.wait_with_output()?)
-    }
     /// Everything a service manager could have been told, under `HOME`.
     fn registrations(&self) -> Vec<PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -147,96 +128,6 @@ impl Fixture {
         walk(&self.home(), &mut found);
         found
     }
-}
-
-#[test]
-fn system_install_without_privilege_stops_with_rerun_guidance() -> Result<()> {
-    if is_root() {
-        return Ok(());
-    }
-    let fx = Fixture::new()?;
-    fx.write_config("https://relay.invalid")?;
-    let config = fx.config();
-
-    let out = fx.run(&[
-        "serve",
-        "service",
-        "install",
-        "--system",
-        "--config",
-        config.to_str().unwrap(),
-    ])?;
-    let err = stderr(&out);
-
-    assert_eq!(out.status.code(), Some(3), "stderr: {err}");
-    assert!(err.contains("sudo"), "no elevation guidance: {err}");
-    assert!(
-        err.contains("serve service install --system"),
-        "intended arguments not preserved: {err}"
-    );
-    assert!(
-        err.contains(config.to_str().unwrap()),
-        "absolute config path not preserved: {err}"
-    );
-    assert!(
-        fx.registrations().is_empty(),
-        "nothing may be registered or silently fall back to a user service: {:?}",
-        fx.registrations()
-    );
-    Ok(())
-}
-
-#[test]
-fn system_scope_operations_without_privilege_are_refused_with_guidance() -> Result<()> {
-    if is_root() {
-        return Ok(());
-    }
-    let fx = Fixture::new()?;
-    for verb in ["uninstall", "start", "stop", "restart"] {
-        let out = fx.run(&["serve", "service", verb, "--system"])?;
-        let err = stderr(&out);
-        assert_eq!(out.status.code(), Some(3), "{verb}: {err}");
-        assert!(
-            err.contains(&format!("sudo iroh-tunnel serve service {verb} --system")),
-            "{verb}: {err}"
-        );
-    }
-    Ok(())
-}
-
-// Needs `IROH_TUNNEL_TEST_INTERACTIVE` (root `test-utils`); run with `--all-features`.
-#[cfg(feature = "test-utils")]
-#[test]
-fn interactive_install_offers_user_or_system_and_system_is_refused_unprivileged() -> Result<()> {
-    if is_root() {
-        return Ok(());
-    }
-    let fx = Fixture::new()?;
-    fx.write_config("https://relay.invalid")?;
-    let config = fx.config();
-    let config = config.to_str().unwrap();
-
-    let out = fx.run_with_stdin(
-        &["serve", "service", "install", "--config", config],
-        "system\n",
-    )?;
-    let err = stderr(&out);
-    assert!(
-        err.contains("user") && err.contains("system"),
-        "no choice offered: {err}"
-    );
-    assert_eq!(out.status.code(), Some(3), "stderr: {err}");
-    assert!(err.contains("sudo") && err.contains(config), "{err}");
-    assert!(fx.registrations().is_empty(), "{:?}", fx.registrations());
-
-    // An unrecognised answer is an error, never a guess.
-    let out = fx.run_with_stdin(
-        &["serve", "service", "install", "--config", config],
-        "maybe\n",
-    )?;
-    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
-    assert!(fx.registrations().is_empty());
-    Ok(())
 }
 
 #[test]
@@ -489,7 +380,7 @@ impl Registered<'_> {
     fn caller(&self, action: &str) -> Command {
         let mut command = Command::new(manage_service_binary());
         command
-            .args(["--role", "serve", "--action", action, "--scope", "user"])
+            .args(["--role", "serve", "--action", action])
             .env("HOME", real_home())
             .env("IROH_TUNNEL_STATE_DIR", self.fx.state())
             .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)

@@ -1,44 +1,12 @@
-//! Platform-support and privilege checks shared by the operations (private).
+//! Privilege checks and shell quoting shared by the operations (private).
 
 use anyhow::Result;
 
-use super::types::ServiceScope;
 use crate::error::CliError;
 
-/// Refuse a scope this platform has no backend for.
-///
-/// Every supported platform (Linux, macOS, Windows) has both scopes, so this
-/// accepts them all; the per-scope privilege and trust checks come later.
-///
-/// # Errors
-///
-/// Never fails today; kept as the single seam for a platform without a backend.
-pub(crate) fn ensure_supported(_scope: ServiceScope) -> Result<()> {
-    Ok(())
-}
-
-/// Refuse a system-scope operation without privilege.
-///
-/// `rerun` holds the argv (after `sudo`) that repeats the intended operation,
-/// with absolute paths already resolved. Nothing is changed.
-///
-/// # Errors
-///
-/// [`CliError::Permission`] with rerun guidance.
-pub(crate) fn ensure_privilege(
-    scope: ServiceScope,
-    elevated: bool,
-    rerun: &[String],
-) -> Result<()> {
-    if scope == ServiceScope::User || elevated {
-        return Ok(());
-    }
-    Err(CliError::Permission(privilege_text(cfg!(windows), rerun)).into())
-}
-
 /// Refuse a root-run registration without privilege. Covers BusyBox hosts,
-/// where even `--user` manages the one system-wide `/etc/init.d` script, so a
-/// user-scope request is never silently turned into a system install.
+/// whose only registration is the system-wide `/etc/init.d` script: a
+/// non-root caller is never silently given a system install.
 ///
 /// # Errors
 ///
@@ -53,56 +21,6 @@ pub(crate) fn ensure_root_run_privilege(root_run: bool, elevated: bool) -> Resul
             .into(),
     )
     .into())
-}
-
-/// Guidance text for a refused system-scope operation (pure; platform passed in).
-fn privilege_text(windows: bool, argv: &[String]) -> String {
-    if windows {
-        let command = argv
-            .iter()
-            .map(|arg| powershell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        // A quoted executable is a string expression in PowerShell, not a
-        // command. Bare combined commands keep their existing invocation form.
-        let call_operator = if argv
-            .first()
-            .is_some_and(|arg| powershell_quote(arg) != *arg)
-        {
-            "& "
-        } else {
-            ""
-        };
-        return format!(
-            "a system service needs Administrator, and nothing was changed (no automatic \
-             elevation, no fallback to a user service). Run as administrator: open an elevated \
-             PowerShell terminal and run `{call_operator}{command}`, or use --user."
-        );
-    }
-    let command = argv
-        .iter()
-        .map(|arg| shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "a system service needs root/Administrator, and nothing was changed (no automatic \
-         elevation, no fallback to a user service). Re-run as an elevated user: \
-         `sudo {command}` (an elevated terminal on Windows), or use --user."
-    )
-}
-
-/// Quote a literal PowerShell argument without variable or backtick expansion.
-/// This is shell guidance, not SCM/CreateProcess command-line serialization.
-fn powershell_quote(arg: &str) -> String {
-    let plain = !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_./\\:-".contains(c));
-    if plain {
-        arg.to_owned()
-    } else {
-        format!("'{}'", arg.replace('\'', "''"))
-    }
 }
 
 /// Quote `arg` for a POSIX shell only when it needs it, for commands shown
@@ -125,37 +43,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_scope_without_privilege_is_a_permission_error_with_the_rerun_command() {
-        let rerun: Vec<String> = [
-            "iroh-tunnel",
-            "serve",
-            "service",
-            "install",
-            "--system",
-            "--config",
-            "/a b/it's.toml",
-        ]
-        .map(str::to_owned)
-        .to_vec();
-        let err = ensure_privilege(ServiceScope::System, false, &rerun).unwrap_err();
-        let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
-            panic!("expected Permission, got {err:?}");
-        };
-        let expected = if cfg!(windows) {
-            "Run as administrator: open an elevated PowerShell terminal and run `iroh-tunnel serve service install --system --config '/a b/it''s.toml'`"
-        } else {
-            r"sudo iroh-tunnel serve service install --system --config '/a b/it'\''s.toml'"
-        };
-        assert!(msg.contains(expected), "{msg}");
-    }
-
-    #[test]
-    fn privilege_is_not_required_for_user_scope_or_when_elevated() {
-        assert!(ensure_privilege(ServiceScope::User, false, &[]).is_ok());
-        assert!(ensure_privilege(ServiceScope::System, true, &[]).is_ok());
-    }
-
-    #[test]
     fn root_run_without_privilege_is_a_permission_error_with_sudo_guidance() {
         let err = ensure_root_run_privilege(true, false).unwrap_err();
         let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
@@ -172,100 +59,10 @@ mod tests {
         assert!(ensure_root_run_privilege(false, true).is_ok());
     }
 
-    fn argv() -> Vec<String> {
-        [
-            "iroh-tunnel",
-            "serve",
-            "service",
-            "install",
-            "--system",
-            "--config",
-            "C:\\Program Files\\x.toml",
-        ]
-        .map(str::to_owned)
-        .to_vec()
-    }
-
     #[test]
-    fn windows_privilege_guidance_invokes_program_files_executable_in_powershell() {
-        for executable in [
-            r"C:\Program Files\iroh-tunnel\iroh-tunnel-serve.exe",
-            r"C:\Program Files\iroh-tunnel\iroh-tunnel-access.exe",
-        ] {
-            for verb in ["install", "uninstall", "start", "stop", "restart", "status"] {
-                let mut args = vec![
-                    executable.to_owned(),
-                    "service".into(),
-                    verb.into(),
-                    "--system".into(),
-                ];
-                if verb == "install" {
-                    args.extend([
-                        "--config".into(),
-                        r"C:\Program Files\it's $config`\role.toml".into(),
-                    ]);
-                }
-                let msg = privilege_text(true, &args);
-                assert!(msg.contains("elevated PowerShell terminal"), "{msg}");
-                assert!(
-                    msg.contains(&format!("`& '{executable}' service {verb} --system")),
-                    "{msg}"
-                );
-                if verb == "install" {
-                    assert!(
-                        msg.contains(r"--config 'C:\Program Files\it''s $config`\role.toml'"),
-                        "{msg}"
-                    );
-                }
-                assert!(!msg.contains("sudo"), "{msg}");
-                assert!(msg.contains("nothing was changed"), "{msg}");
-                assert!(
-                    msg.contains("no automatic elevation, no fallback to a user service"),
-                    "{msg}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn powershell_quote_preserves_literal_arguments() {
-        for (argument, expected) in [
-            (r"C:\Program Files\x", r"'C:\Program Files\x'"),
-            ("a\"b", "'a\"b'"),
-            ("it's", "'it''s'"),
-            ("$config`", "'$config`'"),
-            ("a\tb", "'a\tb'"),
-            ("a;b", "'a;b'"),
-            ("", "''"),
-            ("plain", "plain"),
-        ] {
-            assert_eq!(powershell_quote(argument), expected);
-        }
-    }
-
-    #[test]
-    fn windows_privilege_text_names_run_as_administrator() {
-        let msg = privilege_text(true, &argv());
-        assert!(msg.contains("Run as administrator"), "{msg}");
-        assert!(
-            msg.contains(
-                "`iroh-tunnel serve service install --system --config 'C:\\Program Files\\x.toml'`"
-            ),
-            "{msg}"
-        );
-        assert!(!msg.contains("sudo"), "{msg}");
-    }
-
-    #[test]
-    fn unix_privilege_text_is_unchanged() {
-        let rerun = ["iroh-tunnel", "install", "/a b"]
-            .map(str::to_owned)
-            .to_vec();
-        assert_eq!(
-            privilege_text(false, &rerun),
-            "a system service needs root/Administrator, and nothing was changed (no automatic \
-             elevation, no fallback to a user service). Re-run as an elevated user: \
-             `sudo iroh-tunnel install '/a b'` (an elevated terminal on Windows), or use --user."
-        );
+    fn shell_quote_leaves_plain_words_and_quotes_the_rest() {
+        assert_eq!(shell_quote("/usr/bin/iroh-tunnel"), "/usr/bin/iroh-tunnel");
+        assert_eq!(shell_quote("/a b/it's"), r"'/a b/it'\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 }

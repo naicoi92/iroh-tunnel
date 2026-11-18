@@ -14,17 +14,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use windows_sys::Win32::Foundation::{
-    GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
-    ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
-    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+    ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSidToSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetAce, GetTokenInformation, IsValidSid, LookupAccountSidW, TokenUser, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
+    GetAce, IsValidSid, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileDispositionInfo, FileRenameInfo, FileRenameInfoEx, FlushFileBuffers,
@@ -35,7 +33,6 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::WindowsProgramming::{
     FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
 };
@@ -840,12 +837,17 @@ pub(crate) fn remove_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<
     delete_on_close(&file).with_context(|| format!("failed to remove {name} in {}", dir.display()))
 }
 
-/// The SID of the process token's user.
+/// The SID of the process token's user (tests trust it as the test owner).
 ///
 /// # Errors
 ///
 /// When the token cannot be queried.
+#[cfg(test)]
 pub(crate) fn token_user() -> Result<Sid> {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
     let mut raw: HANDLE = std::ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
     // closing; `raw` is a valid out pointer.
@@ -887,78 +889,6 @@ pub(crate) fn token_user() -> Result<Sid> {
     let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
     // SAFETY: `sid` points inside `buf`, alive for the call.
     unsafe { sid_string(sid) }.context("cannot convert the token user SID")
-}
-
-/// `DOMAIN\name` for `sid`, or `None` when it does not resolve.
-pub(crate) fn account_of(sid: &Sid) -> Option<String> {
-    let text = wide(&sid.0);
-    let mut psid: PSID = std::ptr::null_mut();
-    // SAFETY: `text` is NUL-terminated; `psid` receives a LocalAlloc'ed SID.
-    if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut psid) } == 0 {
-        return None;
-    }
-    let _psid = LocalBox(psid);
-    let (mut name_len, mut domain_len) = (0u32, 0u32);
-    let mut kind: SID_NAME_USE = 0;
-    // SAFETY: a size query: null buffers with zero lengths; the length and
-    // `kind` out pointers are valid; `psid` is alive.
-    let ok = unsafe {
-        LookupAccountSidW(
-            std::ptr::null(),
-            psid,
-            std::ptr::null_mut(),
-            &mut name_len,
-            std::ptr::null_mut(),
-            &mut domain_len,
-            &mut kind,
-        )
-    };
-    // SAFETY: GetLastError has no preconditions.
-    if ok != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
-        return None;
-    }
-    let mut name = vec![0u16; name_len as usize];
-    let mut domain = vec![0u16; domain_len as usize];
-    // SAFETY: the buffers are writable for the lengths passed; `psid` alive.
-    let ok = unsafe {
-        LookupAccountSidW(
-            std::ptr::null(),
-            psid,
-            name.as_mut_ptr(),
-            &mut name_len,
-            domain.as_mut_ptr(),
-            &mut domain_len,
-            &mut kind,
-        )
-    };
-    if ok == 0 {
-        return None;
-    }
-    let name = String::from_utf16(name.get(..name_len as usize)?).ok()?;
-    let domain = String::from_utf16(domain.get(..domain_len as usize)?).ok()?;
-    Some(if domain.is_empty() {
-        name
-    } else {
-        format!("{domain}\\{name}")
-    })
-}
-
-/// The owner of `path` itself (a link is not followed).
-///
-/// # Errors
-///
-/// [`CliError::Permission`] when the path cannot be opened or an element
-/// above it is a reparse point or not a directory.
-pub(crate) fn owner_of(path: &Path) -> Result<Sid> {
-    let expected = components_of(path)?.len();
-    let chain = open_chain(path, LastAccess::Inspect)?;
-    // Shorter only when the walk stopped at a reparse ancestor.
-    if chain.descriptors.len() != expected {
-        return Err(refusal(Refusal::Reparse {
-            path: chain.target()?.1.path.clone(),
-        }));
-    }
-    Ok(chain.target()?.1.owner.clone())
 }
 
 /// The `%ProgramData%` known folder (`FOLDERID_ProgramData`).
@@ -1063,7 +993,7 @@ mod tests {
     use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
 
     fn me() -> TrustedSet {
-        TrustedSet::for_user_files(&token_user().expect("token user"))
+        TrustedSet::admin_with_test_owner(token_user().expect("token user"))
     }
 
     fn run(program: &str, args: &[&str]) -> bool {
@@ -1389,24 +1319,5 @@ mod tests {
         let system32 = Path::new(&root).join("System32");
         verify_binary(&system32.join("cmd.exe")).unwrap();
         assert!(verify_binary(&system32).is_err());
-    }
-
-    #[test]
-    fn owner_of_temp_file_is_current_user() {
-        let (_tmp, file) = fixture();
-        let owner = owner_of(&file).unwrap();
-        // An elevated administrator's token makes Administrators the default
-        // owner of new files; any other token makes the user the owner.
-        let user = token_user().unwrap();
-        assert!(
-            owner == user || owner.0 == model::ADMINISTRATORS,
-            "{owner:?} vs {user:?}"
-        );
-        assert!(account_of(&user).is_some_and(|name| name.contains('\\')));
-        assert_eq!(account_of(&Sid("S-1-5-21-9-9-9-1".into())), None);
-        assert_eq!(
-            account_of(&Sid(model::SYSTEM.into())).map(|n| n.ends_with("\\SYSTEM")),
-            Some(true)
-        );
     }
 }

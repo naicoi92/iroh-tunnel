@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 
-use super::pin::Pin;
-use super::types::{RestartPolicy, ServiceInvocation, ServiceScope};
+use super::types::{RestartPolicy, ServiceInvocation};
 use crate::error::CliError;
 use crate::fs_util::create_private_new;
+use crate::Tier;
 
 /// Everything a backend needs to write one role's registration.
 #[derive(Debug, Clone, Copy)]
@@ -18,16 +18,14 @@ pub(crate) struct RegistrationInput<'a> {
     pub role: &'a str,
     /// The command-line form the registered executable accepts.
     pub invocation: &'a ServiceInvocation,
-    /// The scope the registration is written in.
-    pub scope: ServiceScope,
+    /// The tier the registration is written in.
+    pub tier: Tier,
     /// What the registration runs. Absolute.
     pub binary: &'a Path,
     /// The config the service reads. Absolute.
     pub config: &'a Path,
     /// The state directory the service writes. Absolute.
     pub state: &'a Path,
-    /// Recorded in a system registration; `None` for a user one.
-    pub pin: Option<&'a Pin>,
     /// What the manager does when the service exits.
     pub policy: &'a RestartPolicy,
 }
@@ -53,9 +51,9 @@ pub(crate) fn instance_suffix() -> String {
 ///
 /// # Errors
 ///
-/// [`CliError::Permission`] when the OS denies access. The scope and account
+/// [`CliError::Permission`] when the OS denies access. The tier and account
 /// are left as requested and the message says how to proceed, because
-/// retrying under another scope or account would silently broaden access.
+/// retrying under another tier or account would silently broaden access.
 #[cfg_attr(
     all(not(test), windows),
     expect(dead_code, reason = "only the Unix backends write registration files")
@@ -64,7 +62,7 @@ pub(crate) fn write_registration(path: &Path, contents: &str) -> Result<()> {
     let denied = |e: std::io::Error, what: &str, target: &Path| -> anyhow::Error {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             CliError::Permission(format!(
-                "permission denied {what} {}: {e}. The service scope and account were not \
+                "permission denied {what} {}: {e}. The service tier and account were not \
                  changed and nothing was registered. Fix the permissions of that location and \
                  re-run; use --system (as root) only if you intend a system service",
                 target.display()
@@ -164,11 +162,13 @@ fn registration_permissions(target: &Path) -> std::fs::Permissions {
 }
 
 /// The text of an installed registration. Absent is `None`; a registration
-/// that exists but cannot be read counts as one with an unknown owner (empty
-/// text), never as "nothing installed", so the retarget prompt is not skipped.
+/// that exists but cannot be read is empty text, never "nothing installed".
 #[cfg_attr(
-    all(not(test), windows),
-    expect(dead_code, reason = "only the Unix backends write registration files")
+    all(not(test), not(target_os = "linux")),
+    expect(
+        dead_code,
+        reason = "only the BusyBox backend reads its registration back"
+    )
 )]
 pub(crate) fn read_registration(path: &Path) -> Option<String> {
     match std::fs::read_to_string(path) {

@@ -8,7 +8,7 @@ use anyhow::Result;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::effective_binary::EffectiveBinary;
-use super::types::ServiceScope;
+use crate::Tier;
 
 /// Load a role config for `run`.
 ///
@@ -143,28 +143,18 @@ fn legacy_refusal_text(role: &str, config: &Path, windows: bool) -> String {
     }
 }
 
-/// The text of the currently installed system registration, if any: where a
-/// previous install's pin is read from to detect a retarget (SM-02). Only
-/// system installs read it, and those exist on Unix only.
-#[cfg(unix)]
-pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
-    super::backend::Backend::select(scope)
-        .ok()?
-        .existing_registration(role, scope)
-}
-
-/// Whether the service of `scope` runs as root: a system service always, and
-/// a user-scope request on a host whose only registrations are system-wide
-/// (BusyBox init).
-pub(crate) fn root_run(scope: ServiceScope, system_wide_only: bool) -> bool {
-    scope == ServiceScope::System || system_wide_only
+/// Whether the service of `tier` runs as root: a system service always, and
+/// any service on a host whose only registrations are system-wide (BusyBox
+/// init).
+pub(crate) fn root_run(tier: Tier, system_wide_only: bool) -> bool {
+    tier == Tier::System || system_wide_only
 }
 
 /// What the service manager of this host will run for the role's root-run
 /// service, from the loaded definition.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn effective_binary(native: &mut super::native::Native, role: &str) -> EffectiveBinary {
-    match super::backend::Backend::select(ServiceScope::System) {
+    match super::backend::Backend::select(Tier::System) {
         Ok(backend) => backend.effective_binary(native, role),
         Err(error) => EffectiveBinary::Unknown(format!("{error:#}")),
     }
@@ -589,10 +579,10 @@ mod tests {
     }
 
     #[test]
-    fn root_run_covers_system_scope_and_system_wide_only_hosts() {
-        assert!(root_run(ServiceScope::System, false));
-        assert!(!root_run(ServiceScope::User, false));
-        assert!(root_run(ServiceScope::User, true));
+    fn root_run_covers_system_tier_and_system_wide_only_hosts() {
+        assert!(root_run(Tier::System, false));
+        assert!(!root_run(Tier::User, false));
+        assert!(root_run(Tier::User, true));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -1,10 +1,6 @@
 //! #92: run a role in the Windows logged-in session, driven through the real
 //! binary and the real Task Scheduler (SM-04, AC-SM-04, story 53).
 //!
-//! - `non_elevated_system_scope_is_permission_error`: a non-elevated
-//!   `--system` is refused (exit 3) and nothing is registered. Each command
-//!   runs under a restricted token (`common::restricted`) because the CI
-//!   runner is elevated. Opt-in (`IROH_TUNNEL_E2E_SERVICE=1`).
 //! - `user_background_task_lifecycle`: install, start, status, stop, restart
 //!   and uninstall against the host's Task Scheduler, with the pinned absolute
 //!   config and state paths and a working directory unrelated to either.
@@ -178,34 +174,6 @@ impl Drop for Fixture {
             let _ = wait_for("this test's task process to exit", || !pid_alive(pid));
         }
     }
-}
-
-#[test]
-fn non_elevated_system_scope_is_permission_error() -> Result<()> {
-    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
-        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to launch restricted-token children");
-        return Ok(());
-    }
-    let fx = Fixture::new()?;
-    fx.write_config("https://relay.invalid")?;
-    let config = fx.config();
-    let config = config.to_str().unwrap();
-
-    for args in [
-        vec![
-            "serve", "service", "install", "--system", "--config", config,
-        ],
-        vec!["serve", "service", "start", "--system"],
-        vec!["serve", "service", "stop", "--system"],
-        vec!["serve", "service", "status", "--system"],
-    ] {
-        let out = common::restricted::run_non_elevated(&mut fx.command(&args))?;
-        let err = stderr(&out);
-        assert_eq!(out.status.code(), Some(3), "{args:?}: {err}");
-        assert!(err.contains("Run as administrator"), "{args:?}: {err}");
-    }
-    assert!(!fx.task_exists(), "nothing may be registered");
-    Ok(())
 }
 
 #[test]
@@ -393,7 +361,7 @@ impl Fixture {
     /// captured. A successful run must leave stderr empty.
     fn caller(&self, args: &[&str]) -> Result<String> {
         let out = Command::new(manage_service_binary())
-            .args(["--role", "serve", "--scope", "user"])
+            .args(["--role", "serve"])
             .args(args)
             .env_remove("IROH_TUNNEL_STATE_DIR")
             .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)

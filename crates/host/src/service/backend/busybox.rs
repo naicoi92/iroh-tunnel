@@ -16,15 +16,14 @@
 //! on the NanoKVM, `S40network` and `S95nanokvm` precede it, so the tunnelled
 //! targets exist before iroh-tunnel binds/dials.
 //!
-//! Scope: BusyBox init is system-wide only (no per-user domain exists), so
-//! both scopes manage the one `/etc/init.d` script — User scope prints a
-//! note rather than failing. Requires root.
+//! Tier: BusyBox init is system-wide only (no per-user domain exists), so
+//! the only registration is the root-owned `/etc/init.d` script. Every
+//! mutating operation requires root; a non-root caller is refused.
 
 use super::super::effective_binary::{parse_busybox_script, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
 use super::super::registration::{write_registration, RegistrationInput};
 use super::super::types::AppliedEffect;
-use super::super::types::ServiceScope;
 use super::busybox_script::{render_script, ScriptLayout};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -39,7 +38,7 @@ fn script_name(role: &str) -> String {
 }
 
 /// Where the init script lives. BusyBox init scans `/etc/init.d`, so this is
-/// fixed — there is no scope/per-user variant on a non-systemd host.
+/// fixed — there is no tier/per-user variant on a non-systemd host.
 fn script_path(role: &str) -> PathBuf {
     PathBuf::from("/etc/init.d").join(script_name(role))
 }
@@ -60,8 +59,8 @@ fn set_executable(path: &Path) -> Result<()> {
 
 /// Refuse unless running as root. The init script lives under `/etc/init.d`
 /// and writes a PID file under `/var/run`, so root is required. BusyBox has no
-/// per-user services, so a user-scope request is refused too: it is never
-/// silently turned into a system install.
+/// per-user services, so a non-root caller is refused rather than silently
+/// given a system install.
 ///
 /// # Errors
 ///
@@ -72,14 +71,6 @@ fn require_root() -> Result<()> {
         super::super::is_elevated::is_elevated(),
     )?;
     Ok(())
-}
-
-/// The note a user-scope request earns on BusyBox: there is only the
-/// system-wide script.
-fn busybox_scope_note(role: &str, scope: ServiceScope) -> Option<ServiceNote> {
-    (scope == ServiceScope::User).then(|| ServiceNote::BusyboxSystemWide {
-        script: script_path(role),
-    })
 }
 
 /// Run the installed init script with `verb` (start/stop/restart), bailing on a
@@ -111,7 +102,7 @@ pub(crate) fn effective_binary(role: &str) -> EffectiveBinary {
     parse_busybox_script(existing_registration(role).as_deref())
 }
 
-/// The installed script's text, if any (to read its pin).
+/// The installed script's text, if any.
 pub(crate) fn existing_registration(role: &str) -> Option<String> {
     super::super::registration::read_registration(&script_path(role))
 }
@@ -121,12 +112,8 @@ pub(crate) fn install(
     notes: &mut dyn FnMut(&ServiceNote),
     reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    super::super::pin::require_unix_pin(reg.pin)?;
     require_root()?;
     let role = reg.role;
-    if let Some(note) = busybox_scope_note(role, reg.scope) {
-        notes(&note);
-    }
     let script = render_script(reg, &ScriptLayout::for_role(role))?;
     let path = script_path(role);
     write_registration(&path, &script)?;
@@ -136,7 +123,7 @@ pub(crate) fn install(
     // Start now. A start failure is surfaced, but the script is installed, so
     // the service will come up on the next boot regardless.
     // `restart`, not `start`: a re-install over a running service must pick up
-    // the new registration instead of leaving the old process on the old pin.
+    // the new registration instead of leaving the old process on the old one.
     run_script(native, role, "restart")?;
     native.applied(AppliedEffect::Started);
     notes(&ServiceNote::Installed {
@@ -150,7 +137,7 @@ pub(crate) fn uninstall(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    _scope: ServiceScope,
+    _tier: crate::Tier,
 ) -> Result<()> {
     require_root()?;
     // best-effort: the service may not be running
@@ -169,7 +156,7 @@ pub(crate) fn uninstall(
     Ok(())
 }
 
-pub(crate) fn start(native: &mut Native, role: &str, _scope: ServiceScope) -> Result<()> {
+pub(crate) fn start(native: &mut Native, role: &str, _tier: crate::Tier) -> Result<()> {
     require_root()?;
     run_script(native, role, "start")?;
     native.applied(AppliedEffect::Started);
@@ -180,7 +167,7 @@ pub(crate) fn stop(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    _scope: ServiceScope,
+    _tier: crate::Tier,
 ) -> Result<()> {
     require_root()?;
     run_script(native, role, "stop")?;
@@ -192,7 +179,7 @@ pub(crate) fn restart(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    _scope: ServiceScope,
+    _tier: crate::Tier,
 ) -> Result<()> {
     require_root()?;
     run_script(native, role, "restart")?;
@@ -204,7 +191,7 @@ pub(crate) fn status(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    _scope: ServiceScope,
+    _tier: crate::Tier,
 ) -> Result<NativeOutput> {
     let path = script_path(role);
     // The script returns 3 when not running — informative, not a hard error
@@ -219,15 +206,89 @@ pub(crate) fn status(
 mod tests {
     use super::*;
 
+    use crate::service::native::fake::{note_sink, Event, Events, FakeRunner};
+    use crate::service::native::OutputMode;
+
+    fn reg<'a>() -> RegistrationInput<'a> {
+        RegistrationInput {
+            tier: crate::Tier::System,
+            ..crate::service::fixtures::registration(
+                "serve",
+                Path::new("/usr/bin/iroh-tunnel"),
+                Path::new("/etc/iroh-tunnel/serve.toml"),
+                Path::new("/run/iroh-tunnel"),
+            )
+        }
+    }
+
     #[test]
-    fn busybox_user_scope_request_emits_system_wide_note() {
-        assert_eq!(
-            busybox_scope_note("serve", ServiceScope::User),
-            Some(ServiceNote::BusyboxSystemWide {
-                script: script_path("serve")
+    fn busybox_non_root_mutation_is_permission_error() {
+        if crate::service::is_elevated() {
+            return; // root passes the check and would touch /etc/init.d
+        }
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        let mut notes = note_sink(&events);
+        let tier = crate::Tier::User;
+        let results = [
+            install(&mut native, &mut notes, &reg()),
+            uninstall(&mut native, &mut notes, "serve", tier),
+            start(&mut native, "serve", tier),
+            stop(&mut native, &mut notes, "serve", tier),
+            restart(&mut native, &mut notes, "serve", tier),
+        ];
+        for result in results {
+            let err = result.expect_err("a non-root BusyBox mutation is refused");
+            let Some(crate::error::CliError::Permission(msg)) =
+                err.downcast_ref::<crate::error::CliError>()
+            else {
+                panic!("expected Permission, got {err:?}");
+            };
+            assert!(msg.contains("no per-user services"), "{msg}");
+            assert!(msg.contains("sudo"), "{msg}");
+        }
+        assert!(events.borrow().is_empty(), "nothing ran or was noted");
+        let (applied, _) = native.finish();
+        assert!(applied.is_empty(), "{applied:?}");
+    }
+
+    #[test]
+    fn busybox_root_install_has_no_user_scope_note() {
+        // Rendering a root install's script, as `install` writes it, raises
+        // no note: every registration here is the system-wide script.
+        let events = Events::default();
+        let script = render_script(&reg(), &ScriptLayout::for_role("serve")).unwrap();
+        assert!(script.contains("export IROH_TUNNEL_SERVICE=1"), "{script}");
+        // Only a disposable privileged container may write /etc/init.d.
+        if !crate::service::is_elevated()
+            || std::env::var_os("IROH_TUNNEL_E2E_PRIVILEGED").is_none_or(|v| v != "1")
+        {
+            assert!(events.borrow().iter().all(|e| !matches!(e, Event::Note(_))));
+            return;
+        }
+        // Real root: the install itself emits only `Installed`.
+        let mut fake = FakeRunner::new(&events, vec![]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        let mut notes = note_sink(&events);
+        let _ = install(&mut native, &mut notes, &reg());
+        let _ = std::fs::remove_file(script_path("serve"));
+        let noted: Vec<_> = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Note(n) => Some(n.clone()),
+                Event::Call { .. } => None,
             })
+            .collect();
+        assert!(
+            noted
+                .iter()
+                .all(|n| matches!(n, ServiceNote::Installed { .. })),
+            "{noted:?}"
         );
-        assert_eq!(busybox_scope_note("serve", ServiceScope::System), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-==== role=serve invocation=Combined scope=User ====
+==== role=serve invocation=Combined tier=User ====
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -17,6 +17,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -27,9 +29,8 @@
 	</dict>
 </dict>
 </plist>
-==== role=serve invocation=Combined scope=System ====
+==== role=serve invocation=Combined tier=System ====
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/serve%20%24x%25i.toml uid=1000 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -47,8 +48,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
-		<key>IROH_TUNNEL_TRUSTED_UID</key>
-		<string>1000</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -59,7 +60,7 @@
 	</dict>
 </dict>
 </plist>
-==== role=serve invocation=Standalone scope=User ====
+==== role=serve invocation=Standalone tier=User ====
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -77,6 +78,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -87,9 +90,8 @@
 	</dict>
 </dict>
 </plist>
-==== role=serve invocation=Standalone scope=System ====
+==== role=serve invocation=Standalone tier=System ====
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/serve%20%24x%25i.toml uid=1000 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -106,8 +108,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
-		<key>IROH_TUNNEL_TRUSTED_UID</key>
-		<string>1000</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -118,7 +120,7 @@
 	</dict>
 </dict>
 </plist>
-==== role=access invocation=Combined scope=User ====
+==== role=access invocation=Combined tier=User ====
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -137,6 +139,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -147,9 +151,8 @@
 	</dict>
 </dict>
 </plist>
-==== role=access invocation=Combined scope=System ====
+==== role=access invocation=Combined tier=System ====
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/access%20%24x%25i.toml uid=1000 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -167,8 +170,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
-		<key>IROH_TUNNEL_TRUSTED_UID</key>
-		<string>1000</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -179,7 +182,7 @@
 	</dict>
 </dict>
 </plist>
-==== role=access invocation=Standalone scope=User ====
+==== role=access invocation=Standalone tier=User ====
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -197,6 +200,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -207,9 +212,8 @@
 	</dict>
 </dict>
 </plist>
-==== role=access invocation=Standalone scope=System ====
+==== role=access invocation=Standalone tier=System ====
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- iroh-tunnel-pin config=/home/a%20b/it%27s%20%26%20%3Ccfg%3E/access%20%24x%25i.toml uid=1000 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -226,8 +230,8 @@
 	<dict>
 		<key>IROH_TUNNEL_STATE_DIR</key>
 		<string>/var/lib/iroh $state%n</string>
-		<key>IROH_TUNNEL_TRUSTED_UID</key>
-		<string>1000</string>
+		<key>IROH_TUNNEL_SERVICE</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
