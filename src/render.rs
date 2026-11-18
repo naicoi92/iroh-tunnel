@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use iroh_tunnel_host::config::{
-    GeneratedIdentity, KeygenOutcome, Mutation, ServiceList, SetOutcome,
+    GeneratedIdentity, KeygenOutcome, Mutation, NodeChange, ServiceList, SetNodeOutcome,
+    SetOutcome, TokenChange,
 };
 use iroh_tunnel_host::ReadyReport;
 use iroh_tunnel_host::Role;
@@ -199,6 +200,44 @@ pub(crate) fn render_set(role: Role, outcome: &SetOutcome) -> String {
     }
 }
 
+/// `config node` report: the changed fields, or unchanged. Token values are
+/// never carried by the outcome.
+pub(crate) fn render_node(outcome: &SetNodeOutcome) -> String {
+    match outcome {
+        SetNodeOutcome::Unchanged { path } => {
+            format!("Node settings unchanged ({}).\n", path.display())
+        }
+        SetNodeOutcome::Updated { path, changes } => {
+            let mut out = format!("Updated node settings in {}:\n", path.display());
+            for c in changes {
+                match c {
+                    NodeChange::RelayUrls { old, new } => out.push_str(&format!(
+                        "  relay_urls: {} -> {}\n",
+                        node_list(old),
+                        node_list(new)
+                    )),
+                    NodeChange::RelayToken(t) => out.push_str(match t {
+                        TokenChange::Set => "  relay_token: (none) -> <redacted>\n",
+                        TokenChange::Replaced => {
+                            "  relay_token: <redacted> -> <redacted> (changed)\n"
+                        }
+                        TokenChange::Deleted => "  relay_token: <redacted> -> (none)\n",
+                    }),
+                }
+            }
+            out
+        }
+    }
+}
+
+fn node_list(urls: &[String]) -> String {
+    if urls.is_empty() {
+        "(default)".to_owned()
+    } else {
+        format!("[{}]", urls.join(", "))
+    }
+}
+
 /// `config check` confirmation line.
 pub(crate) fn render_checked(role: Role, path: &Path) -> String {
     format!(
@@ -326,6 +365,73 @@ mod tests {
             old: old.into(),
             new: new.into(),
         }
+    }
+
+    fn node_changes(changes: Vec<NodeChange>) -> SetNodeOutcome {
+        SetNodeOutcome::Updated {
+            path: "/x/s.toml".into(),
+            changes,
+        }
+    }
+
+    fn urls(u: &[&str]) -> Vec<String> {
+        u.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn render_node_updated() {
+        let outcome = node_changes(vec![
+            NodeChange::RelayUrls {
+                old: urls(&["https://old.example"]),
+                new: urls(&["https://a.example"]),
+            },
+            NodeChange::RelayToken(TokenChange::Deleted),
+        ]);
+        assert_eq!(
+            render_node(&outcome),
+            "Updated node settings in /x/s.toml:\n  relay_urls: [https://old.example] -> [https://a.example]\n  relay_token: <redacted> -> (none)\n"
+        );
+    }
+
+    #[test]
+    fn render_node_token_replaced() {
+        let out = render_node(&node_changes(vec![NodeChange::RelayToken(
+            TokenChange::Replaced,
+        )]));
+        assert!(
+            out.contains("  relay_token: <redacted> -> <redacted> (changed)\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_node_set_from_none() {
+        let out = render_node(&node_changes(vec![
+            NodeChange::RelayUrls {
+                old: urls(&[]),
+                new: urls(&["https://a.example"]),
+            },
+            NodeChange::RelayToken(TokenChange::Set),
+        ]));
+        assert!(
+            out.contains("  relay_urls: (default) -> [https://a.example]\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  relay_token: (none) -> <redacted>\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_node_unchanged() {
+        let outcome = SetNodeOutcome::Unchanged {
+            path: "/x/s.toml".into(),
+        };
+        assert_eq!(
+            render_node(&outcome),
+            "Node settings unchanged (/x/s.toml).\n"
+        );
     }
 
     #[test]

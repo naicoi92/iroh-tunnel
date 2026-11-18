@@ -424,7 +424,12 @@ fn dispatch_config<S: ServiceArgs>(
         ConfigAction::Keygen { config, yes, .. } => {
             config_cmd::keygen_cli(role, config.as_deref(), yes)
         }
-        ConfigAction::Set { service, config } => config_cmd::set(service, config),
+        ConfigAction::Set {
+            service,
+            extra,
+            config,
+        } => config_cmd::set(service, extra, config),
+        ConfigAction::Node(args) => config_cmd::node(role, args),
         ConfigAction::Rm { config, name } => config_cmd::rm(role, config.as_deref(), &name),
         ConfigAction::List { config } => config_cmd::list(role, config.as_deref()),
         ConfigAction::Show { config, reveal } => config_cmd::show(role, config.as_deref(), reveal),

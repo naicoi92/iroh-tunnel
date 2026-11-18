@@ -136,6 +136,15 @@ fn invalid_mutations_fail_and_leave_file_bytes_unchanged() {
         vec!["serve", "config", "rm", "--config", p(&cfg), "-n", "X"],
         vec!["serve", "config", "keygen", "--config", p(&cfg), "--yes"],
         vec!["serve", "config", "edit", "--config", p(&cfg)],
+        vec![
+            "serve",
+            "config",
+            "node",
+            "-c",
+            p(&cfg),
+            "-r",
+            "https://a.example",
+        ],
     ];
     for args in cases {
         let output = world

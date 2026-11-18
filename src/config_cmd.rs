@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::cli::ServiceArgs;
+use crate::cli::{NodeArgs, ServiceArgs};
 use crate::output;
 use crate::render;
 use iroh_tunnel_host::config::{
     check_config, identity_state, keygen, list_services, prepare_edit, random_identity,
-    remove_service, set_service, show_config, Disclosure, EditOutcome, IdentityState,
+    remove_service, set_node, set_service, show_config, Disclosure, EditOutcome, IdentityState,
     KeygenOutcome, RotationConsent,
 };
 use iroh_tunnel_host::error::CliError;
@@ -100,9 +100,53 @@ pub fn keygen_random() -> Result<()> {
 /// # Errors
 ///
 /// Fails when the request is incomplete, the config cannot be updated or stdout fails.
-pub fn set<S: ServiceArgs>(args: S, config: Option<PathBuf>) -> Result<()> {
-    let outcome = set_service(S::ROLE, &args.into_set(config)?)?;
+pub fn set<S: ServiceArgs>(args: S, extra: S::SetExtra, config: Option<PathBuf>) -> Result<()> {
+    let outcome = set_service(S::ROLE, &args.into_set(extra, config)?)?;
     output::stdout(&render::render_set(S::ROLE, &outcome))
+}
+
+/// Read the relay token from `path` (`-` reads `stdin`), dropping one
+/// leading UTF-8 BOM and one trailing `\n` or `\r\n`. Errors name the flag and path, never the content.
+fn read_token_source(path: &Path, mut stdin: impl std::io::Read) -> Result<String> {
+    let mut text = String::new();
+    let read = if path == Path::new("-") {
+        stdin.read_to_string(&mut text).map(|_| ())
+    } else {
+        std::fs::read_to_string(path).map(|t| text = t)
+    };
+    read.with_context(|| format!("--relay-token-file {}: cannot read", path.display()))
+        .map_err(|e| CliError::Config(format!("{e:#}")))?;
+    if let Some(t) = text.strip_prefix('\u{feff}') {
+        text = t.to_owned();
+    }
+    if let Some(t) = text.strip_suffix('\n') {
+        text = t.strip_suffix('\r').unwrap_or(t).to_owned();
+    }
+    if text.is_empty() {
+        return Err(CliError::Config(format!(
+            "--relay-token-file {}: source is empty",
+            path.display()
+        ))
+        .into());
+    }
+    Ok(text)
+}
+
+/// `config node`: edit the `[node]` relay settings and print the report.
+///
+/// # Errors
+///
+/// Fails when the token source is unreadable or empty, the edit is invalid,
+/// the config cannot be written or stdout fails.
+pub fn node(role: Role, mut args: NodeArgs) -> Result<()> {
+    // Resolve the token before taking the writer lock: stdin may block.
+    let token = match (args.relay_token.take(), args.relay_token_file.take()) {
+        (Some(t), _) => Some(t),
+        (None, Some(path)) => Some(read_token_source(&path, std::io::stdin().lock())?),
+        (None, None) => None,
+    };
+    let outcome = set_node(role, &args.into_request(token))?;
+    output::stdout(&render::render_node(&outcome))
 }
 
 /// `config check`: validate the config and print the confirmation.
@@ -175,4 +219,67 @@ pub fn edit_cli(role: Role, config: Option<&Path>) -> Result<()> {
 pub fn path(role: Role, config: Option<&Path>) -> Result<()> {
     let path = iroh_tunnel_host::config::resolve_config_path(role, config)?;
     output::stdout(&render::render_path(&path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn from_file(content: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("token.txt");
+        std::fs::write(&path, content).expect("write token file");
+        match read_token_source(&path, Cursor::new(Vec::new())) {
+            Ok(t) => t,
+            Err(e) => format!("ERR {e}"),
+        }
+    }
+
+    #[test]
+    fn token_source_strips_utf8_bom() {
+        assert_eq!(from_file("\u{feff}secret-token\r\n"), "secret-token");
+        assert_eq!(from_file("\u{feff}\u{feff}x"), "\u{feff}x");
+    }
+
+    #[test]
+    fn token_source_trims_one_newline() {
+        assert_eq!(from_file("secret-token\n"), "secret-token");
+    }
+
+    #[test]
+    fn token_source_trims_crlf() {
+        assert_eq!(from_file("secret-token\r\n"), "secret-token");
+    }
+
+    #[test]
+    fn token_source_keeps_extra_newline() {
+        assert_eq!(from_file("secret-token\n\n"), "secret-token\n");
+    }
+
+    #[test]
+    fn token_source_reads_stdin_for_dash() {
+        let got = read_token_source(Path::new("-"), Cursor::new(b"from-stdin".to_vec()));
+        assert_eq!(got.unwrap(), "from-stdin");
+    }
+
+    #[test]
+    fn token_source_empty_errors() {
+        let err = from_file("");
+        assert!(err.starts_with("ERR"), "{err}");
+        assert!(err.contains("--relay-token-file"), "{err}");
+        assert!(err.contains("token.txt"), "{err}");
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn token_source_unreadable_names_flag_and_path() {
+        let err = read_token_source(Path::new("/nonexistent/t.txt"), Cursor::new(Vec::new()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--relay-token-file /nonexistent/t.txt: cannot read"),
+            "{err}"
+        );
+    }
 }

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::types::SetService;
+use super::types::{RelayEdit, SetService};
 
 pub(crate) const VALID_SERVE: &str =
     "[[services]]\nname = \"web\"\nprotocol = \"tcp\"\nhost = \"127.0.0.1\"\nport = 8080\n";
@@ -15,6 +15,7 @@ pub(crate) fn set_web(config: &Path) -> SetService {
         port: Some(8080),
         protocol: None,
         node_id: None,
+        relays: RelayEdit::Keep,
     }
 }
 

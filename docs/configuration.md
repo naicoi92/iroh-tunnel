@@ -43,6 +43,7 @@ Sample files: [`examples/serve.toml`](../examples/serve.toml) and
 ```sh
 iroh-tunnel serve config keygen                       # create or rotate the identity
 iroh-tunnel serve config set -n postgres -t 5432
+iroh-tunnel serve config node -r https://relay.example.com    # node relay list and token
 iroh-tunnel serve config list
 iroh-tunnel serve config show                         # secrets hidden; --reveal prints them
 iroh-tunnel serve config rm -n postgres
@@ -66,7 +67,11 @@ bracketed IPv6 address (`[::1]:5432`). Creating a service needs its address
 `Service ... unchanged`. `set` and `keygen` create the file and its directory
 when missing. `list`, `show`, `rm`, `check` and `run` on a missing file fail
 with exit code `2`, name the path, point to `config set` / `config keygen`,
-and create nothing. `config check` only validates and prints
+and create nothing. `config node` edits the `[node]` relay settings (see
+[Relays](#relays)) and prints `Updated node settings in <path>:` with
+`field: old -> new` lines, or `Node settings unchanged (<path>).`; a present
+token is shown as `<redacted>`, an absent one as `(none)`, and a replacement as
+`<redacted> -> <redacted> (changed)`. `config check` only validates and prints
 `OK: <path> is a valid <role> config.`
 
 ## Serve file
@@ -168,6 +173,21 @@ relay_token = "<token>"           # only for relays that enforce a shared token
   its own list; an empty or missing list falls back to `[node] relay_urls`.
 - In quick mode, `--relay-url URL` on both roles sets a single custom relay.
 
+Edit the node relay settings with `config node` (both roles):
+
+- `config node -r URL [-r URL ...]` replaces the whole relay list.
+- `-r` without a token flag also removes `relay_token`; pass the token again
+  to keep one.
+- `--relay-token TOKEN` or `--relay-token-file PATH` (`-` reads stdin) replaces
+  the token and keeps the relay list (one leading UTF-8 BOM and one trailing
+  newline in the file are dropped). Prefer the file form: a `--relay-token`
+  value is visible in shell history and process lists.
+- `--clear-relays` removes the relay list and token, returning to the n0
+  relays.
+- `ita config set -n NAME -r URL [-r URL ...]` sets a per-service override;
+  `ita config set -n NAME --clear-relays` removes it. `config set` on the
+  serve role has no relay flags.
+
 To run your own relay, see [Self-hosted relay](self-hosted-relay.md).
 
 ## Validation rules
@@ -180,6 +200,9 @@ A file is validated when it loads and before every save. It is rejected when:
 - `protocol` is not `tcp` or `udp`;
 - an Access `node_id` is not 64 hex or 52 base32 characters;
 - a relay URL does not start with `https://`;
+- `config node` / `config set` is given the same relay URL twice in one list;
+- `config node` would store a `relay_token` while the node has no
+  `relay_urls`;
 - `relay_token` is empty or contains whitespace;
 - `max_concurrent_streams` is `0`;
 - `secret_key` is not base64 of exactly 32 bytes;

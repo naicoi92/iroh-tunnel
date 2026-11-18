@@ -135,13 +135,139 @@ fn wrong_role_flag_on_set() {
 #[test]
 fn relay_flag_rejected_on_set() {
     let w = World::new();
-    for role in ["serve", "access"] {
-        let o = w.it(&[role, "config", "set", "-n", "web", "--relay", "x"]);
+    let o = w.it(&[
+        "serve",
+        "config",
+        "set",
+        "-n",
+        "web",
+        "-t",
+        "3000",
+        "-r",
+        "https://relay.example",
+    ]);
+    o.assert_usage();
+    assert!(o.first_paragraph().contains("-r"), "{}", o.stderr);
+    assert!(o.stderr.contains("Usage: iroh-tunnel serve config set"));
+    let o = w.its(&[
+        "config",
+        "set",
+        "-n",
+        "web",
+        "-t",
+        "3000",
+        "-r",
+        "https://relay.example",
+    ]);
+    o.assert_usage();
+    assert!(o.first_paragraph().contains("-r"), "{}", o.stderr);
+    assert!(o.stderr.contains("Usage: iroh-tunnel-serve config set"));
+}
+
+const SEED: &str = "[node]\nrelay_urls = [\"https://old.example\"]\n";
+
+#[test]
+fn node_conflicts_show_node_help() {
+    let w = World::new();
+    let cfg = w.dir("home").join("c.toml");
+    std::fs::write(&cfg, SEED).unwrap();
+    let cfg_s = cfg.to_str().unwrap();
+    let u = "https://a.example";
+    let cases: [&[&str]; 4] = [
+        &["--clear-relays", "-r", u],
+        &["--clear-relays", "--relay-token", "t"],
+        &["--clear-relays", "--relay-token-file", "f"],
+        &["--relay-token", "t", "--relay-token-file", "f"],
+    ];
+    for extra in cases {
+        let mut args = vec!["serve", "config", "node", "-c", cfg_s];
+        args.extend(extra);
+        let o = w.it(&args);
         o.assert_usage();
-        assert!(o.first_paragraph().contains("--relay"), "{}", o.stderr);
-        assert!(o
-            .stderr
-            .contains(&format!("Usage: iroh-tunnel {role} config set")));
+        assert!(
+            o.first_paragraph().contains("cannot be used with"),
+            "{args:?}: {}",
+            o.stderr
+        );
+        assert!(
+            o.stderr.contains("Usage: iroh-tunnel serve config node"),
+            "{args:?}: {}",
+            o.stderr
+        );
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), SEED, "{args:?}");
+    }
+}
+
+#[test]
+fn access_set_override_conflict_shows_set_help() {
+    let w = World::new();
+    let cfg = w.dir("home").join("a.toml");
+    let seed = "[node]\nsecret_key = \"\"\n";
+    std::fs::write(&cfg, seed).unwrap();
+    let o = w.it(&[
+        "access",
+        "config",
+        "set",
+        "-c",
+        cfg.to_str().unwrap(),
+        "-n",
+        "web",
+        "-r",
+        "https://a.example",
+        "--clear-relays",
+    ]);
+    o.assert_usage();
+    assert!(
+        o.first_paragraph().contains("cannot be used with"),
+        "{}",
+        o.stderr
+    );
+    assert!(o.stderr.contains("Usage: iroh-tunnel access config set"));
+    assert_eq!(std::fs::read_to_string(&cfg).unwrap(), seed);
+}
+
+#[test]
+fn bare_config_node_shows_help() {
+    let w = World::new();
+    let default_cfg = w.dir("home").join("iroh-tunnel").join("serve.toml");
+    let missing = w.dir("home").join("c.toml");
+    let existing = w.dir("home").join("existing.toml");
+    std::fs::write(&existing, SEED).unwrap();
+    let run = |args: &[&str]| {
+        let o = w.it(args);
+        o.assert_usage();
+        assert!(o.first_paragraph().contains("required"), "{}", o.stderr);
+        assert!(o.stderr.contains("Usage: iroh-tunnel serve config node"));
+    };
+    run(&["serve", "config", "node"]);
+    assert!(!default_cfg.exists());
+    assert!(!w.dir("home").join("iroh-tunnel").exists());
+    run(&["serve", "config", "node", "-c", missing.to_str().unwrap()]);
+    assert!(!missing.exists());
+    run(&["serve", "config", "node", "-c", existing.to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), SEED);
+}
+
+#[test]
+fn config_node_help_on_every_binary() {
+    let w = World::new();
+    let outs = [
+        w.it(&["serve", "config", "node", "--help"]),
+        w.it(&["access", "config", "node", "--help"]),
+        w.its(&["config", "node", "--help"]),
+        w.ita(&["config", "node", "--help"]),
+    ];
+    for o in outs {
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        let text = format!("{}{}", o.stdout, o.stderr);
+        for flag in [
+            "--relay-url",
+            "--relay-token",
+            "--relay-token-file",
+            "--clear-relays",
+        ] {
+            assert!(text.contains(flag), "{flag} missing: {text}");
+        }
     }
 }
 

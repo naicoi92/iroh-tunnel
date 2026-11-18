@@ -58,6 +58,8 @@ All subcommands accept `-c`, `--config PATH` except `keygen --print`.
 | `keygen --print` | Print a new secret key and its NodeId; writes nothing; conflicts with `-c` and `-y` |
 | `set -n N -t [HOST:]PORT [-p P]` (Serve) | Create or update a service; prints what changed |
 | `set -n N -l [HOST:]PORT -N ID [-p P]` (Access) | Create or update a service; creating needs `-l` and `-N` |
+| `set ... [-r URL]... [--clear-relays]` (Access) | Also set or clear the per-service relay override |
+| `node [-r URL]... [--relay-token T \| --relay-token-file P\|-] [--clear-relays]` | Edit the `[node]` relay list and token |
 | `rm -n N` | Remove a service |
 | `check` | Validate the file without changing it; prints `OK: <path> is a valid <role> config.` |
 | `list` | List services |
@@ -77,10 +79,10 @@ See [Configuration](configuration.md).
 | `-l` | `--listen` | Access listen `[HOST:]PORT` |
 | `-N` | `--node-id` | Serve NodeId |
 | `-p` | `--protocol` | `tcp` or `udp` |
-| `-r` | `--relay-url` | Relay URL (quick mode) |
+| `-r` | `--relay-url` | Relay URL (quick mode, `config node`, access `config set`) |
 | `-k` | `--key-file` | Secret key file (quick mode) |
 | `-y` | `--yes` | Skip confirmation |
-| | `--reveal`, `--print`, `--system`, `--user` | Long-only |
+| | `--reveal`, `--print`, `--system`, `--user`, `--relay-token`, `--relay-token-file`, `--clear-relays` | Long-only |
 
 ### Usage errors
 

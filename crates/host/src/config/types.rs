@@ -220,6 +220,94 @@ pub struct SetService {
     pub protocol: Option<Protocol>,
     /// Peer node id (access role).
     pub node_id: Option<String>,
+    /// Per-service `relay_urls` override.
+    pub relays: RelayEdit,
+}
+
+/// How a `relay_urls` list changes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RelayEdit {
+    /// Leave `relay_urls` as it is.
+    #[default]
+    Keep,
+    /// Store exactly these URLs.
+    Replace(Vec<String>),
+    /// Remove the `relay_urls` key (default relays).
+    Clear,
+}
+
+/// How `config node` changes `[node].relay_token`.
+#[derive(Clone, PartialEq, Eq)]
+pub enum TokenEdit {
+    /// Leave `relay_token` as it is.
+    Keep,
+    /// Store this token.
+    Replace(String),
+    /// Remove the `relay_token` key.
+    Delete,
+}
+
+impl std::fmt::Debug for TokenEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep => f.write_str("Keep"),
+            Self::Replace(_) => f.write_str("Replace(<redacted>)"),
+            Self::Delete => f.write_str("Delete"),
+        }
+    }
+}
+
+/// A `config node` request: the `[node]` relay settings to change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetNode {
+    /// Config file; `None` selects the role default.
+    pub config: Option<PathBuf>,
+    /// Change to `relay_urls`.
+    pub relays: RelayEdit,
+    /// Change to `relay_token`.
+    pub token: TokenEdit,
+}
+
+/// Result of [`crate::config::set_node`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetNodeOutcome {
+    /// The file changed; `changes` lists each field that differs.
+    Updated {
+        /// The config file that was written.
+        path: PathBuf,
+        /// Changed fields, `relay_urls` first.
+        changes: Vec<NodeChange>,
+    },
+    /// Nothing differed; the file is untouched.
+    Unchanged {
+        /// The config file, left untouched.
+        path: PathBuf,
+    },
+}
+
+/// One changed `[node]` relay field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeChange {
+    /// `relay_urls` changed (an absent key reads as an empty list).
+    RelayUrls {
+        /// Previous URLs.
+        old: Vec<String>,
+        /// New URLs.
+        new: Vec<String>,
+    },
+    /// `relay_token` changed.
+    RelayToken(TokenChange),
+}
+
+/// How `relay_token` changed. Values are never carried, so they cannot leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenChange {
+    /// A token was added.
+    Set,
+    /// The token was replaced by a different one.
+    Replaced,
+    /// The token was removed.
+    Deleted,
 }
 
 /// Plain inputs of a quick-mode serve run, for [`quick_serve_config`].
@@ -278,7 +366,7 @@ pub enum SetOutcome {
         service: String,
         /// Config file that was written.
         path: PathBuf,
-        /// Changed fields in the order address, protocol, node_id.
+        /// Changed fields in the order address, protocol, node_id, relay_urls.
         changes: Vec<FieldChange>,
     },
     /// The entry already had every requested value; the file is untouched.
@@ -310,6 +398,8 @@ pub enum ServiceField {
     Protocol,
     /// The peer node id.
     NodeId,
+    /// The per-service `relay_urls` override.
+    RelayUrls,
 }
 
 impl ServiceField {
@@ -321,6 +411,7 @@ impl ServiceField {
             (ServiceField::Address, Role::Access) => "listen",
             (ServiceField::Protocol, _) => "protocol",
             (ServiceField::NodeId, _) => "node_id",
+            (ServiceField::RelayUrls, _) => "relay_urls",
         }
     }
 }

@@ -234,6 +234,72 @@ fn config_set_updated_report() {
 }
 
 #[test]
+fn config_node_updated_report() {
+    let world = World::new();
+    let cfg = world.file(
+        "cfg.toml",
+        "[node]\nrelay_urls = [\"https://old.example\"]\nrelay_token = \"t1\"\n",
+    );
+    let cfg = cfg.to_str().unwrap();
+    let out = world.run(&[
+        "serve",
+        "config",
+        "node",
+        "-c",
+        cfg,
+        "-r",
+        "https://a.example",
+    ]);
+    check(&world, "config_node_updated_report", &out, 0);
+}
+
+#[test]
+fn config_node_unchanged() {
+    let world = World::new();
+    let cfg = world.file(
+        "cfg.toml",
+        "[node]\nrelay_urls = [\"https://old.example\"]\nrelay_token = \"t1\"\n",
+    );
+    let cfg = cfg.to_str().unwrap();
+    let args = [
+        "serve",
+        "config",
+        "node",
+        "-c",
+        cfg,
+        "-r",
+        "https://a.example",
+    ];
+    assert_eq!(world.run(&args).status.code(), Some(0));
+    let again = world.run(&args);
+    check(&world, "config_node_unchanged", &again, 0);
+}
+
+#[test]
+fn config_set_relay_override_report() {
+    let world = World::new();
+    let cfg = world.file("cfg.toml", "[node]\nsecret_key = \"\"\n");
+    let cfg = cfg.to_str().unwrap();
+    let node_id = "0123456789abcdef".repeat(4);
+    let create = world.run(&[
+        "access", "config", "set", "-c", cfg, "-n", "web", "-N", &node_id, "-l", "8080",
+    ]);
+    assert_eq!(create.status.code(), Some(0));
+    let out = world.run(&[
+        "access",
+        "config",
+        "set",
+        "-c",
+        cfg,
+        "-n",
+        "web",
+        "-r",
+        "https://a.example",
+    ]);
+    check(&world, "config_set_relay_override_report", &out, 0);
+}
+
+#[test]
 fn config_rm_message() {
     let world = World::new();
     let cfg = world.file("cfg.toml", "[node]\nsecret_key = \"\"\n");
