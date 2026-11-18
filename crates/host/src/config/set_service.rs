@@ -569,7 +569,9 @@ mod tests {
 
     #[test]
     fn set_override_on_existing() {
-        let (_d, path) = file(Some(&access_file("")));
+        let node_section = "# node keys, keep me\n[node]\nsecret_key   =  \"c2VjcmV0\" # inline\nrelay_urls = [\"https://node.example\"]\n\n";
+        let text = format!("{node_section}{}", access_file(""));
+        let (_d, path) = file(Some(&text));
         let r = relay_req(
             &path,
             "web",
@@ -589,6 +591,7 @@ mod tests {
             }
         );
         let got = std::fs::read_to_string(&path).unwrap();
+        assert!(got.starts_with(node_section), "{got}");
         assert!(
             got.contains("relay_urls = [\"https://a.example\", \"https://b.example\"]"),
             "{got}"
@@ -721,5 +724,6 @@ mod tests {
     #[test]
     fn relay_urls_label() {
         assert_eq!(ServiceField::RelayUrls.label(Role::Access), "relay_urls");
+        assert_eq!(ServiceField::RelayUrls.label(Role::Serve), "relay_urls");
     }
 }
