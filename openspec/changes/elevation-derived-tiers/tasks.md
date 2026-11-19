@@ -39,14 +39,14 @@ Blocked by: 2, 3
 
 Files: `crates/host/src/service/{mod,types,install,verb,start,stop,restart,status,uninstall,policy,platform,registration,native,fixtures,effective_binary,service_binary,task_xml,system_verb}.rs`, `crates/host/src/service/backend/*`, `crates/host/src/ownership.rs` (delete `LockDirs::resolve(home)`, `stop_hint_scoped`), `crates/host/src/service/trust*.rs` (delete pinned-user variants), `crates/host/src/paths/in_home.rs` (delete), `crates/host/src/lib.rs`, `crates/host/examples/manage_service.rs`, `src/scm_runtime.rs`, `src/cli_service.rs` and `src/render.rs` (compile adaptation only), `tests/service_user.rs`, `tests/service_user_windows.rs` (delete tests whose semantics are removed).
 
-- [ ] 4.1 Replace `ServiceScope` with `Tier` derived from `Environment { elevated }`; remove scope parameters, `InstallRequest.{scope,sudo_user,invoking_user,retarget}`, `InstallOutcome::Needs`, `InstallNeed`, `ScopeDecision`; `install` returns `Result<ServiceReport, ServiceFailure>`; `src/cli_service.rs` adapted just enough to compile (prompts removed in group 5).
-- [ ] 4.2 System install: default paths via `*_for(…, System)`, create the missing state dir, canonicalize, trust-check, `ensure_presence_file`; missing config → config error naming the path and `sudo iroh-tunnel <role> config keygen`.
-- [ ] 4.3 Registrations: drop pin comment and trust env; add `IROH_TUNNEL_SERVICE=1` (systemd, launchd, BusyBox); Windows Service env keeps state dir + `IROH_TUNNEL_SCM=1`.
-- [ ] 4.4 Remove cross-tier and Windows cross-scope refusals; same-tier start refusal via `probe_tier`; `system_verb` waits with `wait_released_in(role, System, …)`; emit `ServiceNote::OtherTierRunning` from install/start/restart/status.
-- [ ] 4.5 BusyBox: non-root mutating verbs → permission error; remove the user-scope note.
-- [ ] 4.6 Windows SCM: exit 6 only from a same-tier conflict.
-- [ ] 4.7 Host guidance strings (managed-copy note, binary refusal, launchd not-loaded hint) without scope flags.
-- [ ] 4.8 Delete the scope-refusal/prompt tests in `tests/service_user*.rs`; delete `{system,system_windows,pin,account,account_name,decide_install_scope,default_scope,parse_scope_answer}.rs`, `paths/in_home.rs`, pinned-user trust variants, `LockDirs::resolve(home)`, `stop_hint_scoped`; update `examples/manage_service.rs`; host tests and clippy green.
+- [x] 4.1 Replace `ServiceScope` with `Tier` derived from `Environment { elevated }`; remove scope parameters, `InstallRequest.{scope,sudo_user,invoking_user,retarget}`, `InstallOutcome::Needs`, `InstallNeed`, `ScopeDecision`; `install` returns `Result<ServiceReport, ServiceFailure>`; `src/cli_service.rs` adapted just enough to compile (prompts removed in group 5).
+- [x] 4.2 System install: default paths via `*_for(…, System)`, create the missing state dir, canonicalize, trust-check, `ensure_presence_file`; missing config → config error naming the path and `sudo iroh-tunnel <role> config keygen`.
+- [x] 4.3 Registrations: drop pin comment and trust env; add `IROH_TUNNEL_SERVICE=1` (systemd, launchd, BusyBox); Windows Service env keeps state dir + `IROH_TUNNEL_SCM=1`.
+- [x] 4.4 Remove cross-tier and Windows cross-scope refusals; same-tier start refusal via `probe_tier`; `system_verb` waits with `wait_released_in(role, System, …)`; emit `ServiceNote::OtherTierRunning` from install/start/restart/status.
+- [x] 4.5 BusyBox: non-root mutating verbs → permission error; remove the user-scope note.
+- [x] 4.6 Windows SCM: exit 6 only from a same-tier conflict.
+- [x] 4.7 Host guidance strings (managed-copy note, binary refusal, launchd not-loaded hint) without scope flags.
+- [x] 4.8 Delete the scope-refusal/prompt tests in `tests/service_user*.rs`; delete `{system,system_windows,pin,account,account_name,decide_install_scope,default_scope,parse_scope_answer}.rs`, `paths/in_home.rs`, pinned-user trust variants, `LockDirs::resolve(home)`, `stop_hint_scoped`; update `examples/manage_service.rs`; host tests and clippy green.
 
 ## 5. CLI surface and other-tier notice
 
