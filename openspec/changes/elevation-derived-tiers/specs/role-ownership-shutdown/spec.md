@@ -54,7 +54,7 @@ Evidence: src/ownership.rs:320-345, tests/role_ownership.rs:206-238 (second_serv
 - **THEN** the second process exits with code 6 and stderr contains "already running"
 
 ### Requirement: Ownership scope is the user's default state directory
-The system SHALL scope the user-tier role lock to the user's default state directory (`<default state dir>/<role>.lock`) and the system-tier role lock to the machine lock directory (`<machine dir>/<role>.lock`), both independent of `--config` and `IROH_TUNNEL_STATE_DIR`.
+The system SHALL scope the user-tier role lock to the user's default state directory (`<default state dir>/<role>.lock`) and the system-tier ownership lock to the machine lock directory (`<machine dir>/<role>.claim.lock`, with the detection lock `<machine dir>/<role>.lock` beside it), both independent of `--config` and `IROH_TUNNEL_STATE_DIR`.
 Evidence: src/ownership.rs:1-30, src/ownership.rs:88-100, tests/role_ownership.rs:206-238
 
 #### Scenario: Different state overrides share one lock
@@ -162,7 +162,7 @@ Confidence: inferred
 - **THEN** the file exists afterwards, readable by every account, and is not held by the system process
 
 ### Requirement: Owner record is informational and public only
-The system SHALL publish a `<role>.owner.json` next to the lock of the process's own tier containing role, pid, public node id (once known) and start time, SHALL NOT write any secret key to it, and SHALL NOT use it as proof of liveness. A user-tier process SHALL NOT write a record in the machine lock directory. Publishing SHALL be a precondition of running: when a record cannot be written at claim time or when the node id is published, the start SHALL be refused with an error naming the record path. On Unix a record in the machine lock directory SHALL be readable by other accounts regardless of the process umask; on Windows it inherits the machine directory's access rules.
+The system SHALL publish a `<role>.owner.json` next to the lock of the process's own tier containing role, pid, public node id (once known) and start time, SHALL NOT write any secret key to it, and SHALL NOT use it as proof of liveness, except for the upgrade transition: an admin-owned record naming a live pid, while `<role>.lock` is held exclusively, identifies an earlier-version system instance (see "Machine-tier lock between system service and user processes"). A user-tier process SHALL NOT write a record in the machine lock directory. Publishing SHALL be a precondition of running: when a record cannot be written at claim time or when the node id is published, the start SHALL be refused with an error naming the record path. On Unix a record in the machine lock directory SHALL be readable by other accounts regardless of the process umask; on Windows it inherits the machine directory's access rules.
 Evidence: crates/host/src/ownership.rs:466-527, crates/host/src/ownership.rs:609-651, crates/host/src/ownership.rs:763-771, crates/host/src/ownership.rs:1127 (owner_record_round_trips_without_secret_material)
 
 #### Scenario: Owner record round trip

@@ -47,7 +47,7 @@ Process-scoped entry points keep their signatures and resolve `Tier::current()` 
 | `ownership::Tier` | removed | replaced by `crate::Tier`; `status` keeps `pub use crate::Tier` where it re-exported the old type; `Liveness::Running { tier: Tier, owner: Option<OwnerRecord> }` | yes |
 | `ownership::claim` | modified (behaviour) | `pub(crate) fn claim(role: Role) -> Result<RoleClaim>` claims `Tier::current()` only | no |
 | `ownership::probe_tier` | new | `pub(crate) fn probe_tier(role: Role, tier: Tier) -> Result<Liveness>`; `probe(role)` delegates with `Tier::current()` | no |
-| `ownership::wait_released_in` | new | `pub(crate) fn wait_released_in(role: Role, tier: Tier, timeout: Duration) -> Result<()>`; `wait_released(role, timeout)` delegates | no |
+| `ownership::wait_released_in` | new | `pub(crate) fn wait_released_in(role: Role, tier: Tier, timeout: Duration) -> Result<()>`; the current-tier `wait_released(role, timeout)` was removed during Task 4 (recorded in apply.md) | no |
 | `iroh_tunnel_host::other_tier_running` | new | `pub fn other_tier_running(role: Role, tier: Tier) -> Option<Tier>` re-exported from `lib.rs`; I/O errors → debug log, `None` | yes |
 | `ownership::ensure_presence_file` | new | `pub(crate) fn ensure_presence_file(role: Role) -> Result<()>` | no |
 | Presence file | new | `<machine dir>/<role>.user.lock`, empty, mode 0644 set on the open file; user tier holds it shared via read-only open | file format |
@@ -59,7 +59,7 @@ Process-scoped entry points keep their signatures and resolve `Tier::current()` 
 | `IROH_TUNNEL_TEST_TIER` | new | `test-utils` only: `system` / `user` overrides `Tier::current()`; unset or other value → privilege | no |
 | `IROH_TUNNEL_TEST_TRUSTED_OWNER` | new | `test-utils` or `cfg(test)` only: a numeric uid (Unix) or SID string (Windows) added to the admin-only trusted set, as `TrustedOwners::TestOwner`. Deviation (internal, Task 3): also honoured under `cfg(test)` so host unit tests need no feature flag; variant named `TestOwner` (clippy enum-variant-names) | no |
 | `service::platform::load_config` | modified (behaviour) | `pub(crate) fn load_config<C: RoleDoc>(path: &Path) -> Result<C>`; `RoleDoc` gains `const ROLE: Role` so the legacy message names `default_config_path_for(C::ROLE.name(), Tier::System)` | no |
-| `trust_windows::verify_confidential` | new | `pub(crate) fn verify_confidential(path: &Path) -> Result<()>`: refuse when the DACL grants any read right to a SID outside SYSTEM, Administrators, TrustedInstaller (and the test owner) | no |
+| `trust_windows::verify_confidential_with` | new | `pub(crate) fn verify_confidential_with(path: &Path, trusted: &TrustedSet) -> Result<()>` (renamed from `verify_confidential(path)` during apply: the trusted set is passed explicitly): refuse when the DACL grants any read right to a SID outside SYSTEM, Administrators, TrustedInstaller (and the test owner) | no |
 | Windows verified config read | modified (behaviour) | install's config check and `load_config` under `under_system_service()` call `verify_confidential(dir)` and `verify_confidential(file)` after the ownership walk and before parsing, whether or not a key exists | no |
 | `config::store::ConfigLock::acquire` | modified (behaviour) | unchanged signature; when `is_elevated()` on Windows **and the target lies in the system-tier config directory** (`%ProgramData%\iroh-tunnel\config`), calls `verify_confidential(parent)` and, if the file exists, `verify_confidential(file)` before creating any file. Deviation (internal, Task 3): narrowed from "every elevated write incl. explicit --config" to the spec's scope — elevated CI writes to temp dirs must not be refused | no |
 | Pinned-user trust APIs | removed (Task 4) | `TrustedOwners::RootAnd`, `trusted_uid_from_env`, `verify_dir(path, uid)`, `read_verified(path, uid)`, `TrustedSet::for_user_files`, `trusted_sid_from_env` | no |
@@ -229,8 +229,8 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 **cli-entrypoints**
 - Scope flags are rejected → [new T5] `src/cli.rs::service_scope_flags_are_rejected`
 - No prompt for a non-elevated user → [new T5] `src/cli_service.rs::install_reads_nothing_from_stdin`
-- Short letters do not collide → [keep] short-option unit test in `src/cli.rs` (same test as next line, collision part)
-- Long-only options → [mod T5] short-option unit test in `src/cli.rs` asserts no `system`/`user`
+- Short letters do not collide → [mod T5] `src/cli.rs::short_options_are_consistent_and_conflict_free`
+- Long-only options → [mod T5] `src/cli.rs::long_only_options`
 - Invalid config → [keep] `tests/service_user.rs::install_without_config_fails_with_guidance_and_registers_nothing`
 - Role already running → [keep] `tests/role_ownership.rs::service_start_is_refused_while_the_role_runs`
 - Status JSON → [keep] `tests/cli_golden.rs::status_json_forwards_file_bytes`
@@ -277,6 +277,8 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Running other role with an unreadable owner record → [keep] `ownership.rs::publish_identity_refuses_when_the_running_other_role_record_is_unreadable`
 - Running other role that has not published yet → [keep] `ownership.rs::publish_identity_proceeds_while_the_other_role_has_no_record`
 - Corrupt record of a role that is not running → [keep] `ownership.rs::publish_identity_ignores_a_corrupt_record_of_a_stopped_role`
+- Earlier-version system instance still running → [new fix] `ownership.rs::earlier_version_system_instance_refuses_claim`, `earlier_version_instance_is_probed_running`, `wait_released_in_waits_for_earlier_version_holder`; E2E `tests/service_system.rs::earlier_version_system_instance_refuses_the_new_claim`
+- Non-admin exclusive holder is not mistaken for an earlier version → [new fix] `ownership.rs::non_admin_exclusive_holder_without_record_does_not_block`
 - Corrupt machine record while the machine lock is held only shared → [new T2] `ownership.rs::corrupt_machine_record_ignored_for_user_claim` (the T2 rewrite folded the shared-hold case into it)
 - Other tier is not compared → [new T2] `ownership.rs::identity_check_ignores_other_tier`
 - Machine lock location → [keep] `ownership.rs::machine_dir_from_program_data_joins_iroh_tunnel_and_verifies` + Linux/macOS path assertion [new T2] `ownership.rs::machine_dir_is_platform_runtime_path`
