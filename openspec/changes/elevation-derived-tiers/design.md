@@ -254,6 +254,18 @@ without parsing text.
   guidance text naming `sudo iroh-tunnel <role> service install` without
   `--system`.
 
+### D7b. Windows user task for always-elevated accounts
+
+Found by Windows CI after apply: a logon task (`InteractiveToken`,
+`LeastPrivilege`) of an Administrators member on a UAC-off host, or of the
+built-in Administrator, gets the full admin token, so the task process
+resolves `Tier::System` and uses the system state and lock directories. A
+user-tier install for such an account is refused (exit 3) with guidance to
+install from an elevated terminal. Alternatives rejected: a hidden tier flag
+on `run` (re-introduces a tier switch on the public CLI); documenting it as
+unsupported (silent misbehaviour). Consequence: on UAC-off CI runners the
+user-task lifecycle tests skip and the refusal is tested instead.
+
 ### D8. CLI surface
 
 - `ScopeArgs` and every `--user` / `--system` flag are removed from `cli.rs`;

@@ -1,5 +1,20 @@
 ## ADDED Requirements
 
+### Requirement: Windows user task refused for always-elevated accounts
+The system SHALL refuse a user-tier `service install` on Windows with a permission error (exit code 3), registering nothing, when the logon task would run with an elevated token: the account is the built-in Administrator, or it is a member of Administrators while UAC is disabled (`EnableLUA` is 0). The message SHALL say the account always runs elevated and tell the operator to install from an elevated terminal to get a system service.
+
+#### Scenario: Administrator with UAC disabled
+- **WHEN** a non-elevated process of an Administrators member runs `serve service install` on a host with `EnableLUA=0`
+- **THEN** exit code is 3, stderr says the account always runs elevated and names the elevated `service install`, and no task exists
+
+#### Scenario: Standard user with UAC disabled
+- **WHEN** a non-admin account runs `serve service install` on a host with `EnableLUA=0`
+- **THEN** the user logon task is registered
+
+#### Scenario: Administrator with UAC enabled
+- **WHEN** an Administrators member runs `serve service install` from a non-elevated terminal with `EnableLUA=1`
+- **THEN** the user logon task is registered
+
 ### Requirement: System service persists a generated key into its own config
 The system SHALL, under a system service, generate and persist a missing `secret_key` into the system-tier config through the normal atomic, locked store, keeping the file owned by root (or Administrators) with owner-only access, and SHALL report an invalid edited config without serving it and without changing its owner or mode.
 Evidence: src/service/trust.rs:392-420, tests/service_system.rs (SM-EDIT-01)

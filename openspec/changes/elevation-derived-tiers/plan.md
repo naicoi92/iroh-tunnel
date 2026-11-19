@@ -69,6 +69,7 @@ Process-scoped entry points keep their signatures and resolve `Tier::current()` 
 | `service::{uninstall,start,stop,restart}` | modified | `pub fn <verb>(role: Role, invocation: &ServiceInvocation, env: Environment, call: &mut ServiceCall<'_>) -> Result<ServiceReport, ServiceFailure>` | yes |
 | `service::status` | modified | `pub fn status(role: Role, invocation: &ServiceInvocation, env: Environment, call: &mut ServiceCall<'_>) -> Result<ServiceStatusReport, ServiceFailure>` | yes |
 | `service::{ServiceScope, InstallOutcome, InstallNeed, ScopeDecision, Pin, PinOwner, RetargetConsent, decide_install_scope, default_scope, parse_scope_answer, unknown_user, account_name}` | removed | — | yes |
+| Windows always-elevated refusal | new | user-tier Windows `install` → `CliError::Permission` (exit 3) when the account is the built-in Administrator or an Administrators member with `EnableLUA=0`; message: `this account always runs elevated, so its logon task would run as a system process; install from an elevated terminal (Run as administrator) to get a system service`. Added after apply (Windows CI), user-approved | yes |
 | `ServiceNote::OtherTierRunning` | new | `OtherTierRunning { role: String, other: Tier }` | yes |
 | `ServiceNote::BusyboxSystemWide` | removed | — | yes |
 | Registration pin comment | removed | `iroh-tunnel-pin config=… uid=…/sid=…` no longer written or parsed | file format |
@@ -443,3 +444,8 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Permission failure keeps exit code 3 → [new T6] `tests/service_system.rs::user_owned_config_refused_at_install`
 - Ownership conflict keeps exit code 6 → [keep] `tests/role_ownership.rs::second_serve_is_refused_across_binaries_overrides_and_start_order`
 - Invalid configuration keeps exit code 2 → [new T5] `tests/config_lifecycle.rs::config_list_unparseable_exits_2`
+
+**Added after apply (Windows CI):**
+- Administrator with UAC disabled → [new fix] `service/backend/windows.rs::always_elevated_account_refuses_user_task` (injected token facts) + E2E `tests/service_user_windows.rs::user_task_refused_when_uac_is_disabled` (runs on UAC-off runners)
+- Standard user with UAC disabled → [new fix] `service/backend/windows.rs::standard_user_with_uac_disabled_gets_a_user_task` (injected)
+- Administrator with UAC enabled → [new fix] `service/backend/windows.rs::admin_with_uac_enabled_gets_a_user_task` (injected); E2E lifecycle tests skip on UAC-off runners
