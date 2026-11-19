@@ -67,8 +67,8 @@ Blocked by: 5
 
 Files: `tests/service_system.rs`, `tests/service_system_windows.rs`, `tests/service_user.rs`, `tests/service_user_windows.rs`, `tests/update_ownership.rs`, `README.md`, `CHANGELOG.md`, `docs/GLOSSARY.md`, `docs/**` mentioning scope flags.
 
-- [ ] 6.1 Rewrite `tests/service_system.rs` (privileged BusyBox container) for system-tier paths, trust, legacy refusal, key persistence, coexistence; keep SM-BIN cases with new guidance.
-- [ ] 6.2 Rewrite `tests/service_system_windows.rs` and `tests/service_user_windows.rs` for ProgramData config, readable-config refusal, coexistence, flagless verbs.
-- [ ] 6.3 Update `tests/service_user.rs` for flagless verbs and no linger calls.
-- [ ] 6.4 Docs: README tier section, GLOSSARY User tier / System tier, CHANGELOG Breaking entries with the manual migration steps.
-- [ ] 6.5 Fresh verification: fmt, clippy `--locked`, tests `--locked`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`; record which opt-in E2E suites ran where.
+- [x] 6.1 Rewrite `tests/service_system.rs` (privileged BusyBox container) for system-tier paths, trust, legacy refusal, key persistence, coexistence; keep SM-BIN cases with new guidance.
+- [x] 6.2 Rewrite `tests/service_system_windows.rs` and `tests/service_user_windows.rs` for ProgramData config, readable-config refusal, coexistence, flagless verbs.
+- [x] 6.3 Update `tests/service_user.rs` for flagless verbs and no linger calls.
+- [x] 6.4 Docs: README tier section, GLOSSARY User tier / System tier, CHANGELOG Breaking entries with the manual migration steps.
+- [x] 6.5 Fresh verification: fmt, clippy `--locked`, tests `--locked`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`; record which opt-in E2E suites ran where.
