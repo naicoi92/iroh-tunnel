@@ -32,6 +32,7 @@ fn command(home: &Path) -> Command {
     command
         .env("HOME", home)
         .env("IROH_TUNNEL_TEST_CONFIG_DIR", home)
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .env("IROH_TUNNEL_STATE_DIR", home.join("state"))
         .env("RUST_LOG", "iroh_tunnel=debug")
         .env("NO_COLOR", "1");

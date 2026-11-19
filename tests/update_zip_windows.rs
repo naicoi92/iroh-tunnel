@@ -189,6 +189,7 @@ mod locked {
             .env("XDG_STATE_HOME", home.join("state"))
             .env("XDG_CACHE_HOME", home.join("cache"))
             .env("IROH_TUNNEL_TEST_CONFIG_DIR", home.join("config"))
+            .env("IROH_TUNNEL_TEST_TIER", "user")
             .env("IROH_TUNNEL_STATE_DIR", home.join("state"));
         command
     }

@@ -86,6 +86,7 @@ impl Installed {
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", &home)
             .env("IROH_TUNNEL_TEST_CONFIG_DIR", &home)
+            .env("IROH_TUNNEL_TEST_TIER", "user")
             .env("IROH_TUNNEL_STATE_DIR", state)
             .env("RUST_LOG", "iroh_tunnel=info");
         #[cfg(windows)]
