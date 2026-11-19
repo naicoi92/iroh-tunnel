@@ -435,7 +435,19 @@ pub(crate) fn ensure_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
     let rest = path
         .strip_prefix(existing)
         .map_err(|_| permission(format!("cannot split {}", path.display())))?;
-    let mut current = existing.to_path_buf();
+    // `held` stays open until every component is created and verified.
+    let _held = (held, create_verified(existing, rest, trusted)?);
+    Ok(())
+}
+
+/// Create the components of `rest` below `base` one at a time. Each one,
+/// including one that already exists (a racer may have planted a junction
+/// with that name), is reopened without following a reparse point and
+/// verified (directory, owner, DACL) before the next is created in it; the
+/// handles of the verified chains are returned so they stay open.
+fn create_verified(base: &Path, rest: &Path, trusted: &TrustedSet) -> Result<Vec<Chain>> {
+    let mut chains = Vec::new();
+    let mut current = base.to_path_buf();
     for name in rest.components() {
         current.push(name);
         match std::fs::create_dir(&current) {
@@ -446,8 +458,14 @@ pub(crate) fn ensure_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
                     .context(format!("cannot create directory {}", current.display())));
             }
         }
+        let chain = verified(&current, LastAccess::Inspect, trusted)?;
+        let (_, d) = chain.target()?;
+        if !d.is_dir {
+            return Err(not_a("directory", d));
+        }
+        chains.push(chain);
     }
-    Ok(())
+    Ok(chains)
 }
 
 /// Refuse `path` when its DACL grants a read right to a SID outside
@@ -1157,6 +1175,33 @@ mod tests {
         assert!(text.contains("reparse point"), "{text}");
         assert!(std::fs::read_dir(&real).unwrap().next().is_none());
         assert_eq!(dacl_text(&real), before);
+    }
+
+    #[test]
+    fn create_verified_refuses_a_planted_junction_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        // Stand-in for the race: the missing component's name is already a
+        // junction when the loop reaches it.
+        let link = tmp.path().join("a");
+        assert!(run(
+            "cmd",
+            &[
+                "/c",
+                "mklink",
+                "/J",
+                link.to_str().unwrap(),
+                real.to_str().unwrap()
+            ]
+        ));
+        let text = permission_text(
+            create_verified(tmp.path(), Path::new("a\\state"), &me())
+                .map(|_| ())
+                .unwrap_err(),
+        );
+        assert!(text.contains("reparse point"), "{text}");
+        assert!(std::fs::read_dir(&real).unwrap().next().is_none());
     }
 
     #[test]
