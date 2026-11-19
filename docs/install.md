@@ -46,7 +46,7 @@ replacement stops the install with nothing changed. To pass options through a
 pipe, use `sh -s --`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/install.sh | sudo sh -s -- --version 0.6.0 --yes
+curl -fsSL https://raw.githubusercontent.com/naicoi92/iroh-tunnel/main/install.sh | sudo sh -s -- --version 0.7.0 --yes
 ```
 
 The installer verifies each archive against the release's SHA-256 checksum
@@ -141,7 +141,7 @@ script. They share no files, so you can install any combination.
 libc. The glibc builds need glibc 2.35 or newer.
 
 ```sh
-VERSION=0.6.0
+VERSION=0.7.0
 BASE=https://github.com/naicoi92/iroh-tunnel/releases/download/v$VERSION
 
 # Debian / Ubuntu
@@ -166,12 +166,12 @@ install a single role. To run a role at boot, register it with
 | `ghcr.io/naicoi92/iroh-tunnel-access` | `iroh-tunnel-access` |
 
 ```sh
-docker run --rm ghcr.io/naicoi92/iroh-tunnel:v0.6.0 --version
+docker run --rm ghcr.io/naicoi92/iroh-tunnel:v0.7.0 --version
 ```
 
 Images are distroless, multi-arch (`linux/amd64`, `linux/arm64`) and built
 from the same signed glibc binaries as the release archives. Tags:
-`v0.6.0`, `0.6.0`, `v0.6`, and `latest` for stable releases.
+`v0.7.0`, `0.7.0`, `v0.7`, and `latest` for stable releases.
 Pre-release tags (`vX.Y.Z-rc.N`) never move `latest`.
 See [Docker and Kubernetes](deployment.md) for running them.
 
@@ -208,7 +208,7 @@ Each executable can replace itself with a newer release:
 
 ```sh
 iroh-tunnel update             # latest stable release
-iroh-tunnel update --to 0.6.0  # a chosen release
+iroh-tunnel update --to 0.7.0  # a chosen release
 its update                     # iroh-tunnel-serve
 ita update                     # iroh-tunnel-access
 ```
@@ -259,7 +259,7 @@ Releases publish `checksums.txt` (Linux and Windows) and
 workflow. To check a download yourself:
 
 ```sh
-VERSION=0.6.0
+VERSION=0.7.0
 BASE=https://github.com/naicoi92/iroh-tunnel/releases/download/v$VERSION
 curl -LO "$BASE/checksums.txt" -LO "$BASE/checksums.txt.sigstore.json"
 cosign verify-blob checksums.txt \

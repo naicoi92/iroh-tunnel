@@ -9,6 +9,8 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
 ### Breaking
 
 - The tier follows privilege: every command (`run`, quick mode, `config`,
@@ -541,7 +543,8 @@ riscv64 (musl) release artifacts and build pipeline.
 First stable release: serve/access TCP tunneling, config CLI, systemd/
 launchd service management, status file, GoReleaser packaging.
 
-[Unreleased]: https://github.com/naicoi92/iroh-tunnel/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/naicoi92/iroh-tunnel/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/naicoi92/iroh-tunnel/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/naicoi92/iroh-tunnel/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/naicoi92/iroh-tunnel/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/naicoi92/iroh-tunnel/compare/v0.4.1...v0.4.2
