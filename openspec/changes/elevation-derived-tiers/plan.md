@@ -361,7 +361,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Planted symlink → [keep] `service/trust.rs::publish_replaces_atomically_and_never_follows_a_planted_link`; Windows [keep] `service/trust_windows/win32.rs::publish_replaces_a_planted_symlink`
 - Custom state directory → [keep] `tests/service_user_windows.rs::install_refuses_a_state_directory_the_task_cannot_carry`
 - Not installed (task) → [keep] `tests/service_user_windows.rs::start_without_an_installed_task_names_the_install_command`
-- Slow stop → [new T4] `service/always_elevated.rs::task_restart_times_out_without_starting` (task backend; `schtasks /End` with a lock still held past the wait → service error, no second start)
+- Slow stop → [new T4] `service/backend/windows.rs::task_restart_times_out_without_starting` (task backend; `schtasks /End` with a lock still held past the wait → service error, no second start)
 - System service restart → [keep] `tests/service_system_windows.rs::system_service_lifecycle`; [new T4] `service/system_verb.rs::system_restart_waits_for_system_holder_only`
 - Service definition → [new T6] `tests/service_system_windows.rs::elevated_install_uses_programdata_config`
 - Reinstall → [keep] `tests/service_system_windows.rs::reinstall_replaces_the_definition`

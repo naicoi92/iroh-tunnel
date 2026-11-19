@@ -189,6 +189,12 @@ impl Drop for Fixture {
 
 #[test]
 fn install_refuses_a_state_directory_the_task_cannot_carry() -> Result<()> {
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
+        return Ok(());
+    }
     let fx = Fixture::new()?;
     fx.write_config("https://relay.invalid")?;
     let config = fx.config();

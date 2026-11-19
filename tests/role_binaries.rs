@@ -395,6 +395,8 @@ with (state / "service.log").open("wb") as log:
         )?;
         let _cleanup = RegisteredProcess(state.join("service.pid"));
         let mut command = installed.command(true, &state)?;
+        // Root must pick the system tier; the user-tier pin would mask it.
+        command.env_remove("IROH_TUNNEL_TEST_TIER");
         let out = busy_exec::output(
             command
                 .current_dir(&root)
