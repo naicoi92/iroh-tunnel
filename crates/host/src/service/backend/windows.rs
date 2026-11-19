@@ -130,6 +130,11 @@ pub(crate) fn install(
 ) -> Result<()> {
     debug_assert_eq!(reg.tier, Tier::User, "the system tier is a Windows Service");
     let role = reg.role;
+    super::super::always_elevated::refuse_if_always_elevated(
+        super::windows_account::is_builtin_admin(),
+        super::windows_account::is_admin_member(),
+        super::windows_account::enable_lua(),
+    )?;
     ensure_default_state(reg.state)?;
     let action = task_action(reg)?;
     let xml = format_task_xml(role, &current_user(native)?, &action, reg.policy);

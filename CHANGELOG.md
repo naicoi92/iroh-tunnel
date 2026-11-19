@@ -18,6 +18,10 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   verb and now fail as unknown arguments; `service install` no longer asks for
   a scope, a user name or a retarget confirmation. An administrator who wants
   the user tier runs the command unelevated.
+- On Windows, a user-tier `service install` is refused (exit `3`) for an
+  account that always runs elevated (the built-in Administrator, or an
+  Administrators member with UAC disabled): its logon task would run as a
+  system process. Install from an elevated terminal to get a system service.
 - System-tier files moved to machine-wide locations owned by root or
   administrators: config in `/etc/iroh-tunnel/<role>.toml` (Linux),
   `/Library/Application Support/iroh-tunnel/config/<role>.toml` (macOS),

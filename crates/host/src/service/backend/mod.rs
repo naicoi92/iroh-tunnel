@@ -11,6 +11,8 @@ pub(super) mod launchd;
 pub(super) mod systemd;
 #[cfg(windows)]
 pub(super) mod windows;
+#[cfg(windows)]
+mod windows_account;
 pub(super) mod windows_scm;
 #[cfg(windows)]
 pub(super) mod windows_scm_impl;

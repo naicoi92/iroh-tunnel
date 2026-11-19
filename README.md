@@ -148,6 +148,8 @@ of two tiers, chosen by privilege alone. There is no flag and no prompt.
 | State (Linux) | `~/.local/state/iroh-tunnel` | `/run/iroh-tunnel` |
 | State (macOS) | `~/.local/state/iroh-tunnel` | `/Library/Application Support/iroh-tunnel/state` |
 | State (Windows) | `%LOCALAPPDATA%\iroh-tunnel\state` | `%ProgramData%\iroh-tunnel\state` |
+
+On Windows, `service install` in the user tier is refused (exit 3) for an account that always runs elevated (the built-in Administrator, or an Administrators member with UAC disabled); install from an elevated terminal instead.
 | `service` registers | systemd user unit, LaunchAgent or logon task | systemd system unit, LaunchDaemon, BusyBox init script or Windows Service |
 
 - The system tier never reads `HOME`, `SUDO_USER` or a user profile, so

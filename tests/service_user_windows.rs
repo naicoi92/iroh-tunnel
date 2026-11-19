@@ -233,6 +233,12 @@ async fn user_background_task_lifecycle() -> Result<()> {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
         return Ok(());
     }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
+        return Ok(());
+    }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
     let first_id = fx.write_config(relay.as_ref())?;
@@ -299,6 +305,64 @@ async fn user_background_task_lifecycle() -> Result<()> {
     Ok(())
 }
 
+/// Why this runner cannot host a user logon task, when its account always runs
+/// elevated: the built-in Administrator, or an Administrators member with UAC
+/// disabled (`EnableLUA` = 0). An elevated test process is an admin member.
+fn always_elevated_runner() -> Option<&'static str> {
+    let text = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    if text("whoami", &["/user", "/fo", "csv", "/nh"])
+        .trim()
+        .trim_end_matches('"')
+        .ends_with("-500")
+    {
+        return Some("the runner account is the built-in Administrator");
+    }
+    let lua = text(
+        "reg",
+        &[
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+            "/v",
+            "EnableLUA",
+        ],
+    );
+    (iroh_tunnel_host::service::is_elevated() && lua.contains("0x0"))
+        .then_some("the runner is an administrator with UAC disabled")
+}
+
+/// On an always-elevated runner the user-tier install is refused: exit 3, the
+/// guidance message, and no task registered.
+#[test]
+fn user_task_refused_when_uac_is_disabled() -> Result<()> {
+    let Some(why) = always_elevated_runner() else {
+        eprintln!("skipped: the runner account does not always run elevated");
+        return Ok(());
+    };
+    eprintln!("running: {why}");
+    let fx = Fixture::new()?;
+    fx.write_config("https://relay.invalid")?;
+    let config = fx.config();
+    let out = fx.run(&[
+        "serve",
+        "service",
+        "install",
+        "--config",
+        config.to_str().unwrap(),
+    ])?;
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("always runs elevated"), "{err}");
+    assert!(err.contains("elevated terminal"), "{err}");
+    assert!(!fx.task_exists(), "nothing may be registered");
+    Ok(())
+}
+
 /// Run `command` in the user tier: directly from a non-elevated test, under a
 /// restricted non-elevated token from an elevated one (the CI runner).
 fn user_output(command: &mut Command) -> Result<Output> {
@@ -315,6 +379,12 @@ fn user_output(command: &mut Command) -> Result<Output> {
 fn non_elevated_targets_user_task() -> Result<()> {
     if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
+        return Ok(());
+    }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
         return Ok(());
     }
     let fx = Fixture::new()?;
@@ -453,6 +523,12 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
         return Ok(());
     }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
+        return Ok(());
+    }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
     let node_id = fx.write_config(relay.as_ref())?;
@@ -467,7 +543,10 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
         "--exe",
         BIN,
     ])?;
-    assert!(installed.contains("Installed"), "{installed}");
+    assert!(
+        installed.contains("Enabled") && installed.contains("Started"),
+        "{installed}"
+    );
     // The caller has exited; the task and the role remain.
     assert!(fx.task_exists(), "task not registered");
     fx.wait_for_own_status(&status_file, &node_id)?;
@@ -490,6 +569,12 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
 async fn captured_schtasks_status_is_returned() -> Result<()> {
     if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
+        return Ok(());
+    }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
         return Ok(());
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;

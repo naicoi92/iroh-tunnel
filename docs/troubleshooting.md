@@ -106,6 +106,9 @@ link. The message names the path, account and rights; the service log is
 access or move the file, then run `service start` from an elevated terminal.
 See [Windows system tier](services.md#system-tier).
 
+**Windows `service install` fails with `this account always runs elevated`.**
+The account is the built-in Administrator, or an Administrators member on a host with UAC disabled (`EnableLUA=0`), so its logon task would run as a system process. Run `service install` from an elevated terminal (Run as administrator) to get a system service.
+
 **`note: <role> is also running ...`.**
 The other tier's instance of the role is running too (a system service next to
 your user instance, or the reverse). It is informational; the two have their

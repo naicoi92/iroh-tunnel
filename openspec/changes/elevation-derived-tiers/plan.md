@@ -361,7 +361,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Planted symlink → [keep] `service/trust.rs::publish_replaces_atomically_and_never_follows_a_planted_link`; Windows [keep] `service/trust_windows/win32.rs::publish_replaces_a_planted_symlink`
 - Custom state directory → [keep] `tests/service_user_windows.rs::install_refuses_a_state_directory_the_task_cannot_carry`
 - Not installed (task) → [keep] `tests/service_user_windows.rs::start_without_an_installed_task_names_the_install_command`
-- Slow stop → [new T4] `service/backend/windows.rs::task_restart_times_out_without_starting` (task backend; `schtasks /End` with a lock still held past the wait → service error, no second start)
+- Slow stop → [new T4] `service/always_elevated.rs::task_restart_times_out_without_starting` (task backend; `schtasks /End` with a lock still held past the wait → service error, no second start)
 - System service restart → [keep] `tests/service_system_windows.rs::system_service_lifecycle`; [new T4] `service/system_verb.rs::system_restart_waits_for_system_holder_only`
 - Service definition → [new T6] `tests/service_system_windows.rs::elevated_install_uses_programdata_config`
 - Reinstall → [keep] `tests/service_system_windows.rs::reinstall_replaces_the_definition`
@@ -446,6 +446,6 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Invalid configuration keeps exit code 2 → [new T5] `tests/config_lifecycle.rs::config_list_unparseable_exits_2`
 
 **Added after apply (Windows CI):**
-- Administrator with UAC disabled → [new fix] `service/backend/windows.rs::always_elevated_account_refuses_user_task` (injected token facts) + E2E `tests/service_user_windows.rs::user_task_refused_when_uac_is_disabled` (runs on UAC-off runners)
-- Standard user with UAC disabled → [new fix] `service/backend/windows.rs::standard_user_with_uac_disabled_gets_a_user_task` (injected)
-- Administrator with UAC enabled → [new fix] `service/backend/windows.rs::admin_with_uac_enabled_gets_a_user_task` (injected); E2E lifecycle tests skip on UAC-off runners
+- Administrator with UAC disabled → [new fix] `service/always_elevated.rs::always_elevated_account_refuses_user_task` (injected token facts) + E2E `tests/service_user_windows.rs::user_task_refused_when_uac_is_disabled` (runs on UAC-off runners)
+- Standard user with UAC disabled → [new fix] `service/always_elevated.rs::standard_user_with_uac_disabled_gets_a_user_task` (injected)
+- Administrator with UAC enabled → [new fix] `service/always_elevated.rs::admin_with_uac_enabled_gets_a_user_task` (injected); E2E lifecycle tests skip on UAC-off runners

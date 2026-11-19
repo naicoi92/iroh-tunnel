@@ -29,6 +29,8 @@ mod status;
 mod stop;
 // Pure Windows seams, compiled elsewhere only for their tests.
 #[cfg(any(windows, test))]
+mod always_elevated;
+#[cfg(any(windows, test))]
 mod system_verb;
 #[cfg(any(windows, test))]
 mod task_xml;
