@@ -1802,3 +1802,65 @@ async fn first_start_creates_the_machine_dir_and_logs() -> Result<()> {
     );
     Ok(())
 }
+
+/// Removes a config directory this test created, even on failure.
+struct CreatedDir(PathBuf);
+
+impl Drop for CreatedDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Fix round 1 (Task 5): from an elevated terminal whose working directory
+/// is a Users-readable `%ProgramData%\iroh-tunnel` with `config` missing,
+/// `serve config keygen --config config\serve.toml` (relative) creates the
+/// directory admin-only, writes an admin-only secret and leaves the machine
+/// directory's DACL unchanged.
+#[test]
+fn relative_keygen_from_readable_machine_dir_is_admin_only() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let machine = env_dir("ProgramData", r"C:\ProgramData").join("iroh-tunnel");
+    let config_dir = machine.join("config");
+    if config_dir.exists() {
+        eprintln!("skipped: {} already exists", config_dir.display());
+        return Ok(());
+    }
+    std::fs::create_dir_all(&machine)?;
+    let before = acl_state(&machine)?;
+    ensure!(
+        before.contains("S-1-5-32-545|"),
+        "precondition: the machine directory must be Users-readable: {before}"
+    );
+    let _cleanup = CreatedDir(config_dir.clone());
+
+    let out = Command::new(BIN)
+        .args([
+            "serve",
+            "config",
+            "keygen",
+            "--config",
+            r"config\serve.toml",
+        ])
+        .current_dir(&machine)
+        .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
+        .env_remove("IROH_TUNNEL_TEST_TIER")
+        .stdin(Stdio::null())
+        .output()?;
+    ensure!(out.status.success(), "keygen: {}", stderr(&out));
+
+    for path in [config_dir.clone(), config_dir.join("serve.toml")] {
+        let acl = acl_state(&path)?;
+        for outsider in ["S-1-5-32-545|", "S-1-5-11|", "S-1-1-0|"] {
+            ensure!(
+                !acl.contains(outsider),
+                "{} grants {outsider}: {acl}",
+                path.display()
+            );
+        }
+    }
+    assert_eq!(acl_state(&machine)?, before, "machine DACL unchanged");
+    Ok(())
+}

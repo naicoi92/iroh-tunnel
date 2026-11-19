@@ -76,26 +76,57 @@ enum DirCreation {
     SystemTier,
 }
 
-/// How this process creates the missing parent of `config`.
-fn dir_creation(config: &Path) -> DirCreation {
+/// The one decision for a write to `config`: the path to write through and
+/// how a missing parent is created. On Windows an elevated write into the
+/// system-tier config directory is also confidentiality-checked (see
+/// [`ConfigLock::acquire`]); both follow from this same decision.
+///
+/// # Errors
+///
+/// Windows, elevated: the target or the system config directory cannot be
+/// resolved. The write is refused rather than created with inherited
+/// permissions (fail closed).
+fn plan_write(config: &Path) -> Result<(PathBuf, DirCreation)> {
     #[cfg(windows)]
-    let system = requires_confidentiality(config, crate::service::is_elevated());
-    #[cfg(not(windows))]
-    let system = {
-        let _ = config;
-        crate::Tier::current() == crate::Tier::System
-    };
-    if system {
-        DirCreation::SystemTier
-    } else {
-        DirCreation::Inherited
+    {
+        let elevated = crate::service::is_elevated();
+        let target =
+            system_config_target(config, elevated, std::env::current_dir, system_config_dir)?;
+        Ok(match target {
+            Some(target) => (target, DirCreation::SystemTier),
+            None => (config.to_path_buf(), DirCreation::Inherited),
+        })
     }
+    #[cfg(not(windows))]
+    Ok((
+        config.to_path_buf(),
+        if crate::Tier::current() == crate::Tier::System {
+            DirCreation::SystemTier
+        } else {
+            DirCreation::Inherited
+        },
+    ))
 }
 
-/// Create the parent directory of `path` when it is missing; a system-tier
-/// process creates it as [`DirCreation::SystemTier`].
+/// The system tier's config directory.
+#[cfg(windows)]
+fn system_config_dir() -> Result<PathBuf> {
+    crate::paths::default_config_path_for("serve", crate::Tier::System)?
+        .parent()
+        .map(Path::to_path_buf)
+        .context("the system config path has no directory")
+}
+
+/// Create the parent directory of `path` when it is missing; a write into
+/// the system tier's config directory creates it as
+/// [`DirCreation::SystemTier`].
+///
+/// # Errors
+///
+/// As [`plan_write`], or the directory cannot be created.
 pub(crate) fn ensure_parent(path: &Path) -> Result<()> {
-    ensure_parent_with(path, dir_creation(path))
+    let (target, creation) = plan_write(path)?;
+    ensure_parent_with(&target, creation)
 }
 
 /// [`ensure_parent`] with the creation mode injected.
@@ -129,7 +160,7 @@ fn create_system_config_dir(dir: &Path) -> Result<()> {
     }
     if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
         if let Some(machine) = crate::ownership::machine_dir()? {
-            if machine.path == parent {
+            if same_windows_path(&machine.path, parent) {
                 crate::ownership::ensure_machine_dir(&machine)?;
             }
         }
@@ -152,39 +183,91 @@ fn private_options() -> OpenOptions {
     options
 }
 
-/// Whether `dir` names the system-tier config directory `system`, compared
-/// the way Windows resolves paths: case-insensitive, `/` and `\\` alike, a
-/// verbatim `\\?\\` prefix and trailing separators ignored. Callers pass
-/// canonical paths where they exist.
+/// Whether two paths name the same location the way Windows resolves
+/// paths: case-insensitive, `/` and `\\` alike, a verbatim `\\?\\` prefix
+/// and trailing separators ignored. Callers pass absolute identities
+/// ([`absolute_identity`]).
 #[cfg(any(test, windows))]
-fn is_system_config_dir(dir: &Path, system: &Path) -> bool {
+fn same_windows_path(a: &Path, b: &Path) -> bool {
     fn normalized(path: &Path) -> String {
         let text = path.to_string_lossy().replace('/', "\\");
         let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
         text.trim_end_matches('\\').to_lowercase()
     }
-    normalized(dir) == normalized(system)
+    normalized(a) == normalized(b)
 }
 
-/// Whether a write to `config` must first prove the config directory and
-/// file confidential: an elevated process writing into the system-tier
-/// config directory, the only place the confidentiality rule covers. A
-/// write elsewhere (an explicit `--config` in a user's folder) is not
-/// checked.
+/// The absolute identity of `path`, whether or not it exists: a relative
+/// path is joined to `cwd` (the working directory, injected), its longest existing ancestor
+/// canonicalized (links resolved), the missing rest appended with `.` and
+/// `..` resolved lexically (nothing below a missing component can be a
+/// link). A verbatim `\\?\\` prefix that `canonicalize` adds on Windows is
+/// dropped, except for UNC paths.
+///
+/// # Errors
+///
+/// The existing ancestor cannot be canonicalized.
 #[cfg(any(test, windows))]
-fn requires_confidentiality(config: &Path, elevated: bool) -> bool {
-    if !elevated {
-        return false;
+fn absolute_identity(path: &Path, cwd: &Path) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+    let absolute = std::path::absolute(cwd.join(path))?;
+    let existing = absolute
+        .ancestors()
+        .find(|a| std::fs::symlink_metadata(a).is_ok())
+        .unwrap_or(&absolute);
+    let mut identity = std::fs::canonicalize(existing)?;
+    let rest = absolute.strip_prefix(existing).unwrap_or(Path::new(""));
+    for component in rest.components() {
+        match component {
+            Component::ParentDir => {
+                identity.pop();
+            }
+            Component::Normal(name) => identity.push(name),
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
     }
-    let Some(dir) = config.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return false;
+    let text = identity.to_string_lossy();
+    Ok(match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => identity,
+    })
+}
+
+/// The absolute identity of `config` when an elevated process writes it
+/// into the system-tier config directory (`system_dir`), else `None`. A
+/// relative path or a missing tail is resolved first, so
+/// `config\serve.toml` from `%ProgramData%\iroh-tunnel` is recognised.
+///
+/// # Errors
+///
+/// Elevated only: the working directory (`cwd`), `config` or the system
+/// directory cannot be resolved. The caller must refuse the write, never
+/// fall back to inherited permissions.
+#[cfg(any(test, windows))]
+fn system_config_target(
+    config: &Path,
+    elevated: bool,
+    cwd: impl FnOnce() -> std::io::Result<PathBuf>,
+    system_dir: impl FnOnce() -> Result<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    if !elevated {
+        return Ok(None);
+    }
+    let cwd = cwd().context("cannot read the working directory to resolve the config path")?;
+    let resolve = |p: &Path| {
+        absolute_identity(p, &cwd).with_context(|| {
+            format!(
+                "cannot resolve {} to decide whether it is the system config directory",
+                p.display()
+            )
+        })
     };
-    let system = crate::paths::default_config_path_for("serve", crate::Tier::System);
-    let Some(system_dir) = system.ok().and_then(|p| p.parent().map(Path::to_path_buf)) else {
-        return false;
-    };
-    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    is_system_config_dir(&canonical(dir), &canonical(&system_dir))
+    let target = resolve(config)?;
+    let system = resolve(&system_dir()?)?;
+    let in_system = target
+        .parent()
+        .is_some_and(|dir| same_windows_path(dir, &system));
+    Ok(in_system.then_some(target))
 }
 
 /// Refuse a write when the existing config directory or file of `config`
@@ -228,35 +311,35 @@ impl ConfigLock {
     /// first refuses a directory or file readable by non-admins, before any
     /// file is created.
     pub(crate) fn acquire(config: &Path) -> Result<Self> {
+        let (target, creation) = plan_write(config)?;
         #[cfg(windows)]
-        {
-            let trusted = if requires_confidentiality(config, crate::service::is_elevated()) {
-                Some(crate::service::admin_trust(&crate::service::process_env)?)
-            } else {
-                None
-            };
-            Self::acquire_with(config, trusted.as_ref())
+        if creation == DirCreation::SystemTier {
+            let trusted = crate::service::admin_trust(&crate::service::process_env)?;
+            return Self::acquire_with(&target, Some(&trusted));
         }
-        #[cfg(not(windows))]
-        Self::acquire_unchecked(config)
+        Self::acquire_unchecked(&target, creation)
     }
 
-    /// [`Self::acquire`] with the confidentiality decision injected: `Some`
-    /// checks against that trusted set before any file is created.
+    /// [`Self::acquire`] with the decision injected: `Some` is a write into
+    /// the system config directory, checked against that trusted set before
+    /// any file is created and creating a missing directory admin-only;
+    /// `None` is any other write.
     #[cfg(windows)]
     fn acquire_with(
         config: &Path,
         confidential: Option<&crate::service::trust_windows::model::TrustedSet>,
     ) -> Result<Self> {
-        if let Some(trusted) = confidential {
-            verify_config_confidential(config, trusted)?;
-        }
-        Self::acquire_unchecked(config)
+        let Some(trusted) = confidential else {
+            return Self::acquire_unchecked(config, DirCreation::Inherited);
+        };
+        verify_config_confidential(config, trusted)?;
+        Self::acquire_unchecked(config, DirCreation::SystemTier)
     }
 
-    /// Take the lock without any confidentiality check.
-    fn acquire_unchecked(config: &Path) -> Result<Self> {
-        ensure_parent(config)?;
+    /// Take the lock without any confidentiality check, creating a missing
+    /// parent as `creation`.
+    fn acquire_unchecked(config: &Path, creation: DirCreation) -> Result<Self> {
+        ensure_parent_with(config, creation)?;
         let lock_path = sibling(config, ".lock");
         let file = private_options()
             .create(true)
@@ -554,19 +637,110 @@ pub(crate) fn resolve_and_persist_key<D: RoleDoc>(cfg: &mut D, path: &Path) -> R
 mod tests {
     use super::*;
 
+    /// The process working directory, injected for [`system_config_target`].
+    fn here() -> std::io::Result<PathBuf> {
+        std::env::current_dir()
+    }
+
+    /// A system directory injected for [`system_config_target`].
+    fn system_dir(path: &Path) -> impl FnOnce() -> Result<PathBuf> + '_ {
+        move || Ok(path.to_path_buf())
+    }
+
     #[test]
     fn elevated_write_outside_the_system_config_dir_is_not_checked() {
         let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("machine").join("config");
         let config = tmp.path().join("serve.toml");
-        assert!(!requires_confidentiality(&config, true));
-        assert!(!requires_confidentiality(Path::new("serve.toml"), true));
+        assert_eq!(
+            system_config_target(&config, true, here, system_dir(&system)).unwrap(),
+            None
+        );
+        let relative = Path::new("serve.toml");
+        assert_eq!(
+            system_config_target(relative, true, here, system_dir(&system)).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn elevated_write_into_the_system_config_dir_is_checked() {
-        let system = crate::paths::default_config_path_for("access", crate::Tier::System).unwrap();
-        assert!(requires_confidentiality(&system, true));
-        assert!(!requires_confidentiality(&system, false));
+        let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("machine").join("config");
+        let config = system.join("access.toml");
+        let target = system_config_target(&config, true, here, system_dir(&system)).unwrap();
+        assert!(target.is_some_and(|t| t.ends_with("machine/config/access.toml")));
+        assert_eq!(
+            system_config_target(&config, false, here, system_dir(&system)).unwrap(),
+            None
+        );
+    }
+
+    /// Review round 1: a relative `--config` from the machine directory with
+    /// the `config` directory still missing names the system config dir.
+    #[test]
+    fn relative_target_with_missing_tail_is_the_system_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = tmp.path().join("machine");
+        std::fs::create_dir(&machine).unwrap();
+        let system = machine.join("config");
+        let cwd = || Ok(machine.clone());
+        let expected = absolute_identity(&machine, &machine)
+            .unwrap()
+            .join("config")
+            .join("serve.toml");
+        for relative in [
+            "config/serve.toml",
+            r"config\serve.toml",
+            "./config/x/../serve.toml",
+        ] {
+            if relative.contains('\\') && !cfg!(windows) {
+                continue; // `\` is a separator only on Windows
+            }
+            let target = system_config_target(Path::new(relative), true, cwd, system_dir(&system))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{relative} is the system config dir"));
+            assert!(target.is_absolute(), "{}", target.display());
+            assert!(
+                same_windows_path(&target, &expected),
+                "{}",
+                target.display()
+            );
+        }
+        assert!(!system.exists(), "deciding creates nothing");
+    }
+
+    #[test]
+    fn unreadable_working_directory_fails_closed_when_elevated() {
+        let missing = || Err(std::io::Error::other("cwd gone"));
+        let system = PathBuf::from("/machine/config");
+        let relative = Path::new("config/serve.toml");
+        assert!(system_config_target(relative, true, missing, system_dir(&system)).is_err());
+    }
+
+    #[test]
+    fn unresolvable_system_dir_fails_closed_when_elevated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("serve.toml");
+        let failing = || -> Result<PathBuf> { anyhow::bail!("no ProgramData") };
+        assert!(system_config_target(&config, true, here, failing).is_err());
+        let failing = || -> Result<PathBuf> { anyhow::bail!("no ProgramData") };
+        assert_eq!(
+            system_config_target(&config, false, here, failing).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn absolute_identity_resolves_links_in_the_existing_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let identity = absolute_identity(&real.join("missing/../a/b"), Path::new("/")).unwrap();
+        assert_eq!(
+            identity,
+            std::fs::canonicalize(&real).unwrap().join("a").join("b")
+        );
     }
 
     #[test]
@@ -578,7 +752,7 @@ mod tests {
             r"\\?\C:\ProgramData\iroh-tunnel\config",
             "C:/ProgramData/iroh-tunnel/config",
         ] {
-            assert!(is_system_config_dir(Path::new(same), system), "{same}");
+            assert!(same_windows_path(Path::new(same), system), "{same}");
         }
         for other in [
             r"C:\ProgramData\iroh-tunnel",
@@ -586,7 +760,7 @@ mod tests {
             r"C:\Users\alice\AppData\Local\iroh-tunnel",
             r"D:\ProgramData\iroh-tunnel\config",
         ] {
-            assert!(!is_system_config_dir(Path::new(other), system), "{other}");
+            assert!(!same_windows_path(Path::new(other), system), "{other}");
         }
     }
     use crate::config::fixtures::VALID_SERVE;
