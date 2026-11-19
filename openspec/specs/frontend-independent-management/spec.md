@@ -125,46 +125,6 @@ Source: change keep-failed-edit-text design.md Decisions 1-3 (issue #222)
 - **WHEN** commit cannot read an existing scratch copy
 - **THEN** the error names the scratch copy and it is not removed
 
-### Requirement: Service operations enforce existing policy
-The host SHALL provide install, uninstall, start, stop, restart and status operations taking a typed role, scope and resolved paths. They MUST use the same backend selection and privilege, account, pin/trust, installability and ownership policies as the CLI; raw backend dispatch SHALL NOT be public.
-Source: refactor-codebase design.md Decision 4; openspec/specs/system-service-management
-
-#### Scenario: Unprivileged system scope
-- **WHEN** an unprivileged caller requests install with system scope
-- **THEN** the operation returns a permission-classified error whose guidance names the `sudo` rerun command and absolute config path, and no registration is written
-
-#### Scenario: Non-elevated Windows system scope
-- **WHEN** a non-elevated caller requests install with system scope on Windows
-- **THEN** the operation returns a permission-classified error whose guidance names the elevated-terminal rerun and absolute config path, and no service is registered
-
-#### Scenario: BusyBox user scope unchanged
-- **WHEN** a caller requests a user-scope operation on a host where the BusyBox/SysV backend is selected
-- **THEN** the operation behaves as `system-service-management` "BusyBox backend needs root and ignores user scope" specifies and does not invent per-user support
-
-### Requirement: Insufficient information yields a structured need
-When a service operation lacks information, it SHALL return a structured need (scope selection, invoking-user input or retarget confirmation) instead of prompting or guessing. Execution MUST recheck privilege, ownership, trust and registration facts before mutating.
-Source: refactor-codebase design.md Decision 4
-
-#### Scenario: Install without scope from an unprivileged caller
-- **WHEN** an unprivileged caller requests install with no scope decision
-- **THEN** the operation returns a scope-selection need and registers nothing
-
-#### Scenario: CLI keeps its scope prompt
-- **WHEN** a non-elevated user runs `iroh-tunnel serve service install` on a terminal with no scope flag
-- **THEN** the CLI turns the scope-selection need into the prompt offering `user` and `system` on stderr, as `system-service-management` "Install scope selection" specifies
-
-### Requirement: Retarget confirmation is specific and fresh
-A retarget confirmation SHALL identify both the old and the proposed pin. A confirmation whose old pin no longer matches the registration MUST NOT be applied.
-Source: design.md Decision 4; openspec/specs/system-service-management (Retargeting another user's service needs confirmation)
-
-#### Scenario: Retarget without confirmation
-- **WHEN** a privileged install would retarget a service pinned to another user and the request lacks a matching confirmation
-- **THEN** the operation returns a retarget-confirmation need naming both pins and changes nothing
-
-#### Scenario: Stale confirmation
-- **WHEN** the registered pin changed after the confirmation was produced
-- **THEN** the operation refuses or returns a new retarget-confirmation need
-
 ### Requirement: Registered and updated executables are supplied explicitly
 Host service install SHALL take the absolute path of the all-in-one tunnel executable to register, and the host update operation SHALL take its target executable. Neither MUST fall back to the calling process's `current_exe()`.
 Source: refactor-codebase design.md Decisions 4, 7
@@ -186,11 +146,11 @@ Source: brainstorm.md Key Decisions 1; design.md Decision 4
 - **THEN** the service is still running and its status file is still published
 
 ### Requirement: Explicit lifecycle operations keep composite semantics
-Only explicit stop, restart or uninstall SHALL change service lifetime. Install SHALL still enable and start; uninstall SHALL still stop, disable and remove; start SHALL keep its ownership refusal before the manager call. A failed operation SHALL return the effects already applied, recorded as each one happens. The system MUST NOT perform a compensating rollback unless a backend requirement demands it (the Windows system install, per `system-service-management` "Windows system install replaces and rolls back"); when it does, the rollback's own effects SHALL be returned too. On the Windows system service, a created service counts as enabled and a deleted one as disabled.
+Only explicit stop, restart or uninstall SHALL change service lifetime. Install SHALL still enable and start; uninstall SHALL still stop, disable and remove; start SHALL keep its same-tier ownership refusal before the manager call. A failed operation SHALL return the effects already applied, recorded as each one happens. The system MUST NOT perform a compensating rollback unless a backend requirement demands it (the Windows system install, per `system-service-management` "Windows system install replaces and rolls back"); when it does, the rollback's own effects SHALL be returned too. On the Windows system service, a created service counts as enabled and a deleted one as disabled.
 Source: design.md Decision 4; openspec/specs/system-service-management
 
 #### Scenario: Start refused when the role already runs
-- **WHEN** a caller requests start while the Serve role is already running for that user
+- **WHEN** a caller requests start while the Serve role is already running in the caller's tier
 - **THEN** the operation returns a conflict-classified refusal before calling the service manager
 
 #### Scenario: Partial install reports applied effects
@@ -310,13 +270,41 @@ Source: design.md Decision 7
 - **THEN** the service is not stopped or restarted by the update operation
 
 ### Requirement: No elevation, account switch or scope fallback
-Service operations MUST NOT self-elevate, switch accounts, fall back to another scope or substitute a different platform service mechanism, on any supported platform.
+Service operations MUST NOT self-elevate, switch accounts, act in a tier other than the caller's, or substitute a different platform service mechanism, on any supported platform.
 Source: design.md Decision 4 (refactor-codebase); windows-system-service design.md D8
 
 #### Scenario: Windows system scope without elevation
-- **WHEN** a non-elevated caller requests a system-scope operation on Windows
-- **THEN** the operation returns a permission-classified error with elevated-terminal rerun guidance, and creates no Windows Service, scheduled task or user task
+- **WHEN** a non-elevated caller requests install on Windows
+- **THEN** only the caller's logon task is registered, and no Windows Service is created or changed
 
 #### Scenario: Windows system scope uses only a Windows Service
-- **WHEN** an elevated caller installs system scope on Windows
+- **WHEN** an elevated caller installs on Windows
 - **THEN** only a Windows Service is registered, and no scheduled task is created as a substitute
+
+### Requirement: Service operations never need more input
+Service operations SHALL NOT prompt or guess; every input they need SHALL be part of the request, so no service operation returns a need. Execution MUST recheck privilege, ownership, trust and registration facts before mutating.
+Source: refactor-codebase design.md Decision 4
+
+#### Scenario: Install completes without a need
+- **WHEN** a caller requests install with a valid config
+- **THEN** the operation returns a report or a failure, never a request for more input
+
+### Requirement: Service operations derive the tier from privilege
+The host SHALL provide install, uninstall, start, stop, restart and status operations taking a typed role, the caller's injected privilege and resolved paths, deriving the tier from that privilege and taking no scope. They MUST use the CLI's backend selection, trust, installability and ownership policies, keep raw backend dispatch private, and return the other-tier notice as a structured service note.
+Source: refactor-codebase design.md Decision 4; openspec/specs/system-service-management
+
+#### Scenario: Unprivileged caller
+- **WHEN** an unprivileged caller with a valid user-tier config requests install on a systemd, launchd or Windows host
+- **THEN** a user-tier registration is written and nothing system-wide is written
+
+#### Scenario: Elevated caller on Windows
+- **WHEN** an elevated caller requests install on Windows
+- **THEN** a Windows Service is registered from the system-tier config
+
+#### Scenario: BusyBox without privilege
+- **WHEN** an unprivileged caller requests a mutating operation on a host where the BusyBox/SysV backend is selected
+- **THEN** the operation returns a permission-classified error as `system-service-management` "BusyBox backend needs root" specifies and does not invent per-user support
+
+#### Scenario: Other tier note
+- **WHEN** a caller installs while the role runs in the other tier
+- **THEN** the report carries an other-tier-running note and the install proceeds
