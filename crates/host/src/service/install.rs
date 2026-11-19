@@ -885,7 +885,10 @@ mod unix_tests {
                 config,
                 Path::new("/Library/Application Support/iroh-tunnel/config/serve.toml")
             );
-            assert_eq!(state, Path::new("/var/run/iroh-tunnel"));
+            assert_eq!(
+                state,
+                Path::new("/Library/Application Support/iroh-tunnel/state")
+            );
         }
         let home = crate::paths::default_state_dir_for(Tier::User)
             .ok()
@@ -934,8 +937,8 @@ mod unix_tests {
         assert_eq!(plan.state, real);
         #[cfg(target_os = "macos")]
         assert_eq!(
-            canonical_path(Path::new("/var/run")).unwrap(),
-            Path::new("/private/var/run")
+            canonical_path(Path::new("/var")).unwrap(),
+            Path::new("/private/var")
         );
     }
 

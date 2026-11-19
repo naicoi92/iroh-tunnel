@@ -7,7 +7,8 @@
 //! (`iroh-tunnel/config`, `iroh-tunnel/state`). The system tier uses fixed
 //! machine-wide paths and never reads the home directory: Linux
 //! `/etc/iroh-tunnel` and `/run/iroh-tunnel`; macOS
-//! `/Library/Application Support/iroh-tunnel/config` and `/var/run/iroh-tunnel`;
+//! `/Library/Application Support/iroh-tunnel/{config,state}` (machine locks stay in
+//! `/var/run/iroh-tunnel`);
 //! Windows `%ProgramData%\iroh-tunnel\{config,state}`. Explicit overrides
 //! (`--config`, `IROH_TUNNEL_STATE_DIR`) are applied by the callers before
 //! these defaults.

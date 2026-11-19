@@ -20,7 +20,7 @@
 //!   share it however they were started.
 //! - **System tier** — `<machine dir>/<role>.lock`, held exclusively: one per
 //!   machine per role. The machine dir is `/run/iroh-tunnel` (Linux),
-//!   `/var/run/iroh-tunnel` (macOS), `%ProgramData%\iroh-tunnel` (Windows).
+//!   `/var/run/iroh-tunnel` (macOS; the macOS state dir is separate, under `/Library`), `%ProgramData%\iroh-tunnel` (Windows).
 //! - **Presence file** — `<machine dir>/<role>.user.lock`. The system tier
 //!   creates it (0644, unlocked); a user process holds it *shared* through a
 //!   read-only open while it runs and never creates anything in the machine

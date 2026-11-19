@@ -902,6 +902,25 @@ mod tests {
         verify_binary(&sh, TrustedOwners::RootOnly).unwrap();
     }
 
+    /// The real macOS chain `/` -> `/Library` -> `/Library/Application
+    /// Support` is walked with the root-only owners. The leaf
+    /// (`iroh-tunnel/state`) is created only by an elevated install, so the
+    /// walk covers its deepest ancestor that exists without root; every
+    /// directory above the leaf is therefore proven admin-only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_state_dir_passes_the_trust_walk() {
+        let state = crate::paths::default_state_dir_for(crate::Tier::System).unwrap();
+        let parent = state.parent().and_then(Path::parent).unwrap();
+        assert_eq!(parent, Path::new("/Library/Application Support"));
+        verify_dir_with(parent, TrustedOwners::RootOnly)
+            .unwrap_or_else(|e| panic!("walk refused {}: {e:#}", parent.display()));
+        // An installed leaf is walked too (needs a prior elevated install).
+        if state.exists() {
+            verify_dir_with(&state, TrustedOwners::RootOnly).unwrap();
+        }
+    }
+
     #[test]
     fn root_only_refuses_a_file_owned_by_the_test_user() {
         if me() == 0 {

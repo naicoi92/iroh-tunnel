@@ -534,7 +534,7 @@ mod system_tier {
     #[test]
     fn system_tier_state_dir_is_runtime_dir_without_home() {
         let expected = if cfg!(target_os = "macos") {
-            "/var/run/iroh-tunnel"
+            "/Library/Application Support/iroh-tunnel/state"
         } else {
             "/run/iroh-tunnel"
         };

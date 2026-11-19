@@ -39,7 +39,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(dir, std::path::Path::new("/run/iroh-tunnel"));
         #[cfg(target_os = "macos")]
-        assert_eq!(dir, std::path::Path::new("/var/run/iroh-tunnel"));
+        assert_eq!(
+            dir,
+            std::path::Path::new("/Library/Application Support/iroh-tunnel/state")
+        );
         #[cfg(windows)]
         assert_eq!(
             dir,
@@ -47,6 +50,15 @@ mod tests {
                 .unwrap()
                 .join("iroh-tunnel")
                 .join("state")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_state_dir_is_library_application_support() {
+        assert_eq!(
+            default_state_dir_for(Tier::System).unwrap(),
+            std::path::Path::new("/Library/Application Support/iroh-tunnel/state")
         );
     }
 

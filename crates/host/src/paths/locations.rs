@@ -81,7 +81,8 @@ pub(super) fn system_config_dir() -> Result<PathBuf> {
     return Ok(program_data()?.join(APP_DIR).join("config"));
 }
 
-/// Machine-wide runtime state directory of the system tier.
+/// Machine-wide state directory of the system tier (macOS: under `/Library`,
+/// not `/var/run`, whose group-writable parent the trust walk refuses).
 ///
 /// # Errors
 ///
@@ -91,7 +92,9 @@ pub(super) fn system_state_dir() -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     return Ok(PathBuf::from("/run").join(APP_DIR));
     #[cfg(all(unix, not(target_os = "linux")))]
-    return Ok(PathBuf::from("/var/run").join(APP_DIR));
+    return Ok(PathBuf::from("/Library/Application Support")
+        .join(APP_DIR)
+        .join("state"));
     #[cfg(windows)]
     return Ok(program_data()?.join(APP_DIR).join("state"));
 }
