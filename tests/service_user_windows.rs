@@ -17,8 +17,9 @@
 //! (`common::restricted`) when the test process is elevated.
 //!
 //! The `/End` outcome (graceful drain or hard termination) is reported by the
-//! test, not asserted: SM-04 records terminate-without-drain as a known
-//! limitation, so the measurement is evidence rather than a gate.
+//! test, not asserted: the `system-service-management` requirement "Windows
+//! user-tier stop terminates without draining" records the hard termination
+//! (measured in #185), so the drain outcome is evidence rather than a gate.
 //!
 //! The `test-utils` feature disables relay TLS verification: only the isolated
 //! in-process relay is used, never public relays or real secrets.
@@ -287,15 +288,24 @@ async fn user_background_task_lifecycle() -> Result<()> {
     let stopped = fx.ok(&["serve", "service", "status"])?;
     assert!(stopped.contains("serve is not running"), "{stopped}");
 
-    // A hard /End leaves a stale snapshot: remove it so every later read is
-    // from the new process, and require a new pid.
-    let _ = std::fs::remove_file(&status_file);
+    // A leftover snapshot is a crash leftover: shown, but flagged stale.
+    if !drained {
+        let shown = fx.run(&["serve", "status"])?;
+        let warning = stderr(&shown);
+        assert!(
+            warning.contains("serve is not running") && warning.contains("stale"),
+            "{warning}"
+        );
+        assert!(stdout(&shown).contains(&first_id), "{}", stdout(&shown));
+    }
 
-    // start and restart keep the configured identity in a NEW process.
+    // start with the leftovers in place: a NEW process, same identity.
     fx.ok(&["serve", "service", "start"])?;
-    wait_for("status after start", || pid_of(&status_file).is_some())?;
+    wait_for("a new process's status after start", || {
+        node_id_of(&status_file).as_deref() == Some(first_id.as_str())
+            && pid_of(&status_file).is_some_and(|p| p != pid)
+    })?;
     let started_pid = pid_of(&status_file).unwrap();
-    assert_ne!(started_pid, pid, "start must launch a new process");
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
 
     fx.ok(&["serve", "service", "restart"])?;
