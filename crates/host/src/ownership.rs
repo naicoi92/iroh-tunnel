@@ -1122,6 +1122,30 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Poll `released` for up to 2 s. Between fork and exec a process that
+    /// another test in this multi-threaded binary spawns shares every open
+    /// file description (`O_CLOEXEC` closes them only at exec), and a flock
+    /// belongs to the description: a lock just dropped can read as held for
+    /// that instant. A lock that is really leaked stays held and still fails.
+    fn eventually(mut released: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if released() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether `kind` can be taken on `path` now (then released again).
+    fn lockable(path: &Path, kind: LockKind) -> bool {
+        let file = base_options().read(true).open(path).unwrap();
+        matches!(try_lock(file, kind).unwrap(), Lock::Held(_))
+    }
+
     #[cfg(unix)]
     #[test]
     fn finalize_dir_mode_refuses_a_symlink_and_leaves_its_target_alone() {
@@ -1181,11 +1205,7 @@ mod tests {
             Lock::Busy
         ));
         drop(first);
-        let third = create_lock_file(&path, 0o600).unwrap();
-        assert!(matches!(
-            try_lock(third, LockKind::Exclusive).unwrap(),
-            Lock::Held(_)
-        ));
+        assert!(eventually(|| lockable(&path, LockKind::Exclusive)));
     }
 
     #[test]
@@ -1251,11 +1271,7 @@ mod tests {
             Lock::Busy
         ));
         drop(first);
-        let reader = base_options().read(true).open(&path).unwrap();
-        assert!(matches!(
-            try_lock(reader, LockKind::Shared).unwrap(),
-            Lock::Held(_)
-        ));
+        assert!(eventually(|| lockable(&path, LockKind::Shared)));
     }
 
     fn running() -> Result<Liveness> {
@@ -1658,6 +1674,7 @@ mod tests {
         let shared = hold_for_test(Role::Serve, tmp.path(), LockKind::Shared).unwrap();
         assert!(!held_exclusively(&path).unwrap());
         drop(shared);
+        assert!(eventually(|| lockable(&path, LockKind::Exclusive)));
         let _exclusive = hold_for_test(Role::Serve, tmp.path(), LockKind::Exclusive).unwrap();
         assert!(held_exclusively(&path).unwrap());
     }
@@ -1719,7 +1736,10 @@ mod tests {
         other.try_lock_shared().unwrap();
         drop(other);
         drop(claim);
-        assert!(!held_shared(&path).unwrap(), "released on drop");
+        assert!(
+            eventually(|| !held_shared(&path).unwrap()),
+            "released on drop"
+        );
     }
 
     #[test]
@@ -1939,10 +1959,12 @@ mod tests {
             "one user holder is left"
         );
         drop(second);
-        assert_eq!(
-            other_tier_running_in(Role::Serve, Tier::System, &machine),
-            None
-        );
+        assert!(eventually(|| other_tier_running_in(
+            Role::Serve,
+            Tier::System,
+            &machine
+        )
+        .is_none()));
     }
 
     #[test]
