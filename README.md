@@ -158,8 +158,9 @@ of two tiers, chosen by privilege alone. There is no flag and no prompt.
 - BusyBox/SysV hosts have no user services: `service` verbs other than
   `status` need `sudo`.
 - The two tiers of a role run side by side, each with its own key. When the
-  other tier's instance of the role is running, `run`, `status` and `service`
-  print a note on stderr, for example `note: serve is also running as a system
+  other tier's instance of the role is running, `run`, `status` and
+  `service install|start|restart|status` print a note on stderr (`service
+  stop` and `service uninstall` do not), for example `note: serve is also running as a system
   service; manage it with sudo or from an elevated terminal`.
 - Running both tiers of Access with the same listen address (or both of Serve
   behind the same local port) fails at bind time with an error naming the

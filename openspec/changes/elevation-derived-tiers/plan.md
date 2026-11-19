@@ -93,12 +93,12 @@ Process-scoped entry points keep their signatures and resolve `Tier::current()` 
 **Interfaces:**
 - Produces: `Tier`, `default_config_path_for`, `default_state_dir_for`; existing `default_config_path`/`default_state_dir` keep their signatures.
 
-- [ ] **Step 1:** Unit tests in `tier.rs`: `from_elevated_maps_privilege` (`true → System`, `false → User`); `test_tier_override_wins` (`IROH_TUNNEL_TEST_TIER=system` → `System`, `user` → `User`, `bogus` → privilege).
+- [ ] **Step 1:** Unit tests in `tier.rs`: `from_elevated_maps_privilege` (`true → System`, `false → User`); `test_tier_override_selects_the_tier_in_a_subprocess` (in `tests/config_paths.rs`) (`IROH_TUNNEL_TEST_TIER=system` → `System`, `user` → `User`, `bogus` → privilege).
 - [ ] **Step 2:** `cargo test -p iroh-tunnel-host --all-features tier::` → FAIL (module missing).
 - [ ] **Step 3:** Implement `Tier` per Contracts; re-export from `lib.rs`; rustdoc on every public item.
 - [ ] **Step 4:** Unit tests in `paths`: `system_config_path_is_platform_machine_path` (Linux `/etc/iroh-tunnel/serve.toml`; macOS `/Library/Application Support/iroh-tunnel/config/serve.toml`; Windows `<ProgramData>\iroh-tunnel\config\serve.toml`), `system_state_dir_is_platform_runtime_path` (`/run/iroh-tunnel`, `/var/run/iroh-tunnel`, `<ProgramData>\iroh-tunnel\state`) — both with `HOME` removed.
 - [ ] **Step 5:** Run → FAIL. Implement `*_for` (system branch from constants / `service::program_data_dir()`, no `home_dir()`/`local_app_data()`, no `migrate_legacy`; `IROH_TUNNEL_TEST_CONFIG_DIR` keeps priority) and make the old functions delegate with `Tier::current()`.
-- [ ] **Step 6:** Process tests in `tests/config_paths.rs` with `IROH_TUNNEL_TEST_TIER=system`: `system_tier_ignores_home_and_sudo_user` (`HOME=/home/alice`, `SUDO_USER=alice`; `config path` output lacks `/home/alice`), `system_tier_without_home_succeeds`, `system_tier_does_not_migrate_macos_legacy` (macOS; unreadable legacy file present → `config keygen` with `IROH_TUNNEL_TEST_CONFIG_DIR` succeeds, no "migrated"), `system_tier_status_names_runtime_dir`.
+- [ ] **Step 6:** Process tests in `tests/config_paths.rs` with `IROH_TUNNEL_TEST_TIER=system`: `system_tier_ignores_home_and_sudo_user` (`HOME=/home/alice`, `SUDO_USER=alice`; `config path` output lacks `/home/alice`), `system_tier_without_home_succeeds`, `system_tier_does_not_migrate_macos_legacy` (macOS; unreadable legacy file present → `config keygen` with `IROH_TUNNEL_TEST_CONFIG_DIR` succeeds, no "migrated"), `system_tier_state_dir_is_runtime_dir_without_home`.
 - [ ] **Step 7:** `cargo test --workspace --all-features` → PASS (whole workspace compiles: no signature changed).
 - [ ] **Step 8:** Commit `feat(host): derive tier from privilege for default paths`.
 
@@ -121,7 +121,7 @@ Process-scoped entry points keep their signatures and resolve `Tier::current()` 
 - [ ] **Step 1:** Unit tests via the existing `TierDirs` injection: `system_claim_creates_presence_file_unlocked`, `user_claim_holds_presence_shared_when_present`, `user_claim_without_machine_dir_creates_nothing`, `system_and_user_claims_coexist`, `second_system_claim_is_refused` (Conflict, "already running"), `identity_check_ignores_other_tier`, `corrupt_machine_record_ignored_for_user_claim`.
 - [ ] **Step 2:** `cargo test -p iroh-tunnel-host --all-features ownership::` → FAIL.
 - [ ] **Step 3:** Implement design D5 claim, records and identity scope; machine-dir resolution failure fails only a system claim.
-- [ ] **Step 4:** Unit tests: `probe_tier_sees_only_its_tier` (both tiers held → each probe returns its own owner), `wait_released_in_ignores_other_tier`, `user_sees_system_holder`, `system_sees_shared_user_holder`, `system_sees_none_after_last_user_exits`, `probe_io_error_is_none` (lock path is a directory), `lock_and_presence_readable_under_umask_077` and `machine_owner_record_is_world_readable_under_umask_077` (Unix), `machine_dir_is_platform_runtime_path` (`/run/iroh-tunnel` Linux, `/var/run/iroh-tunnel` macOS; non-`test-utils` resolver function exercised directly).
+- [ ] **Step 4:** Unit tests: `probe_tier_sees_only_its_tier` (both tiers held → each probe returns its own owner), `wait_released_in_ignores_other_tier`, `user_sees_system_holder`, `system_sees_shared_user_holder`, `system_sees_none_after_last_user_exits`, `probe_io_error_is_none` (lock path is a directory), `new_machine_dir_lock_and_presence_are_public_under_umask_077` and `machine_owner_record_is_world_readable_under_umask_077` (Unix), `machine_dir_is_platform_runtime_path` (`/run/iroh-tunnel` Linux, `/var/run/iroh-tunnel` macOS; non-`test-utils` resolver function exercised directly).
 - [ ] **Step 5:** Implement `probe_tier`, `wait_released_in` (old functions delegate), `other_tier_running`, `ensure_presence_file`, 0644 on the open file. Keep `LockDirs::resolve(home)` and `stop_hint_scoped` untouched for `install.rs`.
 - [ ] **Step 6:** `tests/role_ownership.rs`: replace `system_tier_lock_refuses_user_start_and_blocks_a_system_start` with `system_and_user_tiers_run_side_by_side`; add `second_system_instance_is_refused`, `system_lock_ignores_state_override`, `several_user_holders_keep_presence_until_last_exits` (last one `kill -9`), `blind_spot_user_before_presence_is_not_seen` — all with `IROH_TUNNEL_MACHINE_LOCK_DIR` + `IROH_TUNNEL_TEST_TIER`.
 - [ ] **Step 7:** `cargo test --workspace --all-features` → PASS.
@@ -276,16 +276,18 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Running other role with an unreadable owner record → [keep] `ownership.rs::publish_identity_refuses_when_the_running_other_role_record_is_unreadable`
 - Running other role that has not published yet → [keep] `ownership.rs::publish_identity_proceeds_while_the_other_role_has_no_record`
 - Corrupt record of a role that is not running → [keep] `ownership.rs::publish_identity_ignores_a_corrupt_record_of_a_stopped_role`
-- Corrupt machine record while the machine lock is held only shared → [mod T2] `ownership.rs::publish_identity_ignores_a_machine_record_under_a_shared_hold` + [new T2] `ownership.rs::corrupt_machine_record_ignored_for_user_claim`
+- Corrupt machine record while the machine lock is held only shared → [new T2] `ownership.rs::corrupt_machine_record_ignored_for_user_claim` (the T2 rewrite folded the shared-hold case into it)
 - Other tier is not compared → [new T2] `ownership.rs::identity_check_ignores_other_tier`
 - Machine lock location → [keep] `ownership.rs::machine_dir_from_program_data_joins_iroh_tunnel_and_verifies` + Linux/macOS path assertion [new T2] `ownership.rs::machine_dir_is_platform_runtime_path`
 - System lock held, user start → [new T2] `tests/role_ownership.rs::system_and_user_tiers_run_side_by_side` + notice [new T5] `run_prints_other_tier_notice_before_bind`
 - User running, system start → [new T2] `tests/role_ownership.rs::system_and_user_tiers_run_side_by_side`
 - Several user holders → [new T2] `tests/role_ownership.rs::several_user_holders_keep_presence_until_last_exits`
-- Readable under a restrictive umask → [new T2] `ownership.rs::lock_and_presence_readable_under_umask_077`
+- Readable under a restrictive umask → [new T2] `ownership.rs::new_machine_dir_lock_and_presence_are_public_under_umask_077` (also asserts `serve.claim.lock` is `0600`) + [final] `ownership.rs::existing_claim_lock_keeps_its_mode`
+- Non-admin holder cannot block the system service → [final] `ownership.rs::non_admin_holder_cannot_block_the_system_claim`, `ownership.rs::system_claim_lock_is_exclusive_and_detection_lock_shared` + [final] `tests/service_system.rs::non_admin_lock_holder_cannot_block_the_system_service`
+- Second system instance is refused through the claim lock → [final] `ownership.rs::second_system_claim_is_refused_through_the_claim_lock` + [new T2] `tests/role_ownership.rs::second_system_instance_is_refused` + [final] `tests/service_system.rs::non_admin_lock_holder_cannot_block_the_system_service`
 - Windows user task while the system service runs → [new T6] `tests/service_system_windows.rs::user_task_and_service_coexist`
 - Windows ProgramData cannot be resolved → [mod T2] `ownership.rs::tier_dirs_resolution_fails_when_program_data_cannot_be_resolved` (+ user claim proceeds)
-- Install lock directories when ProgramData cannot be resolved → [keep] `ownership.rs::lock_dirs_resolution_fails_when_program_data_cannot_be_resolved` until T4, then [mod T4] the system-install resolver test
+- Install lock directories when ProgramData cannot be resolved → [mod T2] `ownership.rs::tier_dirs_resolution_fails_when_program_data_cannot_be_resolved` + `ownership.rs::machine_dir_from_program_data_propagates_a_resolution_failure`
 - No machine lock file → [new T2] `ownership.rs::user_claim_without_machine_dir_creates_nothing`
 - Presence file created by the system tier → [new T2] `ownership.rs::system_claim_creates_presence_file_unlocked` + [new T4] `service/install.rs::system_install_creates_presence_file`
 - Owner record round trip → [keep] `ownership.rs::owner_record_round_trips_without_secret_material`
@@ -321,7 +323,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Config loosened after install → [new T6] `tests/service_system.rs::loosened_config_refused_at_service_start`
 - Symlinked config directory → [new T3] `service/trust.rs::symlinked_component_is_refused`
 - Link below the canonical root → [new T3] `service/trust.rs::symlinked_component_is_refused` (component below the canonical root)
-- Foreground root run in a container → [new T3] `service/platform.rs::foreground_root_run_is_not_walked`
+- Foreground root run in a container → [new T3] `service/platform.rs::foreground_root_run_is_not_walked` + [final] `service/platform.rs::foreground_sudo_e_from_terminal_is_not_legacy` (`XPC_SERVICE_NAME=0` / empty)
 - systemd unit environment → [new T4] `service/backend/systemd.rs::systemd_unit_has_service_marker_and_no_pin`
 - Pinned registration after upgrade → [new T3] `service/platform.rs::legacy_trusted_uid_is_refused_before_reading_config` + [new T6] `tests/service_system.rs::legacy_pinned_script_is_refused_with_guidance`
 - Windows pinned service after upgrade → [new T3] `service/platform.rs::legacy_trusted_sid_is_refused`
@@ -335,8 +337,8 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - State directory override → [keep] `service/backend/systemd.rs::unit_pins_state_dir_and_quotes_paths_with_spaces`
 - Missing config → [keep] `tests/service_user.rs::install_without_config_fails_with_guidance_and_registers_nothing`
 - Read-only home → [mod T6] `tests/service_user.rs::denied_registration_fails_with_guidance_and_keeps_scope`
-- Container without systemd → [keep] `service/backend/dispatch.rs::linux_backend_follows_the_init_system_for_every_scope`
-- Windows scopes → [mod T4] `service/backend/dispatch.rs::windows_backend_follows_the_scope` (renamed `windows_backend_follows_the_tier`)
+- Container without systemd → [keep] `service/backend/dispatch.rs::linux_backend_follows_the_init_system_for_every_tier`
+- Windows scopes → [mod T4] `service/backend/dispatch.rs::windows_backend_follows_the_tier`
 - Unit registration shape → [keep] `service/backend/systemd.rs::unit_matches_golden_for_every_case` (golden updated in T4)
 - Unit text → [keep] `service/backend/systemd.rs::format_unit_uses_default_restart_policy`
 - Re-install over a running unit → [new T4] `service/backend/systemd.rs::reinstall_restarts_a_running_unit` (asserts the `restart` command in the issued sequence)
@@ -352,7 +354,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - systemd exempts the refused-start status → [keep] `service/backend/systemd.rs::unit_exempts_the_refused_start_status`
 - launchd carries no exit-status exemption → [keep] `service/backend/launchd.rs::plist_carries_no_exit_status_exemption`
 - Not on PATH → [keep] `src/cli_service.rs::cli_resolves_tunnel_binary_from_path_first`
-- Root-run registration from a user-writable binary → [mod T4] `service/install.rs::plan_binary_system_scope_managed_when_refused`
+- Root-run registration from a user-writable binary → [mod T4] `service/install.rs::plan_binary_system_tier_managed_when_refused`
 - Full lifecycle → [keep] `tests/service_user.rs::user_service_lifecycle_uses_the_pinned_absolute_paths`
 - No linger → [new T6] `tests/service_user.rs::user_install_runs_no_loginctl`
 - Planted symlink → [keep] `service/trust.rs::publish_replaces_atomically_and_never_follows_a_planted_link`; Windows [keep] `service/trust_windows/win32.rs::publish_replaces_a_planted_symlink`
@@ -386,7 +388,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - System tier defaults → [new T1] `paths::system_config_path_is_platform_machine_path`
 - System tier ignores the invoking user's home → [new T1] `tests/config_paths.rs::system_tier_ignores_home_and_sudo_user`
 - Unix status location → [keep] `tests/config_paths.rs::state_default_is_home_local_state_ignoring_xdg`
-- System tier status location → [new T1] `tests/config_paths.rs::system_tier_status_names_runtime_dir`
+- System tier status location → [new T1] `tests/config_paths.rs::system_tier_state_dir_is_runtime_dir_without_home`
 - macOS system tier status location → [new T4 fix] `paths::macos_system_state_dir_is_library_application_support`
 - Relative HOME → [keep] `tests/config_paths.rs::relative_home_is_rejected_with_guidance`
 - System tier without HOME → [new T1] `tests/config_paths.rs::system_tier_without_home_succeeds`

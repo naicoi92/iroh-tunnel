@@ -32,10 +32,14 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   error (exit code `2`) naming the new system config path. Nothing is
   migrated. To move a system service over:
   1. Upgrade the binary.
-  2. Create the system config with elevation, for example
-     `sudo iroh-tunnel serve config keygen` and
-     `sudo iroh-tunnel serve config set ...`, or copy the old file to
-     `/etc/iroh-tunnel/serve.toml` with owner root and mode `0600`. A copied
+  2. Create the system config with elevation (the path is also printed in
+     the error): `/etc/iroh-tunnel/<role>.toml` on Linux,
+     `/Library/Application Support/iroh-tunnel/config/<role>.toml` on macOS,
+     `%ProgramData%\iroh-tunnel\config\<role>.toml` on Windows. For example
+     run `sudo iroh-tunnel serve config keygen` and
+     `sudo iroh-tunnel serve config set ...` (Windows: from an elevated
+     terminal), or copy the old file there with owner root (Windows:
+     Administrators) and mode `0600`. A copied
      file keeps its key; do not also run the old user file in the user tier
      with the same key.
   3. Re-run `sudo iroh-tunnel <role> service install` (Windows: from an
@@ -50,7 +54,9 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
   own key; the machine-wide lock no longer keeps them apart. When the other
   tier's instance is running, `run`, `status` and `service install|start|
   restart|status` print a `note:` line on stderr. One process per role per
-  tier still holds.
+  tier still holds. The system tier claims an admin-only
+  `<role>.claim.lock` in the machine directory, so no other account can
+  block a system start by holding a lock file.
 - A system service persists a generated key into its config (owner root,
   `0600`), as the user tier does; the config and state directory must be
   owned by root or administrators and are checked at install and at every

@@ -37,7 +37,7 @@ with `IROH_TUNNEL_STATE_DIR`:
 | Tier | Linux | macOS | Windows |
 |---|---|---|---|
 | User | `~/.local/state/iroh-tunnel/` | `~/.local/state/iroh-tunnel/` | `%LOCALAPPDATA%\iroh-tunnel\state\` |
-| System (machine locks, `<role>.user.lock` presence file) | `/run/iroh-tunnel/` | `/var/run/iroh-tunnel/` | `%ProgramData%\iroh-tunnel\` |
+| System (admin-only `<role>.claim.lock`, `<role>.lock` detection lock, `<role>.user.lock` presence file) | `/run/iroh-tunnel/` | `/var/run/iroh-tunnel/` | `%ProgramData%\iroh-tunnel\` |
 
 The system tier never reads `HOME`, `SUDO_USER` or a user profile, so
 `sudo iroh-tunnel serve config keygen` writes the system file, not yours. An
