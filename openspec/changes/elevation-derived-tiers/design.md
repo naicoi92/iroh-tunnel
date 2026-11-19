@@ -184,6 +184,15 @@ machine dir (/run/iroh-tunnel | /var/run/iroh-tunnel | %ProgramData%\iroh-tunnel
   the install but before the first service start is visible. Lock and
   presence files are created 0644 with the mode applied on the open file, so
   the umask cannot hide them.
+- Upgrade transition (decided after the final review): an earlier-version
+  system process holds `<role>.lock` exclusively and knows no claim lock. A
+  system claim, `probe_tier(System)` and `wait_released_in(System)` treat
+  "`<role>.lock` held exclusively AND `<role>.owner.json` owned by
+  root/Administrators names a live pid" as a running system instance (claim
+  → exit 6 "from an earlier version … stop it first"). A non-admin cannot
+  forge that record, so the DoS fix holds. Residual: a `kill -9`-left record
+  whose pid was reused while an attacker holds the lock; `/run` clears on
+  reboot.
 - Other-tier detection: a user process tests `<role>.lock` with an exclusive
   lock (busy means a system instance runs; a malicious shared holder can only
   cause a false notice); a system process tests

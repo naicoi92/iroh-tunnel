@@ -125,6 +125,14 @@ Evidence: crates/host/src/ownership.rs:144-244, crates/host/src/ownership.rs:906
 - **WHEN** a non-admin account holds `<role>.lock` shared and a system-tier serve starts
 - **THEN** the system serve starts, and the non-admin account cannot open `<role>.claim.lock`
 
+#### Scenario: Earlier-version system instance still running
+- **WHEN** a system-tier process of an earlier version holds `<role>.lock` exclusively, its root/Administrators-owned `<role>.owner.json` in the machine directory names a live pid, and a new system-tier serve starts
+- **THEN** the new serve exits with code 6, stderr says a system instance from an earlier version is still running and must be stopped first, and the system-tier probe reports it as running
+
+#### Scenario: Non-admin exclusive holder is not mistaken for an earlier version
+- **WHEN** a non-admin account holds `<role>.lock` exclusively and no admin-owned owner record with a live pid exists
+- **THEN** a system-tier serve starts
+
 #### Scenario: Second system instance is refused through the claim lock
 - **WHEN** a system-tier serve holds `<role>.claim.lock` and another system-tier serve starts
 - **THEN** the second exits with code 6 and stderr contains "already running"
