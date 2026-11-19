@@ -13,7 +13,7 @@
 
 - Exit codes unchanged: config 2, permission 3, service 5, conflict 6 (`CliError`).
 - No new dependencies; no `--user`/`--system` flag anywhere (clap rejects them as unexpected).
-- System-tier paths (design D2): Linux `/etc/iroh-tunnel/<role>.toml`, state `/run/iroh-tunnel`; macOS `/Library/Application Support/iroh-tunnel/config/<role>.toml`, state `/var/run/iroh-tunnel` (pinned canonically as `/private/var/run/iroh-tunnel`); Windows `%ProgramData%\iroh-tunnel\config\<role>.toml`, state `%ProgramData%\iroh-tunnel\state`.
+- System-tier paths (design D2): Linux `/etc/iroh-tunnel/<role>.toml`, state `/run/iroh-tunnel`; macOS `/Library/Application Support/iroh-tunnel/config/<role>.toml`, state `/Library/Application Support/iroh-tunnel/state` (locks stay in `/var/run/iroh-tunnel`; deviation decided by the user during Task 4: `/private/var/run` is group-writable and fails the trust walk); Windows `%ProgramData%\iroh-tunnel\config\<role>.toml`, state `%ProgramData%\iroh-tunnel\state`.
 - User-tier paths and behaviour unchanged.
 - Never chmod/chown/repair DACLs of existing files; never write secrets to owner records, notices or logs.
 - Test-only seams are gated by `feature = "test-utils"`: `IROH_TUNNEL_TEST_TIER`, `IROH_TUNNEL_TEST_TRUSTED_OWNER`, `IROH_TUNNEL_MACHINE_LOCK_DIR`, `IROH_TUNNEL_TEST_CONFIG_DIR`, `IROH_TUNNEL_TEST_MANAGED_BIN_DIR`.
@@ -28,7 +28,7 @@
 2. A user-tier process on a host where the machine directory does not exist or is unreadable must start without a notice and without creating anything → Task 2 (`user_claim_without_machine_dir_creates_nothing`, `probe_io_error_is_none`).
 6. A user systemd unit / LaunchAgent carries `IROH_TUNNEL_SERVICE=1` but runs unelevated; it must keep reading the user's own files → Task 3 (`user_service_with_marker_is_not_walked`).
 7. With both tiers running, `status` and Windows `restart` must act on their own tier only → Task 4 (`status_reports_own_tier_owner_when_both_run`, `system_restart_waits_for_system_holder_only`).
-3. macOS `/var` → `/private/var` symlink must not make the default system install refuse its own state dir → Task 4 (`system_install_pins_canonical_state_dir`).
+3. macOS default system paths must pass the trust walk (`/private/var/run` is group-writable, so the state dir lives under `/Library/Application Support`) → Task 4 (`macos_system_state_dir_passes_the_trust_walk`).
 4. A Windows `config` directory created by an earlier admin with inherited Users-read must be refused before a key is written → Task 3 (`config_dir_readable_by_users_is_refused`).
 5. A legacy unit restarting in a loop (systemd `Restart=on-failure`) must exit with config error 2 every time without touching the old user file → Task 3 (`legacy_trusted_uid_is_refused_before_reading_config`) and Task 6 E2E.
 
@@ -171,7 +171,7 @@ Process-scoped entry points keep their signatures and resolve `Tier::current()` 
 - Produces: service API per Contracts.
 
 - [ ] **Step 1:** Registration render tests: `systemd_unit_has_service_marker_and_no_pin`, `reinstall_restarts_a_running_unit`, `launchd_plist_has_service_marker_and_no_pin`, `busybox_script_exports_service_marker_and_no_pin`, `windows_service_env_has_scm_marker_and_no_sid`. Run → FAIL. Implement.
-- [ ] **Step 2:** Install planning tests (fixtures, `IROH_TUNNEL_TEST_TRUSTED_OWNER`): `system_install_defaults_to_machine_paths`, `system_install_creates_missing_state_dir_before_canonicalizing`, `system_install_pins_canonical_state_dir` (macOS `/var/run/iroh-tunnel` → `/private/var/run/iroh-tunnel`; no launchd needed), `system_install_missing_config_names_path_and_keygen` (exit 2), `system_install_refuses_untrusted_config` (exit 3), `system_install_creates_presence_file`, `install_returns_report_not_need`, `failed_trust_check_writes_no_managed_copy`. Run → FAIL.
+- [ ] **Step 2:** Install planning tests (fixtures, `IROH_TUNNEL_TEST_TRUSTED_OWNER`): `system_install_defaults_to_machine_paths`, `system_install_creates_missing_state_dir_before_canonicalizing`, `system_install_pins_canonical_state_dir` (canonical pinning of a symlinked override; no launchd needed), `system_install_missing_config_names_path_and_keygen` (exit 2), `system_install_refuses_untrusted_config` (exit 3), `system_install_creates_presence_file`, `install_returns_report_not_need`, `failed_trust_check_writes_no_managed_copy`. Run → FAIL.
 - [ ] **Step 3:** Implement tier from `Environment`, system defaults, create-if-missing state dir (Unix 0755; Windows under the machine dir) → canonicalize → verify → presence → registration; remove `Needs`/scope/pin/retarget paths; adapt `src/cli_service.rs` to the new signatures (prompt code paths stay deleted-or-unreachable until Task 5 removes them).
 - [ ] **Step 4:** Tests: `install_proceeds_when_other_tier_runs_with_note`, `start_refused_only_in_same_tier`, `status_reports_own_tier_owner_when_both_run`, `system_restart_waits_for_system_holder_only`, `busybox_non_root_mutation_is_permission_error`, `busybox_root_install_has_no_user_scope_note`, `scm_conflict_exit_only_for_same_tier`, `task_restart_times_out_without_starting`. Run → FAIL. Implement (cross-tier and Windows cross-scope refusals removed; `system_verb` uses `wait_released_in(role, Tier::System, …)`; `status` uses `probe_tier`).
 - [ ] **Step 5:** Host guidance strings (managed-copy note, binary refusal, launchd not-loaded hint) without scope flags; update their existing tests (`standalone_privilege_guidance_for_all_verbs_uses_supplied_executable`, `standalone_guard_guidance_names_invoked_executable_and_config`, managed-copy note tests).
@@ -315,7 +315,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Elevated Windows terminal → [new T6] `tests/service_system_windows.rs::elevated_stop_targets_scm_service`
 - Removed flags → [new T5] `src/cli.rs::service_scope_flags_are_rejected`
 - Default system install → [new T4] `service/install.rs::system_install_defaults_to_machine_paths`
-- macOS default paths are pinned canonically → [new T4] `service/install.rs::system_install_pins_canonical_state_dir` (canonicalization only; reaching running needs launchd and is not covered by an automated suite — recorded in apply.md)
+- macOS default paths pass the trust walk → [new T4 fix] `paths::macos_system_state_dir_is_library_application_support` + `service/install.rs::macos_system_state_dir_passes_the_trust_walk` (walks the real `/Library/Application Support` chain with the admin-only owners); reaching running needs launchd — not automated, recorded in apply.md
 - Missing system config → [new T4] `service/install.rs::system_install_missing_config_names_path_and_keygen` + [new T6] `tests/service_system.rs::missing_system_config_names_keygen`
 - User-owned config at install → [new T4] `service/install.rs::system_install_refuses_untrusted_config` + [new T6] `tests/service_system.rs::user_owned_config_refused_at_install`
 - Config loosened after install → [new T6] `tests/service_system.rs::loosened_config_refused_at_service_start`
@@ -387,6 +387,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - System tier ignores the invoking user's home → [new T1] `tests/config_paths.rs::system_tier_ignores_home_and_sudo_user`
 - Unix status location → [keep] `tests/config_paths.rs::state_default_is_home_local_state_ignoring_xdg`
 - System tier status location → [new T1] `tests/config_paths.rs::system_tier_status_names_runtime_dir`
+- macOS system tier status location → [new T4 fix] `paths::macos_system_state_dir_is_library_application_support`
 - Relative HOME → [keep] `tests/config_paths.rs::relative_home_is_rejected_with_guidance`
 - System tier without HOME → [new T1] `tests/config_paths.rs::system_tier_without_home_succeeds`
 - Migration permissions and cleanup → [keep] `tests/config_paths.rs::legacy_is_copied_preserving_source_identity_and_permissions`

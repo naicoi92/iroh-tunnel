@@ -12,7 +12,7 @@ A system service runs as root/LocalSystem but reads one user's config and state 
 
 **System-tier locations**
 - From: system services use the installing user's `~/.config/iroh-tunnel`, `~/.local/state/iroh-tunnel` or `LocalAppData\iroh-tunnel`.
-- To: config in `/etc/iroh-tunnel` (Linux), `/Library/Application Support/iroh-tunnel/config` (macOS), `%ProgramData%\iroh-tunnel\config` (Windows); runtime state in `/run/iroh-tunnel`, `/var/run/iroh-tunnel`, `%ProgramData%\iroh-tunnel\state`. User-tier locations are unchanged.
+- To: config in `/etc/iroh-tunnel` (Linux), `/Library/Application Support/iroh-tunnel/config` (macOS), `%ProgramData%\iroh-tunnel\config` (Windows); runtime state in `/run/iroh-tunnel`, `/Library/Application Support/iroh-tunnel/state`, `%ProgramData%\iroh-tunnel\state`. User-tier locations are unchanged.
 - Impact: **BREAKING** for existing system services (see Migration below).
 
 **Account coupling removed**

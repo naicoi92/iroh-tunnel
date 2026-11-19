@@ -54,7 +54,7 @@ Evidence: src/paths.rs:1-10, src/paths.rs:47-54, tests/config_paths.rs:49-68, te
 - **THEN** the printed path does not contain `/home/alice`
 
 ### Requirement: Default state directory per platform
-The system SHALL place `<role>-status.json`, in the user tier, under `~/.local/state/iroh-tunnel` on macOS and Linux (ignoring `XDG_STATE_HOME`) and under `LocalAppData\iroh-tunnel\state` on Windows. In the system tier it SHALL place it under `/run/iroh-tunnel` on Linux, `/var/run/iroh-tunnel` on macOS and `%ProgramData%\iroh-tunnel\state` on Windows.
+The system SHALL place `<role>-status.json`, in the user tier, under `~/.local/state/iroh-tunnel` on macOS and Linux (ignoring `XDG_STATE_HOME`) and under `LocalAppData\iroh-tunnel\state` on Windows. In the system tier it SHALL place it under `/run/iroh-tunnel` on Linux, `/Library/Application Support/iroh-tunnel/state` on macOS (whose `/var/run` is group-writable and fails the system-tier trust walk) and `%ProgramData%\iroh-tunnel\state` on Windows.
 Evidence: src/paths.rs:76-95, tests/config_paths.rs:70-80, tests/config_paths_windows.rs:50-67
 
 #### Scenario: Unix status location
@@ -64,6 +64,10 @@ Evidence: src/paths.rs:76-95, tests/config_paths.rs:70-80, tests/config_paths_wi
 #### Scenario: System tier status location
 - **WHEN** `sudo iroh-tunnel serve status` runs on Linux with no status file
 - **THEN** its error names `/run/iroh-tunnel/serve-status.json`
+
+#### Scenario: macOS system tier status location
+- **WHEN** `sudo iroh-tunnel serve status` runs on macOS with no status file
+- **THEN** its error names `/Library/Application Support/iroh-tunnel/state/serve-status.json`
 
 ### Requirement: Unusable home directory is a config error with guidance
 The system SHALL, in the user tier, fail with the config-error exit code 2 when the home directory (or LocalAppData on Windows) is missing or not absolute, with a message that names `HOME` and the `--config` / `IROH_TUNNEL_STATE_DIR` overrides, and SHALL NOT create anything. In the system tier an unusable home directory SHALL NOT affect path resolution.

@@ -86,9 +86,9 @@ The system SHALL, for a system install without `--config`, use the system-tier d
 - **WHEN** `/etc/iroh-tunnel/serve.toml` exists and `sudo iroh-tunnel serve service install` runs on Linux with `SUDO_USER=alice`
 - **THEN** the registration contains `--config /etc/iroh-tunnel/serve.toml` and `IROH_TUNNEL_STATE_DIR=/run/iroh-tunnel`, and nothing under `/home/alice`
 
-#### Scenario: macOS default paths are pinned canonically
-- **WHEN** `sudo iroh-tunnel serve service install` runs on macOS with the default state directory `/var/run/iroh-tunnel`
-- **THEN** the plist pins the canonical state path `/private/var/run/iroh-tunnel`, the trust walk accepts it, and the service reaches running
+#### Scenario: macOS default paths pass the trust walk
+- **WHEN** `sudo iroh-tunnel serve service install` runs on macOS with default paths
+- **THEN** the plist pins `/Library/Application Support/iroh-tunnel/config/serve.toml` and the state directory `/Library/Application Support/iroh-tunnel/state`, the trust walk accepts both, and the service reaches running
 
 #### Scenario: Missing system config
 - **WHEN** `sudo iroh-tunnel serve service install` runs and `/etc/iroh-tunnel/serve.toml` does not exist

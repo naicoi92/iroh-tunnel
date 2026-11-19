@@ -78,19 +78,21 @@ ignore the variable.
 | User config | `~/.config/iroh-tunnel/<role>.toml` | same | `%LOCALAPPDATA%\iroh-tunnel\config\<role>.toml` |
 | User state | `~/.local/state/iroh-tunnel` | same | `%LOCALAPPDATA%\iroh-tunnel\state` |
 | System config | `/etc/iroh-tunnel/<role>.toml` | `/Library/Application Support/iroh-tunnel/config/<role>.toml` | `%ProgramData%\iroh-tunnel\config\<role>.toml` |
-| System state | `/run/iroh-tunnel` | `/var/run/iroh-tunnel` | `%ProgramData%\iroh-tunnel\state` |
+| System state | `/run/iroh-tunnel` | `/Library/Application Support/iroh-tunnel/state` | `%ProgramData%\iroh-tunnel\state` |
 
-On Unix, the system state directory is the existing machine lock directory.
-Every system-tier state file (status snapshot, owner record, locks) is
-runtime-only, so it belongs on the volatile runtime filesystem, as the
-brainstorm's "runtime files under `/run`" rule says. `/var/lib/iroh-tunnel`
+On Linux, the system state directory is the existing machine lock directory
+(`/run`, volatile). On macOS it is `/Library/Application Support/iroh-tunnel/state`
+(decided during apply, Task 4): `/private/var/run` is `drwxrwxr-x root:daemon`,
+group-writable without sticky bit, so the system-tier trust walk refuses any
+child of it. Locks stay in `/var/run/iroh-tunnel` because lock files are not
+trust-walked. The macOS state dir survives reboots; a stale snapshot is
+already classified by pid/freshness. `/var/lib/iroh-tunnel`
 keeps only the managed binary copies.
 The system tier never reads `HOME`, `SUDO_USER` or the token user's profile;
 the macOS legacy config migration runs for the user tier only.
 `config_path_in` / `state_dir_in` / `windows_*_path_in` are deleted together
 with their last callers (`service/system*.rs`, `LockDirs::resolve(home)`).
-System installs pin the canonical form of both paths, as installs do today
-(macOS `/var/run/iroh-tunnel` is pinned as `/private/var/run/iroh-tunnel`),
+System installs pin the canonical form of both paths, as installs do today,
 so the no-symlink trust walk accepts the defaults.
 `IROH_TUNNEL_TEST_CONFIG_DIR` keeps overriding the config directory in test
 builds for both tiers.
