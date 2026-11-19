@@ -58,6 +58,18 @@ fn rotation_refused(path: &Path) -> anyhow::Error {
     .into()
 }
 
+/// Whether a person can answer the rotation prompt (stdin is a terminal).
+/// Test builds treat `IROH_TUNNEL_TEST_INTERACTIVE` as a terminal, since
+/// integration tests have none.
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    #[cfg(feature = "test-utils")]
+    if std::env::var_os("IROH_TUNNEL_TEST_INTERACTIVE").is_some() {
+        return true;
+    }
+    std::io::stdin().is_terminal()
+}
+
 /// Ask the user to confirm replacing the key in `path`.
 ///
 /// # Errors
@@ -65,7 +77,7 @@ fn rotation_refused(path: &Path) -> anyhow::Error {
 /// [`CliError::Config`] when no terminal is available or the answer is not
 /// yes; the key is left unchanged either way.
 fn confirm_rotation(path: &Path) -> Result<()> {
-    if !crate::cli_service::is_interactive() {
+    if !is_interactive() {
         return Err(rotation_refused(path));
     }
     output::stderr(&format!(

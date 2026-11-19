@@ -1,6 +1,21 @@
 //! Filesystem primitives shared by the host's security-sensitive writers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Drop a leading `\\?\` (verbatim) prefix that `canonicalize` adds on
+/// Windows, so a pinned or displayed path matches what the user would type.
+/// A verbatim UNC path (`\\?\UNC\…`) is left alone: the trust walk refuses it.
+#[cfg_attr(
+    all(not(test), not(windows)),
+    expect(dead_code, reason = "only Windows paths carry a verbatim prefix")
+)]
+pub(crate) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
 
 /// Create `path` exclusively (`O_EXCL`: a pre-planted file or symlink is
 /// never followed, truncated or chmodded) and open it for writing.

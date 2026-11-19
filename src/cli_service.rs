@@ -34,24 +34,14 @@ fn running_executable() -> anyhow::Result<RunningExecutable> {
 }
 
 /// The privilege of the running process, which selects the service tier.
+/// It reads [`Tier::current`] (privilege in production), so the test-build
+/// tier override applies here as everywhere else.
+///
+/// [`Tier::current`]: iroh_tunnel_host::Tier::current
 pub(crate) fn detect_environment() -> Environment {
     Environment {
-        elevated: service::is_elevated(),
+        elevated: iroh_tunnel_host::Tier::current() == iroh_tunnel_host::Tier::System,
     }
-}
-
-/// Whether a person can answer a prompt (stdin is a terminal).
-#[cfg(feature = "test-utils")]
-pub(crate) fn is_interactive() -> bool {
-    use std::io::IsTerminal;
-    // Integration tests have no terminal; this stands in for one.
-    std::env::var_os("IROH_TUNNEL_TEST_INTERACTIVE").is_some() || std::io::stdin().is_terminal()
-}
-
-#[cfg(not(feature = "test-utils"))]
-pub(crate) fn is_interactive() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal()
 }
 
 /// The executable a registration runs: the invoked standalone executable,

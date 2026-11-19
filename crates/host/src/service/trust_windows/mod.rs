@@ -75,6 +75,45 @@ pub(crate) mod test_env {
 #[cfg(any(test, feature = "test-utils"))]
 use crate::error::CliError;
 
+/// How [`verify_config_confidential`] treats a config directory or file that
+/// does not exist.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingObject {
+    /// Nothing to check (a write is about to create it).
+    Skip,
+    /// Pass it to the check, which fails on it (a read needs it to exist).
+    Refuse,
+}
+
+/// Refuse a config whose directory or file grants read access to a principal
+/// outside the admin-only set: the key it holds must stay confidential.
+/// `verify` is the confidentiality check of one path (injected for tests);
+/// `missing` says whether a missing directory or file is skipped. Never
+/// changes a DACL.
+///
+/// # Errors
+///
+/// The first error from `verify`, typically
+/// [`crate::error::CliError::Permission`] naming the path and the SID.
+#[cfg(windows)]
+pub(crate) fn verify_config_confidential(
+    config: &std::path::Path,
+    missing: MissingObject,
+    verify: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let checked = |path: &std::path::Path| missing == MissingObject::Refuse || path.exists();
+    if let Some(dir) = config.parent().filter(|d| !d.as_os_str().is_empty()) {
+        if checked(dir) {
+            verify(dir)?;
+        }
+    }
+    if checked(config) {
+        verify(config)?;
+    }
+    Ok(())
+}
+
 /// Verify the machine directory against the machine trust set.
 ///
 /// # Errors

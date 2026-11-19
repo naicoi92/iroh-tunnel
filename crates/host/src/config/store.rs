@@ -89,7 +89,7 @@ enum DirCreation {
 fn plan_write(config: &Path) -> Result<(PathBuf, DirCreation)> {
     #[cfg(windows)]
     {
-        let elevated = crate::service::is_elevated();
+        let elevated = crate::Tier::current() == crate::Tier::System;
         let target =
             system_config_target(config, elevated, std::env::current_dir, system_config_dir)?;
         Ok(match target {
@@ -226,11 +226,7 @@ fn absolute_identity(path: &Path, cwd: &Path) -> std::io::Result<PathBuf> {
             Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
         }
     }
-    let text = identity.to_string_lossy();
-    Ok(match text.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
-        _ => identity,
-    })
+    Ok(crate::fs_util::strip_verbatim_prefix(identity))
 }
 
 /// The absolute identity of `config` when an elevated process writes it
@@ -268,28 +264,6 @@ fn system_config_target(
         .parent()
         .is_some_and(|dir| same_windows_path(dir, &system));
     Ok(in_system.then_some(target))
-}
-
-/// Refuse a write when the existing config directory or file of `config`
-/// grants read access to a principal outside `trusted`. A missing directory
-/// or file has nothing to check. Never changes a DACL.
-///
-/// # Errors
-///
-/// [`CliError::Permission`] naming the path and the offending SID.
-#[cfg(windows)]
-fn verify_config_confidential(
-    config: &Path,
-    trusted: &crate::service::trust_windows::model::TrustedSet,
-) -> Result<()> {
-    use crate::service::trust_windows::verify_confidential_with;
-    if let Some(dir) = config.parent().filter(|p| p.exists()) {
-        verify_confidential_with(dir, trusted)?;
-    }
-    if config.exists() {
-        verify_confidential_with(config, trusted)?;
-    }
-    Ok(())
 }
 
 /// Advisory lock serializing writers of one config file; released on drop.
@@ -332,7 +306,12 @@ impl ConfigLock {
         let Some(trusted) = confidential else {
             return Self::acquire_unchecked(config, DirCreation::Inherited);
         };
-        verify_config_confidential(config, trusted)?;
+        // A write creates what is missing, so only existing objects are checked.
+        crate::service::trust_windows::verify_config_confidential(
+            config,
+            crate::service::trust_windows::MissingObject::Skip,
+            &|path| crate::service::trust_windows::verify_confidential_with(path, trusted),
+        )?;
         Self::acquire_unchecked(config, DirCreation::SystemTier)
     }
 

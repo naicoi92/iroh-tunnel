@@ -361,15 +361,13 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
     return super::trust::canonical(path);
     #[cfg(not(unix))]
     std::path::absolute(path)
-        .map(strip_verbatim_prefix)
+        .map(crate::fs_util::strip_verbatim_prefix)
         .with_context(|| format!("cannot make {} absolute", path.display()))
 }
 
-/// Create the system state directory when it is missing. Unix: every missing
-/// component `0755`, through verified handles (an existing one is never
-/// re-moded). Windows: below the machine directory it inherits that
-/// directory's protected DACL, which is created first; nothing existing is
-/// re-DACLed.
+/// Create the system state directory when it is missing: every missing
+/// component `0755`, through verified handles; an existing one is never
+/// re-moded.
 #[cfg(unix)]
 fn create_state_dir(state: &Path, env: EnvLookup<'_>) -> Result<()> {
     if state.exists() {
@@ -388,11 +386,9 @@ fn create_state_dir(state: &Path, env: EnvLookup<'_>) -> Result<()> {
     super::trust::ensure_dir(&target, super::admin_trust(env)?, 0o755)
 }
 
-/// Create the system state directory when it is missing. Unix: every missing
-/// component `0755`, through verified handles (an existing one is never
-/// re-moded). Windows: below the machine directory it inherits that
-/// directory's protected DACL, which is created first; nothing existing is
-/// re-DACLed.
+/// Create the system state directory when it is missing: below the machine
+/// directory it inherits that directory's protected DACL, which is created
+/// first; nothing existing is re-DACLed.
 #[cfg(windows)]
 fn create_state_dir(state: &Path, env: EnvLookup<'_>) -> Result<()> {
     if state.exists() {
@@ -435,7 +431,10 @@ fn verify_system_state(state: &Path, env: EnvLookup<'_>) -> Result<()> {
 /// config text is read from the verified handle.
 #[cfg(windows)]
 fn read_system_config(config: &Path, env: EnvLookup<'_>) -> Result<String> {
-    use super::trust_windows::{read_verified, verify_confidential_with, verify_machine_dir};
+    use super::trust_windows::{
+        read_verified, verify_confidential_with, verify_config_confidential, verify_machine_dir,
+        MissingObject,
+    };
 
     if let Some(machine) = crate::ownership::machine_dir()? {
         if machine.verify && machine.path.exists() {
@@ -444,7 +443,10 @@ fn read_system_config(config: &Path, env: EnvLookup<'_>) -> Result<String> {
     }
     let trusted = super::admin_trust(env)?;
     let text = read_verified(config, &trusted)?;
-    verify_config_confidential(config, &|path| verify_confidential_with(path, &trusted))?;
+    // The config was just read, so a missing object is an error, not a pass.
+    verify_config_confidential(config, MissingObject::Refuse, &|path| {
+        verify_confidential_with(path, &trusted)
+    })?;
     Ok(text)
 }
 
@@ -465,18 +467,6 @@ fn verify_system_state(_state: &Path, _env: EnvLookup<'_>) -> Result<()> {
     Err(CliError::Service("system services are not supported on this platform".into()).into())
 }
 
-/// Refuse a config whose directory or file is readable by a non-admin
-/// principal: LocalSystem would run it and the key it holds must stay
-/// confidential. `verify` is the admin-only check (injected for tests); a
-/// directory is checked even before the config exists.
-#[cfg(windows)]
-fn verify_config_confidential(config: &Path, verify: &dyn Fn(&Path) -> Result<()>) -> Result<()> {
-    if let Some(dir) = config.parent().filter(|d| !d.as_os_str().is_empty()) {
-        verify(dir)?;
-    }
-    verify(config)
-}
-
 #[cfg(windows)]
 /// Keep a `Permission` refusal from the machine-directory check as it is
 /// (its text already says nothing was changed); wrap anything else into one.
@@ -493,21 +483,6 @@ fn machine_dir_refusal(err: anyhow::Error, dir: &Path) -> anyhow::Error {
         return err.context(context);
     }
     CliError::Permission(format!("{context}: {err:#}. Nothing was changed.")).into()
-}
-
-/// Drop a leading `\\?\` (verbatim) prefix that `canonicalize` adds, so the
-/// pinned and displayed path matches what the user would type. A verbatim UNC
-/// path (`\\?\UNC\…`) is left alone: the trust walk refuses it.
-#[cfg_attr(
-    all(not(test), not(windows)),
-    expect(dead_code, reason = "only Windows paths carry a verbatim prefix")
-)]
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy();
-    match text.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
-        _ => path,
-    }
 }
 
 /// Make `path` absolute for embedding in a system service file.
@@ -694,7 +669,7 @@ mod tests {
 
     #[test]
     fn verbatim_prefix_is_stripped_but_not_for_unc() {
-        let strip = |p: &str| strip_verbatim_prefix(PathBuf::from(p));
+        let strip = |p: &str| crate::fs_util::strip_verbatim_prefix(PathBuf::from(p));
         assert_eq!(strip(r"\\?\C:\a\b.toml"), PathBuf::from(r"C:\a\b.toml"));
         assert_eq!(strip(r"C:\a\b.toml"), PathBuf::from(r"C:\a\b.toml"));
         assert_eq!(
@@ -1477,7 +1452,12 @@ mod windows_plan_tests {
         let dir_text = dir.to_str().unwrap();
         icacls(&[dir_text, "/grant", grant]);
         let before = icacls(&[dir_text]);
-        let err = verify_config_confidential(config, &check).unwrap_err();
+        let err = super::super::trust_windows::verify_config_confidential(
+            config,
+            super::super::trust_windows::MissingObject::Refuse,
+            &check,
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err.downcast_ref::<CliError>(),
