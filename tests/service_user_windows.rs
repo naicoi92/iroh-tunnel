@@ -32,6 +32,8 @@
 
 mod common;
 
+use common::windows_service::always_elevated_runner;
+
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -309,37 +311,6 @@ async fn user_background_task_lifecycle() -> Result<()> {
     assert!(!fx.task_exists(), "task still registered");
     wait_for("the uninstalled task's process to exit", || !pid_alive(pid))?;
     Ok(())
-}
-
-/// Why this runner cannot host a user logon task, when its account always runs
-/// elevated: the built-in Administrator, or an Administrators member with UAC
-/// disabled (`EnableLUA` = 0). An elevated test process is an admin member.
-fn always_elevated_runner() -> Option<&'static str> {
-    let text = |program: &str, args: &[&str]| {
-        Command::new(program)
-            .args(args)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default()
-    };
-    if text("whoami", &["/user", "/fo", "csv", "/nh"])
-        .trim()
-        .trim_end_matches('"')
-        .ends_with("-500")
-    {
-        return Some("the runner account is the built-in Administrator");
-    }
-    let lua = text(
-        "reg",
-        &[
-            "query",
-            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
-            "/v",
-            "EnableLUA",
-        ],
-    );
-    (iroh_tunnel_host::service::is_elevated() && lua.contains("0x0"))
-        .then_some("the runner is an administrator with UAC disabled")
 }
 
 /// On an always-elevated runner the user-tier install is refused: exit 3, the

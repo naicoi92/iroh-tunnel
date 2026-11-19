@@ -286,7 +286,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Readable under a restrictive umask → [new T2] `ownership.rs::new_machine_dir_lock_and_presence_are_public_under_umask_077` (also asserts `serve.claim.lock` is `0600`) + [final] `ownership.rs::existing_claim_lock_keeps_its_mode`
 - Non-admin holder cannot block the system service → [final] `ownership.rs::non_admin_holder_cannot_block_the_system_claim`, `ownership.rs::system_claim_lock_is_exclusive_and_detection_lock_shared` + [final] `tests/service_system.rs::non_admin_lock_holder_cannot_block_the_system_service`
 - Second system instance is refused through the claim lock → [final] `ownership.rs::second_system_claim_is_refused_through_the_claim_lock` + [new T2] `tests/role_ownership.rs::second_system_instance_is_refused` + [final] `tests/service_system.rs::non_admin_lock_holder_cannot_block_the_system_service`
-- Windows user task while the system service runs → [new T6] `tests/service_system_windows.rs::user_task_and_service_coexist`
+- Windows user task while the system service runs → [new T6] `tests/service_system_windows.rs::user_task_and_service_coexist` (user-task part skipped on always-elevated runners)
 - Windows ProgramData cannot be resolved → [mod T2] `ownership.rs::tier_dirs_resolution_fails_when_program_data_cannot_be_resolved` (+ user claim proceeds)
 - Install lock directories when ProgramData cannot be resolved → [mod T2] `ownership.rs::tier_dirs_resolution_fails_when_program_data_cannot_be_resolved` + `ownership.rs::machine_dir_from_program_data_propagates_a_resolution_failure`
 - No machine lock file → [new T2] `ownership.rs::user_claim_without_machine_dir_creates_nothing`
@@ -315,7 +315,7 @@ Legend: **[new]** test written in the named task; **[mod]** existing test change
 - Re-install over the same tier's own running service → [mod T4] `service/install.rs::a_hold_at_the_registering_tier_is_permitted`
 - Root installs a system service → [new T4] `service/install.rs::system_install_defaults_to_machine_paths` (systemd unit path asserted through the fixture backend) + [new T6] `tests/service_system.rs::system_install_uses_etc_and_run` (BusyBox)
 - User installs a user service → [keep] `tests/service_user.rs::user_service_lifecycle_uses_the_pinned_absolute_paths`
-- Elevated Windows terminal → [new T6] `tests/service_system_windows.rs::elevated_stop_targets_scm_service`
+- Elevated Windows terminal → [new T6] `tests/service_system_windows.rs::elevated_stop_targets_scm_service` (user-task part skipped on always-elevated runners)
 - Removed flags → [new T5] `src/cli.rs::service_scope_flags_are_rejected`
 - Default system install → [new T4] `service/install.rs::system_install_defaults_to_machine_paths`
 - macOS default paths pass the trust walk → [new T4 fix] `paths::macos_system_state_dir_is_library_application_support` + `service/install.rs::macos_system_state_dir_passes_the_trust_walk` (walks the real `/Library/Application Support` chain with the admin-only owners); reaching running needs launchd — not automated, recorded in apply.md

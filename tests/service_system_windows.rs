@@ -62,6 +62,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod common;
 
 use common::windows_service as svc;
+use common::windows_service::always_elevated_runner;
 
 const BIN: &str = env!("CARGO_BIN_EXE_iroh-tunnel");
 
@@ -756,23 +757,11 @@ async fn stop_pending_reported_while_draining() -> Result<()> {
     Ok(())
 }
 
-/// From an elevated terminal, `service stop` targets the Windows Service and
-/// leaves the same role's user task alone.
-#[tokio::test]
-async fn elevated_stop_targets_scm_service() -> Result<()> {
-    if !enabled() {
-        return Ok(());
-    }
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("elevatedstop")?;
-    let node_id = fx.write_config(relay.as_ref(), 9)?;
-    let (user_config, user_id) = fx.write_user_config(relay.as_ref())?;
-    let _task = TaskGuard(&fx);
-
-    fx.install_ok(&[])?;
-    let pid = wait_for_node(&fx, &node_id)?;
+/// Install the user task for `fx`'s role; returns its node id and live pid.
+fn install_user_task(fx: &Fixture, relay: &str) -> Result<(String, u64)> {
+    let (user_config, user_id) = fx.write_user_config(relay)?;
     let out = run_user(
-        &fx,
+        fx,
         &["serve", "service", "install", "--config", &user_config],
     )?;
     ensure!(
@@ -783,24 +772,52 @@ async fn elevated_stop_targets_scm_service() -> Result<()> {
     );
     assert!(fx.task_exists(), "the user task must exist");
     let user_pid = wait_for_user_task(&user_id)?;
+    Ok((user_id, user_pid))
+}
+
+/// From an elevated terminal, `service stop` targets the Windows Service and
+/// leaves the same role's user task alone. On an always-elevated runner the
+/// user task is refused, so only the SCM part runs there.
+#[tokio::test]
+async fn elevated_stop_targets_scm_service() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("elevatedstop")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    let _task = TaskGuard(&fx);
+
+    fx.install_ok(&[])?;
+    let pid = wait_for_node(&fx, &node_id)?;
+    let user = match always_elevated_runner() {
+        Some(why) => {
+            eprintln!("skipped: user-task part ({why})");
+            None
+        }
+        None => Some(install_user_task(&fx, relay.as_ref())?),
+    };
 
     fx.service_ok("stop", &[])?;
     wait_for("the service process to exit", || !pid_alive(pid))?;
     assert!(fx.service_ok("status", &[])?.contains("not running"));
-    // The user task kept its process and still reports running.
-    assert!(pid_alive(user_pid), "an elevated stop ended the user task");
-    assert!(fx.task_exists(), "an elevated stop removed the user task");
-    let status = run_user(&fx, &["serve", "service", "status"])?;
-    assert!(
-        stdout(&status).contains(&format!("serve is running (pid {user_pid}")),
-        "user task status: {}{}",
-        stdout(&status),
-        stderr(&status)
-    );
-    assert_eq!(
-        node_id_of(&user_status_file()?).as_deref(),
-        Some(user_id.as_str())
-    );
+
+    if let Some((user_id, user_pid)) = user {
+        // The user task kept its process and still reports running.
+        assert!(pid_alive(user_pid), "an elevated stop ended the user task");
+        assert!(fx.task_exists(), "an elevated stop removed the user task");
+        let status = run_user(&fx, &["serve", "service", "status"])?;
+        assert!(
+            stdout(&status).contains(&format!("serve is running (pid {user_pid}")),
+            "user task status: {}{}",
+            stdout(&status),
+            stderr(&status)
+        );
+        assert_eq!(
+            node_id_of(&user_status_file()?).as_deref(),
+            Some(user_id.as_str())
+        );
+    }
     Ok(())
 }
 
@@ -1664,9 +1681,14 @@ const SYSTEM_NOTICE: &str = "note: serve is also running as a system service";
 
 /// The logged-in user's task runs next to the Windows Service: the user
 /// install proceeds with the other-tier notice and both keep running.
+/// Skipped on always-elevated runners, where the user task is refused.
 #[tokio::test]
 async fn user_task_and_service_coexist() -> Result<()> {
     if !enabled() {
+        return Ok(());
+    }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!("skipped: {why}; the user task is refused on this runner");
         return Ok(());
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
