@@ -98,7 +98,7 @@ Evidence: crates/host/src/ownership.rs:785-850, tests/role_ownership.rs:241-273 
 - **THEN** access starts
 
 ### Requirement: Machine-tier lock between system service and user processes
-The system SHALL keep a machine lock directory on Linux, macOS and Windows holding the system tier's `<role>.lock` and owner record, and a presence file `<role>.user.lock`. The system tier SHALL hold `<role>.lock` exclusively while it runs; user-tier processes SHALL hold the presence file shared, through a read-only open, while they run. Lock files and the presence file SHALL be readable by every account regardless of the creator's umask. A system-tier process and user-tier processes of one role SHALL run at the same time; these files SHALL serve only to detect the other tier. Failing to resolve the machine directory (on Windows, the `%ProgramData%` known folder) SHALL fail a system-tier claim, status or install, never falling back to the user tier, and SHALL only suppress the notice in the user tier.
+The system SHALL keep a machine lock directory on Linux, macOS and Windows holding the system tier's claim lock `<role>.claim.lock`, its detection lock `<role>.lock`, its owner record, and a presence file `<role>.user.lock`. The system tier SHALL hold `<role>.claim.lock` exclusively and `<role>.lock` shared while it runs; user-tier processes SHALL hold the presence file shared, through a read-only open, while they run. `<role>.claim.lock` SHALL be accessible only to root (Unix, mode 0600) or SYSTEM and Administrators (Windows), so no non-admin account can block a system start; `<role>.lock` and the presence file SHALL be readable by every account regardless of the creator's umask, so holding them can at most cause a false notice. A system-tier process and user-tier processes of one role SHALL run at the same time; these files SHALL serve only to detect the other tier. Failing to resolve the machine directory (on Windows, the `%ProgramData%` known folder) SHALL fail a system-tier claim, status or install, never falling back to the user tier, and SHALL only suppress the notice in the user tier.
 Evidence: crates/host/src/ownership.rs:144-244, crates/host/src/ownership.rs:906-932, crates/host/src/service/install.rs:512, tests/role_ownership.rs:505 (system_tier_lock_refuses_user_start_and_blocks_a_system_start)
 
 #### Scenario: Machine lock location
@@ -120,6 +120,14 @@ Evidence: crates/host/src/ownership.rs:144-244, crates/host/src/ownership.rs:906
 #### Scenario: Readable under a restrictive umask
 - **WHEN** a system-tier process with umask 077 creates `<role>.lock` and `<role>.user.lock` on Unix
 - **THEN** both files grant read to other accounts
+
+#### Scenario: Non-admin holder cannot block the system service
+- **WHEN** a non-admin account holds `<role>.lock` shared and a system-tier serve starts
+- **THEN** the system serve starts, and the non-admin account cannot open `<role>.claim.lock`
+
+#### Scenario: Second system instance is refused through the claim lock
+- **WHEN** a system-tier serve holds `<role>.claim.lock` and another system-tier serve starts
+- **THEN** the second exits with code 6 and stderr contains "already running"
 
 #### Scenario: Windows user task while the system service runs
 - **WHEN** the Windows system service of a role is running and the same role is started in the logged-in user's session

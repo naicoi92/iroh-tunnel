@@ -51,7 +51,7 @@ Process-scoped entry points keep their signatures and resolve `Tier::current()` 
 | `iroh_tunnel_host::other_tier_running` | new | `pub fn other_tier_running(role: Role, tier: Tier) -> Option<Tier>` re-exported from `lib.rs`; I/O errors → debug log, `None` | yes |
 | `ownership::ensure_presence_file` | new | `pub(crate) fn ensure_presence_file(role: Role) -> Result<()>` | no |
 | Presence file | new | `<machine dir>/<role>.user.lock`, empty, mode 0644 set on the open file; user tier holds it shared via read-only open | file format |
-| Lock files in the machine dir | modified | `<role>.lock` mode 0644 set on the open file | file format |
+| Lock files in the machine dir | modified | `<role>.claim.lock` new, 0600 / admin-only DACL, system holds exclusive; `<role>.lock` 0644 set on the open file, system holds shared (detection only). Deviation (final review, user-approved): split to stop non-admin DoS | file format |
 | `service::ENV_SERVICE` | new | `pub const ENV_SERVICE: &str = "IROH_TUNNEL_SERVICE";` value `"1"` | yes |
 | `IROH_TUNNEL_SERVICE` env | new | written to systemd `Environment=`, launchd `EnvironmentVariables`, BusyBox `export`, for both tiers | env contract |
 | `service::under_system_service` | new | `pub(crate) fn under_system_service() -> bool` defined in `service/mod.rs` (reachable from `status::writer` and `service::platform`): `Tier::current() == Tier::System && (ENV_SERVICE == "1" || ENV_SCM == "1")` | no |

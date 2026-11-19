@@ -161,7 +161,8 @@ user dir   (~/.local/state/iroh-tunnel | %LOCALAPPDATA%\...\state)
   <role>.lock          user process: exclusive
   <role>.owner.json    0600
 machine dir (/run/iroh-tunnel | /var/run/iroh-tunnel | %ProgramData%\iroh-tunnel)
-  <role>.lock          system process: exclusive     (0644)
+  <role>.claim.lock    system process: exclusive     (0600 / admin-only DACL)
+  <role>.lock          system process: shared        (0644, detection only)
   <role>.owner.json    system process record         (0644)
   <role>.user.lock     user processes: shared        (0644, created by system)
 ```
@@ -169,14 +170,18 @@ machine dir (/run/iroh-tunnel | /var/run/iroh-tunnel | %ProgramData%\iroh-tunnel
 - A user process claims its user-tier lock exclusively (one per user per
   role), then opens `<role>.user.lock` read-only and holds it shared when the
   file exists. It never creates machine-tier files.
-- A system process claims `<role>.lock` exclusively (one per machine per
-  role) and creates `<role>.user.lock` if missing, without locking it; a
+- A system process claims `<role>.claim.lock` exclusively (one per machine
+  per role; admin-only so no non-admin can block the start — decided in the
+  final review: a world-readable exclusive lock let any user hold it shared
+  and make the service exit 6 forever under `RestartPreventExitStatus=6`),
+  then holds `<role>.lock` shared for detection, and creates `<role>.user.lock` if missing, without locking it; a
   system `service install` creates it too, so a user instance started after
   the install but before the first service start is visible. Lock and
   presence files are created 0644 with the mode applied on the open file, so
   the umask cannot hide them.
-- Other-tier detection: a user process tests `<role>.lock` with a shared lock
-  (busy means a system instance runs); a system process tests
+- Other-tier detection: a user process tests `<role>.lock` with an exclusive
+  lock (busy means a system instance runs; a malicious shared holder can only
+  cause a false notice); a system process tests
   `<role>.user.lock` with an exclusive lock (busy means at least one user
   instance runs). Neither test blocks the start.
 - Known limitation: a user instance started before the presence file ever
