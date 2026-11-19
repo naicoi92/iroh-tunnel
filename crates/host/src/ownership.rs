@@ -50,6 +50,8 @@
 //!
 //! The process only refuses; it never stops another process (RO-03).
 
+mod legacy;
+
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
@@ -797,6 +799,16 @@ fn hold_shared(file: File, path: &Path) -> Option<File> {
     None
 }
 
+/// The refusal for a start that finds a system instance of an earlier version.
+fn earlier_version_running(role: Role, owner: &OwnerRecord) -> anyhow::Error {
+    start_refused(format!(
+        "{} is already running (a system instance from an earlier version, {}); {}",
+        role.name(),
+        describe_owner(Some(owner)),
+        stop_hint(role)
+    ))
+}
+
 /// Take the system tier: the claim lock exclusively and the detection lock
 /// shared, then make sure the presence file exists.
 fn claim_system(role: Role, dirs: &TierDirs) -> Result<Vec<File>> {
@@ -869,6 +881,12 @@ fn claim_system_lock(role: Role, dir: &Path, verify: bool) -> Result<Vec<File>> 
             ))
         }
     };
+    // An earlier version's system process holds `<role>.lock` exclusively and
+    // has no claim lock, so the claim lock above cannot see it.
+    if let Some(owner) = legacy::earlier_version_holder(dir, role)? {
+        drop(claim);
+        return Err(earlier_version_running(role, &owner));
+    }
     let detect_path = dir.join(lock_name(role));
     let detect = create_lock_file(&detect_path, MACHINE_FILE_MODE)
         .with_context(|| format!("cannot create machine role lock {}", detect_path.display()))?;
@@ -1092,13 +1110,20 @@ fn other_tier_running_in(role: Role, tier: Tier, machine: &Path) -> Option<Tier>
 /// I/O errors other than "no such lock" when opening or testing the lock.
 pub(crate) fn tier_liveness_in(role: Role, tier: Tier, dir: &Path) -> Result<Liveness> {
     if held_exclusively(&dir.join(own_lock_name(role, tier)))? {
-        Ok(Liveness::Running {
+        return Ok(Liveness::Running {
             tier,
             owner: read_owner(dir, role),
-        })
-    } else {
-        Ok(Liveness::NotRunning)
+        });
     }
+    if tier == Tier::System {
+        if let Some(owner) = legacy::earlier_version_holder(dir, role)? {
+            return Ok(Liveness::Running {
+                tier,
+                owner: Some(owner),
+            });
+        }
+    }
+    Ok(Liveness::NotRunning)
 }
 
 /// A lock held by a test at an explicit directory; released on drop.
@@ -2026,6 +2051,163 @@ mod tests {
                 probe_tier(Role::Serve, Tier::User).unwrap(),
                 Liveness::NotRunning
             ));
+        });
+    }
+
+    /// Pretend this account is the admin: the record it writes is trusted.
+    #[cfg(unix)]
+    fn trust_me_as_admin() {
+        // SAFETY: single test thread in an isolated child process; geteuid is
+        // always safe.
+        unsafe {
+            std::env::set_var(
+                "IROH_TUNNEL_TEST_TRUSTED_OWNER",
+                libc::geteuid().to_string(),
+            );
+        }
+    }
+
+    /// An earlier version's system process: the exclusive `<role>.lock` and an
+    /// owner record naming `pid`, in `machine` (no claim lock).
+    #[cfg(unix)]
+    fn old_system_holder(machine: &Path, pid: u32) -> TestHold {
+        std::fs::create_dir_all(machine).unwrap();
+        let hold = hold_for_test(Role::Serve, machine, LockKind::Exclusive).unwrap();
+        let record = OwnerRecord {
+            role: "serve".into(),
+            pid,
+            node_id: None,
+            started_at: 1,
+        };
+        std::fs::write(
+            machine.join(owner_name(Role::Serve)),
+            serde_json::to_string(&record).unwrap(),
+        )
+        .unwrap();
+        hold
+    }
+
+    #[cfg(unix)]
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn earlier_version_system_instance_refuses_claim() {
+        const NAME: &str = "ownership::tests::earlier_version_system_instance_refuses_claim";
+        in_two_tier_home(NAME, |home| {
+            trust_me_as_admin();
+            let machine = home.join("machine");
+            let _old = old_system_holder(&machine, std::process::id());
+            let dirs = TierDirs::resolve_for(Tier::System).unwrap();
+            let err = claim_in(Role::Serve, Tier::System, dirs).expect_err("refused");
+            let msg = conflict_message(&err);
+            assert!(msg.contains("earlier version"), "{msg}");
+            assert!(msg.contains("stop it first"), "{msg}");
+            assert!(matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Conflict(_))
+            ));
+            // The claim lock taken on the way was released again.
+            let claim = machine.join(claim_lock_name(Role::Serve));
+            assert!(lockable(&claim, LockKind::Exclusive));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn earlier_version_instance_is_probed_running() {
+        const NAME: &str = "ownership::tests::earlier_version_instance_is_probed_running";
+        in_two_tier_home(NAME, |home| {
+            trust_me_as_admin();
+            let _old = old_system_holder(&home.join("machine"), std::process::id());
+            let Liveness::Running { tier, owner } = probe_tier(Role::Serve, Tier::System).unwrap()
+            else {
+                panic!("must read as running");
+            };
+            assert_eq!(tier, Tier::System);
+            assert_eq!(owner.unwrap().pid, std::process::id());
+            assert!(matches!(
+                probe_tier(Role::Serve, Tier::User).unwrap(),
+                Liveness::NotRunning
+            ));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_released_in_waits_for_earlier_version_holder() {
+        const NAME: &str = "ownership::tests::wait_released_in_waits_for_earlier_version_holder";
+        in_two_tier_home(NAME, |home| {
+            trust_me_as_admin();
+            let old = old_system_holder(&home.join("machine"), std::process::id());
+            let err = wait_released_in(Role::Serve, Tier::System, Duration::from_millis(250))
+                .expect_err("still held");
+            assert!(matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Service(_))
+            ));
+            drop(old);
+            wait_released_in(Role::Serve, Tier::System, Duration::from_millis(500)).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_admin_exclusive_holder_without_record_does_not_block() {
+        const NAME: &str =
+            "ownership::tests::non_admin_exclusive_holder_without_record_does_not_block";
+        in_two_tier_home(NAME, |home| {
+            trust_me_as_admin();
+            let machine = home.join("machine");
+            std::fs::create_dir_all(&machine).unwrap();
+            let _squatter = hold_for_test(Role::Serve, &machine, LockKind::Exclusive).unwrap();
+            assert!(matches!(
+                probe_tier(Role::Serve, Tier::System).unwrap(),
+                Liveness::NotRunning
+            ));
+            let dirs = TierDirs::resolve_for(Tier::System).unwrap();
+            drop(claim_in(Role::Serve, Tier::System, dirs).expect("must proceed"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_owner_record_does_not_block() {
+        const NAME: &str = "ownership::tests::untrusted_owner_record_does_not_block";
+        in_two_tier_home(NAME, |home| {
+            // No test owner: only root is trusted, and a non-root account (or
+            // root itself, which then has nothing to prove) writes the record.
+            let machine = home.join("machine");
+            let _old = old_system_holder(&machine, std::process::id());
+            // SAFETY: geteuid is always safe.
+            if unsafe { libc::geteuid() } == 0 {
+                return;
+            }
+            assert!(matches!(
+                probe_tier(Role::Serve, Tier::System).unwrap(),
+                Liveness::NotRunning
+            ));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_record_with_dead_pid_does_not_block() {
+        const NAME: &str = "ownership::tests::stale_record_with_dead_pid_does_not_block";
+        in_two_tier_home(NAME, |home| {
+            trust_me_as_admin();
+            let _old = old_system_holder(&home.join("machine"), dead_pid());
+            assert!(matches!(
+                probe_tier(Role::Serve, Tier::System).unwrap(),
+                Liveness::NotRunning
+            ));
+            let dirs = TierDirs::resolve_for(Tier::System).unwrap();
+            drop(claim_in(Role::Serve, Tier::System, dirs).expect("must proceed"));
         });
     }
 

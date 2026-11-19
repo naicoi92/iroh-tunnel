@@ -757,6 +757,43 @@ fn non_admin_lock_holder_cannot_block_the_system_service() {
 }
 
 #[test]
+fn earlier_version_system_instance_refuses_the_new_claim() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = Sandbox::new();
+    write_system_config("alpha", &fresh_key());
+    let out = install();
+    assert!(out.status.success(), "{}", err(&out));
+    wait_running();
+    stop_and_release(SYSTEM_PATH);
+    let lock = Path::new(SYSTEM_STATE).join("serve.lock");
+    let record = Path::new(SYSTEM_STATE).join("serve.owner.json");
+    // An earlier version's system process: root holds `serve.lock` exclusively,
+    // has no claim lock and published a root-owned record naming its own pid.
+    // One process (the shell becomes `sleep`), so killing the child releases it.
+    let script = format!(
+        "exec 9<>{lock}; flock -x 9; printf '{{\"role\":\"serve\",\"pid\":%s,\"node_id\":null,\"started_at\":1}}' $$ > {record}; exec sleep 60",
+        lock = lock.display(),
+        record = record.display()
+    );
+    let mut old = Command::new("sh");
+    old.args(["-c", &script])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _old = UserInstance(old.spawn().unwrap());
+    wait_for("the earlier-version holder", || {
+        record.exists()
+            && std::fs::File::open(&lock)
+                .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+    });
+    clear_snapshot();
+    let out = run(&["serve", "run"], &[]);
+    assert_eq!(out.status.code(), Some(6), "{}", err(&out));
+    assert!(err(&out).contains("earlier version"), "{}", err(&out));
+}
+
+#[test]
 fn busybox_non_root_mutation_refused() {
     if !enabled() {
         return;

@@ -869,6 +869,43 @@ pub(crate) fn read_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<Op
         .with_context(|| format!("{} is not UTF-8", shown.display()))
 }
 
+/// Read the regular file `path` without following a link, only when its
+/// owner (read from the opened handle) is in `trusted`; `None` when absent or
+/// owned by someone else. The path above the file is not judged.
+///
+/// # Errors
+///
+/// The OS error of opening or reading the file.
+pub(crate) fn read_owned_by(path: &Path, trusted: &TrustedSet) -> Result<Option<String>> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+    let handle = match open_raw(
+        &verbatim(text),
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    ) {
+        Ok(handle) => handle,
+        Err(e) if is_not_found(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot open {}", path.display())),
+    };
+    let attrs = attributes(&handle).with_context(|| format!("cannot stat {}", path.display()))?;
+    if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return Ok(None);
+    }
+    let (owner, _) = owner_and_dacl(&handle)
+        .with_context(|| format!("cannot read the owner of {}", path.display()))?;
+    if !trusted.contains(&owner) {
+        return Ok(None);
+    }
+    let bytes = read_all(&handle, path)?;
+    Ok(Some(String::from_utf8(bytes).with_context(|| {
+        format!("{} is not UTF-8", path.display())
+    })?))
+}
+
 /// Remove `dir\name` (a file or a link, never its target) under a verified
 /// directory chain; absent is fine.
 ///

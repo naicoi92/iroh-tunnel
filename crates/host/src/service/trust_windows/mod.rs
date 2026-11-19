@@ -21,7 +21,7 @@ pub(crate) use win32::token_user;
 #[cfg(windows)]
 pub(crate) use win32::{
     create_dir_with_sddl, create_file_with_sddl, ensure_dir, program_data_dir, publish, read_in,
-    read_verified, remove_in, verify_binary, verify_confidential_with, verify_dir,
+    read_owned_by, read_verified, remove_in, verify_binary, verify_confidential_with, verify_dir,
 };
 
 /// Serialised, scoped process-environment edits shared by every test that

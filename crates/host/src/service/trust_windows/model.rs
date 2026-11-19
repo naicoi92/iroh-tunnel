@@ -125,7 +125,7 @@ impl TrustedSet {
         set
     }
 
-    fn contains(&self, sid: &Sid) -> bool {
+    pub(crate) fn contains(&self, sid: &Sid) -> bool {
         self.0.contains(sid)
     }
 }
