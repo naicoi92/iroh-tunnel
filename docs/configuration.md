@@ -22,13 +22,22 @@ The location depends on the tier of the command: the **user tier** for a
 normal or non-elevated process, the **system tier** for root, `sudo` or an
 elevated Windows terminal ("Run as administrator").
 
-| Tier, OS | Config file | State directory (status files, locks) |
+| Tier, OS | Config file | State directory (status files) |
 |---|---|---|
 | User, Linux and macOS | `~/.config/iroh-tunnel/<role>.toml` | `~/.local/state/iroh-tunnel/` |
 | User, Windows | `%LOCALAPPDATA%\iroh-tunnel\config\<role>.toml` | `%LOCALAPPDATA%\iroh-tunnel\state\` |
 | System, Linux | `/etc/iroh-tunnel/<role>.toml` | `/run/iroh-tunnel/` |
 | System, macOS | `/Library/Application Support/iroh-tunnel/config/<role>.toml` | `/Library/Application Support/iroh-tunnel/state/` |
 | System, Windows | `%ProgramData%\iroh-tunnel\config\<role>.toml` | `%ProgramData%\iroh-tunnel\state\` |
+
+Role locks and owner records (see
+[One process per role](how-it-works.md#one-process-per-role)) do not move
+with `IROH_TUNNEL_STATE_DIR`:
+
+| Tier | Linux | macOS | Windows |
+|---|---|---|---|
+| User | `~/.local/state/iroh-tunnel/` | `~/.local/state/iroh-tunnel/` | `%LOCALAPPDATA%\iroh-tunnel\state\` |
+| System (machine locks, `<role>.user.lock` presence file) | `/run/iroh-tunnel/` | `/var/run/iroh-tunnel/` | `%ProgramData%\iroh-tunnel\` |
 
 The system tier never reads `HOME`, `SUDO_USER` or a user profile, so
 `sudo iroh-tunnel serve config keygen` writes the system file, not yours. An

@@ -421,8 +421,18 @@ fn reset() {
     let _ = std::fs::remove_dir_all(SYSTEM_CONFIG_DIR);
     let _ = std::fs::remove_file(SYSTEM_STATUS);
     let _ = std::fs::remove_dir_all("/home/linuxbrew");
-    let _ = std::fs::remove_dir_all("/home/it91a/bin");
-    let _ = std::fs::remove_dir_all("/home/it91a/.cargo");
+    // Everything the fixture account gets from `Home::new` or a user-tier
+    // run (config, state with snapshots and locks, run log), so a re-run
+    // starts from an empty user tier.
+    for path in [
+        "/home/it91a/bin",
+        "/home/it91a/.cargo",
+        "/home/it91a/.config/iroh-tunnel",
+        "/home/it91a/.local/state/iroh-tunnel",
+    ] {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    let _ = std::fs::remove_file("/home/it91a/user-run.log");
 }
 
 /// A user-tier process that is killed when the test ends.

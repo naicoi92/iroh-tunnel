@@ -766,7 +766,7 @@ async fn elevated_stop_targets_scm_service() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("elevatedstop")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    let (user_config, _) = fx.write_user_config(relay.as_ref())?;
+    let (user_config, user_id) = fx.write_user_config(relay.as_ref())?;
     let _task = TaskGuard(&fx);
 
     fx.install_ok(&[])?;
@@ -782,13 +782,24 @@ async fn elevated_stop_targets_scm_service() -> Result<()> {
         stderr(&out)
     );
     assert!(fx.task_exists(), "the user task must exist");
+    let user_pid = wait_for_user_task(&user_id)?;
 
     fx.service_ok("stop", &[])?;
     wait_for("the service process to exit", || !pid_alive(pid))?;
     assert!(fx.service_ok("status", &[])?.contains("not running"));
+    // The user task kept its process and still reports running.
+    assert!(pid_alive(user_pid), "an elevated stop ended the user task");
+    assert!(fx.task_exists(), "an elevated stop removed the user task");
+    let status = run_user(&fx, &["serve", "service", "status"])?;
     assert!(
-        fx.task_exists(),
-        "an elevated stop must not touch the user task"
+        stdout(&status).contains(&format!("serve is running (pid {user_pid}")),
+        "user task status: {}{}",
+        stdout(&status),
+        stderr(&status)
+    );
+    assert_eq!(
+        node_id_of(&user_status_file()?).as_deref(),
+        Some(user_id.as_str())
     );
     Ok(())
 }
@@ -853,7 +864,10 @@ async fn elevated_install_uses_programdata_config() -> Result<()> {
     }
     assert!(config.exists(), "keygen must write {}", config.display());
 
-    // The secret is hidden from a non-elevated user.
+    // The secret is hidden from a non-elevated user: the file's own DACL,
+    // then a read attempt from a restricted token.
+    assert_admin_only_readable(&config_dir)?;
+    assert_admin_only_readable(&config)?;
     let read = common::restricted::run_non_elevated(
         Command::new("cmd").args(["/c", "type"]).arg(&config),
     )?;
@@ -1043,6 +1057,83 @@ fn acl_state(path: &Path) -> Result<String> {
     let out = pwsh(&script)?;
     ensure!(out.status.success(), "Get-Acl {p}: {}", stderr(&out));
     Ok(stdout(&out).replace("\r\n", "\n"))
+}
+
+/// SYSTEM, Administrators and TrustedInstaller: the only principals a
+/// system-tier secret may be owned by or readable to.
+const ADMIN_PRINCIPALS: [&str; 3] = [
+    "S-1-5-18",
+    "S-1-5-32-544",
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+];
+/// `FILE_READ_DATA | GENERIC_READ | GENERIC_ALL`: the rights that let an ACE
+/// read a file's content.
+const READ_RIGHTS: u64 = 0x1 | 0x8000_0000 | 0x1000_0000;
+
+/// One access rule of a DACL.
+#[derive(Debug)]
+struct Ace {
+    /// `Allow` or `Deny`.
+    kind: String,
+    sid: String,
+    mask: u64,
+}
+
+/// Owner SID and every explicit or inherited ACE of `path`. Inherit-only
+/// ACEs are kept: on a directory they decide who can read the files created
+/// inside.
+fn dacl_entries(path: &Path) -> Result<(String, Vec<Ace>)> {
+    let p = path.display();
+    // `FileSystemRights` is an Int32 enum: generic bits make it negative, so
+    // widen and mask instead of casting to an unsigned type.
+    let script = format!(
+        "$a = Get-Acl -LiteralPath '{p}'; \
+         'owner|' + $a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; \
+         $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | \
+         ForEach-Object {{ '{{0}}|{{1}}|{{2}}' -f $_.AccessControlType, \
+         $_.IdentityReference.Value, ([int64][int]$_.FileSystemRights -band 4294967295) }}"
+    );
+    let out = pwsh(&script)?;
+    ensure!(out.status.success(), "Get-Acl {p}: {}", stderr(&out));
+    let text = stdout(&out);
+    let mut owner = None;
+    let mut aces = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let fields: Vec<&str> = line.split('|').collect();
+        match fields.as_slice() {
+            ["owner", sid] => owner = Some((*sid).to_owned()),
+            [kind, sid, mask] => aces.push(Ace {
+                kind: (*kind).to_owned(),
+                sid: (*sid).to_owned(),
+                mask: mask
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("mask {mask:?} in {line:?}: {e}"))?,
+            }),
+            _ => anyhow::bail!("unexpected Get-Acl line {line:?}"),
+        }
+    }
+    let owner = owner.ok_or_else(|| anyhow::anyhow!("no owner for {p}: {text}"))?;
+    Ok((owner, aces))
+}
+
+/// `path` is owned by an admin principal and every Allow ACE that grants a
+/// read right belongs to one: no one else can read the secret it holds.
+fn assert_admin_only_readable(path: &Path) -> Result<()> {
+    let (owner, aces) = dacl_entries(path)?;
+    ensure!(
+        ADMIN_PRINCIPALS.contains(&owner.as_str()),
+        "{} is owned by {owner}, not an admin principal",
+        path.display()
+    );
+    ensure!(!aces.is_empty(), "{} has an empty DACL", path.display());
+    for Ace { kind, sid, mask } in &aces {
+        ensure!(
+            kind != "Allow" || mask & READ_RIGHTS == 0 || ADMIN_PRINCIPALS.contains(&sid.as_str()),
+            "{} lets {sid} read (mask {mask:#x}): {aces:?}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Remove the Everyone grant from `path` when dropped.
@@ -1386,10 +1477,9 @@ async fn empty_key_persisted_admin_only() -> Result<()> {
     let key = doc["node"]["secret_key"].as_str().unwrap_or_default();
     assert!(!key.is_empty(), "the generated key must be persisted");
 
-    let acl = acl_state(&fx.config())?;
-    for outsider in ["S-1-5-32-545|", "S-1-5-11|", "S-1-1-0|"] {
-        assert!(!acl.contains(outsider), "{outsider} may read: {acl}");
-    }
+    // The proof is the file's own descriptor; the restricted read below is
+    // an end-to-end check only (the fixture's ancestors are admin-only too).
+    assert_admin_only_readable(&fx.config())?;
     let read = common::restricted::run_non_elevated(
         Command::new("cmd").args(["/c", "type"]).arg(fx.config()),
     )?;
@@ -1551,6 +1641,24 @@ fn run_user(fx: &Fixture, args: &[&str]) -> Result<Output> {
     common::restricted::run_non_elevated(&mut command)
 }
 
+/// The runner's own user-tier serve snapshot. The restricted child runs as
+/// the same account, so it shares this `%LOCALAPPDATA%` state directory.
+fn user_status_file() -> Result<PathBuf> {
+    Ok(
+        iroh_tunnel_host::paths::default_state_dir_for(iroh_tunnel_host::Tier::User)?
+            .join("serve-status.json"),
+    )
+}
+
+/// Wait until the user task runs `node_id` and return its live pid.
+fn wait_for_user_task(node_id: &str) -> Result<u64> {
+    let status = user_status_file()?;
+    wait_for("the user task to report its own status", || {
+        node_id_of(&status).as_deref() == Some(node_id) && pid_of(&status).is_some_and(pid_alive)
+    })?;
+    pid_of(&status).ok_or_else(|| anyhow::anyhow!("no pid in the user snapshot"))
+}
+
 /// The user tier's notice that the system service runs.
 const SYSTEM_NOTICE: &str = "note: serve is also running as a system service";
 
@@ -1581,11 +1689,7 @@ async fn user_task_and_service_coexist() -> Result<()> {
     );
     assert!(stderr(&out).contains(SYSTEM_NOTICE), "{}", stderr(&out));
     assert!(fx.task_exists(), "the user task must exist");
-    let user_status = iroh_tunnel_host::paths::default_state_dir_for(iroh_tunnel_host::Tier::User)?
-        .join("serve-status.json");
-    wait_for("the user task to report status", || {
-        node_id_of(&user_status).as_deref() == Some(user_id.as_str())
-    })?;
+    wait_for_user_task(&user_id)?;
     assert!(pid_alive(pid), "the system service must keep running");
     assert!(sc_running(&fx));
     Ok(())
