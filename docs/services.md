@@ -202,8 +202,12 @@ daemon running unmanaged.
 A user service is a Task Scheduler task that starts at your logon with least
 privilege and restarts on failure. No administrator rights are needed.
 
-- `stop` ends the task; `restart` waits up to 15 seconds for the old process
-  to exit before starting a new one.
+- `stop` ends the task: Task Scheduler terminates the role without the graceful
+  drain, so open connections are cut and the status file can stay behind.
+  `<role> status` then reports it as stale, and the next `start` is not
+  blocked. For a graceful stop on Windows, use the [system tier](#system-tier).
+- `restart` waits up to 15 seconds for the old process to exit before starting
+  a new one.
 - Install refuses a non-default `IROH_TUNNEL_STATE_DIR`.
 - An administrator's non-elevated terminal is the user tier: `install`
   registers this task, never a Windows Service.
