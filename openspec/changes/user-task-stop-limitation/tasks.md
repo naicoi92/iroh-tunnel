@@ -2,8 +2,8 @@
 
 Blocked by: none
 
-- [ ] 1.1 In `docs/services.md` (Windows, User tier), replace "`stop` ends the task" with: `stop` ends the role without the graceful drain (Task Scheduler terminates it), open connections are cut, the status snapshot may stay behind and `<role> status` reports it stale, and the next start is not blocked (scenario "Documented alternative")
-- [ ] 1.2 In the same section, point to the system tier for a graceful stop on Windows, linking the System tier section (scenario "Documented alternative")
+- [x] 1.1 In `docs/services.md` (Windows, User tier), replace "`stop` ends the task" with: `stop` ends the role without the graceful drain (Task Scheduler terminates it), open connections are cut, the status snapshot may stay behind and `<role> status` reports it stale, and the next start is not blocked (scenario "Documented alternative")
+- [x] 1.2 In the same section, point to the system tier for a graceful stop on Windows, linking the System tier section (scenario "Documented alternative")
 
 ## 2. Align the Windows lifecycle test with the specified stop
 
