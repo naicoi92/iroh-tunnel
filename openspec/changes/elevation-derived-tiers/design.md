@@ -153,6 +153,11 @@ as today: a root process under systemd (`INVOCATION_ID`) or launchd
 (`XPC_SERVICE_NAME`) without `IROH_TUNNEL_SERVICE=1`. It gets the same
 configuration error. BusyBox scripts that old cannot be told apart from a
 foreground root run and are left to the D3 rules of a foreground run.
+An empty or `0` `XPC_SERVICE_NAME` is not launchd: macOS Terminal exports
+`XPC_SERVICE_NAME=0`, which `sudo -E` keeps. Caveat: an `INVOCATION_ID`
+inherited from a terminal that systemd started (e.g. GNOME Terminal) through
+`sudo -E` cannot be told apart from a systemd unit, so such a foreground run
+is refused; the troubleshooting guide says to use `sudo` without `-E`.
 
 ### D5. Ownership: per-tier locks plus a presence lock
 

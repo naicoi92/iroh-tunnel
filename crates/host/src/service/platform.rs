@@ -88,9 +88,16 @@ fn read_system_config(path: &Path, _env: super::EnvLookup<'_>) -> Result<String>
 /// Pinned-trust variables an earlier version wrote into system registrations.
 const LEGACY_TRUST_VARS: [&str; 2] = ["IROH_TUNNEL_TRUSTED_UID", "IROH_TUNNEL_TRUSTED_SID"];
 
-/// Variables systemd (`INVOCATION_ID`) and launchd (`XPC_SERVICE_NAME`) set
-/// for the processes they start.
-const MANAGER_VARS: [&str; 2] = ["INVOCATION_ID", "XPC_SERVICE_NAME"];
+/// Whether systemd (`INVOCATION_ID`) or launchd (`XPC_SERVICE_NAME`) started
+/// this process. macOS Terminal exports `XPC_SERVICE_NAME=0` to its shells,
+/// so an empty or `0` value is a foreground session, not launchd. An
+/// `INVOCATION_ID` inherited from a terminal (e.g. GNOME) through `sudo -E`
+/// cannot be told apart from systemd.
+fn under_manager(env: super::EnvLookup<'_>) -> bool {
+    let invocation = env("INVOCATION_ID").is_some_and(|v| !v.is_empty());
+    let launchd = env("XPC_SERVICE_NAME").is_some_and(|v| !v.is_empty() && v != "0");
+    invocation || launchd
+}
 
 /// Whether this process was started by a system registration of an earlier
 /// version: one that pins a user's files (`IROH_TUNNEL_TRUSTED_UID`/`_SID`),
@@ -103,7 +110,7 @@ fn is_legacy_registration(elevated: bool, env: super::EnvLookup<'_>) -> bool {
         return true;
     }
     let marked = env(super::ENV_SERVICE).is_some_and(|v| v == "1");
-    elevated && !marked && MANAGER_VARS.iter().any(|name| env(name).is_some())
+    elevated && !marked && under_manager(env)
 }
 
 /// The configuration error for a legacy registration of `role`, naming the
@@ -372,6 +379,19 @@ mod load_tests {
         assert!(!is_legacy_registration(
             false,
             &env_of(&[("INVOCATION_ID", "x")])
+        ));
+    }
+
+    #[test]
+    fn foreground_sudo_e_from_terminal_is_not_legacy() {
+        // macOS Terminal exports XPC_SERVICE_NAME=0 and `sudo -E` keeps it.
+        assert!(!is_legacy_registration(
+            true,
+            &env_of(&[("XPC_SERVICE_NAME", "0")])
+        ));
+        assert!(!is_legacy_registration(
+            true,
+            &env_of(&[("XPC_SERVICE_NAME", "")])
         ));
     }
 

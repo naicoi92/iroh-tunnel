@@ -58,6 +58,12 @@ the old file to `/etc/iroh-tunnel/<role>.toml` with owner root and mode
 `0600`), then re-run `sudo iroh-tunnel <role> service install`. See the
 [changelog](../CHANGELOG.md).
 
+**`sudo -E iroh-tunnel <role> run` exits with `registered by an earlier version`.**
+A terminal launched by systemd (for example GNOME Terminal) exports
+`INVOCATION_ID`, and `sudo -E` passes it on, so the foreground run looks like
+an old systemd unit. Run `sudo iroh-tunnel <role> run` without `-E`. (macOS
+Terminal's `XPC_SERVICE_NAME=0` is recognised as a foreground session.)
+
 **`sudo ... service install` exits with code 2 and names `/etc/iroh-tunnel/...`.**
 The system tier does not use your own `~/.config` file. Create the system
 config with `sudo iroh-tunnel <role> config keygen` and `sudo iroh-tunnel
