@@ -716,10 +716,9 @@ mod tests {
         let real = tmp.path().join("real");
         std::fs::create_dir(&real).unwrap();
         let identity = absolute_identity(&real.join("missing/../a/b"), Path::new("/")).unwrap();
-        assert_eq!(
-            identity,
-            std::fs::canonicalize(&real).unwrap().join("a").join("b")
-        );
+        // The identity drops the verbatim prefix `canonicalize` adds on Windows.
+        let real = crate::fs_util::strip_verbatim_prefix(std::fs::canonicalize(&real).unwrap());
+        assert_eq!(identity, real.join("a").join("b"));
     }
 
     #[test]

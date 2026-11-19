@@ -848,11 +848,15 @@ fn claim_system_lock(role: Role, dir: &Path, verify: bool) -> Result<Vec<File>> 
     let _ = verify;
     // Windows creates only a missing directory (`CreateDirectoryW` fails on an
     // existing one); Unix keeps its idempotent create.
+    // An unverified (test-utils) directory may sit under missing ancestors,
+    // which Unix creates too; the protected `%ProgramData%` one never does.
     #[cfg(windows)]
     let ensure_dir = if dir_exists {
         Ok(())
-    } else {
+    } else if verify {
         create_machine_dir(dir)
+    } else {
+        std::fs::create_dir_all(dir)
     };
     #[cfg(not(windows))]
     let ensure_dir = create_machine_dir(dir);
@@ -1384,6 +1388,23 @@ mod tests {
                 ..
             }
         ));
+        drop(claim);
+    }
+
+    #[test]
+    fn system_claim_creates_a_missing_machine_dir_and_its_ancestors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = tmp.path().join("state/iroh-tunnel/machine");
+        let dirs = TierDirs {
+            user: None,
+            machine: Some(MachineDir {
+                path: machine.clone(),
+                verify: false,
+            }),
+        };
+        let claim = claim_in(Role::Serve, Tier::System, dirs)
+            .unwrap_or_else(|e| panic!("a missing machine dir must be created: {e:#}"));
+        assert!(machine.join(claim_lock_name(Role::Serve)).is_file());
         drop(claim);
     }
 
