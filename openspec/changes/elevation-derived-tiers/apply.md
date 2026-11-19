@@ -81,3 +81,14 @@
 ## Next step
 
 Run `/opsx-verify`.
+
+---
+
+## Post-PR iteration 1
+
+- **Trigger**: PR #260 `ci.yml` (first run; PR-only workflow) failed `lint` on linux/macos/windows under the pinned toolchain Rust 1.91. The 1.99 toolchain used locally during apply did not flag the two errors: an unfulfilled `dead_code` expectation in `service/trust_windows/mod.rs` (lib test build), and a duplicated `#[cfg(windows)]` in `service/install.rs`.
+- **Fix**: `9bbb6d7 fix(host): satisfy clippy 1.91 lint expectations and drop duplicate cfg`. Checks passed on 1.91: fmt, clippy for macOS and Windows (xwin), rustdoc `-D warnings`, host lib tests 662/0, and the Linux zigbuild test build.
+- **Commit range**: `ff2aeff..9bbb6d7`
+- **Result**: PR #260 checks green (CI run 44500004016: lint and unit on linux, macos and windows; ci-ok).
+- **Contract deviations**: none new.
+- **Lesson**: run clippy with `cargo +1.91` (the MSRV toolchain CI pins), not only the local default toolchain.
