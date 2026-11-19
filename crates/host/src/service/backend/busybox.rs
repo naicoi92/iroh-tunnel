@@ -273,7 +273,7 @@ mod tests {
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Capture, &mut runner);
         let mut notes = note_sink(&events);
-        let _ = install(&mut native, &mut notes, &reg());
+        let installed = install(&mut native, &mut notes, &reg());
         let _ = std::fs::remove_file(script_path("serve"));
         let noted: Vec<_> = events
             .borrow()
@@ -283,10 +283,9 @@ mod tests {
                 Event::Call { .. } => None,
             })
             .collect();
+        installed.expect("a root install succeeds");
         assert!(
-            noted
-                .iter()
-                .all(|n| matches!(n, ServiceNote::Installed { .. })),
+            matches!(noted.as_slice(), [ServiceNote::Installed { .. }]),
             "{noted:?}"
         );
     }

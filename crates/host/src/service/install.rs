@@ -230,9 +230,10 @@ struct InstallPlan {
 }
 
 /// Every check that precedes the write: an absolute executable, privilege
-/// where the registration runs as root, then the tier's own paths and trust
-/// checks, the presence file (system tier) and last the binary decision, so a
-/// failed check never writes a managed copy.
+/// where the registration runs as root, the read-only binary decision, then
+/// the tier's own paths and trust checks and the presence file (system
+/// tier). Nothing is written before every check passed; the managed copy is
+/// materialized last.
 fn plan_install(
     req: &InstallRequest,
     env: Environment,
@@ -249,11 +250,14 @@ fn plan_install(
     let tier = env.tier();
     let system_wide_only = platform::system_wide_only();
     ensure_root_run_privilege(platform::root_run(tier, system_wide_only), env.elevated)?;
+    // The read-only binary decision precedes every filesystem effect (state
+    // directory, presence file); the managed copy is written only after all
+    // checks, by `install_steps`.
+    let binary = plan_binary(req, tier, system_wide_only, seams.verify_binary)?;
     let (config, state) = match tier {
         Tier::User => plan_user_paths(req)?,
         Tier::System => plan_system_paths(req, seams)?,
     };
-    let binary = plan_binary(req, tier, system_wide_only, seams.verify_binary)?;
     Ok(InstallPlan {
         tier,
         config,
@@ -266,10 +270,11 @@ fn plan_install(
 /// checked as installable. The service runs with another working directory,
 /// so nothing may stay relative (SM-02).
 fn plan_user_paths(req: &InstallRequest) -> Result<(PathBuf, PathBuf)> {
-    let config = absolutize_config_path(&crate::config::resolve_config_path(
-        req.role,
-        req.config.as_deref(),
-    )?)?;
+    // The default follows the injected tier, never the process's own.
+    let config = absolutize_config_path(&match req.config.as_deref() {
+        Some(path) => path.to_path_buf(),
+        None => crate::config::resolve_config_path_for(req.role, Tier::User)?,
+    })?;
     let state = absolute_dir(&match non_empty(req.state_dir_override.as_deref()) {
         Some(dir) => dir.to_path_buf(),
         None => crate::paths::default_state_dir_for(Tier::User)?,
@@ -389,15 +394,20 @@ fn create_state_dir(state: &Path, env: EnvLookup<'_>) -> Result<()> {
 /// directory's protected DACL, which is created first; nothing existing is
 /// re-DACLed.
 #[cfg(windows)]
-fn create_state_dir(state: &Path, _env: EnvLookup<'_>) -> Result<()> {
+fn create_state_dir(state: &Path, env: EnvLookup<'_>) -> Result<()> {
     if state.exists() {
         return Ok(());
     }
+    // Only a state directory below the machine directory needs it created
+    // (protected DACL); an override elsewhere must not create it.
     if let Some(machine) = crate::ownership::machine_dir()? {
-        crate::ownership::ensure_machine_dir(&machine)?;
+        if state.starts_with(&machine.path) {
+            crate::ownership::ensure_machine_dir(&machine)?;
+        }
     }
-    std::fs::create_dir_all(state)
-        .with_context(|| format!("cannot create state directory {}", state.display()))
+    // The existing ancestors are verified, handles held, before any
+    // component is created.
+    super::trust_windows::ensure_dir(state, &super::admin_trust(env)?)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -804,7 +814,7 @@ mod tests {
 #[cfg(test)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix_tests {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
 
@@ -946,10 +956,10 @@ mod unix_tests {
     fn system_install_missing_config_names_path_and_keygen() {
         let tmp = tempfile::tempdir().unwrap();
         let config = tmp.path().join("serve.toml");
-        let mut req = request();
+        let (_bin, mut req) = request_with_binary();
         req.config = Some(config.clone());
         let presence = RefCell::new(Vec::new());
-        let Err(err) = plan_system(&req, &|_| panic!("no binary decision"), &presence) else {
+        let Err(err) = plan_system(&req, &|_| Ok(()), &presence) else {
             panic!("a missing config must be refused");
         };
         let Some(CliError::Config(msg)) = kind(&err) else {
@@ -982,11 +992,8 @@ mod unix_tests {
         req.config = Some(config.clone());
         req.state_dir_override = Some(state.clone());
         let record = |_: Role| panic!("no presence file for a refused install");
-        let Err(err) = plan_install(
-            &req,
-            ELEVATED,
-            &seams(&owner_env, &|_| panic!("no binary decision"), &record),
-        ) else {
+        let Err(err) = plan_install(&req, ELEVATED, &seams(&owner_env, &|_| Ok(()), &record))
+        else {
             panic!("a config writable by others must be refused");
         };
         let Some(CliError::Permission(msg)) = kind(&err) else {
@@ -1050,13 +1057,9 @@ mod unix_tests {
         let (_bin, mut req) = request_with_binary();
         req.config = Some(config);
         req.state_dir_override = Some(state);
-        let decided = Cell::new(false);
         let empty = |_: &str| None;
         let record = |_: Role| Ok(());
-        let verify = |_: &Path| {
-            decided.set(true);
-            refuse(Path::new("/x"))
-        };
+        let verify = |_: &Path| refuse(Path::new("/x"));
         let (result, log) =
             run_install_with(&req, ELEVATED, Vec::new(), &seams(&empty, &verify, &record));
         let failure = result.expect_err("an untrusted config must fail the install");
@@ -1065,13 +1068,40 @@ mod unix_tests {
             "{:?}",
             failure.error
         );
-        assert!(
-            !decided.get(),
-            "the binary is decided only after every check"
-        );
         assert!(failure.applied.is_empty(), "{:?}", failure.applied);
         assert!(commands(&log).is_empty(), "{log:?}");
         assert!(!managed_copy_path("serve").exists() || cfg!(not(feature = "test-utils")));
+    }
+
+    #[test]
+    fn failed_binary_decision_creates_no_state_or_presence() {
+        let (_tmp, config, state) = system_files();
+        let (_bin, mut req) = request_with_binary();
+        // An absolute binary that does not exist cannot be canonicalized.
+        req.tunnel_executable = state.with_file_name("missing-binary");
+        req.config = Some(config);
+        req.state_dir_override = Some(state.clone());
+        let presence = RefCell::new(Vec::new());
+        let record = |role: Role| {
+            presence.borrow_mut().push(role);
+            Ok(())
+        };
+        let (result, log) = run_install_with(
+            &req,
+            ELEVATED,
+            Vec::new(),
+            &seams(&owner_env, &|_| Ok(()), &record),
+        );
+        let failure = result.expect_err("an unresolvable binary must fail the install");
+        assert!(
+            matches!(kind(&failure.error), Some(CliError::Config(_))),
+            "{:?}",
+            failure.error
+        );
+        assert!(!state.exists(), "state dir created before the binary check");
+        assert!(presence.borrow().is_empty());
+        assert!(failure.applied.is_empty(), "{:?}", failure.applied);
+        assert!(commands(&log).is_empty(), "{log:?}");
     }
 
     #[test]
@@ -1120,6 +1150,26 @@ mod unix_tests {
                 first_call.is_none_or(|c| at < c),
                 "note precedes the manager: {log:?}"
             );
+        });
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn user_install_default_config_ignores_the_ambient_tier() {
+        const NAME: &str =
+            "service::install::unix_tests::user_install_default_config_ignores_the_ambient_tier";
+        in_isolated_home(NAME, |home| {
+            // SAFETY: single test thread in an isolated child process.
+            unsafe { std::env::set_var("IROH_TUNNEL_TEST_TIER", "system") };
+            let user_config =
+                crate::config::resolve_config_path_for(Role::Serve, Tier::User).unwrap();
+            assert!(user_config.starts_with(home), "{user_config:?}");
+            std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+            std::fs::copy(write_valid_config(home), &user_config).unwrap();
+            let mut req = request();
+            req.state_dir_override = Some(home.join("state"));
+            let (config, _) = plan_user_paths(&req).unwrap();
+            assert_eq!(config, user_config);
         });
     }
 

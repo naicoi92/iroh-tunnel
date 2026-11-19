@@ -407,6 +407,49 @@ pub(crate) fn verify_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
     Ok(())
 }
 
+/// Create the missing components of directory `path`, below an existing
+/// ancestor that is verified first.
+///
+/// The existing ancestor chain is opened without following reparse points
+/// and evaluated against `trusted`; its handles (no `FILE_SHARE_DELETE`) stay
+/// open while the missing components are created, so no ancestor can be
+/// renamed or replaced in between. A junction, symlink or untrusted ancestor
+/// is refused before anything is created. New directories inherit the
+/// parent's DACL; nothing existing is re-secured. An existing `path` is
+/// verified only.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the unsafe ancestor; an I/O error when a
+/// component cannot be created.
+pub(crate) fn ensure_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
+    let existing = path
+        .ancestors()
+        .find(|a| !a.as_os_str().is_empty() && a.exists())
+        .ok_or_else(|| permission(format!("{} has no existing ancestor", path.display())))?;
+    let held = verified(existing, LastAccess::Inspect, trusted)?;
+    let (_, d) = held.target()?;
+    if !d.is_dir {
+        return Err(not_a("directory", d));
+    }
+    let rest = path
+        .strip_prefix(existing)
+        .map_err(|_| permission(format!("cannot split {}", path.display())))?;
+    let mut current = existing.to_path_buf();
+    for name in rest.components() {
+        current.push(name);
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("cannot create directory {}", current.display())));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse `path` when its DACL grants a read right to a SID outside
 /// `trusted` (see [`model::evaluate_confidential`]). A reparse point in the
 /// path is refused; nothing is changed.
@@ -1070,6 +1113,59 @@ mod tests {
         let text = permission_text(read_verified(&link.join("serve.toml"), &me()).unwrap_err());
         assert!(text.contains("reparse point"), "{text}");
         assert!(text.contains(&reported(&link)), "{text}");
+    }
+
+    fn dacl_text(path: &Path) -> String {
+        let out = Command::new("icacls").arg(path).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn ensure_dir_under_untrusted_ancestor_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Everyone may modify the ancestor: it is untrusted.
+        assert!(run(
+            "icacls",
+            &[tmp.path().to_str().unwrap(), "/grant", "*S-1-1-0:(OI)(CI)M"]
+        ));
+        let before = dacl_text(tmp.path());
+        let missing = tmp.path().join("a").join("state");
+        let text = permission_text(ensure_dir(&missing, &me()).unwrap_err());
+        assert!(text.contains("S-1-1-0"), "{text}");
+        assert!(!tmp.path().join("a").exists());
+        assert_eq!(dacl_text(tmp.path()), before);
+    }
+
+    #[test]
+    fn ensure_dir_under_a_junction_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        assert!(run(
+            "cmd",
+            &[
+                "/c",
+                "mklink",
+                "/J",
+                link.to_str().unwrap(),
+                real.to_str().unwrap()
+            ]
+        ));
+        let before = dacl_text(&real);
+        let text = permission_text(ensure_dir(&link.join("a").join("state"), &me()).unwrap_err());
+        assert!(text.contains("reparse point"), "{text}");
+        assert!(std::fs::read_dir(&real).unwrap().next().is_none());
+        assert_eq!(dacl_text(&real), before);
+    }
+
+    #[test]
+    fn ensure_dir_creates_missing_components_under_a_trusted_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("a").join("state");
+        ensure_dir(&state, &me()).unwrap();
+        assert!(state.is_dir());
+        ensure_dir(&state, &me()).unwrap();
     }
 
     #[test]

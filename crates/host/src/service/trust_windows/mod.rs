@@ -20,7 +20,7 @@ pub(crate) mod win32;
 pub(crate) use win32::token_user;
 #[cfg(windows)]
 pub(crate) use win32::{
-    create_dir_with_sddl, program_data_dir, publish, read_in, read_verified, remove_in,
+    create_dir_with_sddl, ensure_dir, program_data_dir, publish, read_in, read_verified, remove_in,
     verify_binary, verify_confidential_with, verify_dir,
 };
 
