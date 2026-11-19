@@ -198,7 +198,7 @@ struct Cleanup;
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let _ = Command::new(BIN)
-            .args(["serve", "service", "uninstall", "--system"])
+            .args(["serve", "service", "uninstall"])
             .output();
         let _ = std::fs::remove_file(LOG);
     }
@@ -219,7 +219,7 @@ fn tail_log() -> String {
 }
 
 fn restart() -> Output {
-    run(&["serve", "service", "restart", "--system"], &[])
+    run(&["serve", "service", "restart"], &[])
 }
 
 fn start_and_wait(user: &Home, what: &str) {
@@ -460,7 +460,7 @@ fn system_service_across_the_privilege_boundary() {
     // --- SM-04 fail closed: root under a service manager with no pin (a
     // registration from before the policy) is refused; a foreground root run
     // of the same config is not a service and is unaffected.
-    let out = run(&["serve", "service", "stop", "--system"], &[]);
+    let out = run(&["serve", "service", "stop"], &[]);
     assert!(out.status.success(), "stop: {}", err(&out));
     let legacy = Command::new(BIN)
         .args(["serve", "run", "--config", bob.config().to_str().unwrap()])
@@ -471,11 +471,7 @@ fn system_service_across_the_privilege_boundary() {
         .output()
         .unwrap();
     assert_eq!(legacy.status.code(), Some(3), "{}", err(&legacy));
-    assert!(
-        err(&legacy).contains("service install --system"),
-        "{}",
-        err(&legacy)
-    );
+    assert!(err(&legacy).contains("service install"), "{}", err(&legacy));
 
     // --- A symlinked home is resolved once at install (SM-04), not refused later.
     let real = PathBuf::from("/home/it91b-real");
@@ -551,7 +547,7 @@ fn install_on_path(user: &Home, path: &str) -> Output {
 }
 
 fn service_verb(verb: &str, path: &str) -> Output {
-    run(&["serve", "service", verb, "--system"], &[("PATH", path)])
+    run(&["serve", "service", verb], &[("PATH", path)])
 }
 
 /// The binary the init script runs: `DAEMON=` as a plain word or
@@ -694,7 +690,7 @@ fn reset_binary_state() {
     wait_for("the previous service process to exit", || !same_alive());
     if Path::new(SCRIPT).exists() {
         let _ = Command::new(BIN)
-            .args(["serve", "service", "uninstall", "--system"])
+            .args(["serve", "service", "uninstall"])
             .output();
         let _ = std::fs::remove_file(SCRIPT);
     }
@@ -741,7 +737,7 @@ fn sm_bin_01_user_bin_dir_registers_managed_copy() {
             // The source is the running executable the install copied from.
             && stdout.contains(BIN)
             && stdout.contains(MANAGED_COPY)
-            && stdout.contains("service install --system"),
+            && stdout.contains("service install"),
         "{stdout}"
     );
     wait_running(&alice);
@@ -775,7 +771,7 @@ fn sm_bin_02_legacy_unsafe_daemon_refuses_start() {
     assert_eq!(out.status.code(), Some(3), "{text}");
     // The refusal names the registered binary and the reinstall command.
     assert!(
-        text.contains(user_binary) && text.contains("service install --system"),
+        text.contains(user_binary) && text.contains("service install"),
         "{text}"
     );
     assert!(!Path::new(PIDFILE).exists(), "a refused start must not run");
@@ -925,7 +921,7 @@ fn reset_access_state() {
             pid_in(ACCESS_PIDFILE).is_none_or(|p| exited(&p))
         });
         let _ = Command::new(BIN)
-            .args(["access", "service", "uninstall", "--system"])
+            .args(["access", "service", "uninstall"])
             .output();
         let _ = std::fs::remove_file(ACCESS_SCRIPT);
     }
@@ -1037,7 +1033,7 @@ fn sm_bin_07_cargo_and_homebrew_prefixes_register_a_copy() {
 
 fn install_access(user: &Home, config: &Path, path: &str) -> Output {
     run(
-        &["access", "service", "install", "--system", "--config"]
+        &["access", "service", "install", "--config"]
             .iter()
             .copied()
             .chain([config.to_str().unwrap()])
@@ -1131,7 +1127,6 @@ fn sm_bin_10_busybox_user_scope_install_registers_a_copy() {
             "serve",
             "service",
             "install",
-            "--user",
             "--config",
             config.to_str().unwrap(),
         ],

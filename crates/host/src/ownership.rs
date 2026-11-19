@@ -310,7 +310,7 @@ fn base_options() -> OpenOptions {
 /// Create `dir` and any missing parents, each created directory getting
 /// exactly `mode` whatever the umask. A directory that already exists is left
 /// untouched (never re-chmodded).
-fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
+pub(crate) fn create_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

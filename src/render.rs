@@ -138,6 +138,24 @@ pub(crate) fn print_service_note(note: &ServiceNote, invocation: &ServiceInvocat
     }
 }
 
+/// Print the other-tier notice on stderr when `role` also runs in the tier
+/// other than this process's. Informational: a probe failure prints nothing
+/// and a write failure is logged, so the command always continues. The probe
+/// only tests a lock without waiting, so it is safe on a runtime thread.
+pub(crate) fn print_other_tier_notice(role: Role) {
+    let Some(other) = iroh_tunnel_host::other_tier_running(role, Tier::current()) else {
+        return;
+    };
+    let note = ServiceNote::OtherTierRunning {
+        role: role.name().to_owned(),
+        other,
+    };
+    let (_, text) = render_service_note(&note);
+    if let Err(error) = crate::output::stderr(&text) {
+        tracing::warn!("other-tier notice not shown: {error:#}");
+    }
+}
+
 /// Render the operator-facing startup lines.
 pub(crate) fn render_ready(report: &ReadyReport) -> String {
     let mut out = format!("NodeId: {}\n", report.node_id);
@@ -520,6 +538,25 @@ mod tests {
         );
         let (_, combined) = render_service_note_for_invocation(&note, &ServiceInvocation::Combined);
         assert_eq!(combined, render_service_note(&note).1);
+    }
+
+    #[test]
+    fn launchd_bootstrap_hint_names_print_disabled() {
+        for domain in ["system", "gui/501"] {
+            let (stream, text) = render_service_note(&ServiceNote::LaunchdBootstrapHint {
+                domain: domain.into(),
+                plist: "/p/x.plist".into(),
+            });
+            assert_eq!(stream, Stream::Stderr);
+            assert!(
+                text.contains(&format!("launchctl print-disabled {domain}")),
+                "{text}"
+            );
+            assert!(
+                !text.contains("--system") && !text.contains("--user"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

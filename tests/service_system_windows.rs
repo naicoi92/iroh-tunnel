@@ -380,7 +380,7 @@ impl Fixture {
 
     /// Install `config` (another file of the fixture) as the service target.
     fn install_config(&self, config: &Path) -> Result<Output> {
-        let args = self.install_args(config.to_str().unwrap(), &["--system"]);
+        let args = self.install_args(config.to_str().unwrap(), &[]);
         self.service("install", &args)
     }
 
@@ -399,7 +399,7 @@ impl Drop for Fixture {
         if std::thread::panicking() {
             self.dump();
         }
-        let _ = self.service("uninstall", &["--system"]);
+        let _ = self.service("uninstall", &[]);
         if self.service_exists() {
             let _ = self.sc("stop");
             let _ = wait_for("the service to stop", || {
@@ -444,7 +444,7 @@ async fn standalone_serve_service_starts_and_stops_under_scm() -> Result<()> {
     fx.exe = standalone;
     fx.standalone = true;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     let pid = wait_for_node(&fx, &node_id)?;
     let expected = format!(
         "\"{}\" run --config \"{}\"",
@@ -452,10 +452,10 @@ async fn standalone_serve_service_starts_and_stops_under_scm() -> Result<()> {
         fx.config().display()
     );
     assert_eq!(fx.image_path()?.to_lowercase(), expected.to_lowercase());
-    fx.service_ok("stop", &["--system"])?;
+    fx.service_ok("stop", &[])?;
     wait_for("standalone process to exit", || !pid_alive(pid))?;
     assert!(!fx.status_file().exists());
-    fx.service_ok("uninstall", &["--system"])?;
+    fx.service_ok("uninstall", &[])?;
     fx.wait_absent()?;
     Ok(())
 }
@@ -479,7 +479,7 @@ async fn standalone_access_service_starts_and_stops_under_scm() -> Result<()> {
     drop(socket);
     std::fs::create_dir_all(fx.config().parent().unwrap())?;
     std::fs::write(fx.config(), format!("[node]\nsecret_key = {:?}\nrelay_urls = [{:?}]\n\n[[services]]\nname = \"echo\"\nnode_id = \"{peer}\"\nprotocol = \"tcp\"\nhost = \"127.0.0.1\"\nport = {port}\n", iroh_tunnel_host::config::encode_secret_key(&key), relay.as_ref() as &str))?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     let pid = wait_for_node(&fx, &key.public().to_string())?;
     let expected = format!(
         "\"{}\" run --config \"{}\"",
@@ -487,10 +487,10 @@ async fn standalone_access_service_starts_and_stops_under_scm() -> Result<()> {
         fx.config().display()
     );
     assert_eq!(fx.image_path()?.to_lowercase(), expected.to_lowercase());
-    fx.service_ok("stop", &["--system"])?;
+    fx.service_ok("stop", &[])?;
     wait_for("standalone access process to exit", || !pid_alive(pid))?;
     assert!(!fx.status_file().exists());
-    fx.service_ok("uninstall", &["--system"])?;
+    fx.service_ok("uninstall", &[])?;
     fx.wait_absent()?;
     Ok(())
 }
@@ -504,9 +504,9 @@ async fn system_service_lifecycle() -> Result<()> {
     let fx = Fixture::new("lifecycle")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
 
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     let pid = wait_for_node(&fx, &node_id)?;
-    let status = fx.service_ok("status", &["--system"])?;
+    let status = fx.service_ok("status", &[])?;
     assert!(status.contains("is running"), "{status}");
 
     // The registered command line is the trusted copy, quoted, then the args.
@@ -546,27 +546,25 @@ async fn system_service_lifecycle() -> Result<()> {
     );
 
     // stop: the process ends and the status file is removed (the drain).
-    fx.service_ok("stop", &["--system"])?;
+    fx.service_ok("stop", &[])?;
     wait_for("the process to exit", || !pid_alive(pid))?;
     assert!(
         !fx.status_file().exists(),
         "stop must drain and remove the status file"
     );
-    assert!(fx
-        .service_ok("status", &["--system"])?
-        .contains("not running"));
+    assert!(fx.service_ok("status", &[])?.contains("not running"));
 
     // start and restart: a new process with the same identity each time.
-    fx.service_ok("start", &["--system"])?;
+    fx.service_ok("start", &[])?;
     let started = wait_for_new_pid(&fx, &node_id, pid)?;
-    fx.service_ok("restart", &["--system"])?;
+    fx.service_ok("restart", &[])?;
     let restarted = wait_for_new_pid(&fx, &node_id, started)?;
     assert_ne!(restarted, started);
 
     // uninstall removes the service; status then reports not installed.
-    fx.service_ok("uninstall", &["--system"])?;
+    fx.service_ok("uninstall", &[])?;
     fx.wait_absent()?;
-    let gone = fx.service("status", &["--system"])?;
+    let gone = fx.service("status", &[])?;
     assert_eq!(gone.status.code(), Some(5), "{}", stderr(&gone));
     Ok(())
 }
@@ -579,7 +577,7 @@ async fn reinstall_replaces_the_definition() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("reinstall")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     let old_pid = wait_for_node(&fx, &node_id)?;
 
     // A second config of the same owner, same identity.
@@ -598,9 +596,7 @@ async fn reinstall_replaces_the_definition() -> Result<()> {
     let new_pid = wait_for_new_pid(&fx, &node_id, old_pid)?;
     wait_for("the old process to exit", || !pid_alive(old_pid))?;
     assert!(pid_alive(new_pid));
-    assert!(fx
-        .service_ok("status", &["--system"])?
-        .contains("is running"));
+    assert!(fx.service_ok("status", &[])?.contains("is running"));
 
     let image = svc::image_path(&name)?.to_lowercase();
     assert!(
@@ -642,7 +638,7 @@ async fn stop_pending_reported_while_draining() -> Result<()> {
         }
     });
     let node_id = fx.write_config(relay.as_ref(), echo_port)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
 
     // An access in this process, tunnelling to the service.
@@ -690,7 +686,7 @@ async fn stop_pending_reported_while_draining() -> Result<()> {
     assert_eq!(&got, b"ping");
 
     let stopper = {
-        let mut command = fx.command(&["serve", "service", "stop", "--system"]);
+        let mut command = fx.command(&["serve", "service", "stop"]);
         std::thread::spawn(move || command.output())
     };
     let name = fx.name();
@@ -763,18 +759,18 @@ async fn missing_service_verbs() -> Result<()> {
     fx.write_config(relay.as_ref(), 9)?;
 
     for verb in ["start", "stop", "status"] {
-        let out = fx.service(verb, &["--system"])?;
+        let out = fx.service(verb, &[])?;
         let err = stderr(&out);
         assert_eq!(out.status.code(), Some(5), "{verb}: {err}");
-        assert!(err.contains("service install --system"), "{verb}: {err}");
+        assert!(err.contains("service install"), "{verb}: {err}");
     }
-    let out = fx.service("uninstall", &["--system"])?;
+    let out = fx.service("uninstall", &[])?;
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
     // Stopping an already stopped service is fine.
-    fx.install_ok(&["--system"])?;
-    fx.service_ok("stop", &["--system"])?;
-    let again = fx.service("stop", &["--system"])?;
+    fx.install_ok(&[])?;
+    fx.service_ok("stop", &[])?;
+    let again = fx.service("stop", &[])?;
     assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
     Ok(())
 }
@@ -812,11 +808,11 @@ async fn crash_is_restarted() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("crash")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     let first = wait_for_node(&fx, &node_id)?;
 
     fx.set_service_env(&[("IROH_TUNNEL_TEST_EXIT_AFTER_MS", "1500")])?;
-    fx.service_ok("restart", &["--system"])?;
+    fx.service_ok("restart", &[])?;
     let crashing = wait_for_new_pid(&fx, &node_id, first)?;
     // The process fails after 1.5 s; recovery restarts it after 5 s.
     let recovered = wait_for_new_pid(&fx, &node_id, crashing)?;
@@ -840,7 +836,6 @@ async fn rollback_when_start_fails() -> Result<()> {
             "serve",
             "service",
             "install",
-            "--system",
             "--config",
             config.to_str().unwrap(),
         ])
@@ -1008,7 +1003,7 @@ fn refused_start(fx: &Fixture) -> Result<u32> {
 
 /// Stop the running service cleanly, so a refused start can be observed.
 fn stop_cleanly(fx: &Fixture) -> Result<()> {
-    fx.service_ok("stop", &["--system"])?;
+    fx.service_ok("stop", &[])?;
     wait_for("the service to stop", || {
         svc::service_stopped_or_absent(&fx.name())
     })
@@ -1019,7 +1014,7 @@ fn stop_cleanly(fx: &Fixture) -> Result<()> {
 fn start_until_running(fx: &Fixture) -> Result<()> {
     wait_for("the service to run after start", || {
         if !sc_running(fx) {
-            let _ = fx.service("start", &["--system"]);
+            let _ = fx.service("start", &[]);
         }
         sc_running(fx)
     })
@@ -1031,7 +1026,6 @@ fn install_with_env(fx: &Fixture, envs: &[(&str, &str)]) -> Result<Output> {
         "serve",
         "service",
         "install",
-        "--system",
         "--config",
         config.to_str().unwrap(),
     ]);
@@ -1059,7 +1053,7 @@ async fn unsafe_config_refused_then_fixed() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("unsafecfg")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
 
     stop_cleanly(&fx)?;
@@ -1137,7 +1131,7 @@ async fn invalid_config_never_runs() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("invalidcfg")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
     stop_cleanly(&fx)?;
     let before = acl_state(&fx.config())?;
@@ -1161,7 +1155,7 @@ async fn empty_key_never_written() -> Result<()> {
     let fx = Fixture::new("emptykey")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
     // Install is allowed to refuse an empty key, so empty it afterwards.
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
     let text = std::fs::read_to_string(fx.config())?;
     let emptied = text
@@ -1198,13 +1192,13 @@ async fn pinless_service_refused() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("pinless")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
 
     stop_cleanly(&fx)?;
     svc::remove_service_env(&fx.name(), "IROH_TUNNEL_TRUSTED_SID")?;
     assert_eq!(refused_start(&fx)?, 3, "a permission error");
-    wait_for_log(&fx, "service install --system")?;
+    wait_for_log(&fx, "service install")?;
     Ok(())
 }
 
@@ -1305,7 +1299,6 @@ async fn binary_check_at_install_and_start() -> Result<()> {
                     "serve",
                     "service",
                     "install",
-                    "--system",
                     "--config",
                     config.to_str().unwrap(),
                 ],
@@ -1325,11 +1318,11 @@ async fn binary_check_at_install_and_start() -> Result<()> {
     // (b) A protected binary that becomes writable after install.
     let fx = Fixture::new("binary-b")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
-    fx.service_ok("stop", &["--system"])?;
+    fx.service_ok("stop", &[])?;
     let _grant = GrantGuard::everyone_modify(&fx.exe)?;
-    let out = fx.service("start", &["--system"])?;
+    let out = fx.service("start", &[])?;
     assert_exit(&out, 3);
     assert!(
         normalised(&stderr(&out)).contains(&normalised(fx.exe.to_str().unwrap())),
@@ -1441,7 +1434,6 @@ fn fx_install_args(config: &Path) -> Vec<&str> {
         "serve",
         "service",
         "install",
-        "--system",
         "--config",
         config.to_str().unwrap(),
     ]
@@ -1459,7 +1451,7 @@ async fn config_owned_by_other_user() -> Result<()> {
     let dir = fx.config().parent().unwrap().to_path_buf();
     icacls(&[dir.to_str().unwrap(), "/setowner", &bob.name])?;
 
-    let out = fx.install(&["--system"])?;
+    let out = fx.install(&[])?;
     assert_exit(&out, 2);
     let err = stderr(&out).to_lowercase();
     assert!(
@@ -1480,7 +1472,7 @@ async fn retarget_declined_and_approved() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("retarget")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
     let name = fx.name();
     let runner = svc::runner_sid()?;
@@ -1550,7 +1542,7 @@ async fn retarget_declined_and_approved() -> Result<()> {
     assert_eq!(files()?, bytes, "both configs kept unchanged");
 
     // Same user again: no prompt (stdin is not a terminal here).
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     Ok(())
 }
 
@@ -1565,7 +1557,7 @@ async fn config_dir_owned_by_administrators() -> Result<()> {
     let dir = fx.config().parent().unwrap().to_path_buf();
     icacls(&[dir.to_str().unwrap(), "/setowner", "*S-1-5-32-544"])?;
 
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
     let description = svc::reg_string(&fx.name(), "Description")?;
     assert!(
@@ -1580,7 +1572,7 @@ struct TaskGuard<'a>(&'a Fixture);
 
 impl Drop for TaskGuard<'_> {
     fn drop(&mut self) {
-        let _ = user_scope(self.0, &["serve", "service", "uninstall", "--user"]).output();
+        let _ = user_scope(self.0, &["serve", "service", "uninstall"]).output();
     }
 }
 
@@ -1604,28 +1596,20 @@ async fn cross_scope_refused_both_ways() -> Result<()> {
     let _task = TaskGuard(&fx);
 
     // A system service exists: a user install is refused.
-    fx.install_ok(&["--system"])?;
-    let out = user_scope(
-        &fx,
-        &["serve", "service", "install", "--user", "--config", config],
-    )
-    .output()?;
+    fx.install_ok(&[])?;
+    let out = user_scope(&fx, &["serve", "service", "install", "--config", config]).output()?;
     assert_exit(&out, 5);
     assert!(
-        stderr(&out).contains("service uninstall --system"),
+        stderr(&out).contains("service uninstall"),
         "{}",
         stderr(&out)
     );
     assert!(!fx.task_exists(), "no user task may be registered");
 
     // A user task exists: a system install is refused.
-    fx.service_ok("uninstall", &["--system"])?;
+    fx.service_ok("uninstall", &[])?;
     fx.wait_absent()?;
-    let out = user_scope(
-        &fx,
-        &["serve", "service", "install", "--user", "--config", config],
-    )
-    .output()?;
+    let out = user_scope(&fx, &["serve", "service", "install", "--config", config]).output()?;
     ensure!(
         out.status.success(),
         "user install: {}{}",
@@ -1633,10 +1617,10 @@ async fn cross_scope_refused_both_ways() -> Result<()> {
         stderr(&out)
     );
     assert!(fx.task_exists(), "the user task must exist");
-    let out = fx.install(&["--system"])?;
+    let out = fx.install(&[])?;
     assert_exit(&out, 5);
     assert!(
-        stderr(&out).contains("service uninstall --user"),
+        stderr(&out).contains("service uninstall"),
         "{}",
         stderr(&out)
     );
@@ -1652,7 +1636,7 @@ async fn user_task_blocked_while_service_runs() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("userblocked")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
 
     let config = fx.config();
@@ -1689,9 +1673,9 @@ async fn already_running_is_clean_stop() -> Result<()> {
     let fx = Fixture::new("alreadyrunning")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
     // The service runs once, so the machine lock file exists.
-    fx.install_ok(&["--system"])?;
+    fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
-    fx.service_ok("stop", &["--system"])?;
+    fx.service_ok("stop", &[])?;
     wait_for("the service to stop", || {
         svc::service_stopped_or_absent(&fx.name())
     })?;
@@ -1763,7 +1747,7 @@ async fn non_elevated_system_operations() -> Result<()> {
     assert_exit(&out, 3);
     let err = stderr(&out);
     assert!(err.contains("Run as administrator"), "{err}");
-    assert!(err.contains("serve service install --system"), "{err}");
+    assert!(err.contains("serve service install"), "{err}");
     assert!(
         normalised(&err).contains(&normalised(config.to_str().unwrap())),
         "the guidance must name {}: {err}",
@@ -1773,14 +1757,13 @@ async fn non_elevated_system_operations() -> Result<()> {
     assert!(!fx.task_exists(), "no task may be registered");
 
     for verb in ["uninstall", "start", "stop", "restart"] {
-        let out = common::restricted::run_non_elevated(
-            &mut fx.command(&["serve", "service", verb, "--system"]),
-        )?;
+        let out =
+            common::restricted::run_non_elevated(&mut fx.command(&["serve", "service", verb]))?;
         assert_exit(&out, 3);
         let err = stderr(&out);
         assert!(err.contains("Run as administrator"), "{verb}: {err}");
         assert!(
-            err.contains(&format!("iroh-tunnel serve service {verb} --system")),
+            err.contains(&format!("iroh-tunnel serve service {verb}")),
             "{verb}: {err}"
         );
     }

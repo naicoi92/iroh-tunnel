@@ -18,20 +18,17 @@ const REPLACE_DENIED_HINT: &str =
      stop it and run the update again from another copy; otherwise check the file permissions";
 
 /// Appended on Windows: a system service holds its executable open, and only
-/// an elevated `service stop --system` releases it. Standalone binaries name
-/// their own command; the combined binary names both possible service roles.
+/// a `service stop` from an elevated terminal (which acts on the system tier)
+/// releases it. Standalone binaries name their own command; the combined
+/// binary names both possible service roles.
 pub(super) fn windows_locked_hint(exe_name: &str) -> String {
     let commands = match exe_name {
-        "iroh-tunnel-serve" | "iroh-tunnel-access" => {
-            format!("{exe_name} service stop --system")
-        }
-        _ => "iroh-tunnel serve service stop --system or \
-              iroh-tunnel access service stop --system"
-            .to_owned(),
+        "iroh-tunnel-serve" | "iroh-tunnel-access" => format!("{exe_name} service stop"),
+        _ => "iroh-tunnel serve service stop or iroh-tunnel access service stop".to_owned(),
     };
     format!(
-        "; if a system service runs this executable, stop it first from an elevated terminal: \
-         {commands}"
+        "; if a system service runs this executable, stop it first from an elevated terminal \
+         (Run as administrator): {commands}"
     )
 }
 
@@ -249,43 +246,42 @@ mod tests {
         );
     }
 
-    #[test]
-    fn windows_locked_hint_mentions_service_stop_system() {
-        let hint = windows_locked_hint("iroh-tunnel");
+    /// Guidance every locked-executable hint shares: elevated, flagless,
+    /// pasteable as is.
+    fn assert_elevated_flagless(hint: &str) {
+        assert!(hint.contains("Run as administrator"), "{hint}");
         assert!(
-            hint.contains("iroh-tunnel serve service stop --system"),
-            "{hint}"
-        );
-        assert!(
-            hint.contains("iroh-tunnel access service stop --system"),
+            !hint.contains("--system") && !hint.contains("--user"),
             "{hint}"
         );
         assert!(!hint.contains("<role>"), "{hint}");
-        assert!(hint.contains("elevated"), "{hint}");
+        assert!(!hint.contains("sudo"), "{hint}");
+    }
+
+    #[test]
+    fn windows_locked_hint_names_both_elevated_service_stops() {
+        let hint = windows_locked_hint("iroh-tunnel");
+        assert!(hint.contains("iroh-tunnel serve service stop"), "{hint}");
+        assert!(hint.contains("iroh-tunnel access service stop"), "{hint}");
+        assert_elevated_flagless(&hint);
     }
 
     #[test]
     fn windows_locked_hint_for_serve_needs_no_combined_executable() {
         let hint = windows_locked_hint("iroh-tunnel-serve");
-        assert!(
-            hint.contains("iroh-tunnel-serve service stop --system"),
-            "{hint}"
-        );
+        assert!(hint.contains("iroh-tunnel-serve service stop"), "{hint}");
         assert!(!hint.contains("iroh-tunnel serve"), "{hint}");
         assert!(!hint.contains("access"), "{hint}");
-        assert!(hint.contains("elevated"), "{hint}");
+        assert_elevated_flagless(&hint);
     }
 
     #[test]
     fn windows_locked_hint_for_access_needs_no_combined_executable() {
         let hint = windows_locked_hint("iroh-tunnel-access");
-        assert!(
-            hint.contains("iroh-tunnel-access service stop --system"),
-            "{hint}"
-        );
+        assert!(hint.contains("iroh-tunnel-access service stop"), "{hint}");
         assert!(!hint.contains("iroh-tunnel access"), "{hint}");
         assert!(!hint.contains("serve"), "{hint}");
-        assert!(hint.contains("elevated"), "{hint}");
+        assert_elevated_flagless(&hint);
     }
 
     #[cfg(unix)]

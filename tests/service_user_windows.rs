@@ -167,9 +167,7 @@ impl Drop for Fixture {
             .as_deref()
             .filter(|id| node_id_of(&status_file).as_deref() == Some(id))
             .and_then(|_| pid_of(&status_file));
-        let _ = self
-            .command(&["serve", "service", "uninstall", "--user"])
-            .output();
+        let _ = self.command(&["serve", "service", "uninstall"]).output();
         if let Some(pid) = own_pid {
             let _ = wait_for("this test's task process to exit", || !pid_alive(pid));
         }
@@ -187,7 +185,6 @@ fn install_refuses_a_state_directory_the_task_cannot_carry() -> Result<()> {
             "serve",
             "service",
             "install",
-            "--user",
             "--config",
             config.to_str().unwrap(),
         ])
@@ -209,7 +206,7 @@ fn start_without_an_installed_task_names_the_install_command() -> Result<()> {
     }
     let fx = Fixture::new()?;
     for verb in ["start", "stop", "status"] {
-        let out = fx.command(&["serve", "service", verb, "--user"]).output()?;
+        let out = fx.command(&["serve", "service", verb]).output()?;
         let err = stderr(&out);
         assert_eq!(out.status.code(), Some(5), "{verb}: {err}");
         assert!(err.contains("service install"), "{verb}: {err}");
@@ -231,26 +228,24 @@ async fn user_background_task_lifecycle() -> Result<()> {
     let status_file = fx.state().join("serve-status.json");
 
     // install registers a task for the current user and starts it.
-    fx.ok(&["serve", "service", "install", "--user", "--config", config])?;
+    fx.ok(&["serve", "service", "install", "--config", config])?;
     assert!(fx.task_exists(), "task not registered");
     fx.wait_for_own_status(&status_file, &first_id)?;
 
     // status reports the task.
-    let status = fx.ok(&["serve", "service", "status", "--user"])?;
+    let status = fx.ok(&["serve", "service", "status"])?;
     assert!(status.contains("serve is running (pid "), "{status}");
     assert!(status.contains("iroh-tunnel-serve"), "{status}");
 
     // starting a running role is refused by role ownership, not duplicated.
-    let again = fx
-        .command(&["serve", "service", "start", "--user"])
-        .output()?;
+    let again = fx.command(&["serve", "service", "start"]).output()?;
     assert_eq!(again.status.code(), Some(6), "{}", stderr(&again));
 
     // stop: the process ends. Whether it drained is reported, not gated.
     let pid = pid_of(&status_file).expect("pid in status file");
     eprintln!("DIAG process tree before /End:\n{}", process_tree());
     let stopped_at = Instant::now();
-    fx.ok(&["serve", "service", "stop", "--user"])?;
+    fx.ok(&["serve", "service", "stop"])?;
     let exited = wait_for("the stopped task's process to exit", || !pid_alive(pid));
     if exited.is_err() {
         eprintln!("DIAG process tree after /End:\n{}", process_tree());
@@ -262,7 +257,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
         stopped_at.elapsed()
     );
 
-    let stopped = fx.ok(&["serve", "service", "status", "--user"])?;
+    let stopped = fx.ok(&["serve", "service", "status"])?;
     assert!(stopped.contains("serve is not running"), "{stopped}");
 
     // A hard /End leaves a stale snapshot: remove it so every later read is
@@ -270,13 +265,13 @@ async fn user_background_task_lifecycle() -> Result<()> {
     let _ = std::fs::remove_file(&status_file);
 
     // start and restart keep the configured identity in a NEW process.
-    fx.ok(&["serve", "service", "start", "--user"])?;
+    fx.ok(&["serve", "service", "start"])?;
     wait_for("status after start", || pid_of(&status_file).is_some())?;
     let started_pid = pid_of(&status_file).unwrap();
     assert_ne!(started_pid, pid, "start must launch a new process");
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
 
-    fx.ok(&["serve", "service", "restart", "--user"])?;
+    fx.ok(&["serve", "service", "restart"])?;
     wait_for("a new process after restart", || {
         pid_of(&status_file).is_some_and(|p| p != started_pid)
     })?;
@@ -285,7 +280,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
 
     // uninstall removes the task and ends the process.
     let pid = pid_of(&status_file).expect("pid in status file");
-    fx.ok(&["serve", "service", "uninstall", "--user"])?;
+    fx.ok(&["serve", "service", "uninstall"])?;
     assert!(!fx.task_exists(), "task still registered");
     wait_for("the uninstalled task's process to exit", || !pid_alive(pid))?;
     Ok(())

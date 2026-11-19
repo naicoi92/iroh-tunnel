@@ -693,3 +693,257 @@ fn out(output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     )
 }
+
+/// The user-tier notice: the role also runs as a system service.
+const SYSTEM_NOTICE: &str = "note: serve is also running as a system service; \
+                             manage it with sudo or from an elevated terminal";
+/// The system-tier notice: the role also runs in a user session.
+const USER_NOTICE: &str = "note: serve is also running in a user session";
+
+/// Spawn with stdout and stderr interleaved in one file, so the order of the
+/// notice (stderr) and the ready or bind lines (stdout) is observable.
+fn spawn_logged(mut command: Command, args: &[String], log: &Path) -> Result<Process> {
+    let file = File::create(log)?;
+    Ok(Process(
+        command
+            .args(args)
+            .stdout(file.try_clone()?)
+            .stderr(file)
+            .spawn()?,
+    ))
+}
+
+/// Wait until the interleaved `log` contains `needle`; returns the log.
+fn wait_log(log: &Path, needle: &str, process: &mut Process) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if text.contains(needle) {
+            return Ok(text);
+        }
+        if let Some(exit) = process.0.try_wait()? {
+            anyhow::bail!("exited ({exit}) before {needle:?}: {text}");
+        }
+        anyhow::ensure!(Instant::now() < deadline, "no {needle:?} in: {text}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Byte offset of `needle` in `text`, failing the test when it is missing.
+fn offset(text: &str, needle: &str) -> usize {
+    text.find(needle)
+        .unwrap_or_else(|| panic!("no {needle:?} in: {text}"))
+}
+
+/// A configured serve config with `key`'s identity and one service.
+fn write_serve_config(dir: &Path, relay: &str, key: &Path) -> Result<PathBuf> {
+    let secret = std::fs::read_to_string(key)?;
+    let path = dir.join("serve.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[node]\nsecret_key = {:?}\nrelay_urls = [{relay:?}]\n\n\
+             [[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
+            secret.trim()
+        ),
+    )?;
+    Ok(path)
+}
+
+#[tokio::test]
+async fn run_prints_other_tier_notice_before_bind() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (system_key, _) = write_key(world.root.path(), "system.key")?;
+    let (user_key, _) = write_key(world.root.path(), "user.key")?;
+    let _system = start_system_serve(&world, &relay, &system_key, &world.state("system"))?;
+
+    // Quick mode: the notice precedes the ready lines and the user starts.
+    let quick_log = world.root.path().join("quick.log");
+    let mut quick = spawn_logged(
+        world.user_command(ALL_IN_ONE, Some("serve"), &world.state("quick")),
+        &serve_args(&relay, &user_key),
+        &quick_log,
+    )?;
+    let text = wait_log(&quick_log, "NodeId:", &mut quick)?;
+    assert!(
+        offset(&text, SYSTEM_NOTICE) < offset(&text, "NodeId:"),
+        "{text}"
+    );
+    assert_eq!(text.matches("note:").count(), 1, "{text}");
+    drop(quick);
+
+    // Configured mode, standalone binary.
+    let config = write_serve_config(world.root.path(), &relay, &user_key)?;
+    let configured_log = world.root.path().join("configured.log");
+    let mut configured = spawn_logged(
+        world.user_command(SERVE, None, &world.state("configured")),
+        &[
+            "run".to_owned(),
+            "--config".to_owned(),
+            config.display().to_string(),
+        ],
+        &configured_log,
+    )?;
+    let text = wait_log(&configured_log, "NodeId:", &mut configured)?;
+    assert!(
+        offset(&text, SYSTEM_NOTICE) < offset(&text, "NodeId:"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_prints_user_session_notice_in_system_tier() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    // The system tier created the presence file on an earlier start.
+    File::create(world.machine().join("serve.user.lock"))?;
+    let user_state = world.state("user");
+    let mut user = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
+        &serve_args(&relay, &key),
+    )?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+
+    let output = world
+        .system_command(ALL_IN_ONE, Some("serve"), &world.state("system"))
+        .args(["status"])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(USER_NOTICE), "{stderr}");
+    // It names no account: neither the user's home nor its owner pid.
+    assert!(
+        !stderr.contains(&world.home().display().to_string()),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&user.0.id().to_string()), "{stderr}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_reads_own_tier_snapshot_when_both_run() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (system_key, system_id) = write_key(world.root.path(), "system.key")?;
+    let (user_key, user_id) = write_key(world.root.path(), "user.key")?;
+    let system_state = world.state("system");
+    let _system = start_system_serve(&world, &relay, &system_key, &system_state)?;
+    let user_state = world.state("user");
+    let mut user = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
+        &serve_args(&relay, &user_key),
+    )?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+
+    for (command, own, other, notice) in [
+        (
+            world.system_command(ALL_IN_ONE, Some("serve"), &system_state),
+            &system_id,
+            &user_id,
+            USER_NOTICE,
+        ),
+        (
+            world.user_command(SERVE, None, &user_state),
+            &user_id,
+            &system_id,
+            SYSTEM_NOTICE,
+        ),
+    ] {
+        let output = { command }.args(["status", "--json"]).output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        let json: serde_json::Value = serde_json::from_str(stdout.trim())?;
+        assert_eq!(json["node_id"].as_str(), Some(own.as_str()), "{stdout}");
+        assert!(!stdout.contains(other.as_str()), "{stdout}");
+        // The notice stays on stderr: `--json` stdout is the file verbatim.
+        assert!(stderr.contains(notice), "{stderr}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_notice_when_other_tier_idle() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    // A system instance ran and stopped: its lock and presence files remain.
+    drop(start_system_serve(
+        &world,
+        &relay,
+        &key,
+        &world.state("old"),
+    )?);
+
+    let log = world.root.path().join("user.log");
+    let mut user = spawn_logged(
+        world.user_command(ALL_IN_ONE, Some("serve"), &world.state("user")),
+        &serve_args(&relay, &key),
+        &log,
+    )?;
+    let text = wait_log(&log, "NodeId:", &mut user)?;
+    assert!(!text.contains("note:"), "{text}");
+    drop(user);
+
+    for command in [
+        world.user_command(ALL_IN_ONE, Some("serve"), &world.state("user")),
+        world.system_command(ALL_IN_ONE, Some("serve"), &world.state("old")),
+    ] {
+        let output = { command }.args(["status"]).output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("note:"), "{stderr}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn port_clash_error_follows_notice() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (system_key, _) = write_key(world.root.path(), "system.key")?;
+    let (user_key, _) = write_key(world.root.path(), "user.key")?;
+    let peer = iroh::SecretKey::generate().public().to_string();
+    let listen = free_loopback();
+    let args = |key: &Path| -> Vec<String> {
+        [
+            "--name",
+            "echo",
+            "--listen",
+            &listen,
+            "--node-id",
+            &peer,
+            "--relay-url",
+            &relay,
+            "--key-file",
+        ]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .chain([key.display().to_string()])
+        .collect()
+    };
+    // The system-tier access holds the address.
+    let system_log = world.root.path().join("system.log");
+    let mut system = spawn_logged(
+        world.system_command(ALL_IN_ONE, Some("access"), &world.state("system")),
+        &args(&system_key),
+        &system_log,
+    )?;
+    wait_log(&system_log, "listening for local clients", &mut system)?;
+
+    let user_log = world.root.path().join("user.log");
+    let mut user = spawn_logged(
+        world.user_command(ALL_IN_ONE, Some("access"), &world.state("user")),
+        &args(&user_key),
+        &user_log,
+    )?;
+    let bind_error = format!("failed to bind {listen}");
+    let text = wait_log(&user_log, &bind_error, &mut user)?;
+    let access_notice = SYSTEM_NOTICE.replace("serve", "access");
+    assert!(
+        offset(&text, &access_notice) < offset(&text, &bind_error),
+        "{text}"
+    );
+    Ok(())
+}

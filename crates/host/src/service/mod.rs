@@ -80,6 +80,12 @@ pub const ENV_SCM: &str = "IROH_TUNNEL_SCM";
 /// launchd, BusyBox) so `run` knows a service manager started it.
 pub const ENV_SERVICE: &str = "IROH_TUNNEL_SERVICE";
 
+/// SDDL of the system tier's config directory (`%ProgramData%\iroh-tunnel\config`):
+/// owner and group Administrators and SYSTEM, a protected DACL granting only
+/// SYSTEM and Administrators, because the configs hold secret keys.
+#[cfg(windows)]
+pub(crate) const CONFIG_DIR_SDDL: &str = "O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
 /// Test builds only (`test-utils`, unit tests): one uid (Unix) or SID (Windows) added to the admin-only
 /// trusted set, so trust success paths are testable without root.
 #[cfg(any(test, feature = "test-utils"))]

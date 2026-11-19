@@ -94,8 +94,7 @@ fn cli_call(notes: &mut dyn FnMut(&service::ServiceNote)) -> ServiceCall<'_> {
 }
 
 /// Run one `service` action in this process's tier and print notes and
-/// native output. The legacy `--user`/`--system` flags are still parsed but
-/// no longer select anything (removed from the CLI separately).
+/// native output. Nothing is read from stdin.
 pub(crate) fn dispatch(
     role: Role,
     action: ServiceAction,
@@ -105,32 +104,43 @@ pub(crate) fn dispatch(
     let mut notes = |note: &service::ServiceNote| print_service_note(note, &invocation);
     let mut call = cli_call(&mut notes);
     match action {
-        ServiceAction::Install { config, .. } => install(role, config, env, &mut call, &invocation),
-        ServiceAction::Uninstall { .. } => service::uninstall(role, &invocation, env, &mut call)
+        ServiceAction::Install { config } => {
+            install(role, config, env, &mut call, &invocation, service::install)
+        }
+        ServiceAction::Uninstall => service::uninstall(role, &invocation, env, &mut call)
             .map(drop)
             .map_err(Into::into),
-        ServiceAction::Start { .. } => service::start(role, &invocation, env, &mut call)
+        ServiceAction::Start => service::start(role, &invocation, env, &mut call)
             .map(drop)
             .map_err(Into::into),
-        ServiceAction::Stop { .. } => service::stop(role, &invocation, env, &mut call)
+        ServiceAction::Stop => service::stop(role, &invocation, env, &mut call)
             .map(drop)
             .map_err(Into::into),
-        ServiceAction::Restart { .. } => service::restart(role, &invocation, env, &mut call)
+        ServiceAction::Restart => service::restart(role, &invocation, env, &mut call)
             .map(drop)
             .map_err(Into::into),
-        ServiceAction::Status { .. } => service::status(role, &invocation, env, &mut call)
+        ServiceAction::Status => service::status(role, &invocation, env, &mut call)
             .map(drop)
             .map_err(Into::into),
     }
 }
 
-/// Install in this process's tier.
+/// The host install operation, injected so the CLI glue is testable without
+/// a service manager.
+type Installer = fn(
+    &InstallRequest,
+    Environment,
+    &mut ServiceCall<'_>,
+) -> Result<service::ServiceReport, service::ServiceFailure>;
+
+/// Install in this process's tier through `installer`.
 fn install(
     role: Role,
     config: Option<PathBuf>,
     env: Environment,
     call: &mut ServiceCall,
     invocation: &ServiceInvocation,
+    installer: Installer,
 ) -> anyhow::Result<()> {
     let request = InstallRequest {
         invocation: invocation.clone(),
@@ -146,7 +156,7 @@ fn install(
             .filter(|d| !d.is_empty())
             .map(PathBuf::from),
     };
-    service::install(&request, env, call)?;
+    installer(&request, env, call)?;
     Ok(())
 }
 
@@ -166,6 +176,71 @@ mod tests {
     }
 
     use super::*;
+
+    /// A host install that succeeds in the user tier without a manager.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the fixture asserts the request the CLI built"
+    )]
+    fn fixture_install(
+        req: &InstallRequest,
+        env: Environment,
+        _call: &mut ServiceCall<'_>,
+    ) -> Result<service::ServiceReport, service::ServiceFailure> {
+        assert!(!env.elevated, "the user tier is not elevated");
+        assert_eq!(req.role, Role::Serve);
+        Ok(service::ServiceReport {
+            applied: Vec::new(),
+            native: Vec::new(),
+        })
+    }
+
+    /// A non-elevated install never reads stdin: the child runs the CLI
+    /// glue with stdin a pipe that is never written nor closed, so any read
+    /// would block until the timeout.
+    #[test]
+    fn install_reads_nothing_from_stdin() {
+        const NAME: &str = "cli_service::tests::install_reads_nothing_from_stdin";
+        const CHILD: &str = "IROH_TUNNEL_TEST_STDIN_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut notes = |_: &service::ServiceNote| {};
+            let mut call = cli_call(&mut notes);
+            install(
+                Role::Serve,
+                Some(PathBuf::from("/cfg/serve.toml")),
+                Environment { elevated: false },
+                &mut call,
+                &ServiceInvocation::Combined,
+                fixture_install,
+            )
+            .unwrap();
+            println!("IROH_STDIN_CHILD_DONE");
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _open_stdin = child.stdin.take();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("install blocked: it read stdin");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let mut stdout = String::new();
+        std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut stdout).unwrap();
+        assert!(status.success(), "{stdout}");
+        assert!(stdout.contains("IROH_STDIN_CHILD_DONE"), "{stdout}");
+    }
 
     #[test]
     fn running_executable_reads_the_executing_file() {

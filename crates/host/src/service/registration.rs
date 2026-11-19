@@ -64,7 +64,7 @@ pub(crate) fn write_registration(path: &Path, contents: &str) -> Result<()> {
             CliError::Permission(format!(
                 "permission denied {what} {}: {e}. The service tier and account were not \
                  changed and nothing was registered. Fix the permissions of that location and \
-                 re-run; use --system (as root) only if you intend a system service",
+                 re-run; use sudo only if you intend a system service",
                 target.display()
             ))
             .into()

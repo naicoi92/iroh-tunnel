@@ -138,7 +138,6 @@ fn install_without_config_fails_with_guidance_and_registers_nothing() -> Result<
         "serve",
         "service",
         "install",
-        "--user",
         "--config",
         config.to_str().unwrap(),
     ])?;
@@ -164,7 +163,6 @@ fn denied_registration_fails_with_guidance_and_keeps_scope() -> Result<()> {
         "serve",
         "service",
         "install",
-        "--user",
         "--config",
         config.to_str().unwrap(),
     ]);
@@ -175,8 +173,12 @@ fn denied_registration_fails_with_guidance_and_keeps_scope() -> Result<()> {
     assert_eq!(out.status.code(), Some(3), "stderr: {err}");
     assert!(err.contains("permission"), "no permission guidance: {err}");
     assert!(
-        err.contains("--system") && err.contains("not"),
-        "guidance must say scope is not changed automatically: {err}"
+        err.contains("not") && err.contains("sudo"),
+        "guidance must say the tier is not changed automatically: {err}"
+    );
+    assert!(
+        !err.contains("--system") && !err.contains("--user"),
+        "no scope flag exists any more: {err}"
     );
     assert!(fx.registrations().is_empty(), "{:?}", fx.registrations());
     Ok(())
@@ -219,9 +221,7 @@ impl Registered<'_> {
 
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
-        let _ = self
-            .cmd(&["serve", "service", "uninstall", "--user"])
-            .output();
+        let _ = self.cmd(&["serve", "service", "uninstall"]).output();
     }
 }
 
@@ -281,7 +281,6 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
         "serve",
         "service",
         "install",
-        "--user",
         "--config",
         config.to_str().unwrap(),
     ])?;
@@ -302,34 +301,34 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
     })?;
     let first_id = node_id_of(&status_file).unwrap();
 
-    let status = ok(&["serve", "service", "status", "--user"])?;
+    let status = ok(&["serve", "service", "status"])?;
     assert!(
         status.to_lowercase().contains("running") || status.contains("state = running"),
         "{status}"
     );
 
     // stop: the process exits and the owned status file is cleaned up.
-    ok(&["serve", "service", "stop", "--user"])?;
+    ok(&["serve", "service", "stop"])?;
     wait_for("stopped service to remove its status file", || {
         !status_file.exists()
     })?;
     // `status` of a stopped unit still exits 0 (systemctl's non-zero is informative).
-    ok(&["serve", "service", "status", "--user"])?;
+    ok(&["serve", "service", "status"])?;
 
     // start again and restart: identity is the configured one throughout.
-    ok(&["serve", "service", "start", "--user"])?;
+    ok(&["serve", "service", "start"])?;
     wait_for("restarted status file", || {
         node_id_of(&status_file).is_some()
     })?;
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
-    ok(&["serve", "service", "restart", "--user"])?;
+    ok(&["serve", "service", "restart"])?;
     wait_for("status after restart", || {
         node_id_of(&status_file).is_some()
     })?;
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
 
     // uninstall removes the registration and the process.
-    ok(&["serve", "service", "uninstall", "--user"])?;
+    ok(&["serve", "service", "uninstall"])?;
     assert!(!svc.registration().exists());
     wait_for("uninstalled service to stop", || !status_file.exists())?;
     Ok(())

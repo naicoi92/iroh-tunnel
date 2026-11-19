@@ -1094,3 +1094,85 @@ fn check_under_held_lock_does_not_wait_or_write() {
     assert_eq!(output.status.code(), Some(0), "{}", err(&output));
     assert_eq!(std::fs::read(&cfg).unwrap(), before);
 }
+
+// --- Elevated writes, read-only targets, unparseable files ------------------
+
+#[test]
+fn elevated_keygen_writes_system_config() {
+    let world = World::new();
+    let system_root = world.file("system root");
+    std::fs::create_dir(&system_root).unwrap();
+    // A restrictive umask must not narrow the system config directory.
+    let base = world.command(&[]);
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "umask 077; exec \"$0\" \"$@\"", BIN])
+        .args(["serve", "config", "keygen"])
+        .env_clear()
+        .envs(base.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("IROH_TUNNEL_TEST_TIER", "system")
+        .env("IROH_TUNNEL_TEST_CONFIG_DIR", &system_root)
+        .stdin(Stdio::null());
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", err(&output));
+
+    let dir = system_root.join("iroh-tunnel");
+    let config = dir.join("serve.toml");
+    assert_eq!(mode(&dir), 0o755, "config directory");
+    assert_eq!(mode(&config), 0o600, "config file");
+    assert!(!secret_key_of(&config).is_empty());
+    if is_root() {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&dir).unwrap().uid(), 0);
+        assert_eq!(std::fs::metadata(&config).unwrap().uid(), 0);
+    }
+    // Nothing is written in the invoking user's home.
+    assert_eq!(std::fs::read_dir(world.home()).unwrap().count(), 0);
+}
+
+#[test]
+fn read_only_config_mutation_is_refused_unchanged() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    write_valid(&cfg);
+    std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let before = std::fs::read(&cfg).unwrap();
+    let mutations: [&[&str]; 3] = [
+        &[
+            "serve",
+            "config",
+            "set",
+            "-c",
+            p(&cfg),
+            "-n",
+            "api",
+            "-t",
+            "8081",
+        ],
+        &["serve", "config", "rm", "-c", p(&cfg), "-n", "web"],
+        &["serve", "config", "keygen", "-c", p(&cfg), "--yes"],
+    ];
+    for args in mutations {
+        let output = world.run(args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            err(&output).contains("read-only"),
+            "{args:?}: {}",
+            err(&output)
+        );
+        assert_eq!(std::fs::read(&cfg).unwrap(), before, "{args:?}");
+        assert_eq!(mode(&cfg), 0o444, "{args:?}");
+    }
+}
+
+#[test]
+fn config_list_unparseable_exits_2() {
+    let world = World::new();
+    let cfg = world.file("serve.toml");
+    std::fs::write(&cfg, "not = [valid").unwrap();
+    let output = world.run(&["serve", "config", "list", "-c", p(&cfg)]);
+    assert_eq!(output.status.code(), Some(2), "{}", err(&output));
+    assert_eq!(out(&output), "");
+    assert!(err(&output).contains(p(&cfg)), "{}", err(&output));
+}

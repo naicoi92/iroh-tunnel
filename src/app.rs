@@ -237,10 +237,12 @@ async fn run(cli: Cli, binary: Binary, ctx: RunContext, ready: ReadyHook) -> any
         }
         Role::Serve { quick, cmd: None } => {
             let cfg = config_ops::quick_serve_config(&quick_serve_request(quick)?)?;
+            crate::render::print_other_tier_notice(StatusRole::Serve);
             runtime::run_quick_serve(cfg, ctx, crate::render::print_ready(), stop_signal()?).await
         }
         Role::Access { quick, cmd: None } => {
             let cfg = config_ops::quick_access_config(&quick_access_request(quick)?)?;
+            crate::render::print_other_tier_notice(StatusRole::Access);
             runtime::run_quick_access(cfg, ctx, crate::render::print_ready(), stop_signal()?).await
         }
     }
@@ -372,6 +374,7 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
             // Existence only: the config is read once, by `load_config`,
             // which under a system service reads it through the trust check.
             config_ops::require_present(status_role, &path)?;
+            crate::render::print_other_tier_notice(status_role);
             // The typed role tag exhaustively selects the run handler —
             // the compiler enforces both arms, no string fallthrough.
             crate::test_fault::bound_run(runtime::run_foreground(
@@ -390,11 +393,12 @@ async fn dispatch_role_cmd<S: ServiceArgs + Send + 'static>(
                 .await
                 .context("config command task failed")?
         }
-        RoleCmd::Status { json } => {
-            tokio::task::spawn_blocking(move || status_cmd::run(status_role, json))
-                .await
-                .context("status command task failed")?
-        }
+        RoleCmd::Status { json } => tokio::task::spawn_blocking(move || {
+            crate::render::print_other_tier_notice(status_role);
+            status_cmd::run(status_role, json)
+        })
+        .await
+        .context("status command task failed")?,
         RoleCmd::Update(args) => match binary.is_standalone() {
             true => {
                 let exe = format!("iroh-tunnel-{}", status_role.name());

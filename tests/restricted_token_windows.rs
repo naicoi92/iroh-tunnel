@@ -58,7 +58,6 @@ fn restricted_child_is_not_elevated_per_product() {
         "serve",
         "service",
         "install",
-        "--system",
         "--config",
         config.to_str().unwrap(),
     ]))
