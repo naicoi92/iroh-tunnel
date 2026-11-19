@@ -54,12 +54,12 @@ Blocked by: 4
 
 Files: `src/cli.rs`, `src/cli_args.rs`, `src/cli_service.rs`, `src/app.rs`, `src/render.rs`, `src/status_cmd.rs`, `src/config_cmd.rs`, `crates/host/src/config/store.rs` (system config dir creation), `crates/host/src/service/mod.rs` (Windows config-dir SDDL), `crates/host/src/update/replace.rs`, `tests/cli_golden.rs`, `tests/cli_usage.rs`, `tests/role_binaries.rs`, `tests/config_lifecycle.rs`, `tests/update_zip_windows.rs` (guidance assertions moved here from 6.2), `tests/service_user*.rs` and `tests/service_system*.rs` (flag removal and guidance assertions moved here from 6.x).
 
-- [ ] 5.1 Remove `ScopeArgs`/`--user`/`--system`; short-option test asserts no `system`/`user`.
-- [ ] 5.2 Remove scope, username and retarget prompts; service dispatch builds `Environment { elevated: is_elevated() }`.
-- [ ] 5.3 Print the other-tier notice before bind/manager calls for `run` (configured and quick), `status`, and render `ServiceNote::OtherTierRunning` for service verbs.
-- [ ] 5.4 Rewrite guidance (`render.rs`, `update/replace.rs`) without scope flags; Windows update guidance names both elevated `service stop` commands.
-- [ ] 5.5 Elevated config writes create `/etc/iroh-tunnel` (macOS config dir) 0755 root, Windows `config` dir with the admin-only SDDL.
-- [ ] 5.6 Golden/usage tests updated, scope flags dropped from every test invocation, guidance assertions updated; `cargo test --workspace --all-features` green.
+- [x] 5.1 Remove `ScopeArgs`/`--user`/`--system`; short-option test asserts no `system`/`user`.
+- [x] 5.2 Remove scope, username and retarget prompts; service dispatch builds `Environment { elevated: is_elevated() }`.
+- [x] 5.3 Print the other-tier notice before bind/manager calls for `run` (configured and quick), `status`, and render `ServiceNote::OtherTierRunning` for service verbs.
+- [x] 5.4 Rewrite guidance (`render.rs`, `update/replace.rs`) without scope flags; Windows update guidance names both elevated `service stop` commands.
+- [x] 5.5 Elevated config writes create `/etc/iroh-tunnel` (macOS config dir) 0755 root, Windows `config` dir with the admin-only SDDL.
+- [x] 5.6 Golden/usage tests updated, scope flags dropped from every test invocation, guidance assertions updated; `cargo test --workspace --all-features` green.
 
 ## 6. End-to-end suites, docs and changelog
 
