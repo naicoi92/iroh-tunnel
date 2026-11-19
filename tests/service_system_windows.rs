@@ -7,9 +7,12 @@
 //!
 //! ## Fixture root
 //!
-//! Config and state live under `%LOCALAPPDATA%` (the user's own profile
-//! volume), not `TEMP`: the product's trust check walks from the volume root,
-//! and the runner's TEMP is on `D:\`, which NETWORK SERVICE owns.
+//! A system install trusts only admin-owned files, so each test keeps its
+//! config and state in `%ProgramData%\iroh-tunnel-e2e-<pid>-<test> data`,
+//! created by this elevated process with a protected DACL (SYSTEM and
+//! Administrators only), the shape of the real `%ProgramData%\iroh-tunnel\config`.
+//! Scratch files a non-elevated child must reach (user-tier configs and
+//! state) live under `%LOCALAPPDATA%`.
 //!
 //! ## PATH
 //!
@@ -19,7 +22,7 @@
 //!
 //! ## Binary trust (R1)
 //!
-//! `service install --system` refuses a binary in a user-writable directory,
+//! An elevated `service install` refuses a binary in a user-writable directory,
 //! and `CARGO_BIN_EXE_iroh-tunnel` lives in the user-owned `target\`. Each test
 //! therefore copies the (self-contained) executable into a fresh
 //! `%ProgramFiles%\iroh-tunnel-e2e-<pid>-<test>` created by the elevated test
@@ -143,7 +146,9 @@ struct Fixture {
     standalone: bool,
     role: &'static str,
     machine: PathBuf,
-    /// Removes `exe_dir` and `machine` after the service is gone; declared
+    /// Admin-only directory holding the config and state of the service.
+    data: PathBuf,
+    /// Removes `exe_dir`, `machine` and `data` after the service is gone; declared
     /// last so it drops after `root`.
     _dirs: DirGuard,
 }
@@ -196,12 +201,22 @@ impl Fixture {
         let tag = format!("{}-{test}", std::process::id());
         let exe_dir =
             env_dir("ProgramFiles", r"C:\Program Files").join(format!("iroh-tunnel-e2e-{tag}"));
-        let machine =
-            env_dir("ProgramData", r"C:\ProgramData").join(format!("iroh-tunnel-e2e-{tag}"));
+        let program_data = env_dir("ProgramData", r"C:\ProgramData");
+        let machine = program_data.join(format!("iroh-tunnel-e2e-{tag}"));
+        let data = program_data.join(format!("iroh-tunnel-e2e-{tag} data"));
         // Created by this elevated process, so they inherit the parents' ACL.
         let mut dirs = DirGuard::default();
         dirs.create(&exe_dir)?;
         dirs.create(&machine)?;
+        dirs.create(&data)?;
+        // The system tier keeps secrets: SYSTEM and Administrators only.
+        icacls(&[
+            data.to_str().unwrap(),
+            "/inheritance:r",
+            "/grant:r",
+            ADMIN_ONLY[0],
+            ADMIN_ONLY[1],
+        ])?;
         let exe = exe_dir.join("iroh-tunnel.exe");
         std::fs::copy(BIN, &exe)?;
         let fx = Self {
@@ -213,6 +228,7 @@ impl Fixture {
             standalone: false,
             role: "serve",
             machine,
+            data,
             _dirs: dirs,
         };
         std::fs::create_dir_all(fx.state())?;
@@ -229,13 +245,13 @@ impl Fixture {
     }
 
     fn config(&self) -> PathBuf {
-        self.base()
+        self.data
             .join("cfg dir")
             .join(format!("{}.toml", self.role))
     }
 
     fn state(&self) -> PathBuf {
-        self.base().join("state")
+        self.data.join("state")
     }
 
     fn status_file(&self) -> PathBuf {
@@ -260,6 +276,26 @@ impl Fixture {
             ),
         )?;
         Ok(key.public().to_string())
+    }
+
+    /// Write a user-tier serve config (own key) under `%LOCALAPPDATA%`, where
+    /// a non-elevated child can read it; returns its path and node id.
+    fn write_user_config(&self, relay: &str) -> Result<(String, String)> {
+        let key = iroh::SecretKey::generate();
+        let path = self.base().join("user cfg").join("serve.toml");
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(
+            &path,
+            format!(
+                "[node]\nsecret_key = {:?}\nrelay_urls = [{relay:?}]\n\n\
+                 [[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
+                iroh_tunnel_host::config::encode_secret_key(&key)
+            ),
+        )?;
+        Ok((
+            path.to_string_lossy().into_owned(),
+            key.public().to_string(),
+        ))
     }
 
     /// Deterministic `PATH`: the protected copy first, then system directories.
@@ -522,8 +558,8 @@ async fn system_service_lifecycle() -> Result<()> {
         fx.exe.display()
     );
 
-    // The definition: automatic start, LocalSystem, own process, pin record
-    // and trusted SID.
+    // The definition: automatic start, LocalSystem, own process, the SCM
+    // marker and no pin of a user's identity.
     let name = fx.name();
     assert_eq!(
         svc::reg_dword(&name, "Start")?,
@@ -533,16 +569,14 @@ async fn system_service_lifecycle() -> Result<()> {
     assert_eq!(svc::reg_string(&name, "ObjectName")?, "LocalSystem");
     let kind = svc::reg_dword(&name, "Type")?;
     assert_eq!(kind & 0x10, 0x10, "Type {kind:#x} lacks WIN32_OWN_PROCESS");
-    let sid = svc::runner_sid()?;
     let description = svc::reg_string(&name, "Description")?;
+    assert!(!description.contains("iroh-tunnel-pin"), "{description}");
+    let env = svc::service_env(&name)?;
+    assert!(env.contains(&"IROH_TUNNEL_SCM=1".to_owned()), "{env:?}");
     assert!(
-        description.contains("iroh-tunnel-pin") && description.contains(&format!("sid={sid}")),
-        "pin record: {description}"
-    );
-    assert!(
-        svc::service_env(&name)?.contains(&format!("IROH_TUNNEL_TRUSTED_SID={sid}")),
-        "environment: {:?}",
-        svc::service_env(&name)?
+        !env.iter()
+            .any(|e| e.starts_with("IROH_TUNNEL_TRUSTED_SID=")),
+        "{env:?}"
     );
 
     // stop: the process ends and the status file is removed (the drain).
@@ -580,7 +614,7 @@ async fn reinstall_replaces_the_definition() -> Result<()> {
     fx.install_ok(&[])?;
     let old_pid = wait_for_node(&fx, &node_id)?;
 
-    // A second config of the same owner, same identity.
+    // A second config in the same admin-only directory, same identity.
     let second = fx.config().with_file_name("serve2.toml");
     std::fs::copy(fx.config(), &second)?;
     let out = fx.install_config(&second)?;
@@ -605,13 +639,6 @@ async fn reinstall_replaces_the_definition() -> Result<()> {
         second.display()
     );
     assert!(!image.contains("serve.toml"), "old config in {image}");
-    let description = svc::reg_string(&name, "Description")?;
-    let wanted = second.to_string_lossy().replace('\\', "/").to_lowercase();
-    assert_eq!(
-        svc::pin_config(&description).as_deref(),
-        Some(wanted.as_str()),
-        "pin record: {description}"
-    );
     Ok(())
 }
 
@@ -729,23 +756,138 @@ async fn stop_pending_reported_while_draining() -> Result<()> {
     Ok(())
 }
 
+/// From an elevated terminal, `service stop` targets the Windows Service and
+/// leaves the same role's user task alone.
 #[tokio::test]
-async fn elevated_without_flag_targets_system() -> Result<()> {
+async fn elevated_stop_targets_scm_service() -> Result<()> {
     if !enabled() {
         return Ok(());
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("noflag")?;
+    let fx = Fixture::new("elevatedstop")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
+    let (user_config, _) = fx.write_user_config(relay.as_ref())?;
+    let _task = TaskGuard(&fx);
 
     fx.install_ok(&[])?;
-    assert!(fx.service_exists(), "the service must exist");
-    assert!(!fx.task_exists(), "no scheduled task may exist");
     let pid = wait_for_node(&fx, &node_id)?;
+    let out = run_user(
+        &fx,
+        &["serve", "service", "install", "--config", &user_config],
+    )?;
+    ensure!(
+        out.status.success(),
+        "user install: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(fx.task_exists(), "the user task must exist");
 
     fx.service_ok("stop", &[])?;
-    wait_for("the process to exit", || !pid_alive(pid))?;
+    wait_for("the service process to exit", || !pid_alive(pid))?;
     assert!(fx.service_ok("status", &[])?.contains("not running"));
+    assert!(
+        fx.task_exists(),
+        "an elevated stop must not touch the user task"
+    );
+    Ok(())
+}
+
+/// An elevated install without `--config` registers only a Windows Service
+/// (no scheduled task) running `%ProgramData%\iroh-tunnel\config\serve.toml`,
+/// which an elevated `config keygen` created admin-only.
+#[tokio::test]
+async fn elevated_install_uses_programdata_config() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let system = env_dir("ProgramData", r"C:\ProgramData").join("iroh-tunnel");
+    let (config_dir, state_dir) = (system.join("config"), system.join("state"));
+    if config_dir.exists() || state_dir.exists() {
+        eprintln!("skipped: {} already holds a system tier", system.display());
+        return Ok(());
+    }
+    // Remove what this test creates: the whole machine directory when it did
+    // not exist before, else only its `config` and `state`.
+    let _cleanup = if system.exists() {
+        vec![
+            CreatedDir(config_dir.clone()),
+            CreatedDir(state_dir.clone()),
+        ]
+    } else {
+        // The shape a release build creates: SYSTEM and Administrators full,
+        // Users read (the test build keeps its locks in the fixture).
+        std::fs::create_dir(&system)?;
+        let guard = vec![CreatedDir(system.clone())];
+        icacls(&[
+            system.to_str().unwrap(),
+            "/inheritance:r",
+            "/grant:r",
+            ADMIN_ONLY[0],
+            ADMIN_ONLY[1],
+            "*S-1-5-32-545:(OI)(CI)RX",
+        ])?;
+        guard
+    };
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("programdata")?;
+    let config = config_dir.join("serve.toml");
+    let system_tier = |args: &[&str]| -> Result<Output> {
+        let mut command = fx.command(args);
+        command
+            .env_remove("IROH_TUNNEL_STATE_DIR")
+            .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
+            .env_remove("IROH_TUNNEL_TEST_TIER");
+        Ok(command.output()?)
+    };
+    let relay_url: &str = relay.as_ref();
+    for args in [
+        &["serve", "config", "keygen"][..],
+        &["serve", "config", "node", "--relay-url", relay_url],
+        &[
+            "serve", "config", "set", "-n", "echo", "-p", "tcp", "-t", "9",
+        ],
+    ] {
+        let out = system_tier(args)?;
+        ensure!(out.status.success(), "{args:?}: {}", stderr(&out));
+    }
+    assert!(config.exists(), "keygen must write {}", config.display());
+
+    // The secret is hidden from a non-elevated user.
+    let read = common::restricted::run_non_elevated(
+        Command::new("cmd").args(["/c", "type"]).arg(&config),
+    )?;
+    assert!(!read.status.success(), "a non-elevated user read the key");
+    assert!(read.stdout.is_empty(), "no secret bytes may leak");
+
+    let out = system_tier(&["serve", "service", "install"])?;
+    ensure!(
+        out.status.success(),
+        "install: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(fx.service_exists(), "the Windows Service must exist");
+    assert!(!fx.task_exists(), "no scheduled task may be created");
+    let name = fx.name();
+    let image = fx.image_path()?.to_lowercase();
+    assert!(
+        image.ends_with(&format!(
+            "serve run --config \"{}\"",
+            config.display().to_string().to_lowercase()
+        )),
+        "{image}"
+    );
+    assert_eq!(
+        svc::reg_dword(&name, "Start")?,
+        2,
+        "Start must be AUTO_START"
+    );
+    assert_eq!(svc::reg_string(&name, "ObjectName")?, "LocalSystem");
+    let status = state_dir.join("serve-status.json");
+    wait_for("the service to report status", || {
+        status_json(&status).is_some()
+    })?;
     Ok(())
 }
 
@@ -865,6 +1007,11 @@ async fn rollback_when_start_fails() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Trust refusals (Task 13, commit C)
 // ---------------------------------------------------------------------------
+
+/// SYSTEM and Administrators with full control, inherited, as `icacls` takes it.
+const ADMIN_ONLY: [&str; 2] = ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"];
+/// Users (`S-1-5-32-545`) with inherited read, as `icacls` takes it.
+const USERS_READ: &str = "*S-1-5-32-545:(OI)(CI)R";
 
 /// Everyone (`S-1-1-0`) with modify rights, as `icacls` takes it.
 const EVERYONE_MODIFY: &str = "*S-1-1-0:M";
@@ -1104,10 +1251,10 @@ async fn junction_in_config_path_refused() -> Result<()> {
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("junction")?;
     fx.write_config(relay.as_ref(), 9)?;
-    let real = fx.base().join("real");
+    let real = fx.data.join("real");
     std::fs::create_dir(&real)?;
     std::fs::copy(fx.config(), real.join("serve.toml"))?;
-    let link = fx.base().join("link");
+    let link = fx.data.join("link");
     let _guard = JunctionGuard(link.clone());
     let made = Command::new("cmd")
         .args(["/c", "mklink", "/J"])
@@ -1146,19 +1293,77 @@ async fn invalid_config_never_runs() -> Result<()> {
     Ok(())
 }
 
+/// An Administrators-owned config directory that lets Users read is
+/// refused before anything is registered, and its DACL is left alone.
 #[tokio::test]
-async fn empty_key_never_written() -> Result<()> {
+async fn readable_config_dir_refused() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("readabledir")?;
+    fx.write_config(relay.as_ref(), 9)?;
+    let dir = fx.config().parent().unwrap().to_path_buf();
+    icacls(&[dir.to_str().unwrap(), "/grant", USERS_READ])?;
+    let rules = acl_state(&dir)?;
+
+    let out = fx.install(&[])?;
+    assert_exit(&out, 3);
+    let err = stderr(&out);
+    assert!(
+        normalised(&err).contains(&normalised(dir.to_str().unwrap())) && err.contains("Users"),
+        "the refusal must name {} and Users: {err}",
+        dir.display()
+    );
+    assert!(!fx.service_exists(), "no service may be registered");
+    assert_eq!(acl_state(&dir)?, rules, "never repaired");
+    Ok(())
+}
+
+/// A service registered by an earlier version (it pins the installing
+/// user's SID) is refused with a config error naming the system config.
+#[tokio::test]
+async fn legacy_sid_service_refused() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let fx = Fixture::new("legacysid")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    fx.install_ok(&[])?;
+    wait_for_node(&fx, &node_id)?;
+    stop_cleanly(&fx)?;
+    let bytes = std::fs::read(fx.config())?;
+
+    fx.set_service_env(&[("IROH_TUNNEL_TRUSTED_SID", &svc::runner_sid()?)])?;
+    assert_eq!(refused_start(&fx)?, 2, "a config error");
+    let system_config =
+        env_dir("ProgramData", r"C:\ProgramData").join(r"iroh-tunnel\config\serve.toml");
+    wait_for_log(&fx, system_config.to_str().unwrap())?;
+    wait_for_log(&fx, "iroh-tunnel serve service install")?;
+    wait_for_log(&fx, "Run as administrator")?;
+    assert_eq!(
+        std::fs::read(fx.config())?,
+        bytes,
+        "the config is untouched"
+    );
+    Ok(())
+}
+
+/// A system config with an empty key: the service generates one, persists it
+/// and the file stays readable by admins only.
+#[tokio::test]
+async fn empty_key_persisted_admin_only() -> Result<()> {
     if !enabled() {
         return Ok(());
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new("emptykey")?;
     let node_id = fx.write_config(relay.as_ref(), 9)?;
-    // Install is allowed to refuse an empty key, so empty it afterwards.
     fx.install_ok(&[])?;
     wait_for_node(&fx, &node_id)?;
-    let text = std::fs::read_to_string(fx.config())?;
-    let emptied = text
+    stop_cleanly(&fx)?;
+    let emptied = std::fs::read_to_string(fx.config())?
         .lines()
         .map(|l| {
             if l.starts_with("secret_key") {
@@ -1169,36 +1374,27 @@ async fn empty_key_never_written() -> Result<()> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert_ne!(emptied, text, "the key line must have been replaced");
     std::fs::write(fx.config(), &emptied)?;
-    let bytes = std::fs::read(fx.config())?;
 
-    stop_cleanly(&fx)?;
-    assert_eq!(refused_start(&fx)?, 2, "a config error");
-    wait_for_log(&fx, "config keygen")?;
-    assert_eq!(
-        std::fs::read(fx.config())?,
-        bytes,
-        "the service must never write a generated key"
-    );
-    Ok(())
-}
+    let _ = std::fs::remove_file(fx.status_file());
+    start_until_running(&fx)?;
+    wait_for("a status file with a new identity", || {
+        node_id_of(&fx.status_file()).is_some_and(|id| id != node_id)
+    })?;
+    let text = std::fs::read_to_string(fx.config())?;
+    let doc: toml::Value = toml::from_str(&text)?;
+    let key = doc["node"]["secret_key"].as_str().unwrap_or_default();
+    assert!(!key.is_empty(), "the generated key must be persisted");
 
-#[tokio::test]
-async fn pinless_service_refused() -> Result<()> {
-    if !enabled() {
-        return Ok(());
+    let acl = acl_state(&fx.config())?;
+    for outsider in ["S-1-5-32-545|", "S-1-5-11|", "S-1-1-0|"] {
+        assert!(!acl.contains(outsider), "{outsider} may read: {acl}");
     }
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("pinless")?;
-    let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&[])?;
-    wait_for_node(&fx, &node_id)?;
-
-    stop_cleanly(&fx)?;
-    svc::remove_service_env(&fx.name(), "IROH_TUNNEL_TRUSTED_SID")?;
-    assert_eq!(refused_start(&fx)?, 3, "a permission error");
-    wait_for_log(&fx, "service install")?;
+    let read = common::restricted::run_non_elevated(
+        Command::new("cmd").args(["/c", "type"]).arg(fx.config()),
+    )?;
+    assert!(!read.status.success(), "a non-elevated user read the key");
+    assert!(read.stdout.is_empty(), "no secret bytes may leak");
     Ok(())
 }
 
@@ -1335,317 +1531,63 @@ async fn binary_check_at_install_and_start() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Identity, scope and concurrency (Task 13, commit D)
+// Tiers and concurrency
 // ---------------------------------------------------------------------------
-
-/// A throwaway local account, deleted on drop.
-struct LocalUser {
-    name: String,
-    sid: String,
-}
-
-impl LocalUser {
-    /// `itb<pid><tag>` with a generated 14-character password (lower, upper,
-    /// digit, symbol). 14 characters keep `net user` from asking about
-    /// pre-Windows 2000 compatibility.
-    fn create(tag: &str) -> Result<Self> {
-        let name = format!("itb{}{tag}", std::process::id());
-        let key = iroh::SecretKey::generate();
-        let hex: String = key.to_bytes()[..5]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let password = format!("{hex}Aa1!");
-        let out = Command::new("net")
-            .args(["user", &name, &password, "/add"])
-            .stdin(Stdio::null())
-            .output()?;
-        ensure!(
-            out.status.success(),
-            "net user /add: {}{}",
-            stdout(&out),
-            stderr(&out)
-        );
-        let mut user = Self {
-            name,
-            sid: String::new(),
-        };
-        let out = pwsh(&format!(
-            "(New-Object System.Security.Principal.NTAccount('{}')).Translate(\
-             [System.Security.Principal.SecurityIdentifier]).Value",
-            user.name
-        ))?;
-        ensure!(
-            out.status.success(),
-            "SID of {}: {}",
-            user.name,
-            stderr(&out)
-        );
-        user.sid = stdout(&out).trim().to_owned();
-        ensure!(user.sid.starts_with("S-1-5-21-"), "SID {:?}", user.sid);
-        Ok(user)
-    }
-}
-
-impl Drop for LocalUser {
-    fn drop(&mut self) {
-        let _ = Command::new("net")
-            .args(["user", &self.name, "/delete"])
-            .stdin(Stdio::null())
-            .output();
-    }
-}
-
-/// The runner's account name (without the machine part), lowercased.
-fn runner_name() -> String {
-    std::env::var("USERNAME")
-        .expect("USERNAME must be set on Windows")
-        .to_lowercase()
-}
-
-/// Run `command` with `input` on stdin.
-#[cfg(feature = "test-utils")]
-fn run_with_input(mut command: Command, input: &str) -> Result<Output> {
-    use std::io::Write as _;
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input.as_bytes())?;
-    Ok(child.wait_with_output()?)
-}
-
-/// An interactive reinstall of the fixture's config answering `answer`,
-/// through the root `test-utils` seam `IROH_TUNNEL_TEST_INTERACTIVE`.
-#[cfg(feature = "test-utils")]
-fn reinstall_answering(fx: &Fixture, config: &Path, answer: &str) -> Result<Output> {
-    let mut command = fx.command(&fx_install_args(config));
-    command.env("IROH_TUNNEL_TEST_INTERACTIVE", "1");
-    run_with_input(command, answer)
-}
-
-fn fx_install_args(config: &Path) -> Vec<&str> {
-    vec![
-        "serve",
-        "service",
-        "install",
-        "--config",
-        config.to_str().unwrap(),
-    ]
-}
-
-#[tokio::test]
-async fn config_owned_by_other_user() -> Result<()> {
-    if !enabled() {
-        return Ok(());
-    }
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("otheruser")?;
-    fx.write_config(relay.as_ref(), 9)?;
-    let bob = LocalUser::create("o")?;
-    let dir = fx.config().parent().unwrap().to_path_buf();
-    icacls(&[dir.to_str().unwrap(), "/setowner", &bob.name])?;
-
-    let out = fx.install(&[])?;
-    assert_exit(&out, 2);
-    let err = stderr(&out).to_lowercase();
-    assert!(
-        err.contains(&bob.name.to_lowercase()) && err.contains(&runner_name()),
-        "the refusal must name both accounts: {err}"
-    );
-    assert!(!fx.service_exists(), "nothing may be registered");
-    Ok(())
-}
-
-// Needs the root `test-utils` seam `IROH_TUNNEL_TEST_INTERACTIVE`.
-#[cfg(feature = "test-utils")]
-#[tokio::test]
-async fn retarget_declined_and_approved() -> Result<()> {
-    if !enabled() {
-        return Ok(());
-    }
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("retarget")?;
-    let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&[])?;
-    wait_for_node(&fx, &node_id)?;
-    let name = fx.name();
-    let runner = svc::runner_sid()?;
-
-    // The service now looks as if bob had installed it.
-    let bob = LocalUser::create("r")?;
-    let ours = svc::reg_string(&name, "Description")?;
-    ensure!(
-        ours.contains(&format!("sid={runner}")),
-        "pin record: {ours}"
-    );
-    let bobs = ours.replace(&format!("sid={runner}"), &format!("sid={}", bob.sid));
-    svc::set_description(&name, &bobs)?;
-
-    // The runner's own config, at another path: the retarget target.
-    let mine = fx.config().with_file_name("mine.toml");
-    std::fs::copy(fx.config(), &mine)?;
-    let definition = |name: &str| -> Result<(String, String, Vec<String>)> {
-        Ok((
-            svc::image_path(name)?,
-            svc::reg_string(name, "Description")?,
-            svc::service_env(name)?,
-        ))
-    };
-    let files = || -> Result<(Vec<u8>, Vec<u8>)> {
-        Ok((std::fs::read(fx.config())?, std::fs::read(&mine)?))
-    };
-    let (before, bytes) = (definition(&name)?, files()?);
-
-    // Declined: exit 5, the prompt names bob, nothing changes.
-    let out = reinstall_answering(&fx, &mine, "n\n")?;
-    assert_exit(&out, 5);
-    let err = stderr(&out);
-    assert!(err.contains("Retarget"), "{err}");
-    assert!(
-        err.to_lowercase().contains(&bob.name.to_lowercase()),
-        "the prompt must name {}: {err}",
-        bob.name
-    );
-    assert_eq!(definition(&name)?, before, "definition and pin unchanged");
-    assert_eq!(files()?, bytes, "both configs unchanged");
-
-    // Approved: the pin is the runner and the new config; both configs kept.
-    let out = reinstall_answering(&fx, &mine, "y\n")?;
-    ensure!(
-        out.status.success(),
-        "approved retarget: {}{}",
-        stdout(&out),
-        stderr(&out)
-    );
-    let pinned = svc::reg_string(&name, "Description")?;
-    assert!(pinned.contains(&format!("sid={runner}")), "{pinned}");
-    assert!(!pinned.contains(&bob.sid), "{pinned}");
-    let wanted = mine.to_string_lossy().replace('\\', "/").to_lowercase();
-    assert_eq!(
-        svc::pin_config(&pinned).as_deref(),
-        Some(wanted.as_str()),
-        "pin record: {pinned}"
-    );
-    assert!(
-        svc::image_path(&name)?
-            .to_lowercase()
-            .contains(&mine.to_string_lossy().to_lowercase()),
-        "ImagePath must name {}",
-        mine.display()
-    );
-    assert_eq!(files()?, bytes, "both configs kept unchanged");
-
-    // Same user again: no prompt (stdin is not a terminal here).
-    fx.install_ok(&[])?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn config_dir_owned_by_administrators() -> Result<()> {
-    if !enabled() {
-        return Ok(());
-    }
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("admindir")?;
-    let node_id = fx.write_config(relay.as_ref(), 9)?;
-    let dir = fx.config().parent().unwrap().to_path_buf();
-    icacls(&[dir.to_str().unwrap(), "/setowner", "*S-1-5-32-544"])?;
-
-    fx.install_ok(&[])?;
-    wait_for_node(&fx, &node_id)?;
-    let description = svc::reg_string(&fx.name(), "Description")?;
-    assert!(
-        description.contains(&format!("sid={}", svc::runner_sid()?)),
-        "the token user must be pinned: {description}"
-    );
-    Ok(())
-}
 
 /// Removes this fixture's user task on drop.
 struct TaskGuard<'a>(&'a Fixture);
 
 impl Drop for TaskGuard<'_> {
     fn drop(&mut self) {
-        let _ = user_scope(self.0, &["serve", "service", "uninstall"]).output();
+        let _ = run_user(self.0, &["serve", "service", "uninstall"]);
     }
 }
 
-/// A `--user` command: the task cannot carry `IROH_TUNNEL_STATE_DIR`.
-fn user_scope(fx: &Fixture, args: &[&str]) -> Command {
+/// `args` run in the user tier: a non-elevated child (restricted token) of
+/// the elevated runner. The task cannot carry `IROH_TUNNEL_STATE_DIR`.
+fn run_user(fx: &Fixture, args: &[&str]) -> Result<Output> {
     let mut command = fx.command(args);
     command.env_remove("IROH_TUNNEL_STATE_DIR");
-    command
+    common::restricted::run_non_elevated(&mut command)
 }
 
+/// The user tier's notice that the system service runs.
+const SYSTEM_NOTICE: &str = "note: serve is also running as a system service";
+
+/// The logged-in user's task runs next to the Windows Service: the user
+/// install proceeds with the other-tier notice and both keep running.
 #[tokio::test]
-async fn cross_scope_refused_both_ways() -> Result<()> {
+async fn user_task_and_service_coexist() -> Result<()> {
     if !enabled() {
         return Ok(());
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("crossscope")?;
-    fx.write_config(relay.as_ref(), 9)?;
-    let config = fx.config();
-    let config = config.to_str().unwrap();
+    let fx = Fixture::new("coexist")?;
+    let node_id = fx.write_config(relay.as_ref(), 9)?;
+    let (user_config, user_id) = fx.write_user_config(relay.as_ref())?;
     let _task = TaskGuard(&fx);
-
-    // A system service exists: a user install is refused.
     fx.install_ok(&[])?;
-    let out = user_scope(&fx, &["serve", "service", "install", "--config", config]).output()?;
-    assert_exit(&out, 5);
-    assert!(
-        stderr(&out).contains("service uninstall"),
-        "{}",
-        stderr(&out)
-    );
-    assert!(!fx.task_exists(), "no user task may be registered");
+    let pid = wait_for_node(&fx, &node_id)?;
 
-    // A user task exists: a system install is refused.
-    fx.service_ok("uninstall", &[])?;
-    fx.wait_absent()?;
-    let out = user_scope(&fx, &["serve", "service", "install", "--config", config]).output()?;
+    let out = run_user(
+        &fx,
+        &["serve", "service", "install", "--config", &user_config],
+    )?;
     ensure!(
         out.status.success(),
         "user install: {}{}",
         stdout(&out),
         stderr(&out)
     );
+    assert!(stderr(&out).contains(SYSTEM_NOTICE), "{}", stderr(&out));
     assert!(fx.task_exists(), "the user task must exist");
-    let out = fx.install(&[])?;
-    assert_exit(&out, 5);
-    assert!(
-        stderr(&out).contains("service uninstall"),
-        "{}",
-        stderr(&out)
-    );
-    assert!(!fx.service_exists(), "no system service may be registered");
-    Ok(())
-}
-
-#[tokio::test]
-async fn user_task_blocked_while_service_runs() -> Result<()> {
-    if !enabled() {
-        return Ok(());
-    }
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("userblocked")?;
-    let node_id = fx.write_config(relay.as_ref(), 9)?;
-    fx.install_ok(&[])?;
-    wait_for_node(&fx, &node_id)?;
-
-    let config = fx.config();
-    let mut command = fx.command(&["serve", "run", "--config", config.to_str().unwrap()]);
-    command.env("IROH_TUNNEL_STATE_DIR", fx.base().join("user-state"));
-    let out = common::restricted::run_non_elevated(&mut command)?;
-    assert_exit(&out, 6);
-    assert!(stderr(&out).contains("system service"), "{}", stderr(&out));
-    assert!(sc_running(&fx), "the system service keeps running");
+    let user_status = iroh_tunnel_host::paths::default_state_dir_for(iroh_tunnel_host::Tier::User)?
+        .join("serve-status.json");
+    wait_for("the user task to report status", || {
+        node_id_of(&user_status).as_deref() == Some(user_id.as_str())
+    })?;
+    assert!(pid_alive(pid), "the system service must keep running");
+    assert!(sc_running(&fx));
     Ok(())
 }
 
@@ -1680,15 +1622,16 @@ async fn already_running_is_clean_stop() -> Result<()> {
         svc::service_stopped_or_absent(&fx.name())
     })?;
 
-    // A non-elevated foreground run holds the machine lock shared.
-    let user_state = fx.base().join("user-state");
+    // An elevated foreground run is a second system-tier holder of the
+    // role: it claims the same system lock the service needs.
+    let holder_state = fx.data.join("holder-state");
     let config = fx.config();
     let mut command = fx.command(&["serve", "run", "--config", config.to_str().unwrap()]);
     command
-        .env("IROH_TUNNEL_STATE_DIR", &user_state)
+        .env("IROH_TUNNEL_STATE_DIR", &holder_state)
         .env("IROH_TUNNEL_TEST_EXIT_AFTER_MS", "40000");
-    let foreground = std::thread::spawn(move || common::restricted::run_non_elevated(&mut command));
-    let status = user_state.join("serve-status.json");
+    let foreground = std::thread::spawn(move || command.output());
+    let status = holder_state.join("serve-status.json");
     wait_for("the foreground run to be ready", || {
         node_id_of(&status).as_deref() == Some(node_id.as_str())
     })?;
@@ -1730,44 +1673,6 @@ async fn already_running_is_clean_stop() -> Result<()> {
         "the foreground run lost the lock: {}",
         stderr(&foreground)
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn non_elevated_system_operations() -> Result<()> {
-    if !enabled() {
-        return Ok(());
-    }
-    let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
-    let fx = Fixture::new("nonelevated")?;
-    fx.write_config(relay.as_ref(), 9)?;
-    let config = fx.config();
-
-    let out = common::restricted::run_non_elevated(&mut fx.command(&fx_install_args(&config)))?;
-    assert_exit(&out, 3);
-    let err = stderr(&out);
-    assert!(err.contains("Run as administrator"), "{err}");
-    assert!(err.contains("serve service install"), "{err}");
-    assert!(
-        normalised(&err).contains(&normalised(config.to_str().unwrap())),
-        "the guidance must name {}: {err}",
-        config.display()
-    );
-    assert!(!fx.service_exists(), "no service may be registered");
-    assert!(!fx.task_exists(), "no task may be registered");
-
-    for verb in ["uninstall", "start", "stop", "restart"] {
-        let out =
-            common::restricted::run_non_elevated(&mut fx.command(&["serve", "service", verb]))?;
-        assert_exit(&out, 3);
-        let err = stderr(&out);
-        assert!(err.contains("Run as administrator"), "{verb}: {err}");
-        assert!(
-            err.contains(&format!("iroh-tunnel serve service {verb}")),
-            "{verb}: {err}"
-        );
-    }
-    assert!(!fx.service_exists(), "nothing may be registered");
     Ok(())
 }
 

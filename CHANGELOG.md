@@ -9,6 +9,58 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
 
 ## [Unreleased]
 
+### Breaking
+
+- The tier follows privilege: every command (`run`, quick mode, `config`,
+  `status`, `service`) runs in the **system tier** when it is root, under
+  `sudo` or elevated on Windows ("Run as administrator"), and in the **user
+  tier** otherwise. `--user` and `--system` are removed from every `service`
+  verb and now fail as unknown arguments; `service install` no longer asks for
+  a scope, a user name or a retarget confirmation. An administrator who wants
+  the user tier runs the command unelevated.
+- System-tier files moved to machine-wide locations owned by root or
+  administrators: config in `/etc/iroh-tunnel/<role>.toml` (Linux),
+  `/Library/Application Support/iroh-tunnel/config/<role>.toml` (macOS),
+  `%ProgramData%\iroh-tunnel\config\<role>.toml` (Windows, readable by
+  SYSTEM and Administrators only); state in `/run/iroh-tunnel`,
+  `/Library/Application Support/iroh-tunnel/state`,
+  `%ProgramData%\iroh-tunnel\state`. The system tier never reads `HOME`,
+  `SUDO_USER` or a user profile. User-tier locations are unchanged.
+- System services registered by earlier versions (they carry
+  `IROH_TUNNEL_TRUSTED_UID` / `IROH_TUNNEL_TRUSTED_SID`, or run under systemd
+  or launchd without `IROH_TUNNEL_SERVICE=1`) refuse to start with a config
+  error (exit code `2`) naming the new system config path. Nothing is
+  migrated. To move a system service over:
+  1. Upgrade the binary.
+  2. Create the system config with elevation, for example
+     `sudo iroh-tunnel serve config keygen` and
+     `sudo iroh-tunnel serve config set ...`, or copy the old file to
+     `/etc/iroh-tunnel/serve.toml` with owner root and mode `0600`. A copied
+     file keeps its key; do not also run the old user file in the user tier
+     with the same key.
+  3. Re-run `sudo iroh-tunnel <role> service install` (Windows: from an
+     elevated terminal).
+
+  To roll back, reinstall the previous release and re-run its
+  `service install --system`; the old user files are never touched.
+
+### Changed
+
+- The user tier and the system tier of a role run side by side, each with its
+  own key; the machine-wide lock no longer keeps them apart. When the other
+  tier's instance is running, `run`, `status` and `service install|start|
+  restart|status` print a `note:` line on stderr. One process per role per
+  tier still holds.
+- A system service persists a generated key into its config (owner root,
+  `0600`), as the user tier does; the config and state directory must be
+  owned by root or administrators and are checked at install and at every
+  service start.
+- BusyBox/SysV init: `install`, `uninstall`, `start`, `stop` and `restart`
+  need root; a non-root call fails with a permission error and changes
+  nothing.
+- Registrations carry `IROH_TUNNEL_SERVICE=1` (Windows: `IROH_TUNNEL_SCM=1`)
+  and no longer pin a user's identity.
+
 ### Fixed
 
 - Role ownership fails closed (#221): a start is refused (exit code 6) when

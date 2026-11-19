@@ -184,6 +184,60 @@ fn denied_registration_fails_with_guidance_and_keeps_scope() -> Result<()> {
     Ok(())
 }
 
+/// No linger: a user install never runs `loginctl`. Every manager tool is a
+/// PATH shim that records its arguments and succeeds, so no real service
+/// manager is touched.
+#[test]
+fn user_install_runs_no_loginctl() -> Result<()> {
+    if is_root() {
+        return Ok(());
+    }
+    let fx = Fixture::new()?;
+    fx.write_config("https://relay.invalid")?;
+    let shims = fx.base().join("shims");
+    let calls = fx.base().join("calls.log");
+    std::fs::create_dir_all(&shims)?;
+    for tool in ["loginctl", "systemctl", "launchctl"] {
+        let shim = shims.join(tool);
+        std::fs::write(
+            &shim,
+            format!("#!/bin/sh\necho \"{tool} $*\" >> \"$IROH_TUNNEL_TEST_CALLS\"\nexit 0\n"),
+        )?;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let config = fx.config();
+    let out = fx
+        .command(&[
+            "serve",
+            "service",
+            "install",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", shims.display()),
+        )
+        .env("IROH_TUNNEL_TEST_CALLS", &calls)
+        .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", "-nolinger")
+        .stdin(Stdio::null())
+        .output()?;
+    let log = std::fs::read_to_string(&calls).unwrap_or_default();
+    assert!(!log.contains("loginctl"), "loginctl was run: {log}");
+    // Where a user manager exists, the install went through the shims.
+    let systemd = Path::new("/run/systemd/system").exists();
+    if cfg!(target_os = "macos") || systemd {
+        assert!(out.status.success(), "install: {}", stderr(&out));
+        let manager = if cfg!(target_os = "macos") {
+            "launchctl"
+        } else {
+            "systemctl --user"
+        };
+        assert!(log.contains(manager), "{log}");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Real lifecycle through the host's user-service manager.
 // ---------------------------------------------------------------------------

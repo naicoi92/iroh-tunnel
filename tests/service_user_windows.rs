@@ -8,6 +8,14 @@
 //!   uses a unique task-name suffix (the `test-utils` seam) and removes its
 //!   task on exit.
 //!
+//! - `non_elevated_targets_user_task`: an administrator's non-elevated
+//!   terminal is the user tier: install registers the logon task only, never
+//!   a Windows Service.
+//!
+//! The CI runner is elevated, and an elevated process is the system tier, so
+//! every user-tier command here runs under a restricted, non-elevated token
+//! (`common::restricted`) when the test process is elevated.
+//!
 //! The `/End` outcome (graceful drain or hard termination) is reported by the
 //! test, not asserted: SM-04 records terminate-without-drain as a known
 //! limitation, so the measurement is evidence rather than a gate.
@@ -94,7 +102,8 @@ impl Fixture {
     /// The task cannot carry `IROH_TUNNEL_STATE_DIR`, so the real per-user
     /// default is used (the test is opt-in and removes its task on exit).
     fn state(&self) -> PathBuf {
-        iroh_tunnel_host::paths::default_state_dir().expect("default state dir")
+        iroh_tunnel_host::paths::default_state_dir_for(iroh_tunnel_host::Tier::User)
+            .expect("default state dir")
     }
     /// Write a config with a fresh key; returns the node id it runs as.
     fn write_config(&self, relay: &str) -> Result<String> {
@@ -133,8 +142,12 @@ impl Fixture {
             .current_dir(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\".into()));
         command
     }
+    /// Run `args` in the user tier (see [`user_output`]).
+    fn run(&self, args: &[&str]) -> Result<Output> {
+        user_output(&mut self.command(args))
+    }
     fn ok(&self, args: &[&str]) -> Result<String> {
-        let out = self.command(args).output()?;
+        let out = self.run(args)?;
         anyhow::ensure!(
             out.status.success(),
             "{args:?} failed: {}{}",
@@ -167,7 +180,7 @@ impl Drop for Fixture {
             .as_deref()
             .filter(|id| node_id_of(&status_file).as_deref() == Some(id))
             .and_then(|_| pid_of(&status_file));
-        let _ = self.command(&["serve", "service", "uninstall"]).output();
+        let _ = self.run(&["serve", "service", "uninstall"]);
         if let Some(pid) = own_pid {
             let _ = wait_for("this test's task process to exit", || !pid_alive(pid));
         }
@@ -180,16 +193,16 @@ fn install_refuses_a_state_directory_the_task_cannot_carry() -> Result<()> {
     fx.write_config("https://relay.invalid")?;
     let config = fx.config();
     let other = fx.base().join("elsewhere");
-    let out = fx
-        .command(&[
+    let out = user_output(
+        fx.command(&[
             "serve",
             "service",
             "install",
             "--config",
             config.to_str().unwrap(),
         ])
-        .env("IROH_TUNNEL_STATE_DIR", &other)
-        .output()?;
+        .env("IROH_TUNNEL_STATE_DIR", &other),
+    )?;
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("IROH_TUNNEL_STATE_DIR"), "{err}");
@@ -206,7 +219,7 @@ fn start_without_an_installed_task_names_the_install_command() -> Result<()> {
     }
     let fx = Fixture::new()?;
     for verb in ["start", "stop", "status"] {
-        let out = fx.command(&["serve", "service", verb]).output()?;
+        let out = fx.run(&["serve", "service", verb])?;
         let err = stderr(&out);
         assert_eq!(out.status.code(), Some(5), "{verb}: {err}");
         assert!(err.contains("service install"), "{verb}: {err}");
@@ -238,7 +251,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
     assert!(status.contains("iroh-tunnel-serve"), "{status}");
 
     // starting a running role is refused by role ownership, not duplicated.
-    let again = fx.command(&["serve", "service", "start"]).output()?;
+    let again = fx.run(&["serve", "service", "start"])?;
     assert_eq!(again.status.code(), Some(6), "{}", stderr(&again));
 
     // stop: the process ends. Whether it drained is reported, not gated.
@@ -283,6 +296,61 @@ async fn user_background_task_lifecycle() -> Result<()> {
     fx.ok(&["serve", "service", "uninstall"])?;
     assert!(!fx.task_exists(), "task still registered");
     wait_for("the uninstalled task's process to exit", || !pid_alive(pid))?;
+    Ok(())
+}
+
+/// Run `command` in the user tier: directly from a non-elevated test, under a
+/// restricted non-elevated token from an elevated one (the CI runner).
+fn user_output(command: &mut Command) -> Result<Output> {
+    if iroh_tunnel_host::service::is_elevated() {
+        common::restricted::run_non_elevated(command)
+    } else {
+        Ok(command.output()?)
+    }
+}
+
+/// From an administrator's non-elevated terminal, install targets the user's
+/// logon task only: no Windows Service is created or changed.
+#[test]
+fn non_elevated_targets_user_task() -> Result<()> {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
+        return Ok(());
+    }
+    let fx = Fixture::new()?;
+    fx.write_config("https://relay.invalid")?;
+    let config = fx.config();
+    let service = format!("iroh-tunnel-serve{}", fx.suffix);
+    let service_exists = || {
+        Command::new("sc.exe")
+            .args(["query", &service])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    assert!(!service_exists(), "precondition: no service {service}");
+
+    // The user-tier config path is the user's own, not ProgramData.
+    let path = fx.ok(&["serve", "config", "path"])?;
+    let program_data = std::env::var("ProgramData")
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        !program_data.is_empty() && !path.to_lowercase().contains(&program_data),
+        "{path}"
+    );
+
+    fx.ok(&[
+        "serve",
+        "service",
+        "install",
+        "--config",
+        config.to_str().unwrap(),
+    ])?;
+    assert!(fx.task_exists(), "the logon task must be registered");
+    assert!(!service_exists(), "no Windows Service may be created");
+    fx.ok(&["serve", "service", "stop"])?;
+    assert!(!service_exists());
     Ok(())
 }
 
@@ -355,14 +423,15 @@ impl Fixture {
     /// The example, run as a caller with no terminal; stdout and stderr are
     /// captured. A successful run must leave stderr empty.
     fn caller(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new(manage_service_binary())
-            .args(["--role", "serve"])
-            .args(args)
-            .env_remove("IROH_TUNNEL_STATE_DIR")
-            .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
-            .stdin(std::process::Stdio::null())
-            .current_dir(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\".into()))
-            .output()?;
+        let out = user_output(
+            Command::new(manage_service_binary())
+                .args(["--role", "serve"])
+                .args(args)
+                .env_remove("IROH_TUNNEL_STATE_DIR")
+                .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
+                .stdin(std::process::Stdio::null())
+                .current_dir(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\".into())),
+        )?;
         anyhow::ensure!(
             out.status.success(),
             "caller {args:?} failed: {}{}",

@@ -10,6 +10,16 @@ The role that makes a service on its host available through a tunnel.
 **Access**:
 The role that provides a local endpoint for clients to reach a service through a tunnel.
 
+## Tiers
+
+**User tier**:
+Where a non-elevated process works: the invoking user's own config, state directory and user service (systemd user unit, LaunchAgent, logon task). Selected by privilege, never by a flag.
+_Avoid_: User scope, user mode
+
+**System tier**:
+Where a root or elevated process works: machine-wide config and state owned by root or administrators, and the system service (systemd system unit, LaunchDaemon, BusyBox init script, Windows Service). It never reads a user's home or profile.
+_Avoid_: System scope, machine tier, root mode
+
 ## UDP forwarding
 
 **Flow**:

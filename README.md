@@ -134,6 +134,41 @@ its service install
 More in [Configuration](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/configuration.md) and
 [Running as a service](https://github.com/naicoi92/iroh-tunnel/blob/main/docs/services.md).
 
+#### User tier and system tier
+
+Every command (`run`, quick mode, `config`, `status`, `service`) works in one
+of two tiers, chosen by privilege alone. There is no flag and no prompt.
+
+| | User tier | System tier |
+|---|---|---|
+| Who | A normal user, or an administrator in a non-elevated terminal | `root`, `sudo`, or "Run as administrator" on Windows |
+| Config (Linux) | `~/.config/iroh-tunnel/<role>.toml` | `/etc/iroh-tunnel/<role>.toml` |
+| Config (macOS) | `~/.config/iroh-tunnel/<role>.toml` | `/Library/Application Support/iroh-tunnel/config/<role>.toml` |
+| Config (Windows) | `%LOCALAPPDATA%\iroh-tunnel\config\<role>.toml` | `%ProgramData%\iroh-tunnel\config\<role>.toml` |
+| State (Linux) | `~/.local/state/iroh-tunnel` | `/run/iroh-tunnel` |
+| State (macOS) | `~/.local/state/iroh-tunnel` | `/Library/Application Support/iroh-tunnel/state` |
+| State (Windows) | `%LOCALAPPDATA%\iroh-tunnel\state` | `%ProgramData%\iroh-tunnel\state` |
+| `service` registers | systemd user unit, LaunchAgent or logon task | systemd system unit, LaunchDaemon, BusyBox init script or Windows Service |
+
+- The system tier never reads `HOME`, `SUDO_USER` or a user profile, so
+  `sudo iroh-tunnel serve config keygen` writes `/etc/iroh-tunnel/serve.toml`
+  (root, `0600`), not your own file. Only root and administrators can read it.
+- An administrator who wants a personal (user-tier) instance runs the command
+  from a normal, non-elevated terminal; on Unix, `sudo -u <user>` works too.
+- BusyBox/SysV hosts have no user services: `service` verbs other than
+  `status` need `sudo`.
+- The two tiers of a role run side by side, each with its own key. When the
+  other tier's instance of the role is running, `run`, `status` and `service`
+  print a note on stderr, for example `note: serve is also running as a system
+  service; manage it with sudo or from an elevated terminal`.
+- Running both tiers of Access with the same listen address (or both of Serve
+  behind the same local port) fails at bind time with an error naming the
+  address; give each tier its own.
+- System services registered by versions before this change point at a user's
+  files and refuse to start. Create the system config and re-run
+  `sudo iroh-tunnel <role> service install`; see the
+  [changelog](https://github.com/naicoi92/iroh-tunnel/blob/main/CHANGELOG.md).
+
 ### 3. Check the connection
 
 ```console

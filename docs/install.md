@@ -239,17 +239,17 @@ matching command from an elevated PowerShell ("Run as administrator"):
 
 ```powershell
 # Standalone Serve or Access, respectively:
-iroh-tunnel-serve.exe service stop --system
-iroh-tunnel-access.exe service stop --system
+iroh-tunnel-serve.exe service stop
+iroh-tunnel-access.exe service stop
 
 # Combined executable, for the role or roles using it:
-iroh-tunnel.exe serve service stop --system
-iroh-tunnel.exe access service stop --system
+iroh-tunnel.exe serve service stop
+iroh-tunnel.exe access service stop
 ```
 
 Stop any other process holding the executable too. If the updater itself keeps
-the file locked, retry from another copy. See [Windows system services](services.md#system-scope)
-for service scope and [System services](services.md#system-services) for
+the file locked, retry from another copy. See [Windows system services](services.md#system-tier)
+for the system tier and [System services](services.md#system-services) for
 refreshing a managed system-service copy after an upgrade.
 
 ## Verifying a release

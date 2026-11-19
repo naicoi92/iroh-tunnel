@@ -84,12 +84,13 @@ EOF and can still send its reply.
 
 ## One process per role
 
-A role (`serve` or `access`) runs as one process per user, whichever
-executable, config file or state directory started it. A second start, or
-`service start` while the role runs, is refused with exit code `6`; nothing is
-stopped for you. On Linux and macOS a machine-level lock also keeps a system
-service and a user process of the same role apart. A Serve and an Access may
-run together, but not with the same NodeId.
+A role (`serve` or `access`) runs as one process per user in the user tier
+and one per machine in the system tier, whichever executable, config file or
+state directory started it. A second start in the same tier, or `service
+start` while the role runs there, is refused with exit code `6`; nothing is
+stopped for you. The two tiers of a role may run side by side with their own
+keys; each prints a note when the other is running. A Serve and an Access of
+one tier may run together, but not with the same NodeId.
 
 Locks are kernel advisory locks, so a crash or `kill -9` never blocks the next
 start. `<role> status` uses these locks, not the recorded pid, to decide

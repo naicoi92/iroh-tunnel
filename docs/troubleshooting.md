@@ -46,12 +46,32 @@ It was installed by Homebrew, a Linux package or a container image. Update it
 through that tool, or pass `--yes` to replace a Homebrew or package file
 anyway. On Windows, stop the running executable first.
 
-**`service install --system` exits with code 3.**
-System services need root; the error prints the `sudo` command to run. On
-Windows, open a terminal with "Run as administrator" and run the printed
-command there.
+**`unexpected argument '--system'` (or `--user`).**
+The scope flags are gone; the tier follows privilege. Run
+`sudo iroh-tunnel <role> service ...` (Windows: from an elevated terminal) for
+the system service, and the same command without `sudo` for your user service.
 
-**`service start --system` or `restart --system` exits with code 3 and names a binary.**
+**A system service exits with `registered by an earlier version`.**
+It was installed before the tier change and points at a user's files. Create
+the system config (for example `sudo iroh-tunnel <role> config keygen`, or copy
+the old file to `/etc/iroh-tunnel/<role>.toml` with owner root and mode
+`0600`), then re-run `sudo iroh-tunnel <role> service install`. See the
+[changelog](../CHANGELOG.md).
+
+**`sudo ... service install` exits with code 2 and names `/etc/iroh-tunnel/...`.**
+The system tier does not use your own `~/.config` file. Create the system
+config with `sudo iroh-tunnel <role> config keygen` and `sudo iroh-tunnel
+<role> config set ...`, or pass `--config` with a root-owned file.
+
+**`sudo ... service install` exits with code 3 and names a config or directory.**
+A system service only trusts files that root owns and nobody else can write.
+Fix the owner or mode named in the message (for example `sudo chown root` and
+`sudo chmod go-w`), or move the file under `/etc/iroh-tunnel`.
+
+**BusyBox: `has no per-user services` (exit code 3).**
+Init-script hosts only have system services. Re-run the command with `sudo`.
+
+**`sudo ... service start` or `restart` exits with code 3 and names a binary.**
 On Linux and macOS the service manager would run a binary that a non-root user
 can change (for example one under your home directory, or a directory above it
 that is group- or world-writable), or its definition cannot be read. The
@@ -61,8 +81,8 @@ Nothing was started, stopped or restarted, so a running service keeps running.
 Re-run the install as root, then start again:
 
 ```sh
-sudo iroh-tunnel <role> service install --system
-sudo iroh-tunnel <role> service start --system
+sudo iroh-tunnel <role> service install
+sudo iroh-tunnel <role> service start
 ```
 
 Install registers the binary directly if it passes the root-only check, or
@@ -73,11 +93,18 @@ otherwise a root-owned copy at
 
 **A Windows system service refuses to start: `permission error`.**
 The config, state directory, binary or `%ProgramData%\iroh-tunnel` can be
-changed by an account the service does not trust, or the path goes through a
-junction or link. The message names the path, account and rights; the service
-log is `%ProgramData%\iroh-tunnel\logs\serve.log` (or `access.log`). Remove
-that access or move the file, then run `service start --system`. See
-[Windows system scope](services.md#system-scope).
+changed by an account the service does not trust, the config directory or file
+can be read by a non-administrator, or the path goes through a junction or
+link. The message names the path, account and rights; the service log is
+`%ProgramData%\iroh-tunnel\logs\serve.log` (or `access.log`). Remove that
+access or move the file, then run `service start` from an elevated terminal.
+See [Windows system tier](services.md#system-tier).
+
+**`note: <role> is also running ...`.**
+The other tier's instance of the role is running too (a system service next to
+your user instance, or the reverse). It is informational; the two have their
+own config and key. If both use the same local address, the second one fails
+to bind; give each tier its own address.
 
 **`the service binary ... is not protected`.**
 The `iroh-tunnel.exe` on `PATH` is in a directory you can write, such as your

@@ -18,17 +18,31 @@ reads a TOML file.
 
 ## File locations
 
-| OS | Config file | State directory (status files, locks) |
+The location depends on the tier of the command: the **user tier** for a
+normal or non-elevated process, the **system tier** for root, `sudo` or an
+elevated Windows terminal ("Run as administrator").
+
+| Tier, OS | Config file | State directory (status files, locks) |
 |---|---|---|
-| Linux, macOS | `~/.config/iroh-tunnel/<role>.toml` | `~/.local/state/iroh-tunnel/` |
-| Windows | `%LOCALAPPDATA%\iroh-tunnel\config\<role>.toml` | `%LOCALAPPDATA%\iroh-tunnel\state\` |
+| User, Linux and macOS | `~/.config/iroh-tunnel/<role>.toml` | `~/.local/state/iroh-tunnel/` |
+| User, Windows | `%LOCALAPPDATA%\iroh-tunnel\config\<role>.toml` | `%LOCALAPPDATA%\iroh-tunnel\state\` |
+| System, Linux | `/etc/iroh-tunnel/<role>.toml` | `/run/iroh-tunnel/` |
+| System, macOS | `/Library/Application Support/iroh-tunnel/config/<role>.toml` | `/Library/Application Support/iroh-tunnel/state/` |
+| System, Windows | `%ProgramData%\iroh-tunnel\config\<role>.toml` | `%ProgramData%\iroh-tunnel\state\` |
+
+The system tier never reads `HOME`, `SUDO_USER` or a user profile, so
+`sudo iroh-tunnel serve config keygen` writes the system file, not yours. An
+elevated `config` command creates a missing system config directory owned by
+root with mode `0755` (Windows: readable by SYSTEM and Administrators only);
+the file itself is `0600`. An administrator who wants the user tier runs the
+command unelevated.
 
 `<role>` is `serve` or `access`. `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are
 ignored. Every command that reads or writes a config accepts
 `--config PATH` (`-c`); `IROH_TUNNEL_STATE_DIR` moves the status files.
 `iroh-tunnel <role> config path` prints the file in use.
 
-On macOS, versions before 0.5.0 kept the config under
+On macOS (user tier only), versions before 0.5.0 kept the config under
 `~/Library/Application Support/iroh-tunnel/`. When the new file is missing and
 the legacy one exists, it is copied (never moved or overwritten, owner-only
 permissions) and a notice is printed. If the copy fails, the command stops
