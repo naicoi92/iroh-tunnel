@@ -462,3 +462,155 @@ fn keygen_print_rejects_config_path_instead_of_ignoring_it() {
     assert!(!target.exists());
     assert!(!stdout(&out).contains("Secret key"));
 }
+
+/// System-tier processes: `IROH_TUNNEL_TEST_TIER=system` makes the binary
+/// resolve machine-wide paths without root.
+mod system_tier {
+    use super::*;
+
+    fn system_tunnel(home: Option<&Path>, envs: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+        cmd.args(args)
+            .env_remove("HOME")
+            .env_remove("SUDO_USER")
+            .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
+            .env_remove("IROH_TUNNEL_STATE_DIR")
+            .env("IROH_TUNNEL_TEST_TIER", "system");
+        if let Some(home) = home {
+            cmd.env("HOME", home);
+        }
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("spawn iroh-tunnel")
+    }
+
+    fn system_config(role: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("/Library/Application Support/iroh-tunnel/config/{role}.toml")
+        } else {
+            format!("/etc/iroh-tunnel/{role}.toml")
+        }
+    }
+
+    #[test]
+    fn system_tier_ignores_home_and_sudo_user() {
+        let out = system_tunnel(
+            Some(Path::new("/home/alice")),
+            &[("SUDO_USER", "alice")],
+            &["serve", "config", "path"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out).trim(), system_config("serve"));
+        assert!(!stdout(&out).contains("/home/alice"));
+    }
+
+    #[test]
+    fn system_tier_without_home_succeeds() {
+        let out = system_tunnel(None, &[], &["access", "config", "path"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out).trim(), system_config("access"));
+    }
+
+    /// Marker: when set, `state_dir_probe` prints the resolved state dirs
+    /// instead of acting as a no-op test (re-exec pattern; no production seam).
+    const PROBE: &str = "IROH_TUNNEL_STATE_DIR_PROBE";
+
+    #[test]
+    fn state_dir_probe() {
+        if std::env::var_os(PROBE).is_none() {
+            return;
+        }
+        let explicit =
+            iroh_tunnel_host::paths::default_state_dir_for(iroh_tunnel_host::Tier::System).unwrap();
+        let current = iroh_tunnel_host::paths::default_state_dir().unwrap();
+        println!(
+            "PROBE explicit={} current={}",
+            explicit.display(),
+            current.display()
+        );
+    }
+
+    #[test]
+    fn system_tier_state_dir_is_runtime_dir_without_home() {
+        let expected = if cfg!(target_os = "macos") {
+            "/Library/Application Support/iroh-tunnel/state"
+        } else {
+            "/run/iroh-tunnel"
+        };
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "system_tier::state_dir_probe", "--nocapture"])
+            .env(PROBE, "1")
+            .env("IROH_TUNNEL_TEST_TIER", "system")
+            .env_remove("HOME")
+            .env_remove("SUDO_USER")
+            .output()
+            .expect("re-exec test binary");
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(
+            stdout(&out).contains(&format!("PROBE explicit={expected} current={expected}")),
+            "{}",
+            stdout(&out)
+        );
+    }
+
+    #[test]
+    fn test_tier_override_selects_the_tier_in_a_subprocess() {
+        let (_tmp, home) = home();
+        let path_with = |tier: Option<&str>| {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
+            cmd.args(["serve", "config", "path"])
+                .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
+                .env_remove("IROH_TUNNEL_TEST_TIER")
+                .env("HOME", &home);
+            if let Some(tier) = tier {
+                cmd.env("IROH_TUNNEL_TEST_TIER", tier);
+            }
+            let out = cmd.output().expect("spawn iroh-tunnel");
+            assert!(out.status.success(), "{}", stderr(&out));
+            stdout(&out).trim().to_string()
+        };
+        assert_eq!(path_with(Some("system")), system_config("serve"));
+        assert_eq!(
+            path_with(Some("user")),
+            new_config(&home, "serve").display().to_string()
+        );
+        // Any other value falls back to privilege, i.e. to the unset result.
+        assert_eq!(path_with(Some("bogus")), path_with(None));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_tier_config_path_skips_legacy_migration() {
+        let (_tmp, home) = home();
+        let legacy = home.join("Library/Application Support/iroh-tunnel/serve.toml");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "x").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = system_tunnel(Some(&home), &[], &["serve", "config", "path"]);
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out).trim(), system_config("serve"));
+        assert!(!stderr(&out).contains("migrated"), "{}", stderr(&out));
+        assert!(!home.join(".config").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_tier_does_not_migrate_macos_legacy() {
+        let (_tmp, home) = home();
+        let legacy = home.join("Library/Application Support/iroh-tunnel/serve.toml");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "x").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let cfg = home.join("cfg");
+        let out = system_tunnel(
+            Some(&home),
+            &[("IROH_TUNNEL_TEST_CONFIG_DIR", cfg.to_str().unwrap())],
+            &["serve", "config", "keygen"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(!stderr(&out).contains("migrated"), "{}", stderr(&out));
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}

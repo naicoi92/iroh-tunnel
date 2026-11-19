@@ -86,6 +86,7 @@ impl Installed {
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", &home)
             .env("IROH_TUNNEL_TEST_CONFIG_DIR", &home)
+            .env("IROH_TUNNEL_TEST_TIER", "user")
             .env("IROH_TUNNEL_STATE_DIR", state)
             .env("RUST_LOG", "iroh_tunnel=info");
         #[cfg(windows)]
@@ -337,17 +338,10 @@ async fn standalone_managed_install_starts_registered_role() -> Result<()> {
         std::fs::copy(ALL_IN_ONE, bin.join("iroh-tunnel"))?;
         let state = root.join("state");
         std::fs::create_dir(&state)?;
-        let config_dir = root.join("user config");
+        // The flagless install of a root process is a system install: its
+        // config must pass the admin-only trust walk, so it is root-owned.
+        let config_dir = root.join("system config");
         std::fs::create_dir(&config_dir)?;
-        // Existing unprivileged account: no real home/config/state is changed.
-        // Its home (/nonexistent on Linux) also keeps the cross-scope probe
-        // away from the operator's running root role.
-        let nobody = Command::new("/usr/bin/id")
-            .args(["-u", "nobody"])
-            .output()?;
-        anyhow::ensure!(nobody.status.success(), "nobody account required");
-        let uid: u32 = String::from_utf8(nobody.stdout)?.trim().parse()?;
-        std::os::unix::fs::chown(&config_dir, Some(uid), None)?;
         let config = config_dir.join("config file.toml");
         let secret = iroh::SecretKey::generate();
         let node = format!(
@@ -401,6 +395,8 @@ with (state / "service.log").open("wb") as log:
         )?;
         let _cleanup = RegisteredProcess(state.join("service.pid"));
         let mut command = installed.command(true, &state)?;
+        // Root must pick the system tier; the user-tier pin would mask it.
+        command.env_remove("IROH_TUNNEL_TEST_TIER");
         let out = busy_exec::output(
             command
                 .current_dir(&root)
@@ -409,9 +405,8 @@ with (state / "service.log").open("wb") as log:
                 .args([
                     "service",
                     "install",
-                    "--system",
                     "--config",
-                    "user config/config file.toml",
+                    "system config/config file.toml",
                 ]),
         )?;
         anyhow::ensure!(
@@ -465,7 +460,7 @@ with (state / "service.log").open("wb") as log:
         // AC2: resolved relative --config is carried through the CLI observer.
         let stdout = String::from_utf8_lossy(&out.stdout);
         let expected = format!(
-            "sudo '{}' service install --system --config '{}'",
+            "sudo '{}' service install --config '{}'",
             installed.real.display(),
             config.display()
         );
@@ -954,13 +949,13 @@ fn standalone_service_dispatches_its_own_role() -> Result<()> {
         let mut standalone = install.command(true, state.path())?;
         let output = busy_exec::output(
             standalone
-                .args(["service", "install", "--user", "--config"])
+                .args(["service", "install", "--config"])
                 .arg(&missing),
         )?;
         let mut combined = it.command(true, state.path())?;
         let reference = busy_exec::output(
             combined
-                .args([role, "service", "install", "--user", "--config"])
+                .args([role, "service", "install", "--config"])
                 .arg(&missing),
         )?;
         let stderr = String::from_utf8_lossy(&output.stderr);

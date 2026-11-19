@@ -643,23 +643,6 @@ pub enum ConfigAction<S: ServiceArgs> {
     },
 }
 
-/// Scope selection shared by every service verb.
-///
-/// With neither flag, `install` offers the choice to a non-elevated
-/// interactive user and defaults to system for root/Administrator; the other
-/// verbs act on the user service unless elevated. A system scope without
-/// privilege is refused with rerun guidance, never elevated or replaced by a
-/// user service.
-#[derive(Args, Debug, Clone, Copy)]
-pub struct ScopeArgs {
-    /// Per-user service (LaunchAgent / `systemctl --user`); needs no privileges.
-    #[arg(long, conflicts_with = "system")]
-    pub user: bool,
-    /// System-wide service (LaunchDaemon / /etc/systemd/system); needs root.
-    #[arg(long)]
-    pub system: bool,
-}
-
 /// Service sub-actions.
 #[derive(Subcommand, Debug)]
 pub enum ServiceAction {
@@ -668,34 +651,17 @@ pub enum ServiceAction {
         /// Config file to pin into the service (absolute path is stored; default: OS-specific).
         #[arg(short, long)]
         config: Option<PathBuf>,
-        #[command(flatten)]
-        scope: ScopeArgs,
     },
     /// Stop and remove the service.
-    Uninstall {
-        #[command(flatten)]
-        scope: ScopeArgs,
-    },
+    Uninstall,
     /// Start the service.
-    Start {
-        #[command(flatten)]
-        scope: ScopeArgs,
-    },
+    Start,
     /// Stop the service.
-    Stop {
-        #[command(flatten)]
-        scope: ScopeArgs,
-    },
+    Stop,
     /// Restart the service.
-    Restart {
-        #[command(flatten)]
-        scope: ScopeArgs,
-    },
+    Restart,
     /// Print the service status.
-    Status {
-        #[command(flatten)]
-        scope: ScopeArgs,
-    },
+    Status,
 }
 
 /// Initialize the tracing subscriber.
@@ -951,22 +917,43 @@ mod tests {
     fn long_only_options() {
         for_each_command(&mut |b, path, cmd| {
             for arg in cmd.get_arguments() {
+                assert!(
+                    !matches!(arg.get_long(), Some("system" | "user")),
+                    "{b:?} {path:?} defines --{}",
+                    arg.get_long().unwrap_or_default()
+                );
                 if matches!(
                     arg.get_long(),
-                    Some(
-                        "reveal"
-                            | "print"
-                            | "system"
-                            | "user"
-                            | "relay-token"
-                            | "relay-token-file"
-                            | "clear-relays"
-                    )
+                    Some("reveal" | "print" | "relay-token" | "relay-token-file" | "clear-relays")
                 ) {
                     assert_eq!(arg.get_short(), None, "{b:?} {path:?} {:?}", arg.get_long());
                 }
             }
         });
+    }
+
+    #[test]
+    fn service_scope_flags_are_rejected() {
+        let cases: [(Binary, &[&str]); 4] = [
+            (
+                Binary::AllInOne,
+                &["it", "serve", "service", "install", "--system"],
+            ),
+            (
+                Binary::AllInOne,
+                &["it", "access", "service", "stop", "--user"],
+            ),
+            (Binary::Serve, &["its", "service", "install", "--system"]),
+            (Binary::Access, &["ita", "service", "stop", "--user"]),
+        ];
+        for (binary, args) in cases {
+            let err = parse_cli(binary, argv(args)).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{args:?}: {err}"
+            );
+        }
     }
 
     #[test]

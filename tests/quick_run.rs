@@ -59,6 +59,7 @@ fn isolated(command: &mut Command, home: &std::path::Path) {
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
         .env("IROH_TUNNEL_TEST_CONFIG_DIR", home)
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .env("RUST_LOG", "iroh_tunnel=info");
 }
 

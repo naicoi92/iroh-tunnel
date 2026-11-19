@@ -167,11 +167,11 @@ Source: refactor-codebase design.md Decisions 3, 8
 Source: refactor-codebase design.md Decision 8; openspec/specs/cli-entrypoints
 
 #### Scenario: Permission failure keeps exit code 3
-- **WHEN** a non-root user runs `iroh-tunnel serve service install --system`
+- **WHEN** `sudo iroh-tunnel serve service install --config <path>` runs and the config is owned by a non-root user
 - **THEN** the process exits with code 3
 
 #### Scenario: Ownership conflict keeps exit code 6
-- **WHEN** `iroh-tunnel serve` starts while another Serve role of the same user is running
+- **WHEN** `iroh-tunnel serve run --config <valid config>` starts while another Serve role of the same user is running in the user tier
 - **THEN** the process exits with code 6
 
 #### Scenario: Invalid configuration keeps exit code 2

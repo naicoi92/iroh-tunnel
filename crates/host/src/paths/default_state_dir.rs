@@ -1,38 +1,33 @@
-//! Default directory of the status files.
+//! Default directory of the status files in the current process tier.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 
-#[cfg(not(windows))]
-use super::locations::{home_dir, APP_DIR};
-#[cfg(windows)]
-use super::locations::{local_app_data, windows_state_dir};
+use super::default_state_dir_for;
+use crate::Tier;
 
-/// Default directory holding the `<role>-status.json` files.
+/// Default directory holding the `<role>-status.json` files, in the tier of
+/// the current process ([`Tier::current`]); see [`default_state_dir_for`].
 ///
 /// # Errors
 ///
-/// [`crate::error::CliError::Config`] when the home directory (or LocalAppData on Windows)
-/// is missing or not absolute.
+/// As [`default_state_dir_for`].
 pub fn default_state_dir() -> Result<PathBuf> {
-    #[cfg(windows)]
-    return Ok(windows_state_dir(&local_app_data()?));
-    #[cfg(not(windows))]
-    Ok(home_dir()?.join(".local").join("state").join(APP_DIR))
+    default_state_dir_for(Tier::current())
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(windows))]
     use super::*;
 
-    #[cfg(not(windows))]
     #[test]
-    fn state_dir_is_under_dot_local_state() {
-        if let Ok(dir) = default_state_dir() {
-            assert!(dir.is_absolute());
-            assert!(dir.ends_with(".local/state/iroh-tunnel"));
+    fn delegates_to_the_current_tier() {
+        let expected = default_state_dir_for(Tier::current());
+        let actual = default_state_dir();
+        assert_eq!(actual.is_ok(), expected.is_ok());
+        if let (Ok(a), Ok(e)) = (actual, expected) {
+            assert_eq!(a, e);
         }
     }
 }

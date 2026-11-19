@@ -20,6 +20,37 @@ pub fn sc(verb: &str, name: &str) -> Output {
         .expect("run sc.exe")
 }
 
+/// Why this runner cannot host a user logon task, when its account always runs
+/// elevated: the built-in Administrator, or an Administrators member with UAC
+/// disabled (`EnableLUA` = 0). An elevated test process is an admin member.
+pub fn always_elevated_runner() -> Option<&'static str> {
+    let text = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    if text("whoami", &["/user", "/fo", "csv", "/nh"])
+        .trim()
+        .trim_end_matches('"')
+        .ends_with("-500")
+    {
+        return Some("the runner account is the built-in Administrator");
+    }
+    let lua = text(
+        "reg",
+        &[
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+            "/v",
+            "EnableLUA",
+        ],
+    );
+    (iroh_tunnel_host::service::is_elevated() && lua.contains("0x0"))
+        .then_some("the runner is an administrator with UAC disabled")
+}
+
 pub fn service_exists(name: &str) -> bool {
     sc("query", name).status.success()
 }
@@ -139,29 +170,6 @@ fn write_service_env(name: &str, entries: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Overwrite the service's `Description` (where the pin record lives).
-pub fn set_description(name: &str, text: &str) -> Result<()> {
-    let out = Command::new("reg")
-        .args([
-            "add",
-            &registry_key(name),
-            "/v",
-            "Description",
-            "/t",
-            "REG_SZ",
-            "/d",
-            text,
-            "/f",
-        ])
-        .output()?;
-    ensure!(
-        out.status.success(),
-        "reg add Description: {}",
-        stderr(&out)
-    );
-    Ok(())
-}
-
 /// The SID of the user running the test (`whoami /user`, SID column only).
 pub fn runner_sid() -> Result<String> {
     let out = Command::new("whoami")
@@ -176,29 +184,4 @@ pub fn runner_sid() -> Result<String> {
         .map(|s| s.trim().trim_matches('"').to_owned())
         .filter(|s| s.starts_with("S-1-"));
     sid.ok_or_else(|| anyhow::anyhow!("no SID in whoami output: {text}"))
-}
-
-/// The config path of a pin record (`iroh-tunnel-pin config=<%XX> sid=..`),
-/// unescaped and normalised (lowercase, `/` separators) for comparison.
-pub fn pin_config(description: &str) -> Option<String> {
-    let token = description
-        .split_whitespace()
-        .find_map(|t| t.strip_prefix("config="))?;
-    let bytes = token.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            out.push(u8::from_str_radix(token.get(i + 1..i + 3)?, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Some(
-        String::from_utf8_lossy(&out)
-            .replace('\\', "/")
-            .to_lowercase(),
-    )
 }

@@ -17,12 +17,15 @@ pub mod role;
 pub mod runtime;
 pub mod service;
 pub mod status;
+pub mod tier;
 pub mod update;
 
 #[cfg(test)]
 mod fixtures;
 
+pub use ownership::other_tier_running;
 pub use role::Role;
+pub use tier::Tier;
 
 pub use iroh_tunnel_engine::settings::Protocol;
 /// Bridge re-exports (deviation R3): the runtime types the CLI hands to or

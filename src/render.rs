@@ -10,7 +10,7 @@ use iroh_tunnel_host::ReadyReport;
 use iroh_tunnel_host::Role;
 
 use iroh_tunnel_host::service::{shell_quote, InstalledAt, ServiceInvocation, ServiceNote};
-use iroh_tunnel_host::{OnReady, ReadyServices};
+use iroh_tunnel_host::{OnReady, ReadyServices, Tier};
 
 /// The stream a rendered line belongs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,11 +23,15 @@ pub(crate) enum Stream {
 /// existed.
 pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
     match note {
-        ServiceNote::BusyboxSystemWide { .. } => (
+        ServiceNote::OtherTierRunning { role, other } => (
             Stream::Stderr,
-            "note: this host runs BusyBox init (no systemd); the service is a \
-             system-wide /etc/init.d script owned by root.\n"
-                .to_owned(),
+            match other {
+                Tier::System => format!(
+                    "note: {role} is also running as a system service; manage it with sudo or \
+                     from an elevated terminal\n"
+                ),
+                Tier::User => format!("note: {role} is also running in a user session\n"),
+            },
         ),
         ServiceNote::LaunchdBootstrapHint { domain, plist } => (
             Stream::Stderr,
@@ -76,7 +80,7 @@ pub(crate) fn render_service_note(note: &ServiceNote) -> (Stream, String) {
             Stream::Stdout,
             format!(
                 "Registered a root-owned copy of {} at {} for the {role} service; re-run \
-                 `sudo iroh-tunnel {role} service install --system` after upgrading to update it\n",
+                 `sudo iroh-tunnel {role} service install` after upgrading to update it\n",
                 source.display(),
                 copy.display()
             ),
@@ -102,7 +106,7 @@ pub(crate) fn render_service_note_for_invocation(
     ) = (invocation, note)
     {
         let rerun = format!(
-            "re-run `sudo {} service install --system --config {}`",
+            "re-run `sudo {} service install --config {}`",
             shell_quote(&executable.to_string_lossy()),
             shell_quote(&config.to_string_lossy())
         );
@@ -131,6 +135,24 @@ pub(crate) fn print_service_note(note: &ServiceNote, invocation: &ServiceInvocat
     };
     if let Err(error) = written {
         tracing::warn!("service note not shown: {error:#}");
+    }
+}
+
+/// Print the other-tier notice on stderr when `role` also runs in the tier
+/// other than this process's. Informational: a probe failure prints nothing
+/// and a write failure is logged, so the command always continues. The probe
+/// only tests a lock without waiting, so it is safe on a runtime thread.
+pub(crate) fn print_other_tier_notice(role: Role) {
+    let Some(other) = iroh_tunnel_host::other_tier_running(role, Tier::current()) else {
+        return;
+    };
+    let note = ServiceNote::OtherTierRunning {
+        role: role.name().to_owned(),
+        other,
+    };
+    let (_, text) = render_service_note(&note);
+    if let Err(error) = crate::output::stderr(&text) {
+        tracing::warn!("other-tier notice not shown: {error:#}");
     }
 }
 
@@ -511,11 +533,30 @@ mod tests {
         assert_eq!(
             text,
             "Registered a root-owned copy of /source at /copy for the serve service; re-run \
-             `sudo '/opt/role bin/renamed' service install --system --config \
+             `sudo '/opt/role bin/renamed' service install --config \
              '/home/a/config file.toml'` after upgrading to update it\n"
         );
         let (_, combined) = render_service_note_for_invocation(&note, &ServiceInvocation::Combined);
         assert_eq!(combined, render_service_note(&note).1);
+    }
+
+    #[test]
+    fn launchd_bootstrap_hint_names_print_disabled() {
+        for domain in ["system", "gui/501"] {
+            let (stream, text) = render_service_note(&ServiceNote::LaunchdBootstrapHint {
+                domain: domain.into(),
+                plist: "/p/x.plist".into(),
+            });
+            assert_eq!(stream, Stream::Stderr);
+            assert!(
+                text.contains(&format!("launchctl print-disabled {domain}")),
+                "{text}"
+            );
+            assert!(
+                !text.contains("--system") && !text.contains("--user"),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -526,12 +567,21 @@ mod tests {
             assert_eq!((got_stream, got.as_str()), (stream, text));
         };
         check(
-            ServiceNote::BusyboxSystemWide {
-                script: "/etc/init.d/S96iroh-tunnel-serve".into(),
+            ServiceNote::OtherTierRunning {
+                role: "serve".into(),
+                other: iroh_tunnel_host::Tier::System,
             },
             Stream::Stderr,
-            "note: this host runs BusyBox init (no systemd); the service is a \
-             system-wide /etc/init.d script owned by root.\n",
+            "note: serve is also running as a system service; manage it with sudo or from an \
+             elevated terminal\n",
+        );
+        check(
+            ServiceNote::OtherTierRunning {
+                role: "access".into(),
+                other: iroh_tunnel_host::Tier::User,
+            },
+            Stream::Stderr,
+            "note: access is also running in a user session\n",
         );
         check(
             ServiceNote::LaunchdBootstrapHint {
@@ -612,7 +662,7 @@ mod tests {
             Stream::Stdout,
             "Registered a root-owned copy of /home/u/.cargo/bin/iroh-tunnel at \
              /var/lib/iroh-tunnel/bin/serve/iroh-tunnel for the serve service; re-run \
-             `sudo iroh-tunnel serve service install --system` after upgrading to update it\n",
+             `sudo iroh-tunnel serve service install` after upgrading to update it\n",
         );
     }
 

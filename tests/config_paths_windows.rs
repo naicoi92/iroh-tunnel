@@ -16,7 +16,10 @@ fn tunnel(args: &[&str], envs: &[(&str, &Path)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
     cmd.args(args)
         .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
-        .env_remove("IROH_TUNNEL_STATE_DIR");
+        .env_remove("IROH_TUNNEL_STATE_DIR")
+        // Elevated CI runners derive the system tier; these tests assert the
+        // user-tier (LocalAppData) defaults.
+        .env("IROH_TUNNEL_TEST_TIER", "user");
     for (key, value) in envs {
         cmd.env(key, value);
     }

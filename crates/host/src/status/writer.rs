@@ -154,6 +154,20 @@ impl StatusWriter {
     /// [`Self::save_with_state_dir`]; tests inject a `tempfile::tempdir()`
     /// here.
     pub(crate) fn save_to(&self, dir: &Path, value: &StatusPayload) -> Result<PathBuf> {
+        #[cfg(any(unix, windows))]
+        return self.save_to_with(dir, value, service_trust()?);
+        #[cfg(not(any(unix, windows)))]
+        self.save_to_with(dir, value)
+    }
+
+    /// [`Self::save_to`] with the system-service trust policy decided by the
+    /// caller: `Some` goes through a verified handle, `None` through paths.
+    fn save_to_with(
+        &self,
+        dir: &Path,
+        value: &StatusPayload,
+        #[cfg(any(unix, windows))] trust: Option<crate::service::AdminTrust>,
+    ) -> Result<PathBuf> {
         // The payload enum re-ties schema to role at this boundary. A
         // mismatched writer/payload pair is a programmer error — bailed in
         // EVERY build profile (not just debug), because silently writing
@@ -175,12 +189,12 @@ impl StatusWriter {
         }
         .context("failed to encode status JSON")?;
 
-        // Under a system service root writes into a user-owned directory:
-        // go through a verified handle instead of paths (SM-04).
+        // Under a system service the state directory is re-verified against
+        // the admin-only owners on every write and the snapshot goes
+        // through a verified handle instead of paths (SM-04).
         #[cfg(unix)]
-        if let Some(uid) = crate::service::trust::trusted_uid_from_env()? {
-            use crate::service::trust::{publish, remove_in, TrustedOwners};
-            let owners = TrustedOwners::RootAnd(uid);
+        if let Some(owners) = trust {
+            use crate::service::trust::{publish, remove_in};
             let temp = format!(
                 "{}.tmp.{}.{}",
                 self.file_name(),
@@ -194,9 +208,8 @@ impl StatusWriter {
             return Ok(path);
         }
         #[cfg(windows)]
-        if let Some(sid) = crate::service::trust_windows::trusted_sid_from_env()? {
-            use crate::service::trust_windows::{model::TrustedSet, publish, remove_in};
-            let trusted = TrustedSet::for_user_files(&sid);
+        if let Some(trusted) = trust {
+            use crate::service::trust_windows::{publish, remove_in};
             let temp = format!(
                 "{}.tmp.{}.{}",
                 self.file_name(),
@@ -331,14 +344,40 @@ pub(crate) fn remove_own_status_file_for_exit(role: Role) {
     remove_own_status_file_blocking(StatusWriter::new(role), None);
 }
 
+/// The admin-only trust policy when this process is a system service; `None`
+/// for every other process, which writes through plain paths.
+///
+/// # Errors
+///
+/// [`crate::error::CliError::Config`] for a malformed test owner.
+#[cfg(any(unix, windows))]
+fn service_trust() -> Result<Option<crate::service::AdminTrust>> {
+    if !crate::service::under_system_service() {
+        return Ok(None);
+    }
+    crate::service::admin_trust(&crate::service::process_env).map(Some)
+}
+
 fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path>) {
+    #[cfg(any(unix, windows))]
+    remove_own_status_file_with(writer, state_dir, service_trust().ok().flatten());
+    #[cfg(not(any(unix, windows)))]
+    remove_own_status_file_with(writer, state_dir);
+}
+
+/// [`remove_own_status_file_blocking`] with the system-service trust policy
+/// decided by the caller.
+fn remove_own_status_file_with(
+    writer: StatusWriter,
+    state_dir: Option<&Path>,
+    #[cfg(any(unix, windows))] trust: Option<crate::service::AdminTrust>,
+) {
     let Ok(path) = writer.path_for_state_dir(state_dir) else {
         return;
     };
     #[cfg(unix)]
-    if let Ok(Some(uid)) = crate::service::trust::trusted_uid_from_env() {
-        use crate::service::trust::{read_in, remove_in, TrustedOwners};
-        let owners = TrustedOwners::RootAnd(uid);
+    if let Some(owners) = trust {
+        use crate::service::trust::{read_in, remove_in};
         let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
         else {
             return;
@@ -357,9 +396,8 @@ fn remove_own_status_file_blocking(writer: StatusWriter, state_dir: Option<&Path
         return;
     }
     #[cfg(windows)]
-    if let Ok(Some(sid)) = crate::service::trust_windows::trusted_sid_from_env() {
-        use crate::service::trust_windows::{model::TrustedSet, read_in, remove_in};
-        let trusted = TrustedSet::for_user_files(&sid);
+    if let Some(trusted) = trust {
+        use crate::service::trust_windows::{read_in, remove_in};
         let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
         else {
             return;
@@ -413,7 +451,7 @@ mod tests {
     #[cfg(windows)]
     fn plain_env() -> crate::service::trust_windows::test_env::EnvGuard {
         crate::service::trust_windows::test_env::EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", None),
+            ("IROH_TUNNEL_SERVICE", None),
             ("IROH_TUNNEL_SCM", None),
         ])
     }
@@ -733,7 +771,14 @@ mod windows_tests {
     use super::super::fixtures::sample_status;
     use super::*;
     use crate::error::CliError;
-    use crate::service::trust_windows::{test_env::EnvGuard, token_user};
+    use crate::service::trust_windows::model::TrustedSet;
+    use crate::service::trust_windows::token_user;
+
+    /// The admin-only set plus the current user, as a test build trusts it
+    /// through `IROH_TUNNEL_TEST_TRUSTED_OWNER`.
+    fn admin_and_me() -> Option<TrustedSet> {
+        Some(TrustedSet::admin_with_test_owner(token_user().unwrap()))
+    }
 
     fn icacls_grants_everyone(path: &Path) -> bool {
         std::process::Command::new("icacls")
@@ -764,13 +809,10 @@ mod windows_tests {
         } else if !linked {
             println!("skipped link case: mklink is unavailable (no symlink privilege)");
         }
-        let sid = token_user().unwrap().0;
-        let _env = EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
-            ("IROH_TUNNEL_SCM", None),
-        ]);
         let payload = StatusPayload::Serve(sample_status());
-        StatusWriter::serve().save_to(dir, &payload).unwrap();
+        StatusWriter::serve()
+            .save_to_with(dir, &payload, admin_and_me())
+            .unwrap();
         let meta = std::fs::symlink_metadata(&status).unwrap();
         assert!(meta.file_type().is_file() && !meta.file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
@@ -780,13 +822,12 @@ mod windows_tests {
     fn status_publish_refuses_an_untrusted_state_dir() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(icacls_grants_everyone(tmp.path()));
-        let sid = token_user().unwrap().0;
-        let _env = EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
-            ("IROH_TUNNEL_SCM", None),
-        ]);
         let err = StatusWriter::serve()
-            .save_to(tmp.path(), &StatusPayload::Serve(sample_status()))
+            .save_to_with(
+                tmp.path(),
+                &StatusPayload::Serve(sample_status()),
+                admin_and_me(),
+            )
             .unwrap_err();
         assert!(
             matches!(
@@ -802,22 +843,91 @@ mod windows_tests {
     fn remove_own_status_file_under_service_goes_through_verified_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let sid = token_user().unwrap().0;
-        let _env = EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
-            ("IROH_TUNNEL_SCM", None),
-        ]);
         let writer = StatusWriter::serve();
         let mut foreign = sample_status();
         foreign.pid = std::process::id().wrapping_add(1);
-        writer.save_to(dir, &StatusPayload::Serve(foreign)).unwrap();
-        remove_own_status_file_blocking(StatusWriter::serve(), Some(dir));
+        writer
+            .save_to_with(dir, &StatusPayload::Serve(foreign), admin_and_me())
+            .unwrap();
+        remove_own_status_file_with(StatusWriter::serve(), Some(dir), admin_and_me());
         assert!(dir.join("serve-status.json").exists(), "foreign pid kept");
 
         let mut own = sample_status();
         own.pid = std::process::id();
-        writer.save_to(dir, &StatusPayload::Serve(own)).unwrap();
-        remove_own_status_file_blocking(StatusWriter::serve(), Some(dir));
+        writer
+            .save_to_with(dir, &StatusPayload::Serve(own), admin_and_me())
+            .unwrap();
+        remove_own_status_file_with(StatusWriter::serve(), Some(dir), admin_and_me());
         assert!(!dir.join("serve-status.json").exists(), "own pid removed");
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod unix_service_tests {
+    use super::super::fixtures::sample_status;
+    use super::*;
+    use crate::error::CliError;
+    use crate::service::trust::{admin_owners, TrustedOwners};
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The admin-only owners plus the current user (test-owner seam).
+    fn admin_and_me() -> Option<TrustedOwners> {
+        // SAFETY: geteuid(2) has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() }.to_string();
+        Some(admin_owners(Some(OsStr::new(&me))).unwrap())
+    }
+
+    fn state_dir() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("state");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (tmp, dir)
+    }
+
+    #[test]
+    fn system_service_status_replaces_a_planted_symlink() {
+        let (tmp, dir) = state_dir();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("serve-status.json")).unwrap();
+        let payload = StatusPayload::Serve(sample_status());
+        StatusWriter::serve()
+            .save_to_with(&dir, &payload, admin_and_me())
+            .unwrap();
+        let meta = std::fs::symlink_metadata(dir.join("serve-status.json")).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    }
+
+    #[test]
+    fn system_service_status_refuses_an_untrusted_state_dir() {
+        let (_tmp, dir) = state_dir();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = StatusWriter::serve()
+            .save_to_with(&dir, &StatusPayload::Serve(sample_status()), admin_and_me())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CliError>(),
+                Some(CliError::Permission(_))
+            ),
+            "{err:#}"
+        );
+        assert!(!dir.join("serve-status.json").exists());
+    }
+
+    #[test]
+    fn system_service_removes_only_its_own_status_file() {
+        let (_tmp, dir) = state_dir();
+        let writer = StatusWriter::serve();
+        let mut own = sample_status();
+        own.pid = std::process::id();
+        writer
+            .save_to_with(&dir, &StatusPayload::Serve(own), admin_and_me())
+            .unwrap();
+        remove_own_status_file_with(StatusWriter::serve(), Some(&dir), admin_and_me());
+        assert!(!dir.join("serve-status.json").exists());
     }
 }

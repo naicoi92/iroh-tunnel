@@ -2,10 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use super::pin::{Pin, PinOwner};
-
-use super::install::install_via;
+use super::install::{install_via, InstallSeams};
 use super::native::fake::{Event, Events, FakeRunner};
 use super::native::{NativeOutput, ServiceCall};
 use super::registration::RegistrationInput;
@@ -13,12 +10,10 @@ use super::registration::RegistrationInput;
 use super::status::status_via;
 #[cfg(unix)]
 use super::types::ServiceStatusReport;
-use super::types::{
-    Environment, InstallOutcome, InstallRequest, RunningExecutable, ServiceFailure, ServiceScope,
-};
+use super::types::{Environment, InstallRequest, RunningExecutable, ServiceFailure, ServiceReport};
 use super::types::{RestartPolicy, ServiceInvocation};
-use crate::ownership::{LockDirs, LockResolver};
 use crate::role::Role;
+use crate::Tier;
 
 pub(crate) fn tunnel_exe() -> PathBuf {
     if cfg!(windows) {
@@ -31,8 +26,7 @@ pub(crate) fn tunnel_exe() -> PathBuf {
 /// The combined executable's invocation, borrowable for any lifetime.
 pub(crate) static COMBINED: ServiceInvocation = ServiceInvocation::Combined;
 
-/// A combined user registration of `role` with the default restart policy
-/// and no pin.
+/// A combined user registration of `role` with the default restart policy.
 pub(crate) fn registration<'a>(
     role: &'a str,
     binary: &'a Path,
@@ -42,77 +36,98 @@ pub(crate) fn registration<'a>(
     RegistrationInput {
         role,
         invocation: &COMBINED,
-        scope: ServiceScope::User,
+        tier: Tier::User,
         binary,
         config,
         state,
-        pin: None,
         policy: &RestartPolicy::DEFAULT,
     }
 }
 
-pub(crate) fn request(scope: Option<ServiceScope>) -> InstallRequest {
+pub(crate) fn request() -> InstallRequest {
     InstallRequest {
         invocation: super::ServiceInvocation::Combined,
         role: Role::Serve,
-        scope,
         config: None,
         tunnel_executable: tunnel_exe(),
         running_executable: RunningExecutable {
             display: tunnel_exe(),
             read_from: tunnel_exe(),
         },
-        sudo_user: None,
-        invoking_user: None,
         state_dir_override: None,
-        retarget: None,
     }
 }
 
-#[cfg(unix)]
-pub(crate) const CAN_ANSWER: Environment = Environment {
-    elevated: false,
-    can_answer: true,
-};
+/// A non-elevated caller: the user tier.
+pub(crate) const BATCH: Environment = Environment { elevated: false };
 
-pub(crate) const BATCH: Environment = Environment {
-    elevated: false,
-    can_answer: false,
-};
+/// An elevated caller: the system tier.
+pub(crate) const ELEVATED: Environment = Environment { elevated: true };
+
+/// The test environment (`IROH_TUNNEL_TEST_TRUSTED_OWNER` and nothing
+/// else), the binary check `verify` and a presence step that records nothing.
+pub(crate) fn seams<'a>(
+    env: super::EnvLookup<'a>,
+    verify: &'a dyn Fn(&Path) -> anyhow::Result<()>,
+    presence: &'a dyn Fn(Role) -> anyhow::Result<()>,
+) -> InstallSeams<'a> {
+    InstallSeams {
+        env,
+        verify_binary: verify,
+        ensure_presence: presence,
+    }
+}
 
 /// Run `install` against a fake runner; returns the result and the events.
-///
-/// The lock directories are two fresh tempdirs, so no test probes the real
-/// machine or per-user lock directory.
+/// The presence step and the binary check are no-ops; the environment is
+/// empty (no test owner).
 pub(crate) fn run_install(
     req: &InstallRequest,
     env: Environment,
     responses: Vec<NativeOutput>,
-) -> (Result<InstallOutcome, ServiceFailure>, Vec<Event>) {
-    let user = tempfile::tempdir().unwrap();
-    let machine = tempfile::tempdir().unwrap();
-    let resolve = |_: Option<&Path>| {
-        Ok(LockDirs {
-            user: user.path().to_path_buf(),
-            machine: Some(machine.path().to_path_buf()),
-        })
-    };
-    run_install_in(req, env, responses, &resolve)
+) -> (Result<ServiceReport, ServiceFailure>, Vec<Event>) {
+    let empty = |_: &str| None;
+    let accept = |_: &Path| Ok(());
+    let presence = |_: Role| Ok(());
+    run_install_with(req, env, responses, &seams(&empty, &accept, &presence))
 }
 
-/// [`run_install`] over an explicit lock-directory resolver.
-pub(crate) fn run_install_in(
+/// [`run_install`] over explicit host seams.
+pub(crate) fn run_install_with(
     req: &InstallRequest,
     env: Environment,
     responses: Vec<NativeOutput>,
-    lock_dirs: LockResolver<'_>,
-) -> (Result<InstallOutcome, ServiceFailure>, Vec<Event>) {
+    seams: &InstallSeams<'_>,
+) -> (Result<ServiceReport, ServiceFailure>, Vec<Event>) {
     let events = Events::default();
     let mut fake = FakeRunner::new(&events, responses);
     let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
     let mut notes = crate::service::native::fake::note_sink(&events);
     let mut call = ServiceCall::capture(&mut notes);
-    let result = install_via(req, env, &mut call, &mut runner, lock_dirs);
+    let result = install_via(req, env, &mut call, &mut runner, seams);
+    let log = events.borrow().clone();
+    (result, log)
+}
+
+/// Run `verb` for serve against a fake runner; returns the result and the
+/// events (commands and notes).
+pub(crate) fn run_verb(
+    verb: super::verb::Verb,
+    env: Environment,
+) -> (Result<ServiceReport, ServiceFailure>, Vec<Event>) {
+    let events = Events::default();
+    let mut fake = FakeRunner::new(&events, Vec::new());
+    let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+    let mut notes = crate::service::native::fake::note_sink(&events);
+    let mut call = ServiceCall::capture(&mut notes);
+    let result = super::verb::verb_via(
+        verb,
+        Role::Serve,
+        &ServiceInvocation::Combined,
+        env,
+        &mut call,
+        &mut runner,
+    );
     let log = events.borrow().clone();
     (result, log)
 }
@@ -149,7 +164,6 @@ pub(crate) fn run_status(
     status_via(
         Role::Serve,
         &super::ServiceInvocation::Combined,
-        ServiceScope::User,
         BATCH,
         &mut call,
         &mut runner,
@@ -171,7 +185,7 @@ pub(crate) fn ok_output(program: String) -> NativeOutput {
 }
 
 // Golden files pinning the exact bytes of every generated registration: each
-// backend renders every role x invocation x scope case into one text and
+// backend renders every role x invocation x tier case into one text and
 // compares it with `tests/fixtures/registration/<name>`. Re-bless from the
 // current code with `GOLDEN_BLESS=1 cargo test -p iroh-tunnel-host`.
 
@@ -179,7 +193,7 @@ pub(crate) fn ok_output(program: String) -> NativeOutput {
 pub(crate) struct Case {
     pub role: &'static str,
     pub invocation: ServiceInvocation,
-    pub scope: ServiceScope,
+    pub tier: Tier,
 }
 
 impl Case {
@@ -190,13 +204,13 @@ impl Case {
             ServiceInvocation::Standalone { .. } => "Standalone",
         };
         format!(
-            "==== role={} invocation={invocation} scope={:?} ====\n",
-            self.role, self.scope
+            "==== role={} invocation={invocation} tier={:?} ====\n",
+            self.role, self.tier
         )
     }
 }
 
-/// Every role × invocation × scope case, in a fixed order.
+/// Every role × invocation × tier case, in a fixed order.
 pub(crate) fn cases() -> Vec<Case> {
     let mut all = Vec::new();
     for role in ["serve", "access"] {
@@ -204,11 +218,11 @@ pub(crate) fn cases() -> Vec<Case> {
             executable: PathBuf::from(format!("/opt/role bin/iroh-tunnel-{role}")),
         };
         for invocation in [ServiceInvocation::Combined, standalone] {
-            for scope in [ServiceScope::User, ServiceScope::System] {
+            for tier in [Tier::User, Tier::System] {
                 all.push(Case {
                     role,
                     invocation: invocation.clone(),
-                    scope,
+                    tier,
                 });
             }
         }
@@ -231,15 +245,6 @@ pub(crate) fn unix_paths(role: &str) -> UnixPaths {
         config: PathBuf::from(format!("/home/a b/it's & <cfg>/{role} $x%i.toml")),
         state: PathBuf::from("/var/lib/iroh $state%n"),
     }
-}
-
-/// The pin a system registration records; `None` for a user one.
-#[cfg(unix)]
-pub(crate) fn unix_pin(scope: ServiceScope, config: &Path) -> Option<Pin> {
-    (scope == ServiceScope::System).then(|| Pin {
-        config: config.to_path_buf(),
-        owner: PinOwner::Uid(1000),
-    })
 }
 
 /// Compare `actual` with the golden file `name`, or write it under

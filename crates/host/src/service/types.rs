@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use super::native::NativeOutput;
-use super::pin::{Pin, RetargetConsent};
 use crate::role::Role;
+use crate::Tier;
 
 /// A change an operation made to the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,18 +152,10 @@ impl ServiceInvocation {
             Self::Standalone { .. } => None,
         }
     }
-
-    /// The argv that names `role`'s commands in rerun guidance, before the
-    /// `service <verb>` words.
-    pub(crate) fn rerun_prefix(&self, role: &str) -> Vec<String> {
-        match self {
-            Self::Combined => vec!["iroh-tunnel".to_owned(), role.to_owned()],
-            Self::Standalone { executable } => vec![executable.to_string_lossy().into_owned()],
-        }
-    }
 }
 
-/// Everything `install` needs from its caller.
+/// Everything `install` needs from its caller. The tier is not part of the
+/// request: [`super::install`] derives it from the caller's [`Environment`].
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
     /// The role to register.
@@ -172,78 +164,32 @@ pub struct InstallRequest {
     /// `Standalone` executable must be `tunnel_executable`: guidance names it
     /// while the registration runs `tunnel_executable`.
     pub invocation: ServiceInvocation,
-    /// `None` lets [`super::decide_install_scope`] decide.
-    pub scope: Option<ServiceScope>,
-    /// Config file; `None` selects the role default.
+    /// Config file; `None` selects the default of the caller's tier.
     pub config: Option<PathBuf>,
     /// The selected executable the registration runs. Must be absolute.
     pub tunnel_executable: PathBuf,
     /// The executable running this install: the source of a managed copy
     /// when a root-run registration cannot trust `tunnel_executable`.
     pub running_executable: RunningExecutable,
-    /// `SUDO_USER`: an input to choosing whose files a system service uses.
-    pub sudo_user: Option<String>,
-    /// The user a person named when asked ([`InstallNeed::InvokingUser`]).
-    pub invoking_user: Option<String>,
-    /// `IROH_TUNNEL_STATE_DIR`, if set.
+    /// `IROH_TUNNEL_STATE_DIR`, if set; `None` selects the default of the
+    /// caller's tier.
     pub state_dir_override: Option<PathBuf>,
-    /// Consent to replace another owner's system registration.
-    pub retarget: Option<RetargetConsent>,
 }
 
-/// What `install` did, or the decision it needs first.
-#[derive(Debug)]
-pub enum InstallOutcome {
-    /// The registration was written, enabled and started.
-    Installed(ServiceReport),
-    /// A decision is needed first; nothing changed.
-    Needs(InstallNeed),
-}
-
-/// A decision a person must make before `install` can continue. Nothing has
-/// been changed when one is returned.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstallNeed {
-    /// User or system service.
-    ScopeChoice,
-    /// Whose files a system service should use.
-    InvokingUser,
-    /// Replace an existing system registration that belongs to someone else
-    /// (`previous: None` when its owner cannot be told).
-    Retarget {
-        /// The registration being replaced; `None` when its owner cannot be told.
-        previous: Option<Pin>,
-        /// The registration that would replace it.
-        proposed: Pin,
-    },
-}
-
-/// Whether the service is installed system-wide or per-user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceScope {
-    /// A machine-wide service for the invoking user's files.
-    System,
-    /// A per-user service.
-    User,
-}
-
-/// What the install-time scope decision depends on, injected so the policy is
-/// a pure function of its inputs.
+/// The caller's privilege, injected so the operations are testable. The
+/// tier every operation acts in is derived from it
+/// ([`crate::Tier::from_elevated`]); no caller can name another tier.
 #[derive(Debug, Clone, Copy)]
 pub struct Environment {
     /// The process runs as root / an elevated Administrator.
     pub elevated: bool,
-    /// Standard input is a terminal that can answer the scope prompt.
-    pub can_answer: bool,
 }
 
-/// Outcome of the pure install-scope policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeDecision {
-    /// The scope is decided.
-    Chosen(ServiceScope),
-    /// A person must pick user or system.
-    NeedsChoice,
+impl Environment {
+    /// The tier the operations act in.
+    pub(crate) fn tier(self) -> Tier {
+        Tier::from_elevated(self.elevated)
+    }
 }
 
 /// Restart policy shared by every platform's service template.
@@ -292,17 +238,12 @@ mod tests {
         };
         assert_eq!(ServiceInvocation::Combined.role_arg("serve"), Some("serve"));
         assert_eq!(standalone.role_arg("serve"), None);
-        assert_eq!(
-            ServiceInvocation::Combined.rerun_prefix("access"),
-            ["iroh-tunnel", "access"]
-        );
-        assert_eq!(standalone.rerun_prefix("access"), ["/opt/role bin/renamed"]);
     }
 
     #[test]
-    fn scope_variants_exist() {
-        // Compile + equality smoke test for the public enum.
-        assert_ne!(ServiceScope::System, ServiceScope::User);
+    fn the_tier_follows_the_privilege() {
+        assert_eq!(Environment { elevated: true }.tier(), Tier::System);
+        assert_eq!(Environment { elevated: false }.tier(), Tier::User);
     }
 
     #[test]

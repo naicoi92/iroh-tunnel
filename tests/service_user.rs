@@ -1,10 +1,6 @@
 //! #90: install and manage a user service, driven through the real binary.
 //!
 //! Acceptance map:
-//! - SM-SCOPE-01 (90.CL1): the non-elevated interactive install offers
-//!   user/system; `system` without privilege stops with rerun guidance that
-//!   keeps the intended arguments and absolute paths, never elevates, never
-//!   falls back to a user service and registers nothing.
 //! - SM-PERMISSION-01 (90.AC2): a denied registration fails with guidance and
 //!   leaves scope and account unchanged.
 //! - SM-USER-01 / SM-PATH-01 (90.AC1, 90.CL2): the real user-service manager
@@ -114,21 +110,6 @@ impl Fixture {
     fn run(&self, args: &[&str]) -> Result<Output> {
         Ok(self.command(args).output()?)
     }
-    /// Answers a prompt through the root crate's `test-utils` seam
-    /// `IROH_TUNNEL_TEST_INTERACTIVE`; only built with that feature.
-    #[cfg(feature = "test-utils")]
-    fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Result<Output> {
-        use std::io::Write;
-        let mut child = self
-            .command(args)
-            .env("IROH_TUNNEL_TEST_INTERACTIVE", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        child.stdin.take().unwrap().write_all(stdin.as_bytes())?;
-        Ok(child.wait_with_output()?)
-    }
     /// Everything a service manager could have been told, under `HOME`.
     fn registrations(&self) -> Vec<PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -150,96 +131,6 @@ impl Fixture {
 }
 
 #[test]
-fn system_install_without_privilege_stops_with_rerun_guidance() -> Result<()> {
-    if is_root() {
-        return Ok(());
-    }
-    let fx = Fixture::new()?;
-    fx.write_config("https://relay.invalid")?;
-    let config = fx.config();
-
-    let out = fx.run(&[
-        "serve",
-        "service",
-        "install",
-        "--system",
-        "--config",
-        config.to_str().unwrap(),
-    ])?;
-    let err = stderr(&out);
-
-    assert_eq!(out.status.code(), Some(3), "stderr: {err}");
-    assert!(err.contains("sudo"), "no elevation guidance: {err}");
-    assert!(
-        err.contains("serve service install --system"),
-        "intended arguments not preserved: {err}"
-    );
-    assert!(
-        err.contains(config.to_str().unwrap()),
-        "absolute config path not preserved: {err}"
-    );
-    assert!(
-        fx.registrations().is_empty(),
-        "nothing may be registered or silently fall back to a user service: {:?}",
-        fx.registrations()
-    );
-    Ok(())
-}
-
-#[test]
-fn system_scope_operations_without_privilege_are_refused_with_guidance() -> Result<()> {
-    if is_root() {
-        return Ok(());
-    }
-    let fx = Fixture::new()?;
-    for verb in ["uninstall", "start", "stop", "restart"] {
-        let out = fx.run(&["serve", "service", verb, "--system"])?;
-        let err = stderr(&out);
-        assert_eq!(out.status.code(), Some(3), "{verb}: {err}");
-        assert!(
-            err.contains(&format!("sudo iroh-tunnel serve service {verb} --system")),
-            "{verb}: {err}"
-        );
-    }
-    Ok(())
-}
-
-// Needs `IROH_TUNNEL_TEST_INTERACTIVE` (root `test-utils`); run with `--all-features`.
-#[cfg(feature = "test-utils")]
-#[test]
-fn interactive_install_offers_user_or_system_and_system_is_refused_unprivileged() -> Result<()> {
-    if is_root() {
-        return Ok(());
-    }
-    let fx = Fixture::new()?;
-    fx.write_config("https://relay.invalid")?;
-    let config = fx.config();
-    let config = config.to_str().unwrap();
-
-    let out = fx.run_with_stdin(
-        &["serve", "service", "install", "--config", config],
-        "system\n",
-    )?;
-    let err = stderr(&out);
-    assert!(
-        err.contains("user") && err.contains("system"),
-        "no choice offered: {err}"
-    );
-    assert_eq!(out.status.code(), Some(3), "stderr: {err}");
-    assert!(err.contains("sudo") && err.contains(config), "{err}");
-    assert!(fx.registrations().is_empty(), "{:?}", fx.registrations());
-
-    // An unrecognised answer is an error, never a guess.
-    let out = fx.run_with_stdin(
-        &["serve", "service", "install", "--config", config],
-        "maybe\n",
-    )?;
-    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
-    assert!(fx.registrations().is_empty());
-    Ok(())
-}
-
-#[test]
 fn install_without_config_fails_with_guidance_and_registers_nothing() -> Result<()> {
     let fx = Fixture::new()?;
     let config = fx.config();
@@ -247,7 +138,6 @@ fn install_without_config_fails_with_guidance_and_registers_nothing() -> Result<
         "serve",
         "service",
         "install",
-        "--user",
         "--config",
         config.to_str().unwrap(),
     ])?;
@@ -273,7 +163,6 @@ fn denied_registration_fails_with_guidance_and_keeps_scope() -> Result<()> {
         "serve",
         "service",
         "install",
-        "--user",
         "--config",
         config.to_str().unwrap(),
     ]);
@@ -284,10 +173,68 @@ fn denied_registration_fails_with_guidance_and_keeps_scope() -> Result<()> {
     assert_eq!(out.status.code(), Some(3), "stderr: {err}");
     assert!(err.contains("permission"), "no permission guidance: {err}");
     assert!(
-        err.contains("--system") && err.contains("not"),
-        "guidance must say scope is not changed automatically: {err}"
+        err.contains("not") && err.contains("sudo"),
+        "guidance must say the tier is not changed automatically: {err}"
+    );
+    assert!(
+        !err.contains("--system") && !err.contains("--user"),
+        "no scope flag exists any more: {err}"
     );
     assert!(fx.registrations().is_empty(), "{:?}", fx.registrations());
+    Ok(())
+}
+
+/// No linger: a user install never runs `loginctl`. Every manager tool is a
+/// PATH shim that records its arguments and succeeds, so no real service
+/// manager is touched.
+#[test]
+fn user_install_runs_no_loginctl() -> Result<()> {
+    if is_root() {
+        return Ok(());
+    }
+    let fx = Fixture::new()?;
+    fx.write_config("https://relay.invalid")?;
+    let shims = fx.base().join("shims");
+    let calls = fx.base().join("calls.log");
+    std::fs::create_dir_all(&shims)?;
+    for tool in ["loginctl", "systemctl", "launchctl"] {
+        let shim = shims.join(tool);
+        std::fs::write(
+            &shim,
+            format!("#!/bin/sh\necho \"{tool} $*\" >> \"$IROH_TUNNEL_TEST_CALLS\"\nexit 0\n"),
+        )?;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let config = fx.config();
+    let out = fx
+        .command(&[
+            "serve",
+            "service",
+            "install",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", shims.display()),
+        )
+        .env("IROH_TUNNEL_TEST_CALLS", &calls)
+        .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", "-nolinger")
+        .stdin(Stdio::null())
+        .output()?;
+    let log = std::fs::read_to_string(&calls).unwrap_or_default();
+    assert!(!log.contains("loginctl"), "loginctl was run: {log}");
+    // Where a user manager exists, the install went through the shims.
+    let systemd = Path::new("/run/systemd/system").exists();
+    if cfg!(target_os = "macos") || systemd {
+        assert!(out.status.success(), "install: {}", stderr(&out));
+        let manager = if cfg!(target_os = "macos") {
+            "launchctl"
+        } else {
+            "systemctl --user"
+        };
+        assert!(log.contains(manager), "{log}");
+    }
     Ok(())
 }
 
@@ -328,9 +275,7 @@ impl Registered<'_> {
 
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
-        let _ = self
-            .cmd(&["serve", "service", "uninstall", "--user"])
-            .output();
+        let _ = self.cmd(&["serve", "service", "uninstall"]).output();
     }
 }
 
@@ -390,7 +335,6 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
         "serve",
         "service",
         "install",
-        "--user",
         "--config",
         config.to_str().unwrap(),
     ])?;
@@ -411,34 +355,34 @@ async fn user_service_lifecycle_uses_the_pinned_absolute_paths() -> Result<()> {
     })?;
     let first_id = node_id_of(&status_file).unwrap();
 
-    let status = ok(&["serve", "service", "status", "--user"])?;
+    let status = ok(&["serve", "service", "status"])?;
     assert!(
         status.to_lowercase().contains("running") || status.contains("state = running"),
         "{status}"
     );
 
     // stop: the process exits and the owned status file is cleaned up.
-    ok(&["serve", "service", "stop", "--user"])?;
+    ok(&["serve", "service", "stop"])?;
     wait_for("stopped service to remove its status file", || {
         !status_file.exists()
     })?;
     // `status` of a stopped unit still exits 0 (systemctl's non-zero is informative).
-    ok(&["serve", "service", "status", "--user"])?;
+    ok(&["serve", "service", "status"])?;
 
     // start again and restart: identity is the configured one throughout.
-    ok(&["serve", "service", "start", "--user"])?;
+    ok(&["serve", "service", "start"])?;
     wait_for("restarted status file", || {
         node_id_of(&status_file).is_some()
     })?;
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
-    ok(&["serve", "service", "restart", "--user"])?;
+    ok(&["serve", "service", "restart"])?;
     wait_for("status after restart", || {
         node_id_of(&status_file).is_some()
     })?;
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
 
     // uninstall removes the registration and the process.
-    ok(&["serve", "service", "uninstall", "--user"])?;
+    ok(&["serve", "service", "uninstall"])?;
     assert!(!svc.registration().exists());
     wait_for("uninstalled service to stop", || !status_file.exists())?;
     Ok(())
@@ -489,7 +433,7 @@ impl Registered<'_> {
     fn caller(&self, action: &str) -> Command {
         let mut command = Command::new(manage_service_binary());
         command
-            .args(["--role", "serve", "--action", action, "--scope", "user"])
+            .args(["--role", "serve", "--action", action])
             .env("HOME", real_home())
             .env("IROH_TUNNEL_STATE_DIR", self.fx.state())
             .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)

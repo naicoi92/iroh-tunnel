@@ -1,15 +1,14 @@
 //! systemd (Linux) service backend.
 //!
-//! Manages systemd unit files under `/etc/systemd/system` (system scope) or
-//! `~/.config/systemd/user` (user scope). Each action delegates to `systemctl`
+//! Manages systemd unit files under `/etc/systemd/system` (system tier) or
+//! `~/.config/systemd/user` (user tier). Each action delegates to `systemctl`
 //! with `--user` added automatically for the per-user domain.
 
 use super::super::effective_binary::{parse_systemd_show, EffectiveBinary};
 use super::super::native::{InstalledAt, Native, NativeOutput, ServiceNote};
-use super::super::pin::Pin;
 use super::super::registration::{instance_suffix, write_registration, RegistrationInput};
 use super::super::types::AppliedEffect;
-use super::super::types::ServiceScope;
+use crate::Tier;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -17,10 +16,10 @@ fn unit_name(role: &str) -> String {
     format!("iroh-tunnel-{role}{}.service", instance_suffix())
 }
 
-/// Where the unit file lives for the given scope.
-fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
-    Ok(match scope {
-        ServiceScope::System => {
+/// Where the unit file lives for the given tier.
+fn unit_path(role: &str, tier: Tier) -> Result<PathBuf> {
+    Ok(match tier {
+        Tier::System => {
             #[cfg(feature = "test-utils")]
             if let Some(dir) =
                 std::env::var_os("IROH_TUNNEL_TEST_SYSTEMD_DIR").filter(|d| !d.is_empty())
@@ -29,7 +28,7 @@ fn unit_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
             }
             PathBuf::from("/etc/systemd/system").join(unit_name(role))
         }
-        ServiceScope::User => {
+        Tier::User => {
             let home = dirs::home_dir().context("no home directory")?;
             home.join(".config/systemd/user").join(unit_name(role))
         }
@@ -46,7 +45,6 @@ fn format_unit(reg: &RegistrationInput<'_>) -> String {
         binary,
         config,
         state,
-        pin,
         policy,
         ..
     } = *reg;
@@ -67,15 +65,10 @@ fn format_unit(reg: &RegistrationInput<'_>) -> String {
         "no"
     };
     let restart_sec = policy.delay_secs;
-    // A system service reads a user's files as root: say whose (SM-04).
-    let pin_comment = pin.map_or_else(String::new, |p| format!("# {}\n", p.record()));
-    // A SID pin is rejected by `install` before this runs.
-    let trust_env = pin.and_then(Pin::unix_uid).map_or_else(String::new, |uid| {
-        let var = format!("{}={uid}", super::super::trust::ENV_TRUSTED_UID);
-        format!("Environment={}\n", quote_arg(&var, Expand::Environment))
-    });
+    // The service marker tells `run` a service manager started it.
+    let marker = format!("{}=1", super::super::ENV_SERVICE);
     format!(
-        "{pin_comment}[Unit]\n\
+        "[Unit]\n\
          Description=Iroh Tunnel ({role})\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
@@ -84,7 +77,7 @@ fn format_unit(reg: &RegistrationInput<'_>) -> String {
          Type=simple\n\
          ExecStart={binary} {role_arg}run --config {config}\n\
          Environment={state_env}\n\
-         {trust_env}\
+         Environment={marker}\n\
          Restart={restart}\n\
          RestartSec={restart_sec}\n\
          RestartPreventExitStatus=6\n\
@@ -125,8 +118,8 @@ fn quote_arg(arg: &str, line: Expand) -> String {
 }
 
 /// Run `systemctl [--user] <args...>`, bailing on non-zero exit.
-fn run_systemctl(native: &mut Native, scope: ServiceScope, args: &[&str]) -> Result<()> {
-    let output = systemctl(native, scope, args)
+fn run_systemctl(native: &mut Native, tier: Tier, args: &[&str]) -> Result<()> {
+    let output = systemctl(native, tier, args)
         .with_context(|| format!("failed to run systemctl {:?}", args))?;
     if !output.success() {
         bail!("systemctl {:?} failed with {}", args, output.status_text());
@@ -135,13 +128,9 @@ fn run_systemctl(native: &mut Native, scope: ServiceScope, args: &[&str]) -> Res
 }
 
 /// Run `systemctl [--user] <args...>` in the caller's output mode.
-fn systemctl(
-    native: &mut Native,
-    scope: ServiceScope,
-    args: &[&str],
-) -> std::io::Result<NativeOutput> {
+fn systemctl(native: &mut Native, tier: Tier, args: &[&str]) -> std::io::Result<NativeOutput> {
     let mut cmd = std::process::Command::new("systemctl");
-    if scope == ServiceScope::User {
+    if tier == Tier::User {
         cmd.arg("--user");
     }
     cmd.args(args);
@@ -149,8 +138,8 @@ fn systemctl(
 }
 
 /// Where the unit file is (or would be).
-pub(crate) fn registration_path(role: &str, scope: ServiceScope) -> Result<PathBuf> {
-    unit_path(role, scope)
+pub(crate) fn registration_path(role: &str, tier: Tier) -> Result<PathBuf> {
+    unit_path(role, tier)
 }
 
 /// What systemd will run for the role's system unit, from the loaded unit.
@@ -168,39 +157,33 @@ pub(crate) fn effective_binary(native: &mut Native, role: &str) -> EffectiveBina
     }
 }
 
-/// The installed unit's text, if any (to read its pin).
-pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
-    super::super::registration::read_registration(&unit_path(role, scope).ok()?)
-}
-
 pub(crate) fn install(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    super::super::pin::require_unix_pin(reg.pin)?;
     let unit = format_unit(reg);
-    let path = unit_path(reg.role, reg.scope)?;
+    let path = unit_path(reg.role, reg.tier)?;
     write_registration(&path, &unit)?;
     native.applied(AppliedEffect::RegistrationWritten(path.clone()));
 
-    enable_and_start(native, notes, reg.scope, &unit_name(reg.role), &path)
+    enable_and_start(native, notes, reg.tier, &unit_name(reg.role), &path)
 }
 
 /// Reload, enable and (re)start the written unit, then announce it.
 fn enable_and_start(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
-    scope: ServiceScope,
+    tier: Tier,
     name: &str,
     path: &Path,
 ) -> Result<()> {
-    run_systemctl(native, scope, &["daemon-reload"])?;
-    run_systemctl(native, scope, &["enable", name])?;
+    run_systemctl(native, tier, &["daemon-reload"])?;
+    run_systemctl(native, tier, &["enable", name])?;
     native.applied(AppliedEffect::Enabled);
     // `restart`, not `enable --now`: a re-install over a running unit must pick
     // up the new registration instead of leaving the old process running.
-    run_systemctl(native, scope, &["restart", name])?;
+    run_systemctl(native, tier, &["restart", name])?;
     native.applied(AppliedEffect::Started);
     notes(&ServiceNote::Installed {
         name: name.to_owned(),
@@ -213,15 +196,15 @@ pub(crate) fn uninstall(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<()> {
     let name = unit_name(role);
-    let path = unit_path(role, scope)?;
+    let path = unit_path(role, tier)?;
     // Best-effort stop/disable: the unit may not be loaded yet.
-    if run_systemctl(native, scope, &["stop", &name]).is_ok() {
+    if run_systemctl(native, tier, &["stop", &name]).is_ok() {
         native.applied(AppliedEffect::Stopped);
     }
-    if run_systemctl(native, scope, &["disable", &name]).is_ok() {
+    if run_systemctl(native, tier, &["disable", &name]).is_ok() {
         native.applied(AppliedEffect::Disabled);
     }
     if path.exists() {
@@ -231,13 +214,13 @@ pub(crate) fn uninstall(
     }
     // Refresh systemd's view of the now-removed unit. A failure here leaves
     // stale state, so surface it rather than reporting success silently.
-    run_systemctl(native, scope, &["daemon-reload"])?;
+    run_systemctl(native, tier, &["daemon-reload"])?;
     notes(&ServiceNote::Uninstalled { name });
     Ok(())
 }
 
-pub(crate) fn start(native: &mut Native, role: &str, scope: ServiceScope) -> Result<()> {
-    run_systemctl(native, scope, &["start", &unit_name(role)])?;
+pub(crate) fn start(native: &mut Native, role: &str, tier: Tier) -> Result<()> {
+    run_systemctl(native, tier, &["start", &unit_name(role)])?;
     native.applied(AppliedEffect::Started);
     Ok(())
 }
@@ -246,9 +229,9 @@ pub(crate) fn stop(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<()> {
-    run_systemctl(native, scope, &["stop", &unit_name(role)])?;
+    run_systemctl(native, tier, &["stop", &unit_name(role)])?;
     native.applied(AppliedEffect::Stopped);
     Ok(())
 }
@@ -257,9 +240,9 @@ pub(crate) fn restart(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<()> {
-    run_systemctl(native, scope, &["restart", &unit_name(role)])?;
+    run_systemctl(native, tier, &["restart", &unit_name(role)])?;
     native.applied(AppliedEffect::Started);
     Ok(())
 }
@@ -268,30 +251,27 @@ pub(crate) fn status(
     native: &mut Native,
     _notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<NativeOutput> {
     // `systemctl status` prints a human-readable status; in Inherit mode it
     // reaches the terminal directly, in Capture mode it is returned.
     // It exits non-zero (3) when the service is stopped; that is informative,
     // not a hard failure, so the status is not checked.
-    systemctl(native, scope, &["status", &unit_name(role)])
-        .context("failed to run systemctl status")
+    systemctl(native, tier, &["status", &unit_name(role)]).context("failed to run systemctl status")
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn unit_matches_golden_for_every_case() {
-        use super::super::super::fixtures::{assert_golden, cases, unix_paths, unix_pin};
+        use super::super::super::fixtures::{assert_golden, cases, unix_paths};
         let mut all = String::new();
         for case in cases() {
             let paths = unix_paths(case.role);
-            let pin = unix_pin(case.scope, &paths.config);
             all.push_str(&case.header());
             all.push_str(&format_unit(&RegistrationInput {
                 invocation: &case.invocation,
-                scope: case.scope,
-                pin: pin.as_ref(),
+                tier: case.tier,
                 ..registration(case.role, &paths.binary, &paths.config, &paths.state)
             }));
         }
@@ -308,7 +288,7 @@ mod tests {
             let root = home.join("system units");
             std::env::set_var("IROH_TUNNEL_TEST_SYSTEMD_DIR", &root);
             assert_eq!(
-                unit_path("serve", ServiceScope::System).unwrap(),
+                unit_path("serve", Tier::System).unwrap(),
                 root.join(unit_name("serve"))
             );
         });
@@ -358,7 +338,7 @@ mod tests {
         let mut fake = FakeRunner::new(&events, vec![output(0, "active (running)\n", "")]);
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Capture, &mut runner);
-        let out = status(&mut native, &mut |_| {}, "serve", ServiceScope::User).unwrap();
+        let out = status(&mut native, &mut |_| {}, "serve", Tier::User).unwrap();
         assert_eq!(out.stdout, b"active (running)\n");
         assert_eq!(
             *events.borrow(),
@@ -420,7 +400,7 @@ mod tests {
         let mut fake = FakeRunner::new(&events, vec![output(3, "inactive (dead)\n", "")]);
         let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
         let mut native = Native::new(OutputMode::Inherit, &mut runner);
-        assert!(status(&mut native, &mut |_| {}, "serve", ServiceScope::System).is_ok());
+        assert!(status(&mut native, &mut |_| {}, "serve", Tier::System).is_ok());
     }
 
     #[test]
@@ -434,7 +414,7 @@ mod tests {
         enable_and_start(
             &mut native,
             &mut notes,
-            ServiceScope::System,
+            Tier::System,
             "iroh-tunnel-serve.service",
             &path,
         )
@@ -442,7 +422,7 @@ mod tests {
         let log = events.borrow();
         assert_eq!(log.len(), 4, "{log:?}");
         // Re-install over a running unit must restart it: pin the order of the
-        // trailing arguments, independent of the scope flag run_systemctl adds.
+        // trailing arguments, independent of the tier flag run_systemctl adds.
         let expected_tails: [&[&str]; 3] = [
             &["daemon-reload"],
             &["enable", "iroh-tunnel-serve.service"],
@@ -461,6 +441,63 @@ mod tests {
                 name: "iroh-tunnel-serve.service".into(),
                 at: InstalledAt::Path(path)
             })
+        );
+    }
+
+    #[test]
+    fn systemd_unit_has_service_marker_and_no_pin() {
+        let unit = format_unit(&RegistrationInput {
+            tier: Tier::System,
+            ..registration(
+                "serve",
+                Path::new("/usr/bin/iroh-tunnel"),
+                Path::new("/etc/iroh-tunnel/serve.toml"),
+                Path::new("/run/iroh-tunnel"),
+            )
+        });
+        assert!(
+            unit.contains("Environment=IROH_TUNNEL_SERVICE=1\n"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("Environment=IROH_TUNNEL_STATE_DIR=/run/iroh-tunnel\n"),
+            "{unit}"
+        );
+        assert!(!unit.contains("iroh-tunnel-pin"), "{unit}");
+        assert!(!unit.contains("IROH_TUNNEL_TRUSTED_UID"), "{unit}");
+    }
+
+    #[test]
+    fn reinstall_restarts_a_running_unit() {
+        let events = Events::default();
+        let mut fake = FakeRunner::new(&events, vec![]);
+        let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        let path = PathBuf::from("/etc/systemd/system/iroh-tunnel-serve.service");
+        enable_and_start(
+            &mut native,
+            &mut |_| {},
+            Tier::System,
+            "iroh-tunnel-serve.service",
+            &path,
+        )
+        .unwrap();
+        let issued: Vec<String> = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Call { args, .. } => Some(args.join(" ")),
+                Event::Note(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            issued.last().map(String::as_str),
+            Some("restart iroh-tunnel-serve.service"),
+            "{issued:?}"
+        );
+        assert!(
+            !issued.iter().any(|c| c.starts_with("start ")),
+            "{issued:?}"
         );
     }
 
@@ -551,7 +588,7 @@ mod tests {
 
     #[test]
     fn unit_path_system_scope_is_under_etc() {
-        let p = unit_path("serve", ServiceScope::System).unwrap();
+        let p = unit_path("serve", Tier::System).unwrap();
         assert_eq!(
             p,
             PathBuf::from("/etc/systemd/system/iroh-tunnel-serve.service")

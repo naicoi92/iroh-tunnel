@@ -82,7 +82,7 @@ See [Configuration](configuration.md).
 | `-r` | `--relay-url` | Relay URL (quick mode, `config node`, access `config set`) |
 | `-k` | `--key-file` | Secret key file (quick mode) |
 | `-y` | `--yes` | Skip confirmation |
-| | `--reveal`, `--print`, `--system`, `--user`, `--relay-token`, `--relay-token-file`, `--clear-relays` | Long-only |
+| | `--reveal`, `--print`, `--relay-token`, `--relay-token-file`, `--clear-relays` | Long-only |
 
 ### Usage errors
 
@@ -96,9 +96,13 @@ config-file errors print only the error.
 
 | Subcommand | Purpose |
 |---|---|
-| `install [-c PATH] [--user\|--system]` | Register, enable and start the role |
-| `start`, `stop`, `restart`, `status` `[--user\|--system]` | Control the registered service |
-| `uninstall [--user\|--system]` | Stop and remove it |
+| `install [-c PATH]` | Register, enable and start the role |
+| `start`, `stop`, `restart`, `status` | Control the registered service |
+| `uninstall` | Stop and remove it |
+
+The verbs act on the user service, or on the system service when run as root,
+with `sudo` or from an elevated Windows terminal; there is no scope flag. See
+[User tier or system tier](services.md#user-tier-or-system-tier).
 
 Use `iroh-tunnel serve service ...` or `iroh-tunnel access service ...`
 with the combined executable, or `its service ...` / `ita service ...` with

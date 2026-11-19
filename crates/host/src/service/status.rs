@@ -6,47 +6,48 @@ use anyhow::Result;
 use super::backend::Backend;
 use super::native::{system_runner, Native, Runner, ServiceCall, ServiceNote};
 use super::types::{
-    Environment, Fact, Registration, ServiceFailure, ServiceInvocation, ServiceScope,
-    ServiceStatusReport,
+    Environment, Fact, Registration, ServiceFailure, ServiceInvocation, ServiceStatusReport,
 };
 use crate::role::Role;
+#[cfg(not(windows))]
+use crate::Tier;
 
-/// `service status`: the registration, liveness and owner facts, plus the
-/// native tool's output (inherited by the terminal in
-/// [`OutputMode::Inherit`](super::OutputMode::Inherit), returned otherwise).
+/// `service status` in the caller's tier: the registration, liveness and
+/// owner facts of that tier, plus the native tool's output (inherited by the
+/// terminal in [`OutputMode::Inherit`](super::OutputMode::Inherit), returned
+/// otherwise). A role also running in the other tier is reported as a
+/// [`ServiceNote::OtherTierRunning`]; its owner is never read.
 ///
 /// # Errors
 ///
-/// A [`ServiceFailure`] for policy refusals and when the native tool cannot
-/// run. A fact that cannot be read is [`Fact::Unavailable`], not an error.
+/// A [`ServiceFailure`] when the native tool cannot run (or, on Windows, the
+/// role has no registration). A fact that cannot be read is
+/// [`Fact::Unavailable`], not an error.
 pub fn status(
     role: Role,
     invocation: &ServiceInvocation,
-    scope: ServiceScope,
     env: Environment,
-    call: &mut ServiceCall,
+    call: &mut ServiceCall<'_>,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
     let mut runner = system_runner;
-    status_via(role, invocation, scope, env, call, &mut runner)
+    status_via(role, invocation, env, call, &mut runner)
 }
 
 /// [`status`] over an injected command runner.
 pub(crate) fn status_via(
     role: Role,
-    invocation: &ServiceInvocation,
-    scope: ServiceScope,
+    _invocation: &ServiceInvocation,
     env: Environment,
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
 ) -> Result<ServiceStatusReport, ServiceFailure> {
-    super::verb::check_verb_policy("status", role, invocation, scope, env)
-        .map_err(ServiceFailure::before_effects)?;
-    let liveness = crate::ownership::probe(role);
+    let tier = env.tier();
+    let liveness = crate::ownership::probe_tier(role, tier);
     let owner = owner_fact(&liveness);
     // Queried once: the absent-service refusal and the registration fact share
     // the answer. An absent service is exit 5.
     #[cfg(windows)]
-    let system_registration = if scope == ServiceScope::System {
+    let system_registration = if tier == crate::Tier::System {
         Some(
             super::system_verb::system_registration(role)
                 .map_err(ServiceFailure::before_effects)?,
@@ -54,6 +55,7 @@ pub(crate) fn status_via(
     } else {
         None
     };
+    super::verb::note_other_tier(role, tier, &mut *call.notes);
     // The Windows backends print the role's liveness as a note. It comes from
     // the probe above, so the note and the report cannot disagree; a failed
     // probe gives no note and stays an unavailable fact in the report.
@@ -62,13 +64,13 @@ pub(crate) fn status_via(
     #[cfg(not(windows))]
     let liveness_note: Option<ServiceNote> = None;
     let mut native = Native::new(call.output, runner);
-    let output = Backend::select(scope).and_then(|backend| {
+    let output = Backend::select(tier).and_then(|backend| {
         backend.status(
             &mut native,
             &mut *call.notes,
             liveness_note.as_ref(),
             role,
-            scope,
+            tier,
         )
     });
     let (applied, outputs) = native.finish();
@@ -88,7 +90,7 @@ pub(crate) fn status_via(
         })
     };
     #[cfg(not(windows))]
-    let registration = Fact::from_result(registration_of(role.name(), scope));
+    let registration = Fact::from_result(registration_of(role.name(), tier));
     Ok(ServiceStatusReport {
         registration,
         liveness: Fact::from_result(liveness),
@@ -115,10 +117,10 @@ fn owner_fact(
     }
 }
 
-/// Whether the platform's registration file exists (Unix backends).
+/// Whether the platform's registration file of `tier` exists (Unix backends).
 #[cfg(not(windows))]
-fn registration_of(role: &str, scope: ServiceScope) -> Result<Registration> {
-    let path = Backend::select(scope)?.registration_path(role, scope)?;
+fn registration_of(role: &str, tier: Tier) -> Result<Registration> {
+    let path = Backend::select(tier)?.registration_path(role, tier)?;
     Ok(if path.exists() {
         Registration::Present {
             location: path.display().to_string(),
@@ -147,7 +149,8 @@ mod tests {
     #[cfg(unix)]
     use super::super::fixtures::{in_isolated_home, run_status};
     use super::*;
-    use crate::ownership::{Liveness, OwnerRecord, Tier};
+    use crate::ownership::{Liveness, OwnerRecord};
+    use crate::Tier;
 
     #[test]
     fn role_note_describes_the_probed_owner() {
@@ -255,6 +258,74 @@ mod tests {
                 "{report:?}"
             );
             assert!(matches!(report.owner, Fact::Known(None)), "{report:?}");
+        });
+    }
+
+    /// Claim serve in `tier` and publish `node_id` as its identity.
+    #[cfg(all(unix, feature = "test-utils"))]
+    fn claim_as(tier: Tier, node_id: &str) -> crate::ownership::RoleClaim {
+        let name = if tier == Tier::System {
+            "system"
+        } else {
+            "user"
+        };
+        // SAFETY: single test thread in an isolated child process.
+        unsafe { std::env::set_var("IROH_TUNNEL_TEST_TIER", name) };
+        let claim = crate::ownership::claim(Role::Serve).unwrap();
+        claim.publish_identity(node_id).unwrap();
+        claim
+    }
+
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[test]
+    fn status_reports_own_tier_owner_when_both_run() {
+        const NAME: &str = "service::status::tests::status_reports_own_tier_owner_when_both_run";
+        in_isolated_home(NAME, |home| {
+            #[cfg(target_os = "linux")]
+            if crate::service::platform::system_wide_only() {
+                return; // BusyBox status runs the real init script
+            }
+            // SAFETY: single test thread in an isolated child process.
+            unsafe { std::env::set_var("IROH_TUNNEL_MACHINE_LOCK_DIR", home.join("machine")) };
+            let _system = claim_as(Tier::System, "system-node");
+            let _user = claim_as(Tier::User, "user-node");
+            // SAFETY: as above.
+            unsafe { std::env::remove_var("IROH_TUNNEL_TEST_TIER") };
+            let events = crate::service::native::fake::Events::default();
+            let mut fake = crate::service::native::fake::FakeRunner::new(&events, vec![]);
+            let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
+            let mut notes = crate::service::native::fake::note_sink(&events);
+            let mut call = ServiceCall::capture(&mut notes);
+            let report = status_via(
+                Role::Serve,
+                &ServiceInvocation::Combined,
+                super::super::fixtures::BATCH,
+                &mut call,
+                &mut runner,
+            )
+            .unwrap();
+            assert!(
+                matches!(&report.owner, Fact::Known(Some(o)) if o.node_id.as_deref() == Some("user-node")),
+                "{report:?}"
+            );
+            assert!(
+                matches!(
+                    report.liveness,
+                    Fact::Known(Liveness::Running {
+                        tier: Tier::User,
+                        ..
+                    })
+                ),
+                "{report:?}"
+            );
+            assert!(events
+                .borrow()
+                .contains(&crate::service::native::fake::Event::Note(
+                    ServiceNote::OtherTierRunning {
+                        role: "serve".into(),
+                        other: Tier::System,
+                    }
+                )));
         });
     }
 

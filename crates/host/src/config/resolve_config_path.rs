@@ -19,6 +19,18 @@ pub fn resolve_config_path(role: Role, override_path: Option<&Path>) -> Result<P
     if let Some(path) = override_path {
         return Ok(path.to_path_buf());
     }
+    resolve_config_path_for(role, crate::Tier::current())
+}
+
+/// The default configuration path of `role` in `tier`, for callers that act
+/// for a tier other than the process's own (the service layer derives it from
+/// the injected privilege). The `test-utils` config root applies to both
+/// tiers.
+///
+/// # Errors
+///
+/// As [`resolve_config_path`].
+pub(crate) fn resolve_config_path_for(role: Role, tier: crate::Tier) -> Result<PathBuf> {
     #[cfg(feature = "test-utils")]
     if let Some(dir) = std::env::var_os("IROH_TUNNEL_TEST_CONFIG_DIR") {
         let dir = std::path::PathBuf::from(dir);
@@ -27,7 +39,7 @@ pub fn resolve_config_path(role: Role, override_path: Option<&Path>) -> Result<P
             .join("iroh-tunnel")
             .join(format!("{}.toml", role.name())));
     }
-    crate::paths::default_config_path(role.name())
+    crate::paths::default_config_path_for(role.name(), tier)
 }
 
 #[cfg(test)]

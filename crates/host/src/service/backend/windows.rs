@@ -3,7 +3,7 @@
 //! A Task Scheduler task for the current user: logon trigger, interactive
 //! token, no elevation. It is driven through `schtasks` (`/Create /XML`,
 //! `/Run`, `/End`, `/Query`, `/Delete`), so install, start, status and stop
-//! need no administrator rights. The system scope is a Windows Service,
+//! need no administrator rights. The system tier is a Windows Service,
 //! handled by `windows_scm`, and does not reach this module.
 //!
 //! Per RO-03 stop is `schtasks /End`; no control channel or stop command is
@@ -20,8 +20,8 @@ use super::super::registration::instance_suffix;
 use super::super::registration::RegistrationInput;
 use super::super::task_xml::{encode_utf16_le, format_task_xml, task_action};
 use super::super::types::AppliedEffect;
-use super::super::types::ServiceScope;
 use crate::error::CliError;
+use crate::Tier;
 
 /// Task name, one per role (plus the test-only instance suffix).
 fn task_name(role: &str) -> String {
@@ -94,11 +94,6 @@ fn is_installed(native: &mut Native, role: &str) -> Result<bool> {
     Ok(listing.lines().any(|line| line.contains(&wanted)))
 }
 
-/// [`is_installed`] for the cross-scope check in `service install --system`.
-pub(crate) fn task_registered(native: &mut Native, role: &str) -> Result<bool> {
-    is_installed(native, role)
-}
-
 fn require_installed(native: &mut Native, role: &str) -> Result<()> {
     if is_installed(native, role)? {
         Ok(())
@@ -133,12 +128,13 @@ pub(crate) fn install(
     notes: &mut dyn FnMut(&ServiceNote),
     reg: &RegistrationInput<'_>,
 ) -> Result<()> {
-    debug_assert_eq!(
-        reg.scope,
-        ServiceScope::User,
-        "system scope is refused earlier"
-    );
+    debug_assert_eq!(reg.tier, Tier::User, "the system tier is a Windows Service");
     let role = reg.role;
+    super::super::always_elevated::refuse_if_always_elevated(
+        super::windows_account::is_builtin_admin(),
+        super::windows_account::is_admin_member(),
+        super::windows_account::enable_lua(),
+    )?;
     ensure_default_state(reg.state)?;
     let action = task_action(reg)?;
     let xml = format_task_xml(role, &current_user(native)?, &action, reg.policy);
@@ -193,7 +189,7 @@ impl Drop for TempDefinition {
     }
 }
 
-/// Add scope guidance to an access-denied failure (the account is never
+/// Add tier guidance to an access-denied failure (the account is never
 /// changed to work around it). Detection reads the English message: on a
 /// localised Windows the failure stays a plain service error (exit 5).
 fn denied_or(error: anyhow::Error, what: &str) -> anyhow::Error {
@@ -203,7 +199,7 @@ fn denied_or(error: anyhow::Error, what: &str) -> anyhow::Error {
         .contains("access is denied")
     {
         CliError::Permission(format!(
-            "access denied {what}. The service scope and account were not changed and \
+            "access denied {what}. The service tier and account were not changed and \
              nothing was registered; fix the permissions or policy of your account and re-run"
         ))
         .into()
@@ -216,7 +212,7 @@ pub(crate) fn uninstall(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    _scope: ServiceScope,
+    _tier: Tier,
 ) -> Result<()> {
     let name = task_name(role);
     if is_installed(native, role)? {
@@ -232,7 +228,7 @@ pub(crate) fn uninstall(
     Ok(())
 }
 
-pub(crate) fn start(native: &mut Native, role: &str, _scope: ServiceScope) -> Result<()> {
+pub(crate) fn start(native: &mut Native, role: &str, _tier: Tier) -> Result<()> {
     require_installed(native, role)?;
     schtasks_ok(native, &["/Run", "/TN", &task_name(role)])?;
     native.applied(AppliedEffect::Started);
@@ -243,7 +239,7 @@ pub(crate) fn stop(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    _scope: ServiceScope,
+    _tier: Tier,
 ) -> Result<()> {
     require_installed(native, role)?;
     let name = task_name(role);
@@ -273,24 +269,35 @@ pub(crate) fn restart(
     native: &mut Native,
     notes: &mut dyn FnMut(&ServiceNote),
     role: &str,
-    scope: ServiceScope,
+    tier: Tier,
 ) -> Result<()> {
-    stop(native, notes, role, scope)?;
-    // `/End` returns before the process is gone; a start that races the old
-    // process would be dropped (IgnoreNew) or refused by role ownership.
-    let deadline = std::time::Instant::now() + RESTART_WAIT;
-    while task_is_running(role)? {
-        if std::time::Instant::now() >= deadline {
-            return Err(CliError::Service(format!(
-                "{} did not stop within {}s after schtasks /End; not starting a second instance",
-                task_name(role),
-                RESTART_WAIT.as_secs()
-            ))
-            .into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    start(native, role, scope)
+    let id = status_role(role)?;
+    restart_with(native, notes, role, tier, |timeout| {
+        crate::ownership::wait_released_in(id, Tier::User, timeout)
+    })
+}
+
+/// [`restart`] with the wait for the user-tier lock injected: stop, wait up
+/// to [`RESTART_WAIT`], then start. `/End` returns before the process is
+/// gone; a start that races the old process would be dropped (IgnoreNew) or
+/// refused by role ownership, so a wait that times out starts nothing.
+fn restart_with(
+    native: &mut Native,
+    notes: &mut dyn FnMut(&ServiceNote),
+    role: &str,
+    tier: Tier,
+    wait: impl FnOnce(std::time::Duration) -> Result<()>,
+) -> Result<()> {
+    stop(native, notes, role, tier)?;
+    wait(RESTART_WAIT).map_err(|e| {
+        CliError::Service(format!(
+            "{} did not stop within {}s after schtasks /End; not starting a second instance \
+             ({e:#})",
+            task_name(role),
+            RESTART_WAIT.as_secs()
+        ))
+    })?;
+    start(native, role, tier)
 }
 
 pub(crate) fn status(
@@ -298,7 +305,7 @@ pub(crate) fn status(
     notes: &mut dyn FnMut(&ServiceNote),
     liveness_note: Option<&ServiceNote>,
     role: &str,
-    _scope: ServiceScope,
+    _tier: Tier,
 ) -> Result<NativeOutput> {
     require_installed(native, role)?;
     // The role lock, not the localised task text, says whether it runs. The
@@ -322,11 +329,44 @@ fn status_role(role: &str) -> Result<crate::role::Role> {
     }
 }
 
-/// Whether the role is running, by its ownership lock. The task `Status`
-/// text is localised, so the lock is the locale-independent source of truth.
+/// Whether the role is running in the user tier, by its ownership lock. The
+/// task `Status` text is localised, so the lock is the locale-independent
+/// source of truth; a system-tier holder of the role is not this task.
 fn task_is_running(role: &str) -> Result<bool> {
     Ok(matches!(
-        crate::ownership::probe(status_role(role)?)?,
+        crate::ownership::probe_tier(status_role(role)?, Tier::User)?,
         crate::ownership::Liveness::Running { .. }
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::native::fake::{output, Event, Events, FakeRunner};
+    use crate::service::native::OutputMode;
+
+    #[test]
+    fn task_restart_times_out_without_starting() {
+        let listing = format!("\"\\{}\",\"N/A\",\"Running\"\n", task_name("serve"));
+        let events = Events::default();
+        // Listing (installed), then `/End` succeeds.
+        let mut fake = FakeRunner::new(&events, vec![output(0, &listing, ""), output(0, "", "")]);
+        let mut runner = |c: &mut Command, m| fake.run(c, m);
+        let mut native = Native::new(OutputMode::Capture, &mut runner);
+        let err = restart_with(&mut native, &mut |_| {}, "serve", Tier::User, |_| {
+            Err(CliError::Service("serve did not stop".into()).into())
+        })
+        .expect_err("a held lock must stop the restart");
+        let Some(CliError::Service(msg)) = err.downcast_ref::<CliError>() else {
+            panic!("expected Service, got {err:?}");
+        };
+        assert!(msg.contains("did not stop"), "{msg}");
+        let runs: Vec<_> = events
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e, Event::Call { args, .. } if args.first().is_some_and(|a| a == "/Run")))
+            .cloned()
+            .collect();
+        assert!(runs.is_empty(), "no second start: {runs:?}");
+    }
 }

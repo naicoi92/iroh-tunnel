@@ -14,17 +14,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use windows_sys::Win32::Foundation::{
-    GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
-    ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
-    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+    ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSidToSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetAce, GetTokenInformation, IsValidSid, LookupAccountSidW, TokenUser, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
+    GetAce, IsValidSid, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileDispositionInfo, FileRenameInfo, FileRenameInfoEx, FlushFileBuffers,
@@ -35,7 +33,6 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::WindowsProgramming::{
     FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
 };
@@ -243,6 +240,7 @@ unsafe fn read_dacl(acl: *const ACL) -> Option<Vec<Ace>> {
             sid,
             mask: layout.mask,
             inherit_only: layout.inherit_only,
+            object_inherit: layout.object_inherit,
             allow: layout.allow,
         });
     }
@@ -407,6 +405,87 @@ pub(crate) fn verify_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
         return Err(not_a("directory", d));
     }
     Ok(())
+}
+
+/// Create the missing components of directory `path`, below an existing
+/// ancestor that is verified first.
+///
+/// The existing ancestor chain is opened without following reparse points
+/// and evaluated against `trusted`; its handles (no `FILE_SHARE_DELETE`) stay
+/// open while the missing components are created, so no ancestor can be
+/// renamed or replaced in between. A junction, symlink or untrusted ancestor
+/// is refused before anything is created. New directories inherit the
+/// parent's DACL; nothing existing is re-secured. An existing `path` is
+/// verified only.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the unsafe ancestor; an I/O error when a
+/// component cannot be created.
+pub(crate) fn ensure_dir(path: &Path, trusted: &TrustedSet) -> Result<()> {
+    let existing = path
+        .ancestors()
+        .find(|a| !a.as_os_str().is_empty() && a.exists())
+        .ok_or_else(|| permission(format!("{} has no existing ancestor", path.display())))?;
+    let held = verified(existing, LastAccess::Inspect, trusted)?;
+    let (_, d) = held.target()?;
+    if !d.is_dir {
+        return Err(not_a("directory", d));
+    }
+    let rest = path
+        .strip_prefix(existing)
+        .map_err(|_| permission(format!("cannot split {}", path.display())))?;
+    // `held` stays open until every component is created and verified.
+    let _held = (held, create_verified(existing, rest, trusted)?);
+    Ok(())
+}
+
+/// Create the components of `rest` below `base` one at a time. Each one,
+/// including one that already exists (a racer may have planted a junction
+/// with that name), is reopened without following a reparse point and
+/// verified (directory, owner, DACL) before the next is created in it; the
+/// handles of the verified chains are returned so they stay open.
+fn create_verified(base: &Path, rest: &Path, trusted: &TrustedSet) -> Result<Vec<Chain>> {
+    let mut chains = Vec::new();
+    let mut current = base.to_path_buf();
+    for name in rest.components() {
+        current.push(name);
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("cannot create directory {}", current.display())));
+            }
+        }
+        let chain = verified(&current, LastAccess::Inspect, trusted)?;
+        let (_, d) = chain.target()?;
+        if !d.is_dir {
+            return Err(not_a("directory", d));
+        }
+        chains.push(chain);
+    }
+    Ok(chains)
+}
+
+/// Refuse `path` when its DACL grants a read right to a SID outside
+/// `trusted` (see [`model::evaluate_confidential`]). A reparse point in the
+/// path is refused; nothing is changed.
+///
+/// # Errors
+///
+/// [`CliError::Permission`] naming the path and the offending SID, or when
+/// the path cannot be inspected.
+pub(crate) fn verify_confidential_with(path: &Path, trusted: &TrustedSet) -> Result<()> {
+    let expected = components_of(path)?.len();
+    let chain = open_chain(path, LastAccess::Inspect)?;
+    let (_, d) = chain.target()?;
+    if chain.descriptors.len() != expected || d.reparse {
+        return Err(refusal(Refusal::Reparse {
+            path: d.path.clone(),
+        }));
+    }
+    model::evaluate_confidential(d, trusted).map_err(refusal)
 }
 
 /// Verify `path` and return its text, read from the verified handle.
@@ -790,6 +869,43 @@ pub(crate) fn read_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<Op
         .with_context(|| format!("{} is not UTF-8", shown.display()))
 }
 
+/// Read the regular file `path` without following a link, only when its
+/// owner (read from the opened handle) is in `trusted`; `None` when absent or
+/// owned by someone else. The path above the file is not judged.
+///
+/// # Errors
+///
+/// The OS error of opening or reading the file.
+pub(crate) fn read_owned_by(path: &Path, trusted: &TrustedSet) -> Result<Option<String>> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+    let handle = match open_raw(
+        &verbatim(text),
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    ) {
+        Ok(handle) => handle,
+        Err(e) if is_not_found(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot open {}", path.display())),
+    };
+    let attrs = attributes(&handle).with_context(|| format!("cannot stat {}", path.display()))?;
+    if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return Ok(None);
+    }
+    let (owner, _) = owner_and_dacl(&handle)
+        .with_context(|| format!("cannot read the owner of {}", path.display()))?;
+    if !trusted.contains(&owner) {
+        return Ok(None);
+    }
+    let bytes = read_all(&handle, path)?;
+    Ok(Some(String::from_utf8(bytes).with_context(|| {
+        format!("{} is not UTF-8", path.display())
+    })?))
+}
+
 /// Remove `dir\name` (a file or a link, never its target) under a verified
 /// directory chain; absent is fine.
 ///
@@ -819,12 +935,17 @@ pub(crate) fn remove_in(dir: &Path, trusted: &TrustedSet, name: &str) -> Result<
     delete_on_close(&file).with_context(|| format!("failed to remove {name} in {}", dir.display()))
 }
 
-/// The SID of the process token's user.
+/// The SID of the process token's user (tests trust it as the test owner).
 ///
 /// # Errors
 ///
 /// When the token cannot be queried.
+#[cfg(test)]
 pub(crate) fn token_user() -> Result<Sid> {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
     let mut raw: HANDLE = std::ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
     // closing; `raw` is a valid out pointer.
@@ -868,87 +989,11 @@ pub(crate) fn token_user() -> Result<Sid> {
     unsafe { sid_string(sid) }.context("cannot convert the token user SID")
 }
 
-/// `DOMAIN\name` for `sid`, or `None` when it does not resolve.
-pub(crate) fn account_of(sid: &Sid) -> Option<String> {
-    let text = wide(&sid.0);
-    let mut psid: PSID = std::ptr::null_mut();
-    // SAFETY: `text` is NUL-terminated; `psid` receives a LocalAlloc'ed SID.
-    if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut psid) } == 0 {
-        return None;
-    }
-    let _psid = LocalBox(psid);
-    let (mut name_len, mut domain_len) = (0u32, 0u32);
-    let mut kind: SID_NAME_USE = 0;
-    // SAFETY: a size query: null buffers with zero lengths; the length and
-    // `kind` out pointers are valid; `psid` is alive.
-    let ok = unsafe {
-        LookupAccountSidW(
-            std::ptr::null(),
-            psid,
-            std::ptr::null_mut(),
-            &mut name_len,
-            std::ptr::null_mut(),
-            &mut domain_len,
-            &mut kind,
-        )
-    };
-    // SAFETY: GetLastError has no preconditions.
-    if ok != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
-        return None;
-    }
-    let mut name = vec![0u16; name_len as usize];
-    let mut domain = vec![0u16; domain_len as usize];
-    // SAFETY: the buffers are writable for the lengths passed; `psid` alive.
-    let ok = unsafe {
-        LookupAccountSidW(
-            std::ptr::null(),
-            psid,
-            name.as_mut_ptr(),
-            &mut name_len,
-            domain.as_mut_ptr(),
-            &mut domain_len,
-            &mut kind,
-        )
-    };
-    if ok == 0 {
-        return None;
-    }
-    let name = String::from_utf16(name.get(..name_len as usize)?).ok()?;
-    let domain = String::from_utf16(domain.get(..domain_len as usize)?).ok()?;
-    Some(if domain.is_empty() {
-        name
-    } else {
-        format!("{domain}\\{name}")
-    })
-}
-
-/// The owner of `path` itself (a link is not followed).
-///
-/// # Errors
-///
-/// [`CliError::Permission`] when the path cannot be opened or an element
-/// above it is a reparse point or not a directory.
-pub(crate) fn owner_of(path: &Path) -> Result<Sid> {
-    let expected = components_of(path)?.len();
-    let chain = open_chain(path, LastAccess::Inspect)?;
-    // Shorter only when the walk stopped at a reparse ancestor.
-    if chain.descriptors.len() != expected {
-        return Err(refusal(Refusal::Reparse {
-            path: chain.target()?.1.path.clone(),
-        }));
-    }
-    Ok(chain.target()?.1.owner.clone())
-}
-
 /// The `%ProgramData%` known folder (`FOLDERID_ProgramData`).
 ///
 /// # Errors
 ///
 /// An error naming the HRESULT when the shell cannot resolve the folder.
-#[cfg_attr(
-    all(feature = "test-utils", not(test)),
-    expect(dead_code, reason = "test-utils builds use a temp machine dir")
-)]
 pub(crate) fn program_data_dir() -> Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -981,19 +1026,11 @@ pub(crate) fn program_data_dir() -> Result<PathBuf> {
     result
 }
 
-/// Create the single directory `path` with the security descriptor given in
-/// SDDL form. The parent must exist; an existing directory is an error.
-///
-/// # Errors
-///
-/// The OS error from the SDDL conversion or from `CreateDirectoryW`.
-pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
+/// The self-relative security descriptor of `sddl`, freed on drop.
+fn sddl_descriptor(sddl: &str) -> io::Result<LocalBox> {
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
-    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
-
     let sddl = wide(sddl);
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and outlives the call; the out-pointer
@@ -1009,7 +1046,36 @@ pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    let descriptor = LocalBox(descriptor);
+    Ok(LocalBox(descriptor))
+}
+
+/// The last OS error of a create call, with "not elevated" codes reported as
+/// `PermissionDenied` (see [`super::map_create_error`]).
+fn create_error() -> io::Error {
+    let err = io::Error::last_os_error();
+    let code = err.raw_os_error().unwrap_or(0).cast_unsigned();
+    match super::map_create_error(code) {
+        io::ErrorKind::PermissionDenied if err.kind() != io::ErrorKind::PermissionDenied => {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{err} (os error {code})"),
+            )
+        }
+        _ => err,
+    }
+}
+
+/// Create the single directory `path` with the security descriptor given in
+/// SDDL form. The parent must exist; an existing directory is an error.
+///
+/// # Errors
+///
+/// The OS error from the SDDL conversion or from `CreateDirectoryW`.
+pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let descriptor = sddl_descriptor(sddl)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: win32_size_of::<SECURITY_ATTRIBUTES>(),
         lpSecurityDescriptor: descriptor.0,
@@ -1020,20 +1086,53 @@ pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     // that `descriptor` keeps alive until after the call.
     let created = unsafe { CreateDirectoryW(path.as_ptr(), &attributes) };
     if created == 0 {
-        let err = io::Error::last_os_error();
-        let code = err.raw_os_error().unwrap_or(0).cast_unsigned();
         // `CreateDirectoryW` is atomic: a failure leaves no directory behind.
-        return Err(match super::map_create_error(code) {
-            io::ErrorKind::PermissionDenied if err.kind() != io::ErrorKind::PermissionDenied => {
-                io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("{err} (os error {code})"),
-                )
-            }
-            _ => err,
-        });
+        return Err(create_error());
     }
     Ok(())
+}
+
+/// Create the new file `path` (read/write, never following or replacing an
+/// existing entry) with the security descriptor given in SDDL form, so it is
+/// never visible with another DACL.
+///
+/// # Errors
+///
+/// The OS error from the SDDL conversion or from `CreateFileW`;
+/// `AlreadyExists` when anything exists at `path`.
+pub(crate) fn create_file_with_sddl(path: &Path, sddl: &str) -> io::Result<std::fs::File> {
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+
+    let descriptor = sddl_descriptor(sddl)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: win32_size_of::<SECURITY_ATTRIBUTES>(),
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let path = wide(&path.to_string_lossy());
+    // SAFETY: `path` is NUL-terminated; `attributes` points at a descriptor
+    // that `descriptor` keeps alive until after the call.
+    let raw = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(create_error());
+    }
+    // SAFETY: CreateFileW succeeded, so `raw` is a valid handle owned by no
+    // one else; the File closes it on drop.
+    Ok(std::fs::File::from(unsafe {
+        OwnedHandle::from_raw_handle(raw)
+    }))
 }
 
 #[cfg(test)]
@@ -1046,7 +1145,7 @@ mod tests {
     use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
 
     fn me() -> TrustedSet {
-        TrustedSet::for_user_files(&token_user().expect("token user"))
+        TrustedSet::admin_with_test_owner(token_user().expect("token user"))
     }
 
     fn run(program: &str, args: &[&str]) -> bool {
@@ -1123,6 +1222,86 @@ mod tests {
         let text = permission_text(read_verified(&link.join("serve.toml"), &me()).unwrap_err());
         assert!(text.contains("reparse point"), "{text}");
         assert!(text.contains(&reported(&link)), "{text}");
+    }
+
+    fn dacl_text(path: &Path) -> String {
+        let out = Command::new("icacls").arg(path).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn ensure_dir_under_untrusted_ancestor_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Everyone may modify the ancestor: it is untrusted.
+        assert!(run(
+            "icacls",
+            &[tmp.path().to_str().unwrap(), "/grant", "*S-1-1-0:(OI)(CI)M"]
+        ));
+        let before = dacl_text(tmp.path());
+        let missing = tmp.path().join("a").join("state");
+        let text = permission_text(ensure_dir(&missing, &me()).unwrap_err());
+        assert!(text.contains("S-1-1-0"), "{text}");
+        assert!(!tmp.path().join("a").exists());
+        assert_eq!(dacl_text(tmp.path()), before);
+    }
+
+    #[test]
+    fn ensure_dir_under_a_junction_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        assert!(run(
+            "cmd",
+            &[
+                "/c",
+                "mklink",
+                "/J",
+                link.to_str().unwrap(),
+                real.to_str().unwrap()
+            ]
+        ));
+        let before = dacl_text(&real);
+        let text = permission_text(ensure_dir(&link.join("a").join("state"), &me()).unwrap_err());
+        assert!(text.contains("reparse point"), "{text}");
+        assert!(std::fs::read_dir(&real).unwrap().next().is_none());
+        assert_eq!(dacl_text(&real), before);
+    }
+
+    #[test]
+    fn create_verified_refuses_a_planted_junction_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        // Stand-in for the race: the missing component's name is already a
+        // junction when the loop reaches it.
+        let link = tmp.path().join("a");
+        assert!(run(
+            "cmd",
+            &[
+                "/c",
+                "mklink",
+                "/J",
+                link.to_str().unwrap(),
+                real.to_str().unwrap()
+            ]
+        ));
+        let text = permission_text(
+            create_verified(tmp.path(), Path::new("a\\state"), &me())
+                .map(|_| ())
+                .unwrap_err(),
+        );
+        assert!(text.contains("reparse point"), "{text}");
+        assert!(std::fs::read_dir(&real).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn ensure_dir_creates_missing_components_under_a_trusted_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("a").join("state");
+        ensure_dir(&state, &me()).unwrap();
+        assert!(state.is_dir());
+        ensure_dir(&state, &me()).unwrap();
     }
 
     #[test]
@@ -1372,24 +1551,5 @@ mod tests {
         let system32 = Path::new(&root).join("System32");
         verify_binary(&system32.join("cmd.exe")).unwrap();
         assert!(verify_binary(&system32).is_err());
-    }
-
-    #[test]
-    fn owner_of_temp_file_is_current_user() {
-        let (_tmp, file) = fixture();
-        let owner = owner_of(&file).unwrap();
-        // An elevated administrator's token makes Administrators the default
-        // owner of new files; any other token makes the user the owner.
-        let user = token_user().unwrap();
-        assert!(
-            owner == user || owner.0 == model::ADMINISTRATORS,
-            "{owner:?} vs {user:?}"
-        );
-        assert!(account_of(&user).is_some_and(|name| name.contains('\\')));
-        assert_eq!(account_of(&Sid("S-1-5-21-9-9-9-1".into())), None);
-        assert_eq!(
-            account_of(&Sid(model::SYSTEM.into())).map(|n| n.ends_with("\\SYSTEM")),
-            Some(true)
-        );
     }
 }

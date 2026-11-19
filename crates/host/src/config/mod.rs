@@ -48,6 +48,7 @@ pub use remove_service::remove_service;
 pub use require_existing::require_existing;
 pub use require_present::require_present;
 pub use resolve_config_path::resolve_config_path;
+pub(crate) use resolve_config_path::resolve_config_path_for;
 pub use resolve_secret_key::resolve_secret_key;
 pub use resolve_write_target::resolve_write_target;
 pub use set_node::set_node;

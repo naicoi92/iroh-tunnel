@@ -1,11 +1,11 @@
 //! Privileged configuration trust policy (SM-04, SM-05; issue #79 / #91).
 //!
-//! A system service runs as root but reads files in the installing user's
-//! home. Root must therefore refuse a path that an *untrusted* principal can
-//! change, or it would act on attacker-chosen content (or write through an
+//! A system service runs as root and reads its machine-wide config and state
+//! directory. Root must therefore refuse a path that an *untrusted* principal
+//! can change, or it would act on attacker-chosen content (or write through an
 //! attacker-chosen link).
 //!
-//! - **Trusted principals:** root and the one UID recorded at install time.
+//! - **Trusted principals:** root only (plus one test-build owner).
 //! - **Check:** descend from `/` one component at a time with no-follow,
 //!   handle-relative `openat`, `fstat` every opened handle and refuse when an
 //!   untrusted principal can write to the file or any directory above it. The
@@ -27,12 +27,8 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::RoleDoc;
 use crate::error::CliError;
 
-/// Set by the root-owned registration of a system service: the UID whose
-/// files the service may trust besides root. Its presence turns the checks on.
-pub const ENV_TRUSTED_UID: &str = "IROH_TUNNEL_TRUSTED_UID";
 const ENV_STATE_DIR: &str = "IROH_TUNNEL_STATE_DIR";
 
 const S_IFMT: u32 = 0o170_000;
@@ -47,29 +43,64 @@ fn refuse(msg: String) -> anyhow::Error {
 
 /// The principals whose ownership the trust walk accepts.
 ///
-/// The service binary is checked with [`TrustedOwners::RootOnly`]: the uid
-/// pinned for the config must never be able to change what root executes.
-/// The user's config, state directory and status files use
-/// [`TrustedOwners::RootAnd`] with that pinned uid.
+/// A system service trusts only root ([`TrustedOwners::RootOnly`]) for its
+/// binary, config, state directory and status files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrustedOwners {
     /// Only root (uid 0).
     RootOnly,
-    /// Root and the given uid.
-    RootAnd(u32),
+    /// Root and the one uid a test build adds through
+    /// `IROH_TUNNEL_TEST_TRUSTED_OWNER`; never built in production.
+    #[cfg(any(test, feature = "test-utils"))]
+    TestOwner(u32),
 }
 
 impl TrustedOwners {
     /// Whether a file or directory owned by `owner` is trusted.
     pub(crate) fn trusts(self, owner: u32) -> bool {
-        owner == 0 || matches!(self, Self::RootAnd(uid) if uid == owner)
+        match self {
+            Self::RootOnly => owner == 0,
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::TestOwner(uid) => owner == 0 || owner == uid,
+        }
     }
 
     fn describe(self) -> String {
         match self {
             Self::RootOnly => "root".to_owned(),
-            Self::RootAnd(uid) => format!("root or the installing user (uid {uid})"),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::TestOwner(uid) => format!("root or the test owner (uid {uid})"),
         }
+    }
+}
+
+/// The admin-only owners of a system service's files: root, plus the uid a
+/// test build names in `test_owner` (always `None` in production).
+///
+/// # Errors
+///
+/// [`CliError::Config`] when `test_owner` is not a numeric uid.
+pub(crate) fn admin_owners(test_owner: Option<&OsStr>) -> Result<TrustedOwners> {
+    let Some(text) = test_owner else {
+        return Ok(TrustedOwners::RootOnly);
+    };
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        text.to_str()
+            .and_then(|t| t.trim().parse().ok())
+            .map(TrustedOwners::TestOwner)
+            .ok_or_else(|| {
+                CliError::Config(format!(
+                    "IROH_TUNNEL_TEST_TRUSTED_OWNER must be a numeric uid, got {}",
+                    text.to_string_lossy()
+                ))
+                .into()
+            })
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let _ = text;
+        Ok(TrustedOwners::RootOnly)
     }
 }
 
@@ -378,30 +409,30 @@ fn create_child_dir(
     Entry::new(child.file, child.path)
 }
 
-/// Verify a directory (e.g. the state directory) the root service writes in.
+/// Verify the existing directory `path` against `owners`.
 ///
 /// # Errors
 ///
 /// [`CliError::Permission`] naming the unsafe path, owner and mode, or when the
-/// directory is missing (the service never creates it as root).
-pub fn verify_dir(path: &Path, trusted_uid: u32) -> Result<()> {
+/// directory is missing.
+pub(crate) fn verify_dir_with(path: &Path, owners: TrustedOwners) -> Result<()> {
     if !path.exists() {
         return Err(refuse(format!(
-            "{} does not exist; create it as the installing user (`mkdir -p`) — the service \
-             does not create directories in a user's home as root",
+            "{} does not exist; re-run the elevated `service install`, which creates it",
             path.display()
         )));
     }
-    walk(path, TrustedOwners::RootAnd(trusted_uid), EntryKind::Dir).map(drop)
+    walk(path, owners, EntryKind::Dir).map(drop)
 }
 
-/// Verify `path` and return its text read from the verified handle.
+/// Verify the file `path` against `owners` and return its text read from
+/// the verified handle.
 ///
 /// # Errors
 ///
 /// [`CliError::Permission`] when the path or any parent is unsafe.
-pub fn read_verified(path: &Path, trusted_uid: u32) -> Result<String> {
-    let mut entry = walk(path, TrustedOwners::RootAnd(trusted_uid), EntryKind::File)?;
+pub(crate) fn read_verified_with(path: &Path, owners: TrustedOwners) -> Result<String> {
+    let mut entry = walk(path, owners, EntryKind::File)?;
     let mut text = String::new();
     entry
         .file
@@ -596,99 +627,26 @@ fn cstring(text: &str) -> Result<CString> {
     CString::new(text).with_context(|| format!("{text:?} contains a NUL byte"))
 }
 
-/// The trust policy requested by the registration, if any.
-pub(crate) fn trusted_uid_from_env() -> Result<Option<u32>> {
-    match std::env::var(ENV_TRUSTED_UID) {
-        Ok(value) => value.trim().parse().map(Some).map_err(|_| {
-            CliError::Config(format!(
-                "{ENV_TRUSTED_UID} must be a numeric uid; re-run the service install"
-            ))
-            .into()
-        }),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(CliError::Config(format!("{ENV_TRUSTED_UID}: {e}")).into()),
-    }
-}
-
-/// Whether this is root run by a service manager with no trust pin: the
-/// registration predates the policy. systemd sets `INVOCATION_ID` and launchd
-/// `XPC_SERVICE_NAME`; a foreground `sudo` run sets neither and is unaffected.
-/// BusyBox init sets nothing, so that backend cannot be told apart (it is
-/// refused only after re-install, which pins it).
-fn is_unpinned_service(root: bool, env_set: impl Fn(&str) -> bool) -> bool {
-    root && ["INVOCATION_ID", "XPC_SERVICE_NAME"]
-        .iter()
-        .any(|name| env_set(name))
-}
-
-fn unpinned_refusal() -> String {
-    "this system service was installed before configuration trust checks existed, so it would \
-     read a user's file as root without verifying it. Nothing was changed. Re-install it with \
-     `sudo iroh-tunnel <role> service install --system`"
-        .to_owned()
-}
-
-/// Load a role config for `run`.
-///
-/// A plain read normally. Under a system service (`IROH_TUNNEL_TRUSTED_UID`
-/// set by the root-owned registration) the state directory and the config are
-/// verified first and the config is parsed only from the verified handle. The
-/// service never writes a generated key into the user's file (it would leave a
-/// root-owned file there), so a missing key is an error.
+/// The config text of a system service, read from a verified handle after
+/// the state directory (`IROH_TUNNEL_STATE_DIR` in `env`) and the config were
+/// verified against the admin-only owners.
 ///
 /// # Errors
 ///
-/// [`CliError::Permission`] for an unsafe path, [`CliError::Config`] for an
-/// invalid or keyless config.
-pub(crate) fn load_config<C: RoleDoc>(path: &Path) -> Result<C> {
-    let Some(uid) = trusted_uid_from_env()? else {
-        // SM-04: fail closed. A root process started by a service manager
-        // without a pin is a registration from before the policy.
-        // SAFETY: geteuid(2) has no preconditions and cannot fail.
-        let root = unsafe { libc::geteuid() } == 0;
-        if is_unpinned_service(root, |name| std::env::var_os(name).is_some()) {
-            return Err(CliError::Permission(unpinned_refusal()).into());
-        }
-        return crate::config::load_role_config::<C>(path);
-    };
-    if let Some(state) = std::env::var_os(ENV_STATE_DIR).filter(|d| !d.is_empty()) {
-        verify_dir(Path::new(&state), uid)?;
+/// [`CliError::Permission`] for an unsafe path, [`CliError::Config`] for a
+/// malformed test owner, or the read error.
+pub(crate) fn read_system_config(path: &Path, env: super::EnvLookup<'_>) -> Result<String> {
+    let owners = super::admin_trust(env)?;
+    if let Some(state) = env(ENV_STATE_DIR).filter(|d| !d.is_empty()) {
+        verify_dir_with(Path::new(&state), owners)?;
     }
-    let text = read_verified(path, uid)?;
-    let mut cfg = crate::config::parse_role_config::<C>(&text, path)?;
-    if cfg.node_mut().secret_key.is_empty() {
-        return Err(CliError::Config(format!(
-            "{} has no secret_key, and a system service does not write into a user's file as \
-             root. Run `iroh-tunnel <role> config keygen --config {}` as the user, then restart",
-            path.display(),
-            path.display()
-        ))
-        .into());
-    }
-    Ok(cfg)
+    read_verified_with(path, owners)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn root_under_a_service_manager_without_a_pin_is_a_legacy_registration() {
-        let manager = |name: &str| name == "INVOCATION_ID";
-        let launchd = |name: &str| name == "XPC_SERVICE_NAME";
-        let none = |_: &str| false;
-        assert!(is_unpinned_service(true, manager));
-        assert!(is_unpinned_service(true, launchd));
-        // A foreground root run (no manager) and any non-root run are not.
-        assert!(!is_unpinned_service(true, none));
-        assert!(!is_unpinned_service(false, manager));
-    }
-
-    #[test]
-    fn legacy_refusal_tells_the_operator_to_reinstall() {
-        let msg = unpinned_refusal();
-        assert!(msg.contains("service install --system"), "{msg}");
-    }
     use std::os::unix::fs::symlink;
 
     fn me() -> u32 {
@@ -724,9 +682,19 @@ mod tests {
     }
 
     #[test]
+    fn admin_owners_are_root_only_without_a_test_owner() {
+        assert_eq!(admin_owners(None).unwrap(), TrustedOwners::RootOnly);
+        assert_eq!(
+            admin_owners(Some(OsStr::new("4242"))).unwrap(),
+            TrustedOwners::TestOwner(4242)
+        );
+        assert!(admin_owners(Some(OsStr::new("alice"))).is_err());
+    }
+
+    #[test]
     fn safe_path_is_read_from_the_handle() {
         let (_tmp, file) = fixture();
-        assert_eq!(read_verified(&file, me()).unwrap(), "x = 1\n");
+        assert_eq!(read_verified_with(&file, mine()).unwrap(), "x = 1\n");
     }
 
     #[test]
@@ -744,10 +712,10 @@ mod tests {
         // The refusal may come from the file or, when the fixture lives under
         // a sticky `/tmp`, from the directory above it; either way a path that
         // a different principal owns must be named and refused.
-        let msg = refusal(read_verified(&file, other));
+        let msg = refusal(read_verified_with(&file, TrustedOwners::TestOwner(other)));
         assert!(msg.contains("unsafe") && msg.contains("/"), "{msg}");
         // And the same path is accepted when its owner is the trusted uid.
-        assert!(read_verified(&file, owner).is_ok());
+        assert!(read_verified_with(&file, TrustedOwners::TestOwner(owner)).is_ok());
     }
 
     #[test]
@@ -755,7 +723,7 @@ mod tests {
         let (_tmp, file) = fixture();
         for bad in [0o666, 0o620, 0o602] {
             mode(&file, bad);
-            let msg = refusal(read_verified(&file, me()));
+            let msg = refusal(read_verified_with(&file, mine()));
             assert!(msg.contains(file.to_str().unwrap()), "{msg}");
             assert!(msg.contains(&format!("{bad:04o}")), "{msg}");
         }
@@ -770,7 +738,7 @@ mod tests {
         ] {
             for bad in [0o775, 0o757] {
                 mode(dir, bad);
-                let msg = refusal(read_verified(&file, me()));
+                let msg = refusal(read_verified_with(&file, mine()));
                 assert!(msg.contains(dir.to_str().unwrap()), "{msg}");
             }
             mode(dir, 0o755);
@@ -783,12 +751,12 @@ mod tests {
         let root = tmp.path().canonicalize().unwrap();
         let link = root.join("link.toml");
         symlink(&file, &link).unwrap();
-        let msg = refusal(read_verified(&link, me()));
+        let msg = refusal(read_verified_with(&link, mine()));
         assert!(msg.contains("symlink"), "{msg}");
 
         let dir_link = root.join("dlink");
         symlink(root.join("a"), &dir_link).unwrap();
-        let msg = refusal(read_verified(&dir_link.join("b/serve.toml"), me()));
+        let msg = refusal(read_verified_with(&dir_link.join("b/serve.toml"), mine()));
         assert!(msg.contains("symlink"), "{msg}");
     }
 
@@ -796,8 +764,8 @@ mod tests {
     fn dot_dot_and_relative_paths_are_refused() {
         let (_tmp, file) = fixture();
         let dotted = file.parent().unwrap().join("../b/serve.toml");
-        assert!(refusal(read_verified(&dotted, me())).contains("canonical"));
-        assert!(refusal(read_verified(Path::new("serve.toml"), me())).contains("absolute"));
+        assert!(refusal(read_verified_with(&dotted, mine())).contains("canonical"));
+        assert!(refusal(read_verified_with(Path::new("serve.toml"), mine())).contains("absolute"));
     }
 
     #[test]
@@ -813,27 +781,27 @@ mod tests {
         let file = inner.join("serve.toml");
         std::fs::write(&file, "y").unwrap();
         mode(&file, 0o600);
-        assert_eq!(read_verified(&file, me()).unwrap(), "y");
+        assert_eq!(read_verified_with(&file, mine()).unwrap(), "y");
 
         // Without the sticky bit the same directory is refused.
         mode(&sticky, 0o777);
-        assert!(refusal(read_verified(&file, me())).contains("writable"));
+        assert!(refusal(read_verified_with(&file, mine())).contains("writable"));
     }
 
     #[test]
     fn directory_check_requires_an_existing_safe_directory() {
         let (_tmp, file) = fixture();
         let dir = file.parent().unwrap();
-        verify_dir(dir, me()).unwrap();
+        verify_dir_with(dir, mine()).unwrap();
         let missing = dir.join("nope");
-        assert!(verify_dir(&missing, me())
+        assert!(verify_dir_with(&missing, mine())
             .unwrap_err()
             .to_string()
             .contains("does not exist"));
         // A file is not a directory.
-        assert!(verify_dir(&file, me()).is_err());
+        assert!(verify_dir_with(&file, mine()).is_err());
         mode(dir, 0o777);
-        assert!(verify_dir(dir, me()).is_err());
+        assert!(verify_dir_with(dir, mine()).is_err());
     }
 
     #[test]
@@ -892,8 +860,10 @@ mod tests {
 
     // ---- Root-only trust mode (unix-system-binary-trust) ----
 
+    /// The admin-only owners plus the current user through the test-owner
+    /// seam, as a test build reads `IROH_TUNNEL_TEST_TRUSTED_OWNER`.
     fn mine() -> TrustedOwners {
-        TrustedOwners::RootAnd(me())
+        admin_owners(Some(OsStr::new(&me().to_string()))).unwrap()
     }
 
     fn other() -> u32 {
@@ -932,6 +902,25 @@ mod tests {
         verify_binary(&sh, TrustedOwners::RootOnly).unwrap();
     }
 
+    /// The real macOS chain `/` -> `/Library` -> `/Library/Application
+    /// Support` is walked with the root-only owners. The leaf
+    /// (`iroh-tunnel/state`) is created only by an elevated install, so the
+    /// walk covers its deepest ancestor that exists without root; every
+    /// directory above the leaf is therefore proven admin-only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_state_dir_passes_the_trust_walk() {
+        let state = crate::paths::default_state_dir_for(crate::Tier::System).unwrap();
+        let parent = state.parent().and_then(Path::parent).unwrap();
+        assert_eq!(parent, Path::new("/Library/Application Support"));
+        verify_dir_with(parent, TrustedOwners::RootOnly)
+            .unwrap_or_else(|e| panic!("walk refused {}: {e:#}", parent.display()));
+        // An installed leaf is walked too (needs a prior elevated install).
+        if state.exists() {
+            verify_dir_with(&state, TrustedOwners::RootOnly).unwrap();
+        }
+    }
+
     #[test]
     fn root_only_refuses_a_file_owned_by_the_test_user() {
         if me() == 0 {
@@ -953,11 +942,11 @@ mod tests {
     fn binary_refuses_untrusted_parent_naming_it() {
         if me() == 0 {
             // Relies on uid 0 being untrusted, which never holds for root:
-            // `RootAnd(other)` always trusts root. Skipped when run as root.
+            // `TestOwner(other)` always trusts root. Skipped when run as root.
             return;
         }
         let (tmp, file) = binary_fixture();
-        let msg = perm_message(verify_binary(&file, TrustedOwners::RootAnd(other())));
+        let msg = perm_message(verify_binary(&file, TrustedOwners::TestOwner(other())));
         let root = tmp.path().canonicalize().unwrap();
         let named = [root.clone(), root.join("bin")]
             .into_iter()
@@ -1018,11 +1007,11 @@ mod tests {
     fn binary_sticky_parent_untrusted_child_fails() {
         if me() == 0 {
             // Relies on uid 0 being untrusted, which never holds for root:
-            // `RootAnd(other)` always trusts root. Skipped when run as root.
+            // `TestOwner(other)` always trusts root. Skipped when run as root.
             return;
         }
         let (_tmp, file) = sticky_binary();
-        assert!(verify_binary(&file, TrustedOwners::RootAnd(other())).is_err());
+        assert!(verify_binary(&file, TrustedOwners::TestOwner(other())).is_err());
     }
 
     #[test]

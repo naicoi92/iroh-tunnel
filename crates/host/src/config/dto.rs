@@ -310,6 +310,10 @@ mod protocol_serde {
 /// internal abstraction over two known implementers, not a public extension
 /// point.
 pub(crate) trait RoleDoc: serde::Serialize + serde::de::DeserializeOwned {
+    /// The role this document configures; names the role in diagnostics such
+    /// as the legacy-registration refusal.
+    const ROLE: crate::Role;
+
     /// Validate the parsed document; the config store calls it after parsing.
     /// Each role implements its own checks.
     fn validate(&self) -> Result<()>;
@@ -389,6 +393,8 @@ impl ServeConfig {
 }
 
 impl RoleDoc for ServeConfig {
+    const ROLE: crate::Role = crate::Role::Serve;
+
     fn validate(&self) -> Result<()> {
         // Delegate to the inherent method so callers using either
         // ServeConfig::validate or RoleDoc::validate get the same behavior.
@@ -437,6 +443,8 @@ impl AccessConfig {
 }
 
 impl RoleDoc for AccessConfig {
+    const ROLE: crate::Role = crate::Role::Access;
+
     fn validate(&self) -> Result<()> {
         AccessConfig::validate(self)
     }

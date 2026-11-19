@@ -3,7 +3,7 @@
 //! `model` is pure and compiles on every platform; `win32` is the adapter
 //! that feeds it real descriptors read from no-follow handles.
 #![cfg_attr(
-    not(windows),
+    all(not(windows), not(test)),
     expect(
         dead_code,
         reason = "the model is pure and compiled everywhere, but only Windows consumes it"
@@ -16,10 +16,12 @@ pub(crate) mod model;
 #[cfg(windows)]
 pub(crate) mod win32;
 
+#[cfg(all(windows, test))]
+pub(crate) use win32::token_user;
 #[cfg(windows)]
 pub(crate) use win32::{
-    account_of, create_dir_with_sddl, owner_of, program_data_dir, publish, read_in, read_verified,
-    remove_in, token_user, verify_binary, verify_dir,
+    create_dir_with_sddl, create_file_with_sddl, ensure_dir, program_data_dir, publish, read_in,
+    read_owned_by, read_verified, remove_in, verify_binary, verify_confidential_with, verify_dir,
 };
 
 /// Serialised, scoped process-environment edits shared by every test that
@@ -70,14 +72,53 @@ pub(crate) mod test_env {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 use crate::error::CliError;
-use model::Sid;
+
+/// How [`verify_config_confidential`] treats a config directory or file that
+/// does not exist.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingObject {
+    /// Nothing to check (a write is about to create it).
+    Skip,
+    /// Pass it to the check, which fails on it (a read needs it to exist).
+    Refuse,
+}
+
+/// Refuse a config whose directory or file grants read access to a principal
+/// outside the admin-only set: the key it holds must stay confidential.
+/// `verify` is the confidentiality check of one path (injected for tests);
+/// `missing` says whether a missing directory or file is skipped. Never
+/// changes a DACL.
+///
+/// # Errors
+///
+/// The first error from `verify`, typically
+/// [`crate::error::CliError::Permission`] naming the path and the SID.
+#[cfg(windows)]
+pub(crate) fn verify_config_confidential(
+    config: &std::path::Path,
+    missing: MissingObject,
+    verify: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let checked = |path: &std::path::Path| missing == MissingObject::Refuse || path.exists();
+    if let Some(dir) = config.parent().filter(|d| !d.as_os_str().is_empty()) {
+        if checked(dir) {
+            verify(dir)?;
+        }
+    }
+    if checked(config) {
+        verify(config)?;
+    }
+    Ok(())
+}
 
 /// Verify the machine directory against the machine trust set.
 ///
 /// # Errors
 ///
-/// [`CliError::Permission`] naming the unsafe element.
+/// [`crate::error::CliError::Permission`] naming the unsafe element.
 #[cfg(windows)]
 pub(crate) fn verify_machine_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     verify_dir(dir, &model::TrustedSet::machine())
@@ -95,38 +136,40 @@ pub(crate) fn map_create_error(code: u32) -> std::io::ErrorKind {
     }
 }
 
-/// Set by the SCM registration of a system service: the SID whose files the
-/// service may trust besides the system principals.
-pub const ENV_TRUSTED_SID: &str = "IROH_TUNNEL_TRUSTED_SID";
-
-/// The trust pin requested by the registration, if any.
+/// The admin-only trusted set of a system service's files (SYSTEM,
+/// Administrators, TrustedInstaller), plus the SID a test build names in
+/// `test_owner` (always `None` in production).
 ///
 /// # Errors
 ///
-/// [`CliError::Config`] when the variable is set but is not a SID.
-pub(crate) fn trusted_sid_from_env() -> anyhow::Result<Option<Sid>> {
-    trusted_sid_from(std::env::var(ENV_TRUSTED_SID))
-}
-
-/// [`trusted_sid_from_env`] with the lookup injected, so it is testable
-/// without touching the process environment.
-fn trusted_sid_from(value: Result<String, std::env::VarError>) -> anyhow::Result<Option<Sid>> {
-    match value {
-        Ok(text) => model::parse_sid(&text).map(Some).ok_or_else(|| {
-            CliError::Config(format!(
-                "{ENV_TRUSTED_SID} must be a SID; re-run the service install"
-            ))
-            .into()
-        }),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(CliError::Config(format!("{ENV_TRUSTED_SID}: {e}")).into()),
+/// [`crate::error::CliError::Config`] when `test_owner` is not a SID.
+pub(crate) fn admin_set(test_owner: Option<&std::ffi::OsStr>) -> anyhow::Result<model::TrustedSet> {
+    let Some(text) = test_owner else {
+        return Ok(model::TrustedSet::machine());
+    };
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        text.to_str()
+            .and_then(model::parse_sid)
+            .map(model::TrustedSet::admin_with_test_owner)
+            .ok_or_else(|| {
+                CliError::Config(format!(
+                    "IROH_TUNNEL_TEST_TRUSTED_OWNER must be a SID, got {}",
+                    text.to_string_lossy()
+                ))
+                .into()
+            })
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let _ = text;
+        Ok(model::TrustedSet::machine())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env::VarError;
 
     #[test]
     fn create_errors_for_an_unelevated_token_are_permission_denied() {
@@ -138,7 +181,7 @@ mod tests {
         assert_eq!(map_create_error(3), Other);
     }
 
-    fn config_message(r: anyhow::Result<Option<Sid>>) -> String {
+    fn config_message(r: anyhow::Result<Option<model::Sid>>) -> String {
         match r.unwrap_err().downcast_ref::<CliError>() {
             Some(CliError::Config(m)) => m.clone(),
             other => panic!("{other:?}"),
@@ -146,24 +189,10 @@ mod tests {
     }
 
     #[test]
-    fn trusted_sid_absent_is_none_and_valid_is_parsed() {
-        assert_eq!(trusted_sid_from(Err(VarError::NotPresent)).unwrap(), None);
-        assert_eq!(
-            trusted_sid_from(Ok("S-1-5-21-1-2-3-1001".into())).unwrap(),
-            Some(Sid("S-1-5-21-1-2-3-1001".into()))
-        );
-    }
-
-    #[test]
-    fn malformed_trusted_sid_is_a_config_error() {
-        for bad in ["", "garbage", "S-1-5", " S-1-5-18"] {
-            assert_eq!(
-                config_message(trusted_sid_from(Ok(bad.into()))),
-                "IROH_TUNNEL_TRUSTED_SID must be a SID; re-run the service install",
-                "{bad:?}"
-            );
-        }
-        let msg = config_message(trusted_sid_from(Err(VarError::NotUnicode("x".into()))));
-        assert!(msg.contains(ENV_TRUSTED_SID), "{msg}");
+    fn admin_set_is_machine_without_a_test_owner_and_refuses_a_bad_one() {
+        assert!(admin_set(None).is_ok());
+        assert!(admin_set(Some(std::ffi::OsStr::new("S-1-5-21-1-2-3-1001"))).is_ok());
+        let msg = config_message(admin_set(Some(std::ffi::OsStr::new("alice"))).map(|_| None));
+        assert!(msg.contains("IROH_TUNNEL_TEST_TRUSTED_OWNER"), "{msg}");
     }
 }

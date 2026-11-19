@@ -8,105 +8,160 @@ use anyhow::Result;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::effective_binary::EffectiveBinary;
-use super::types::ServiceScope;
+use crate::Tier;
 
-/// Load a role config for `run`, enforcing the privileged trust policy when a
-/// system service asks for it (SM-04). Plain read elsewhere.
+/// Load a role config for `run`.
+///
+/// A registration from an earlier version is refused first, before any read
+/// (design D4). Under a system service ([`super::under_system_service`]) the
+/// state directory and the config are verified against the admin-only owners
+/// and the config is parsed only from the verified handle; a missing key is
+/// then generated and persisted by the caller through the normal store. Any
+/// other run (user tier, foreground elevated run) is a plain read.
 ///
 /// # Errors
 ///
-/// [`CliError::Permission`] for an unsafe path under a system service, or the
-/// ordinary config errors.
+/// [`CliError::Config`] for a legacy registration or an invalid config,
+/// [`CliError::Permission`] for an unsafe path under a system service.
+///
+/// [`CliError::Config`]: crate::error::CliError::Config
+/// [`CliError::Permission`]: crate::error::CliError::Permission
 pub(crate) fn load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
-    #[cfg(unix)]
-    {
-        super::trust::load_config(path)
-    }
-    #[cfg(windows)]
-    {
-        windows_load_config(path)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        crate::config::load_role_config::<C>(path)
-    }
+    load_config_in::<C>(
+        path,
+        crate::Tier::current(),
+        super::is_elevated(),
+        &super::process_env,
+    )
 }
 
-/// Windows twin of `trust::load_config`: under a system service the state
-/// directory and the config are verified and the config is parsed only from
-/// the verified handle. The service never writes into the user's file, so a
-/// missing key is an error; with a non-empty key `resolve_and_persist_key` has
-/// nothing to persist.
+/// [`load_config`] with the tier, the elevation and the environment
+/// injected.
+fn load_config_in<C: crate::config::RoleDoc>(
+    path: &Path,
+    tier: crate::Tier,
+    elevated: bool,
+    env: super::EnvLookup<'_>,
+) -> Result<C> {
+    if is_legacy_registration(elevated, env) {
+        return Err(legacy_refusal(C::ROLE)?.into());
+    }
+    if !super::system_service_marked(tier, env) {
+        return crate::config::load_role_config::<C>(path);
+    }
+    let text = read_system_config(path, env)?;
+    crate::config::parse_role_config::<C>(&text, path)
+}
+
+/// The verified config text of a system service.
+#[cfg(unix)]
+fn read_system_config(path: &Path, env: super::EnvLookup<'_>) -> Result<String> {
+    super::trust::read_system_config(path, env)
+}
+
+/// The verified config text of a system service: the ownership walk, then
+/// the confidentiality of the config directory and file, before parsing.
 #[cfg(windows)]
-fn windows_load_config<C: crate::config::RoleDoc>(path: &Path) -> Result<C> {
-    use super::trust_windows::{
-        model::TrustedSet, read_verified, trusted_sid_from_env, verify_dir,
-    };
-    use crate::error::CliError;
+fn read_system_config(path: &Path, env: super::EnvLookup<'_>) -> Result<String> {
+    use super::trust_windows::{read_verified, verify_confidential_with, verify_dir};
     use crate::status::writer::ENV_STATE_DIR;
 
-    let Some(sid) = trusted_sid_from_env()? else {
-        if std::env::var_os(super::ENV_SCM).is_some_and(|v| v == "1") {
-            return Err(CliError::Permission(
-                "a Windows system service started without IROH_TUNNEL_TRUSTED_SID; the \
-                 registration predates the trust policy. Re-install it with `iroh-tunnel <role> \
-                 service install --system`"
-                    .to_owned(),
-            )
-            .into());
-        }
-        return crate::config::load_role_config::<C>(path);
-    };
-    let trusted = TrustedSet::for_user_files(&sid);
-    if let Some(state) = std::env::var_os(ENV_STATE_DIR).filter(|d| !d.is_empty()) {
+    let trusted = super::admin_trust(env)?;
+    if let Some(state) = env(ENV_STATE_DIR).filter(|d| !d.is_empty()) {
         verify_dir(Path::new(&state), &trusted)?;
     }
     let text = read_verified(path, &trusted)?;
-    let mut cfg = crate::config::parse_role_config::<C>(&text, path)?;
-    if cfg.node_mut().secret_key.is_empty() {
-        return Err(CliError::Config(empty_key_text(path)).into());
+    if let Some(dir) = path.parent() {
+        verify_confidential_with(dir, &trusted)?;
     }
-    Ok(cfg)
+    verify_confidential_with(path, &trusted)?;
+    Ok(text)
 }
 
-/// The refusal for a keyless config under a Windows system service.
-#[cfg_attr(
-    all(not(test), not(windows)),
-    expect(
-        dead_code,
-        reason = "only Windows system services refuse a keyless config"
-    )
-)]
-fn empty_key_text(path: &Path) -> String {
-    format!(
-        "{0} has no secret_key, and a system service does not write into a user's file. Run \
-         `iroh-tunnel <role> config keygen --config {0}` as that user, then restart",
-        path.display()
-    )
+/// No system service exists on other targets, so nothing is verified.
+#[cfg(not(any(unix, windows)))]
+fn read_system_config(path: &Path, _env: super::EnvLookup<'_>) -> Result<String> {
+    std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read config: {}", path.display()))
 }
 
-/// The text of the currently installed system registration, if any: where a
-/// previous install's pin is read from to detect a retarget (SM-02). Only
-/// system installs read it, and those exist on Unix only.
-#[cfg(unix)]
-pub(crate) fn existing_registration(role: &str, scope: ServiceScope) -> Option<String> {
-    super::backend::Backend::select(scope)
-        .ok()?
-        .existing_registration(role, scope)
+/// Pinned-trust variables an earlier version wrote into system registrations.
+const LEGACY_TRUST_VARS: [&str; 2] = ["IROH_TUNNEL_TRUSTED_UID", "IROH_TUNNEL_TRUSTED_SID"];
+
+/// Whether systemd (`INVOCATION_ID`) or launchd (`XPC_SERVICE_NAME`) started
+/// this process. macOS Terminal exports `XPC_SERVICE_NAME=0` to its shells,
+/// so an empty or `0` value is a foreground session, not launchd. An
+/// `INVOCATION_ID` inherited from a terminal (e.g. GNOME) through `sudo -E`
+/// cannot be told apart from systemd.
+fn under_manager(env: super::EnvLookup<'_>) -> bool {
+    let invocation = env("INVOCATION_ID").is_some_and(|v| !v.is_empty());
+    let launchd = env("XPC_SERVICE_NAME").is_some_and(|v| !v.is_empty() && v != "0");
+    invocation || launchd
 }
 
-/// Whether the service of `scope` runs as root: a system service always, and
-/// a user-scope request on a host whose only registrations are system-wide
-/// (BusyBox init).
-pub(crate) fn root_run(scope: ServiceScope, system_wide_only: bool) -> bool {
-    scope == ServiceScope::System || system_wide_only
+/// Whether this process was started by a system registration of an earlier
+/// version: one that pins a user's files (`IROH_TUNNEL_TRUSTED_UID`/`_SID`),
+/// or an even older one where an elevated process runs under systemd or
+/// launchd without the [`super::ENV_SERVICE`] marker. A foreground elevated
+/// run sets no manager variable; an old BusyBox script cannot be told apart
+/// from one and is treated as such.
+fn is_legacy_registration(elevated: bool, env: super::EnvLookup<'_>) -> bool {
+    if LEGACY_TRUST_VARS.iter().any(|name| env(name).is_some()) {
+        return true;
+    }
+    let marked = env(super::ENV_SERVICE).is_some_and(|v| v == "1");
+    elevated && !marked && under_manager(env)
+}
+
+/// The configuration error for a legacy registration of `role`, naming the
+/// role's system-tier config path.
+///
+/// # Errors
+///
+/// [`CliError::Config`] when the system config path cannot be resolved.
+///
+/// [`CliError::Config`]: crate::error::CliError::Config
+fn legacy_refusal(role: crate::Role) -> Result<crate::error::CliError> {
+    let config = crate::paths::default_config_path_for(role.name(), crate::Tier::System)?;
+    Ok(crate::error::CliError::Config(legacy_refusal_text(
+        role.name(),
+        &config,
+        cfg!(windows),
+    )))
+}
+
+/// The legacy-registration guidance for `role` and its system `config`; the
+/// Windows wording replaces `sudo` with an elevated terminal.
+fn legacy_refusal_text(role: &str, config: &Path, windows: bool) -> String {
+    let config = config.display();
+    if windows {
+        format!(
+            "this service was registered by an earlier version and points at a user's files; \
+             create {config} (for example `iroh-tunnel {role} config keygen` from an elevated \
+             terminal (Run as administrator)) and re-run `iroh-tunnel {role} service install` \
+             from an elevated terminal (Run as administrator)"
+        )
+    } else {
+        format!(
+            "this service was registered by an earlier version and points at a user's files; \
+             create {config} (for example `sudo iroh-tunnel {role} config keygen`) and re-run \
+             `sudo iroh-tunnel {role} service install`"
+        )
+    }
+}
+
+/// Whether the service of `tier` runs as root: a system service always, and
+/// any service on a host whose only registrations are system-wide (BusyBox
+/// init).
+pub(crate) fn root_run(tier: Tier, system_wide_only: bool) -> bool {
+    tier == Tier::System || system_wide_only
 }
 
 /// What the service manager of this host will run for the role's root-run
 /// service, from the loaded definition.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn effective_binary(native: &mut super::native::Native, role: &str) -> EffectiveBinary {
-    match super::backend::Backend::select(ServiceScope::System) {
+    match super::backend::Backend::select(Tier::System) {
         Ok(backend) => backend.effective_binary(native, role),
         Err(error) => EffectiveBinary::Unknown(format!("{error:#}")),
     }
@@ -234,18 +289,307 @@ pub(crate) fn unsupported<T>() -> Result<T> {
 }
 
 #[cfg(test)]
-mod tests {
+mod load_tests {
     use super::*;
+    use crate::config::ServeConfig;
+    use crate::error::CliError;
+    use crate::Tier;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    /// An injected environment holding exactly `vars`.
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let map: HashMap<String, OsString> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), OsString::from(v)))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    fn config_message(r: Result<ServeConfig>) -> String {
+        match r.map(drop).unwrap_err().downcast::<CliError>() {
+            Ok(CliError::Config(m)) => m,
+            other => panic!("expected a config error, got {other:?}"),
+        }
+    }
+
+    fn load(path: &Path, tier: Tier, elevated: bool, vars: &[(&str, &str)]) -> Result<ServeConfig> {
+        load_config_in::<ServeConfig>(path, tier, elevated, &env_of(vars))
+    }
 
     #[test]
-    fn windows_empty_key_text_names_keygen() {
-        let text = empty_key_text(Path::new("C:/u/serve.toml"));
+    fn legacy_trusted_uid_is_refused_before_reading_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("alice/serve.toml");
+        let vars = [("IROH_TUNNEL_TRUSTED_UID", "1000"), (ENV_SERVICE_KEY, "1")];
+        // A missing file would be a read error; the refusal comes first.
+        let msg = config_message(load(&missing, Tier::System, true, &vars));
+        let expected = crate::paths::default_config_path_for("serve", Tier::System).unwrap();
+        assert!(msg.contains(&expected.display().to_string()), "{msg}");
+        assert!(msg.contains("earlier version"), "{msg}");
+        assert!(!missing.exists());
+        let unix = legacy_refusal_text("serve", Path::new("/etc/iroh-tunnel/serve.toml"), false);
+        assert!(unix.contains("/etc/iroh-tunnel/serve.toml"), "{unix}");
         assert!(
-            text.contains("config keygen --config C:/u/serve.toml"),
-            "{text}"
+            unix.contains("sudo iroh-tunnel serve service install"),
+            "{unix}"
         );
-        assert!(text.contains("does not write into a user's file"), "{text}");
     }
+
+    #[test]
+    fn legacy_trusted_sid_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("serve.toml");
+        let vars = [("IROH_TUNNEL_TRUSTED_SID", "S-1-5-21-1-2-3-1001")];
+        let msg = config_message(load(&missing, Tier::System, true, &vars));
+        assert!(msg.contains("service install"), "{msg}");
+        let config = Path::new(r"C:\ProgramData\iroh-tunnel\config\serve.toml");
+        let windows = legacy_refusal_text("serve", config, true);
+        assert!(
+            windows.contains(r"C:\ProgramData\iroh-tunnel\config\serve.toml"),
+            "{windows}"
+        );
+        assert!(
+            windows.contains("`iroh-tunnel serve service install`"),
+            "{windows}"
+        );
+        assert!(
+            windows.contains("elevated terminal (Run as administrator)"),
+            "{windows}"
+        );
+        assert!(!windows.contains("sudo"), "{windows}");
+    }
+
+    #[test]
+    fn root_under_manager_without_service_marker_is_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("serve.toml");
+        for manager in ["INVOCATION_ID", "XPC_SERVICE_NAME"] {
+            let msg = config_message(load(&missing, Tier::System, true, &[(manager, "x")]));
+            assert!(msg.contains("earlier version"), "{manager}: {msg}");
+        }
+        // With the marker it is a current registration, not a legacy one.
+        assert!(!is_legacy_registration(
+            true,
+            &env_of(&[("INVOCATION_ID", "x"), (ENV_SERVICE_KEY, "1")])
+        ));
+        // A non-elevated process under a manager is a user service.
+        assert!(!is_legacy_registration(
+            false,
+            &env_of(&[("INVOCATION_ID", "x")])
+        ));
+    }
+
+    #[test]
+    fn foreground_sudo_e_from_terminal_is_not_legacy() {
+        // macOS Terminal exports XPC_SERVICE_NAME=0 and `sudo -E` keeps it.
+        assert!(!is_legacy_registration(
+            true,
+            &env_of(&[("XPC_SERVICE_NAME", "0")])
+        ));
+        assert!(!is_legacy_registration(
+            true,
+            &env_of(&[("XPC_SERVICE_NAME", "")])
+        ));
+    }
+
+    #[test]
+    fn foreground_root_run_is_not_walked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("serve.toml");
+        // World-writable: a walk would refuse it; a foreground run reads it.
+        std::fs::write(&file, format!("[node]\nsecret_key = \"{KEY}\"\n")).unwrap();
+        open_up(&file);
+        let cfg = load(&file, Tier::System, true, &[]).unwrap();
+        assert_eq!(cfg.node.secret_key, KEY);
+    }
+
+    #[test]
+    fn user_service_with_marker_is_not_walked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("serve.toml");
+        std::fs::write(&file, format!("[node]\nsecret_key = \"{KEY}\"\n")).unwrap();
+        open_up(&file);
+        let vars = [(ENV_SERVICE_KEY, "1"), ("INVOCATION_ID", "x")];
+        let cfg = load(&file, Tier::User, false, &vars).unwrap();
+        assert_eq!(cfg.node.secret_key, KEY);
+    }
+
+    #[test]
+    fn system_service_marker_needs_the_system_tier_and_value_one() {
+        use crate::service::{system_service_marked, ENV_SCM};
+        assert!(system_service_marked(
+            Tier::System,
+            &env_of(&[(ENV_SERVICE_KEY, "1")])
+        ));
+        assert!(system_service_marked(
+            Tier::System,
+            &env_of(&[(ENV_SCM, "1")])
+        ));
+        assert!(!system_service_marked(
+            Tier::System,
+            &env_of(&[(ENV_SERVICE_KEY, "0")])
+        ));
+        assert!(!system_service_marked(
+            Tier::User,
+            &env_of(&[(ENV_SERVICE_KEY, "1")])
+        ));
+        assert!(!system_service_marked(Tier::System, &env_of(&[])));
+    }
+
+    const ENV_SERVICE_KEY: &str = crate::service::ENV_SERVICE;
+
+    /// Make `path` writable by group and others (Unix); a walked load
+    /// refuses it. Elsewhere a no-op.
+    fn open_up(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
+    #[cfg(unix)]
+    mod unix_walk {
+        use super::*;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::path::PathBuf;
+
+        fn me() -> String {
+            // SAFETY: geteuid(2) has no preconditions and cannot fail.
+            unsafe { libc::geteuid() }.to_string()
+        }
+
+        /// `<tmp>/etc/serve.toml` (0600) and `<tmp>/state`, both 0755 dirs.
+        fn fixture(body: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().canonicalize().unwrap();
+            let etc = root.join("etc");
+            let state = root.join("state");
+            for dir in [&etc, &state] {
+                std::fs::create_dir(dir).unwrap();
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let file = etc.join("serve.toml");
+            std::fs::write(&file, body).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            (tmp, file, state)
+        }
+
+        fn permission_message(r: Result<ServeConfig>) -> String {
+            match r.map(drop).unwrap_err().downcast::<CliError>() {
+                Ok(CliError::Permission(m)) => m,
+                other => panic!("expected a permission error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn system_service_reads_admin_owned_config() {
+            let (_tmp, file, state) = fixture(&format!("[node]\nsecret_key = \"{KEY}\"\n"));
+            let me = me();
+            let vars = [
+                (ENV_SERVICE_KEY, "1"),
+                ("IROH_TUNNEL_TEST_TRUSTED_OWNER", me.as_str()),
+                ("IROH_TUNNEL_STATE_DIR", state.to_str().unwrap()),
+            ];
+            let cfg = load(&file, Tier::System, true, &vars).unwrap();
+            assert_eq!(cfg.node.secret_key, KEY);
+        }
+
+        #[test]
+        fn system_service_refuses_untrusted_owner() {
+            if me() == "0" {
+                // Root owns the fixture and root is always trusted.
+                return;
+            }
+            let (_tmp, file, _state) = fixture(&format!("[node]\nsecret_key = \"{KEY}\"\n"));
+            let msg =
+                permission_message(load(&file, Tier::System, true, &[(ENV_SERVICE_KEY, "1")]));
+            assert!(msg.contains("owner uid"), "{msg}");
+        }
+
+        #[test]
+        fn system_service_refuses_a_loosened_config_naming_mode() {
+            let (_tmp, file, _state) = fixture("");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
+            let me = me();
+            let vars = [
+                (ENV_SERVICE_KEY, "1"),
+                ("IROH_TUNNEL_TEST_TRUSTED_OWNER", me.as_str()),
+            ];
+            let msg = permission_message(load(&file, Tier::System, true, &vars));
+            assert!(
+                msg.contains(file.to_str().unwrap()) && msg.contains("0666"),
+                "{msg}"
+            );
+        }
+
+        #[test]
+        fn symlinked_component_is_refused() {
+            let (tmp, file, _state) = fixture("");
+            let link = tmp.path().canonicalize().unwrap().join("link");
+            std::os::unix::fs::symlink(file.parent().unwrap(), &link).unwrap();
+            let me = me();
+            let vars = [
+                (ENV_SERVICE_KEY, "1"),
+                ("IROH_TUNNEL_TEST_TRUSTED_OWNER", me.as_str()),
+            ];
+            let msg = permission_message(load(&link.join("serve.toml"), Tier::System, true, &vars));
+            assert!(msg.contains("symlink"), "{msg}");
+        }
+
+        #[test]
+        fn system_service_refuses_an_unsafe_state_dir() {
+            let (_tmp, file, state) = fixture("");
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let me = me();
+            let vars = [
+                (ENV_SERVICE_KEY, "1"),
+                ("IROH_TUNNEL_TEST_TRUSTED_OWNER", me.as_str()),
+                ("IROH_TUNNEL_STATE_DIR", state.to_str().unwrap()),
+            ];
+            let msg = permission_message(load(&file, Tier::System, true, &vars));
+            assert!(msg.contains(state.to_str().unwrap()), "{msg}");
+        }
+
+        #[test]
+        fn missing_key_is_persisted_under_system_service() {
+            let (_tmp, file, _state) = fixture("[node]\nsecret_key = \"\"\n");
+            let me = me();
+            let vars = [
+                (ENV_SERVICE_KEY, "1"),
+                ("IROH_TUNNEL_TEST_TRUSTED_OWNER", me.as_str()),
+            ];
+            // `run` loads, then persists the generated key through the store.
+            let mut cfg = load(&file, Tier::System, true, &vars).unwrap();
+            crate::config::resolve_and_persist_key(&mut cfg, &file).unwrap();
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.contains(&cfg.node.secret_key) && !cfg.node.secret_key.is_empty());
+            let meta = std::fs::metadata(&file).unwrap();
+            assert_eq!(meta.mode() & 0o777, 0o600);
+            assert_eq!(meta.uid().to_string(), me);
+        }
+
+        #[test]
+        fn malformed_test_owner_is_a_config_error() {
+            let (_tmp, file, _state) = fixture("");
+            let vars = [
+                (ENV_SERVICE_KEY, "1"),
+                ("IROH_TUNNEL_TEST_TRUSTED_OWNER", "alice"),
+            ];
+            let msg = config_message(load(&file, Tier::System, true, &vars));
+            assert!(msg.contains("IROH_TUNNEL_TEST_TRUSTED_OWNER"), "{msg}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     // Compile-only guard: on Linux the runtime probe must exist and be bool.
     #[cfg(target_os = "linux")]
@@ -255,10 +599,10 @@ mod tests {
     }
 
     #[test]
-    fn root_run_covers_system_scope_and_system_wide_only_hosts() {
-        assert!(root_run(ServiceScope::System, false));
-        assert!(!root_run(ServiceScope::User, false));
-        assert!(root_run(ServiceScope::User, true));
+    fn root_run_covers_system_tier_and_system_wide_only_hosts() {
+        assert!(root_run(Tier::System, false));
+        assert!(!root_run(Tier::User, false));
+        assert!(root_run(Tier::User, true));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -454,7 +798,9 @@ mod windows_tests {
     use super::*;
     use crate::config::ServeConfig;
     use crate::error::CliError;
-    use crate::service::trust_windows::{test_env::EnvGuard, token_user};
+    use crate::service::trust_windows::token_user;
+    use crate::Tier;
+    use std::ffi::OsString;
 
     const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
@@ -464,71 +810,50 @@ mod windows_tests {
         file
     }
 
-    fn sid_text() -> String {
-        token_user().unwrap().0
+    fn icacls(args: &[&str]) -> Vec<u8> {
+        let out = std::process::Command::new("icacls")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "icacls {args:?}");
+        out.stdout
+    }
+
+    /// A system service started by the SCM whose test build trusts the
+    /// current user besides the admin principals.
+    fn load(path: &Path) -> Result<ServeConfig> {
+        let sid = OsString::from(token_user()?.0);
+        let env = move |name: &str| match name {
+            "IROH_TUNNEL_SCM" => Some(OsString::from("1")),
+            "IROH_TUNNEL_TEST_TRUSTED_OWNER" => Some(sid.clone()),
+            _ => None,
+        };
+        load_config_in::<ServeConfig>(path, Tier::System, true, &env)
     }
 
     fn error_of(r: Result<ServeConfig>) -> CliError {
-        match r.unwrap_err().downcast::<CliError>() {
+        match r.map(drop).unwrap_err().downcast::<CliError>() {
             Ok(e) => e,
             Err(e) => panic!("expected CliError: {e:#}"),
         }
     }
 
     #[test]
-    fn service_without_sid_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file = write(tmp.path(), "");
-        let _env = EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", None),
-            ("IROH_TUNNEL_SCM", Some("1")),
-        ]);
-        match error_of(load_config::<ServeConfig>(&file)) {
-            CliError::Permission(m) => assert!(m.contains("service install --system"), "{m}"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn empty_secret_key_under_service_is_config_error_and_file_unchanged() {
+    fn empty_secret_key_under_service_is_persisted() {
         let tmp = tempfile::tempdir().unwrap();
         let file = write(tmp.path(), "[node]\nsecret_key = \"\"\n");
-        let before = std::fs::read(&file).unwrap();
-        let sddl_before = std::process::Command::new("icacls")
-            .arg(&file)
-            .output()
-            .unwrap()
-            .stdout;
-        let sid = sid_text();
-        let _env = EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
-            ("IROH_TUNNEL_STATE_DIR", None),
-            ("IROH_TUNNEL_SCM", None),
-        ]);
-        match error_of(load_config::<ServeConfig>(&file)) {
-            CliError::Config(m) => assert!(m.contains("config keygen"), "{m}"),
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(std::fs::read(&file).unwrap(), before);
-        let sddl_after = std::process::Command::new("icacls")
-            .arg(&file)
-            .output()
-            .unwrap()
-            .stdout;
-        assert_eq!(sddl_after, sddl_before);
+        let mut cfg = load(&file).unwrap();
+        crate::config::resolve_and_persist_key(&mut cfg, &file).unwrap();
+        assert!(!cfg.node.secret_key.is_empty());
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(&cfg.node.secret_key), "key persisted");
     }
 
     #[test]
     fn invalid_toml_reports_failed_to_parse() {
         let tmp = tempfile::tempdir().unwrap();
         let file = write(tmp.path(), "this is = = not toml");
-        let sid = sid_text();
-        let _env = EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
-            ("IROH_TUNNEL_STATE_DIR", None),
-            ("IROH_TUNNEL_SCM", None),
-        ]);
-        let err = load_config::<ServeConfig>(&file).unwrap_err();
+        let err = load(&file).unwrap_err();
         assert!(format!("{err:#}").contains("failed to parse"), "{err:#}");
     }
 
@@ -536,20 +861,44 @@ mod windows_tests {
     fn writable_config_is_permission_error() {
         let tmp = tempfile::tempdir().unwrap();
         let file = write(tmp.path(), &format!("[node]\nsecret_key = \"{KEY}\"\n"));
-        let granted = std::process::Command::new("icacls")
-            .args([file.to_str().unwrap(), "/grant", "*S-1-1-0:M"])
-            .output()
-            .is_ok_and(|o| o.status.success());
-        assert!(granted);
-        let sid = sid_text();
-        let _env = EnvGuard::set(&[
-            ("IROH_TUNNEL_TRUSTED_SID", Some(&sid)),
-            ("IROH_TUNNEL_STATE_DIR", None),
-            ("IROH_TUNNEL_SCM", None),
-        ]);
-        assert!(matches!(
-            error_of(load_config::<ServeConfig>(&file)),
-            CliError::Permission(_)
-        ));
+        icacls(&[file.to_str().unwrap(), "/grant", "*S-1-1-0:M"]);
+        assert!(matches!(error_of(load(&file)), CliError::Permission(_)));
+    }
+
+    #[test]
+    fn service_start_refuses_readable_config_with_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = write(tmp.path(), &format!("[node]\nsecret_key = \"{KEY}\"\n"));
+        let path = file.to_str().unwrap();
+        icacls(&[path, "/grant", "*S-1-5-32-545:R"]);
+        let before = icacls(&[path]);
+        match error_of(load(&file)) {
+            CliError::Permission(m) => {
+                assert!(m.contains("S-1-5-32-545"), "{m}");
+                assert!(!m.contains(KEY), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(icacls(&[path]), before, "DACL unchanged");
+    }
+
+    #[test]
+    fn service_start_refuses_a_readable_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = write(tmp.path(), &format!("[node]\nsecret_key = \"{KEY}\"\n"));
+        icacls(&[tmp.path().to_str().unwrap(), "/grant", "*S-1-5-32-545:R"]);
+        assert!(matches!(error_of(load(&file)), CliError::Permission(m) if m.contains("Users")));
+    }
+
+    #[test]
+    fn config_in_user_profile_is_refused_without_a_test_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = write(tmp.path(), &format!("[node]\nsecret_key = \"{KEY}\"\n"));
+        let env = |name: &str| (name == "IROH_TUNNEL_SCM").then(|| OsString::from("1"));
+        let r = load_config_in::<ServeConfig>(&file, Tier::System, true, &env);
+        match error_of(r) {
+            CliError::Permission(m) => assert!(m.contains("untrusted SID"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 }

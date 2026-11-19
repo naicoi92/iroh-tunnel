@@ -13,7 +13,8 @@ mod schema;
 mod types;
 pub(crate) mod writer;
 
-pub use crate::ownership::{describe_owner, Liveness, OwnerRecord, Tier};
+pub use crate::ownership::{describe_owner, Liveness, OwnerRecord};
+pub use crate::Tier;
 pub use iroh_tunnel_engine::conn_path::short_peer_id;
 pub use read_role_status::read_role_status;
 pub use schema::{

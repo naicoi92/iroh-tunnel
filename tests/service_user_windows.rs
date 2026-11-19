@@ -1,16 +1,20 @@
 //! #92: run a role in the Windows logged-in session, driven through the real
 //! binary and the real Task Scheduler (SM-04, AC-SM-04, story 53).
 //!
-//! - `non_elevated_system_scope_is_permission_error`: a non-elevated
-//!   `--system` is refused (exit 3) and nothing is registered. Each command
-//!   runs under a restricted token (`common::restricted`) because the CI
-//!   runner is elevated. Opt-in (`IROH_TUNNEL_E2E_SERVICE=1`).
 //! - `user_background_task_lifecycle`: install, start, status, stop, restart
 //!   and uninstall against the host's Task Scheduler, with the pinned absolute
 //!   config and state paths and a working directory unrelated to either.
 //!   Opt-in (`IROH_TUNNEL_E2E_SERVICE=1`) because it registers a task; it
 //!   uses a unique task-name suffix (the `test-utils` seam) and removes its
 //!   task on exit.
+//!
+//! - `non_elevated_targets_user_task`: an administrator's non-elevated
+//!   terminal is the user tier: install registers the logon task only, never
+//!   a Windows Service.
+//!
+//! The CI runner is elevated, and an elevated process is the system tier, so
+//! every user-tier command here runs under a restricted, non-elevated token
+//! (`common::restricted`) when the test process is elevated.
 //!
 //! The `/End` outcome (graceful drain or hard termination) is reported by the
 //! test, not asserted: SM-04 records terminate-without-drain as a known
@@ -27,6 +31,8 @@
 )]
 
 mod common;
+
+use common::windows_service::always_elevated_runner;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -98,7 +104,8 @@ impl Fixture {
     /// The task cannot carry `IROH_TUNNEL_STATE_DIR`, so the real per-user
     /// default is used (the test is opt-in and removes its task on exit).
     fn state(&self) -> PathBuf {
-        iroh_tunnel_host::paths::default_state_dir().expect("default state dir")
+        iroh_tunnel_host::paths::default_state_dir_for(iroh_tunnel_host::Tier::User)
+            .expect("default state dir")
     }
     /// Write a config with a fresh key; returns the node id it runs as.
     fn write_config(&self, relay: &str) -> Result<String> {
@@ -137,8 +144,12 @@ impl Fixture {
             .current_dir(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\".into()));
         command
     }
+    /// Run `args` in the user tier (see [`user_output`]).
+    fn run(&self, args: &[&str]) -> Result<Output> {
+        user_output(&mut self.command(args))
+    }
     fn ok(&self, args: &[&str]) -> Result<String> {
-        let out = self.command(args).output()?;
+        let out = self.run(args)?;
         anyhow::ensure!(
             out.status.success(),
             "{args:?} failed: {}{}",
@@ -171,9 +182,7 @@ impl Drop for Fixture {
             .as_deref()
             .filter(|id| node_id_of(&status_file).as_deref() == Some(id))
             .and_then(|_| pid_of(&status_file));
-        let _ = self
-            .command(&["serve", "service", "uninstall", "--user"])
-            .output();
+        let _ = self.run(&["serve", "service", "uninstall"]);
         if let Some(pid) = own_pid {
             let _ = wait_for("this test's task process to exit", || !pid_alive(pid));
         }
@@ -181,50 +190,27 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn non_elevated_system_scope_is_permission_error() -> Result<()> {
-    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
-        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to launch restricted-token children");
+fn install_refuses_a_state_directory_the_task_cannot_carry() -> Result<()> {
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
         return Ok(());
     }
     let fx = Fixture::new()?;
     fx.write_config("https://relay.invalid")?;
     let config = fx.config();
-    let config = config.to_str().unwrap();
-
-    for args in [
-        vec![
-            "serve", "service", "install", "--system", "--config", config,
-        ],
-        vec!["serve", "service", "start", "--system"],
-        vec!["serve", "service", "stop", "--system"],
-        vec!["serve", "service", "status", "--system"],
-    ] {
-        let out = common::restricted::run_non_elevated(&mut fx.command(&args))?;
-        let err = stderr(&out);
-        assert_eq!(out.status.code(), Some(3), "{args:?}: {err}");
-        assert!(err.contains("Run as administrator"), "{args:?}: {err}");
-    }
-    assert!(!fx.task_exists(), "nothing may be registered");
-    Ok(())
-}
-
-#[test]
-fn install_refuses_a_state_directory_the_task_cannot_carry() -> Result<()> {
-    let fx = Fixture::new()?;
-    fx.write_config("https://relay.invalid")?;
-    let config = fx.config();
     let other = fx.base().join("elsewhere");
-    let out = fx
-        .command(&[
+    let out = user_output(
+        fx.command(&[
             "serve",
             "service",
             "install",
-            "--user",
             "--config",
             config.to_str().unwrap(),
         ])
-        .env("IROH_TUNNEL_STATE_DIR", &other)
-        .output()?;
+        .env("IROH_TUNNEL_STATE_DIR", &other),
+    )?;
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("IROH_TUNNEL_STATE_DIR"), "{err}");
@@ -241,7 +227,7 @@ fn start_without_an_installed_task_names_the_install_command() -> Result<()> {
     }
     let fx = Fixture::new()?;
     for verb in ["start", "stop", "status"] {
-        let out = fx.command(&["serve", "service", verb, "--user"]).output()?;
+        let out = fx.run(&["serve", "service", verb])?;
         let err = stderr(&out);
         assert_eq!(out.status.code(), Some(5), "{verb}: {err}");
         assert!(err.contains("service install"), "{verb}: {err}");
@@ -255,6 +241,12 @@ async fn user_background_task_lifecycle() -> Result<()> {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
         return Ok(());
     }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
+        return Ok(());
+    }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
     let first_id = fx.write_config(relay.as_ref())?;
@@ -263,26 +255,24 @@ async fn user_background_task_lifecycle() -> Result<()> {
     let status_file = fx.state().join("serve-status.json");
 
     // install registers a task for the current user and starts it.
-    fx.ok(&["serve", "service", "install", "--user", "--config", config])?;
+    fx.ok(&["serve", "service", "install", "--config", config])?;
     assert!(fx.task_exists(), "task not registered");
     fx.wait_for_own_status(&status_file, &first_id)?;
 
     // status reports the task.
-    let status = fx.ok(&["serve", "service", "status", "--user"])?;
+    let status = fx.ok(&["serve", "service", "status"])?;
     assert!(status.contains("serve is running (pid "), "{status}");
     assert!(status.contains("iroh-tunnel-serve"), "{status}");
 
     // starting a running role is refused by role ownership, not duplicated.
-    let again = fx
-        .command(&["serve", "service", "start", "--user"])
-        .output()?;
+    let again = fx.run(&["serve", "service", "start"])?;
     assert_eq!(again.status.code(), Some(6), "{}", stderr(&again));
 
     // stop: the process ends. Whether it drained is reported, not gated.
     let pid = pid_of(&status_file).expect("pid in status file");
     eprintln!("DIAG process tree before /End:\n{}", process_tree());
     let stopped_at = Instant::now();
-    fx.ok(&["serve", "service", "stop", "--user"])?;
+    fx.ok(&["serve", "service", "stop"])?;
     let exited = wait_for("the stopped task's process to exit", || !pid_alive(pid));
     if exited.is_err() {
         eprintln!("DIAG process tree after /End:\n{}", process_tree());
@@ -294,7 +284,7 @@ async fn user_background_task_lifecycle() -> Result<()> {
         stopped_at.elapsed()
     );
 
-    let stopped = fx.ok(&["serve", "service", "status", "--user"])?;
+    let stopped = fx.ok(&["serve", "service", "status"])?;
     assert!(stopped.contains("serve is not running"), "{stopped}");
 
     // A hard /End leaves a stale snapshot: remove it so every later read is
@@ -302,13 +292,13 @@ async fn user_background_task_lifecycle() -> Result<()> {
     let _ = std::fs::remove_file(&status_file);
 
     // start and restart keep the configured identity in a NEW process.
-    fx.ok(&["serve", "service", "start", "--user"])?;
+    fx.ok(&["serve", "service", "start"])?;
     wait_for("status after start", || pid_of(&status_file).is_some())?;
     let started_pid = pid_of(&status_file).unwrap();
     assert_ne!(started_pid, pid, "start must launch a new process");
     assert_eq!(node_id_of(&status_file).unwrap(), first_id);
 
-    fx.ok(&["serve", "service", "restart", "--user"])?;
+    fx.ok(&["serve", "service", "restart"])?;
     wait_for("a new process after restart", || {
         pid_of(&status_file).is_some_and(|p| p != started_pid)
     })?;
@@ -317,9 +307,97 @@ async fn user_background_task_lifecycle() -> Result<()> {
 
     // uninstall removes the task and ends the process.
     let pid = pid_of(&status_file).expect("pid in status file");
-    fx.ok(&["serve", "service", "uninstall", "--user"])?;
+    fx.ok(&["serve", "service", "uninstall"])?;
     assert!(!fx.task_exists(), "task still registered");
     wait_for("the uninstalled task's process to exit", || !pid_alive(pid))?;
+    Ok(())
+}
+
+/// On an always-elevated runner the user-tier install is refused: exit 3, the
+/// guidance message, and no task registered.
+#[test]
+fn user_task_refused_when_uac_is_disabled() -> Result<()> {
+    let Some(why) = always_elevated_runner() else {
+        eprintln!("skipped: the runner account does not always run elevated");
+        return Ok(());
+    };
+    eprintln!("running: {why}");
+    let fx = Fixture::new()?;
+    fx.write_config("https://relay.invalid")?;
+    let config = fx.config();
+    let out = fx.run(&[
+        "serve",
+        "service",
+        "install",
+        "--config",
+        config.to_str().unwrap(),
+    ])?;
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("always runs elevated"), "{err}");
+    assert!(err.contains("elevated terminal"), "{err}");
+    assert!(!fx.task_exists(), "nothing may be registered");
+    Ok(())
+}
+
+/// Run `command` in the user tier: directly from a non-elevated test, under a
+/// restricted non-elevated token from an elevated one (the CI runner).
+fn user_output(command: &mut Command) -> Result<Output> {
+    if iroh_tunnel_host::service::is_elevated() {
+        common::restricted::run_non_elevated(command)
+    } else {
+        Ok(command.output()?)
+    }
+}
+
+/// From an administrator's non-elevated terminal, install targets the user's
+/// logon task only: no Windows Service is created or changed.
+#[test]
+fn non_elevated_targets_user_task() -> Result<()> {
+    if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
+        eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
+        return Ok(());
+    }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
+        return Ok(());
+    }
+    let fx = Fixture::new()?;
+    fx.write_config("https://relay.invalid")?;
+    let config = fx.config();
+    let service = format!("iroh-tunnel-serve{}", fx.suffix);
+    let service_exists = || {
+        Command::new("sc.exe")
+            .args(["query", &service])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    assert!(!service_exists(), "precondition: no service {service}");
+
+    // The user-tier config path is the user's own, not ProgramData.
+    let path = fx.ok(&["serve", "config", "path"])?;
+    let program_data = std::env::var("ProgramData")
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        !program_data.is_empty() && !path.to_lowercase().contains(&program_data),
+        "{path}"
+    );
+
+    fx.ok(&[
+        "serve",
+        "service",
+        "install",
+        "--config",
+        config.to_str().unwrap(),
+    ])?;
+    assert!(fx.task_exists(), "the logon task must be registered");
+    assert!(!service_exists(), "no Windows Service may be created");
+    fx.ok(&["serve", "service", "stop"])?;
+    assert!(!service_exists());
     Ok(())
 }
 
@@ -392,14 +470,15 @@ impl Fixture {
     /// The example, run as a caller with no terminal; stdout and stderr are
     /// captured. A successful run must leave stderr empty.
     fn caller(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new(manage_service_binary())
-            .args(["--role", "serve", "--scope", "user"])
-            .args(args)
-            .env_remove("IROH_TUNNEL_STATE_DIR")
-            .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
-            .stdin(std::process::Stdio::null())
-            .current_dir(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\".into()))
-            .output()?;
+        let out = user_output(
+            Command::new(manage_service_binary())
+                .args(["--role", "serve"])
+                .args(args)
+                .env_remove("IROH_TUNNEL_STATE_DIR")
+                .env("IROH_TUNNEL_TEST_SERVICE_SUFFIX", &self.suffix)
+                .stdin(std::process::Stdio::null())
+                .current_dir(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\".into())),
+        )?;
         anyhow::ensure!(
             out.status.success(),
             "caller {args:?} failed: {}{}",
@@ -421,6 +500,12 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
         return Ok(());
     }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
+        return Ok(());
+    }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;
     let fx = Fixture::new()?;
     let node_id = fx.write_config(relay.as_ref())?;
@@ -435,7 +520,10 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
         "--exe",
         BIN,
     ])?;
-    assert!(installed.contains("Installed"), "{installed}");
+    assert!(
+        installed.contains("Enabled") && installed.contains("Started"),
+        "{installed}"
+    );
     // The caller has exited; the task and the role remain.
     assert!(fx.task_exists(), "task not registered");
     fx.wait_for_own_status(&status_file, &node_id)?;
@@ -458,6 +546,12 @@ async fn caller_exit_leaves_user_service_running() -> Result<()> {
 async fn captured_schtasks_status_is_returned() -> Result<()> {
     if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to drive the real Task Scheduler");
+        return Ok(());
+    }
+    if let Some(why) = always_elevated_runner() {
+        eprintln!(
+            "skipped: {why}; the user task is refused (user_task_refused_when_uac_is_disabled)"
+        );
         return Ok(());
     }
     let (_map, relay, _server) = iroh::test_utils::run_relay_server().await?;

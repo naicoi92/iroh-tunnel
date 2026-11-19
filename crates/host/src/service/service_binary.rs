@@ -277,7 +277,7 @@ mod unix_tests {
     }
 
     fn mine() -> TrustedOwners {
-        TrustedOwners::RootAnd(me())
+        TrustedOwners::TestOwner(me())
     }
 
     fn mode_of(path: &Path) -> u32 {

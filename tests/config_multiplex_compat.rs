@@ -45,6 +45,7 @@ multiplex = false
     ] {
         std::fs::write(&path, &source)?;
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+            .env("IROH_TUNNEL_TEST_TIER", "user")
             .args(["access", "config"])
             .args(&args)
             .env("IROH_TUNNEL_TEST_CONFIG_DIR", temp.path())
@@ -92,6 +93,7 @@ fn keygen_drops_multiplex_from_inline_services() -> Result<()> {
         "# inline services\nservices = [{{ name = \"echo\", node_id = \"{peer}\", protocol = \"tcp\", port = 5432, multiplex = false }}]\n"
     ))?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .args(["access", "config", "keygen", "--config"])
         .arg(&path)
         .output()?;
@@ -116,6 +118,7 @@ fn rejected_config_set_preserves_legacy_file_and_key() -> Result<()> {
     );
     std::fs::write(&path, &source)?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .args(["access", "config", "set", "--config"])
         .arg(&path)
         .args([
@@ -145,6 +148,7 @@ fn malformed_config_reports_parse_error_and_preserves_file() -> Result<()> {
     let source = format!("[node]\nsecret_key = \"{key}\"\n\n[[services]\n");
     std::fs::write(&path, &source)?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .args(["access", "config", "keygen", "--config"])
         .arg(&path)
         .output()?;
@@ -177,6 +181,7 @@ fn config_write_error_is_reported_and_readonly_file_preserved() -> Result<()> {
         return Ok(());
     }
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .args(["access", "config", "keygen", "--yes", "--config"])
         .arg(&path)
         .output()?;
@@ -210,6 +215,7 @@ fn config_edit_saves_valid_editor_output_and_drops_multiplex() -> Result<()> {
     std::fs::write(&editor, "#!/bin/sh\ncat \"$IROH_EDITOR_SOURCE\" > \"$1\"\n")?;
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700))?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .args(["access", "config", "edit"])
         .env("IROH_TUNNEL_TEST_CONFIG_DIR", temp.path())
         .env("IROH_EDITOR_SOURCE", &editor_output)

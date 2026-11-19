@@ -13,6 +13,8 @@ fn tunnel(args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"));
     cmd.args(args)
         .env_remove("IROH_TUNNEL_TEST_INTERACTIVE")
+        // An elevated runner would derive the system tier.
+        .env("IROH_TUNNEL_TEST_TIER", "user")
         .stdin(Stdio::null());
     cmd
 }

@@ -57,7 +57,7 @@ The system SHALL use the same short letter for the same option in every role for
 - `-k` key-file
 - `-y` yes
 
-`--reveal`, `--print`, `--system`, `--user`, `--relay-token`, `--relay-token-file` and `--clear-relays` SHALL have no short form.
+`--reveal`, `--print`, `--relay-token`, `--relay-token-file` and `--clear-relays` SHALL have no short form.
 Evidence: src/cli.rs:386-417 (unit test), tests/role_binaries.rs:463-554
 
 #### Scenario: Short letters do not collide
@@ -66,7 +66,7 @@ Evidence: src/cli.rs:386-417 (unit test), tests/role_binaries.rs:463-554
 
 #### Scenario: Long-only options
 - **WHEN** the same definitions are inspected
-- **THEN** `reveal`, `print`, `system`, `user`, `relay-token`, `relay-token-file` and `clear-relays` have no short letter
+- **THEN** `reveal`, `print`, `relay-token`, `relay-token-file` and `clear-relays` have no short letter, and no command defines `system` or `user`
 
 ### Requirement: Role-specific quick options are rejected by the other role
 The system SHALL reject Access-only quick options (`-l/--listen`, `-N/--node-id`) in Serve and Serve-only options (`-t/--target`) in Access.
@@ -204,43 +204,34 @@ Evidence: src/cli.rs:197-278, src/app.rs:253-271, tests/quick_run.rs:786-808
 - **THEN** it exits successfully and lists `-r/--relay-url`, `--relay-token`, `--relay-token-file` and `--clear-relays`
 
 ### Requirement: Status command
-The system SHALL provide a `status` command per role that prints the role's status table, or the raw file with `--json`.
+The system SHALL provide a `status` command per role that prints the status table of the invoking tier's role, or the raw file with `--json`, preceded on stderr by the other-tier notice when the role also runs in the other tier.
 Evidence: src/cli.rs:202-207, src/app.rs:208, src/status_cmd.rs:414-484 (unit tests)
 Confidence: inferred
 
 #### Scenario: Status JSON
 - **WHEN** `status --json` is run
-- **THEN** the status file is printed verbatim
+- **THEN** the status file is printed verbatim on stdout
 
-### Requirement: Service scope selection and privilege
-The system SHALL offer `service install|uninstall|start|stop|restart|status` with mutually exclusive `--user` and `--system` flags; without a flag `install` asks a non-elevated interactive user and defaults to system for an elevated one, other verbs default by privilege; system scope without privilege is refused with rerun guidance and never elevated or replaced by a user service.
-Evidence: src/cli.rs:280-333, src/app.rs:273-349, src/app.rs:354-378
-Confidence: inferred
-
-#### Scenario: Conflicting scope flags
-- **WHEN** both `--user` and `--system` are given
-- **THEN** parsing fails
-
-#### Scenario: Unprivileged system install
-- **WHEN** `service install --system` runs without elevation on Unix
-- **THEN** it is refused with a rerun command using an absolute `--config` path
+#### Scenario: Status from the system tier
+- **WHEN** `sudo iroh-tunnel serve status` runs while the system-tier serve is running
+- **THEN** the system-tier status snapshot is shown
 
 ### Requirement: Service install pins absolute paths and validates config
-The system SHALL pin an absolute config path and absolute state directory (`IROH_TUNNEL_STATE_DIR` or the platform default) into an installed user service and SHALL refuse to install when the config is missing or invalid for the role, with a config error suggesting `config keygen` or `--config`.
+The system SHALL pin an absolute config path and absolute state directory (`IROH_TUNNEL_STATE_DIR` or the tier's default) into an installed service and SHALL refuse to install when the config is missing or invalid for the role, with a config error suggesting `config keygen` or `--config`.
 Evidence: src/app.rs:236-251,310-328,427-468
 Confidence: inferred
 
 #### Scenario: Invalid config
-- **WHEN** `service install --user` is run with a missing or invalid config
+- **WHEN** `service install` is run with a missing or invalid config
 - **THEN** it fails with "cannot install the service" and registers nothing
 
 ### Requirement: Service start refuses a running role
-The system SHALL refuse `service start` when the role is already running, before asking the service manager to start it.
+The system SHALL refuse `service start` when the role is already running in the invoking tier, before asking the service manager to start it.
 Evidence: src/app.rs:333-344
 Confidence: inferred
 
 #### Scenario: Role already running
-- **WHEN** `service start` is invoked while the role holds ownership
+- **WHEN** `service start` is invoked while the role holds ownership in the invoking tier
 - **THEN** it fails (Conflict, exit 6) and the service is not started
 
 ### Requirement: Standalone binaries refuse service management
@@ -442,3 +433,16 @@ Source: brainstorm.md Addresses; design.md D4
 #### Scenario: Malformed addresses
 - **WHEN** `-t :3000`, `-t host:`, `-t ::1:8080` or `-t not-an-address` is given
 - **THEN** each exits with code 2 and the error names `--target`, followed by the command's help
+
+### Requirement: Service verbs follow the invoking tier
+The system SHALL offer `service install|uninstall|start|stop|restart|status` with no scope flag, acting in the invoking tier as `system-service-management` "Service tier follows privilege" specifies. The CLI SHALL NOT prompt for a scope, a user name or a retarget confirmation and SHALL never elevate itself.
+Evidence: src/cli.rs:280-333, src/app.rs:273-349, src/app.rs:354-378
+Confidence: inferred
+
+#### Scenario: Scope flags are rejected
+- **WHEN** `service install --system` or `service stop --user` is given
+- **THEN** parsing fails with an unexpected-argument error
+
+#### Scenario: No prompt for a non-elevated user
+- **WHEN** a non-elevated user with a valid user-tier config runs `service install` on a terminal of a systemd, launchd or Windows host
+- **THEN** a user service is installed and nothing is read from stdin

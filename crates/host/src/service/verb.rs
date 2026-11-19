@@ -11,16 +11,15 @@ use super::effective_binary::EffectiveBinary;
 use super::execute::execute;
 use super::native::{Native, Runner, ServiceCall, ServiceNote};
 use super::platform;
+use super::policy::ensure_root_run_privilege;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::policy::shell_quote;
-use super::policy::{ensure_privilege, ensure_supported};
 use super::service_binary::release_unreferenced_copy;
-use super::types::{
-    AppliedEffect, Environment, ServiceFailure, ServiceInvocation, ServiceReport, ServiceScope,
-};
+use super::types::{AppliedEffect, Environment, ServiceFailure, ServiceInvocation, ServiceReport};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::error::CliError;
 use crate::role::Role;
+use crate::Tier;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Verb {
@@ -31,6 +30,7 @@ pub(crate) enum Verb {
 }
 
 impl Verb {
+    #[cfg(test)]
     pub(crate) fn word(self) -> &'static str {
         match self {
             Verb::Uninstall => "uninstall",
@@ -41,33 +41,39 @@ impl Verb {
     }
 }
 
-pub(crate) fn flag(scope: ServiceScope) -> &'static str {
-    match scope {
-        ServiceScope::System => "--system",
-        ServiceScope::User => "--user",
+/// The checks a verb runs before any effect, in the caller's `tier`: a
+/// root-run registration (every one on BusyBox) needs privilege, and `start`
+/// is refused while the role already runs in that same tier. A holder in the
+/// other tier never refuses.
+///
+/// # Errors
+///
+/// [`crate::error::CliError::Permission`] for an unprivileged root-run
+/// operation, [`crate::error::CliError::Conflict`] for a start while the
+/// role runs in `tier`.
+fn check_verb(verb: Verb, role: Role, tier: Tier, root_run: bool, elevated: bool) -> Result<()> {
+    ensure_root_run_privilege(root_run, elevated)?;
+    if matches!(verb, Verb::Start) {
+        // Refuse before the manager: the unit would otherwise start and exit
+        // after systemd/launchd already reported success (RO-03).
+        crate::ownership::ensure_not_running_in(role, tier)?;
+    }
+    Ok(())
+}
+
+/// Tell the caller that `role` also runs in the tier other than `tier`.
+/// Informational only: an I/O error while probing reads as "not running".
+pub(crate) fn note_other_tier(role: Role, tier: Tier, notes: &mut dyn FnMut(&ServiceNote)) {
+    if let Some(other) = crate::ownership::other_tier_running(role, tier) {
+        notes(&ServiceNote::OtherTierRunning {
+            role: role.name().to_owned(),
+            other,
+        });
     }
 }
 
-/// Refuse `verb` for an unsupported scope or a missing privilege; the
-/// refusal names the command that repeats it as `invocation`.
-pub(crate) fn check_verb_policy(
-    verb: &str,
-    role: Role,
-    invocation: &ServiceInvocation,
-    scope: ServiceScope,
-    env: Environment,
-) -> Result<()> {
-    ensure_supported(scope)?;
-    let mut rerun = invocation.rerun_prefix(role.name());
-    rerun.extend([
-        "service".to_owned(),
-        verb.to_owned(),
-        flag(scope).to_owned(),
-    ]);
-    ensure_privilege(scope, env.elevated, &rerun)
-}
-
-/// [`uninstall`]/[`start`]/[`stop`]/[`restart`] over an injected runner.
+/// [`uninstall`]/[`start`]/[`stop`]/[`restart`] over an injected runner, in
+/// the tier of `env`.
 ///
 /// [`uninstall`]: super::uninstall
 /// [`start`]: super::start
@@ -77,29 +83,23 @@ pub(crate) fn verb_via(
     verb: Verb,
     role: Role,
     invocation: &ServiceInvocation,
-    scope: ServiceScope,
     env: Environment,
     call: &mut ServiceCall,
     runner: &mut Runner<'_>,
 ) -> Result<ServiceReport, ServiceFailure> {
-    check_verb_policy(verb.word(), role, invocation, scope, env)
-        .and_then(|()| {
-            if matches!(verb, Verb::Start) {
-                // Refuse before the manager: the unit would otherwise start and
-                // exit after systemd/launchd already reported success (RO-03).
-                crate::ownership::ensure_not_running(role)?;
-            }
-            Ok(())
-        })
-        .map_err(ServiceFailure::before_effects)?;
-    let root_run = platform::root_run(scope, platform::system_wide_only());
+    let tier = env.tier();
+    let root_run = platform::root_run(tier, platform::system_wide_only());
+    check_verb(verb, role, tier, root_run, env.elevated).map_err(ServiceFailure::before_effects)?;
     execute(call, runner, |native, notes| {
+        if matches!(verb, Verb::Start | Verb::Restart) {
+            note_other_tier(role, tier, notes);
+        }
         verb_steps(
             native,
             notes,
             verb,
             |native| guard_root_run(native, role.name(), root_run, invocation),
-            |native, notes| Backend::select(scope)?.verb(verb, native, notes, role, scope),
+            |native, notes| Backend::select(tier)?.verb(verb, native, notes, role, tier),
             |native| release_unreferenced_copy(native, role.name(), root_run),
         )
     })
@@ -208,11 +208,11 @@ fn check_effective(
     };
     let guidance = match invocation {
         ServiceInvocation::Combined => {
-            format!("re-run `sudo iroh-tunnel {role} service install --system`")
+            format!("re-run `sudo iroh-tunnel {role} service install`")
         }
         ServiceInvocation::Standalone { executable } => format!(
-            "re-run service install with sudo using {}, select `--system`, and \
-             supply `--config` followed by the absolute path of this service's config",
+            "re-run service install with sudo using {} and supply `--config` followed by the \
+             absolute path of this service's config",
             shell_quote(&executable.to_string_lossy())
         ),
     };
@@ -224,121 +224,90 @@ fn check_effective(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::super::fixtures::in_isolated_home;
     use super::super::fixtures::{blocking_runtime, ok_output, BATCH};
-    #[cfg(unix)]
-    use super::super::fixtures::{commands, in_isolated_home};
-    #[cfg(unix)]
-    use super::super::native::fake::{Events, FakeRunner};
+    #[cfg(all(unix, feature = "test-utils"))]
+    use super::super::fixtures::{commands, run_verb};
+    #[cfg(all(unix, feature = "test-utils"))]
+    use super::super::native::fake::Event;
     use super::super::native::ServiceCall;
     use super::super::native::ServiceNote;
     use super::super::status::status_via;
     use super::*;
     use crate::error::CliError;
-    use std::path::Path;
 
-    #[cfg(unix)]
-    #[test]
-    fn start_is_refused_before_manager_when_role_runs() {
-        const NAME: &str = "service::verb::tests::start_is_refused_before_manager_when_role_runs";
-        in_isolated_home(NAME, |_| {
-            let _claim = crate::ownership::claim(Role::Serve).unwrap();
-            let events = Events::default();
-            let mut fake = FakeRunner::new(&events, vec![]);
-            let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
-            let mut notes = crate::service::native::fake::note_sink(&events);
-            let mut call = ServiceCall::capture(&mut notes);
-            let result = verb_via(
-                Verb::Start,
-                Role::Serve,
-                &ServiceInvocation::Combined,
-                ServiceScope::User,
-                BATCH,
-                &mut call,
-                &mut runner,
+    /// The role's lock held in the user tier, then in the system tier, of
+    /// an isolated home (machine directory under it).
+    #[cfg(all(unix, feature = "test-utils"))]
+    fn claim_in_tier(tier: crate::Tier) -> crate::ownership::RoleClaim {
+        // SAFETY: single test thread in an isolated child process.
+        unsafe {
+            std::env::set_var(
+                "IROH_TUNNEL_TEST_TIER",
+                if tier == crate::Tier::System {
+                    "system"
+                } else {
+                    "user"
+                },
             );
+        }
+        let claim = crate::ownership::claim(Role::Serve).unwrap();
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("IROH_TUNNEL_TEST_TIER") };
+        claim
+    }
+
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[test]
+    fn start_refused_only_in_same_tier() {
+        const NAME: &str = "service::verb::tests::start_refused_only_in_same_tier";
+        in_isolated_home(NAME, |home| {
+            if platform::system_wide_only() {
+                return; // BusyBox: a non-root start is refused for privilege
+            }
+            // SAFETY: single test thread in an isolated child process.
+            unsafe { std::env::set_var("IROH_TUNNEL_MACHINE_LOCK_DIR", home.join("machine")) };
+            // The role runs in the system tier only: a user start proceeds
+            // and says so.
+            let system = claim_in_tier(crate::Tier::System);
+            let (result, log) = run_verb(Verb::Start, BATCH);
+            result.expect("a system-tier holder never refuses a user start");
+            assert!(!commands(&log).is_empty(), "{log:?}");
+            assert!(
+                log.contains(&Event::Note(ServiceNote::OtherTierRunning {
+                    role: "serve".into(),
+                    other: crate::Tier::System,
+                })),
+                "{log:?}"
+            );
+            drop(system);
+            // The role runs in the user tier: refused before the manager.
+            let _user = claim_in_tier(crate::Tier::User);
+            let (result, log) = run_verb(Verb::Start, BATCH);
             let err = anyhow::Error::from(result.expect_err("must be refused"));
             assert!(
                 matches!(err.downcast_ref::<CliError>(), Some(CliError::Conflict(_))),
                 "{err:?}"
             );
-            assert!(commands(&events.borrow()).is_empty());
+            assert!(commands(&log).is_empty(), "{log:?}");
         });
     }
 
     #[test]
-    fn standalone_privilege_guidance_for_all_verbs_uses_supplied_executable() {
-        let env = Environment {
-            elevated: false,
-            can_answer: false,
-        };
-        let path = Path::new(if cfg!(windows) {
-            r"C:\Program Files\role bin\renamed.exe"
-        } else {
-            "/opt/role bin/renamed"
-        });
-        let command = if cfg!(windows) {
-            r"& 'C:\Program Files\role bin\renamed.exe'"
-        } else {
-            "sudo '/opt/role bin/renamed'"
-        };
-        for role in [Role::Serve, Role::Access] {
-            for verb in ["start", "stop", "restart", "uninstall"] {
-                let mut notes = |_: &ServiceNote| {};
-                let mut call = ServiceCall::capture(&mut notes);
-                let invocation = ServiceInvocation::Standalone {
-                    executable: path.to_path_buf(),
-                };
-                let err = match verb {
-                    "start" => {
-                        super::super::start(role, &invocation, ServiceScope::System, env, &mut call)
-                    }
-                    "stop" => {
-                        super::super::stop(role, &invocation, ServiceScope::System, env, &mut call)
-                    }
-                    "restart" => super::super::restart(
-                        role,
-                        &invocation,
-                        ServiceScope::System,
-                        env,
-                        &mut call,
-                    ),
-                    _ => super::super::uninstall(
-                        role,
-                        &invocation,
-                        ServiceScope::System,
-                        env,
-                        &mut call,
-                    ),
-                }
-                .unwrap_err();
-                let message = err.error.to_string();
-                assert!(
-                    message.contains(&format!("{command} service {verb} --system")),
-                    "{message}"
-                );
-                assert!(matches!(
-                    err.error.downcast_ref::<CliError>(),
-                    Some(CliError::Permission(_))
-                ));
-                assert!(err.applied.is_empty());
-            }
-            let mut notes = |_: &ServiceNote| {};
-            let mut call = ServiceCall::capture(&mut notes);
-            let err = super::super::status(
-                role,
-                &ServiceInvocation::Standalone {
-                    executable: path.to_path_buf(),
-                },
-                ServiceScope::System,
-                env,
-                &mut call,
-            )
-            .unwrap_err();
-            assert!(err
-                .error
-                .to_string()
-                .contains(&format!("{command} service status --system")));
-            assert!(err.applied.is_empty());
+    fn unprivileged_root_run_verbs_are_refused_before_effects() {
+        for verb in [Verb::Start, Verb::Stop, Verb::Restart, Verb::Uninstall] {
+            let err = check_verb(verb, Role::Serve, crate::Tier::User, true, false)
+                .expect_err("a root-run registration needs root");
+            let Some(CliError::Permission(msg)) = err.downcast_ref::<CliError>() else {
+                panic!("expected Permission, got {err:?}");
+            };
+            assert!(msg.contains("Re-run with sudo"), "{msg}");
+            assert!(!msg.contains("--system"), "{msg}");
+        }
+        for verb in [Verb::Stop, Verb::Restart, Verb::Uninstall] {
+            check_verb(verb, Role::Serve, crate::Tier::System, true, true).unwrap();
+            check_verb(verb, Role::Serve, crate::Tier::User, false, false).unwrap();
         }
     }
 
@@ -369,7 +338,6 @@ mod tests {
                 status_via(
                     Role::Serve,
                     &ServiceInvocation::Combined,
-                    ServiceScope::User,
                     BATCH,
                     &mut call,
                     &mut runner,
@@ -385,6 +353,9 @@ mod tests {
     fn dropped_awaiter_does_not_stop_service() {
         const NAME: &str = "service::verb::tests::dropped_awaiter_does_not_stop_service";
         in_isolated_home(NAME, |_| {
+            if platform::system_wide_only() {
+                return; // BusyBox: a non-root start is refused before any command
+            }
             use std::sync::{Arc, Mutex};
             let calls: Arc<Mutex<Vec<String>>> = Arc::default();
             let recorded = Arc::clone(&calls);
@@ -405,7 +376,6 @@ mod tests {
                         Verb::Start,
                         Role::Serve,
                         &ServiceInvocation::Combined,
-                        ServiceScope::User,
                         BATCH,
                         &mut call,
                         &mut runner,
@@ -621,14 +591,14 @@ mod steps_tests {
 
     #[cfg(unix)]
     #[test]
-    fn user_scope_start_skips_guard() {
-        const NAME: &str = "service::verb::steps_tests::user_scope_start_skips_guard";
+    fn user_tier_start_skips_guard() {
+        const NAME: &str = "service::verb::steps_tests::user_tier_start_skips_guard";
         super::super::fixtures::in_isolated_home(NAME, |_| {
             if super::super::platform::root_run(
-                ServiceScope::User,
+                crate::Tier::User,
                 super::super::platform::system_wide_only(),
             ) {
-                // BusyBox init: a user-scope request is root-run and guarded.
+                // BusyBox init: every registration is root-run and guarded.
                 return;
             }
             let events = Events::default();
@@ -640,7 +610,6 @@ mod steps_tests {
                 Verb::Start,
                 Role::Serve,
                 &ServiceInvocation::Combined,
-                ServiceScope::User,
                 super::super::fixtures::BATCH,
                 &mut call,
                 &mut runner,
@@ -749,6 +718,8 @@ mod guard_tests {
                 "{text}"
             );
             assert!(text.contains("/opt/role bin/renamed"), "{text}");
+            assert!(text.contains("with sudo"), "{text}");
+            assert!(!text.contains("--system"), "{text}");
         }
     }
 
@@ -764,7 +735,7 @@ mod guard_tests {
         assert!(msg.contains(path.to_str().unwrap()), "{msg}");
         assert!(msg.contains("owner uid 501, mode 0775"), "{msg}");
         assert!(
-            msg.contains("sudo iroh-tunnel serve service install --system"),
+            msg.contains("sudo iroh-tunnel serve service install`"),
             "{msg}"
         );
         assert!(started.is_empty(), "{started:?}");
@@ -780,11 +751,14 @@ mod guard_tests {
         );
         let msg = permission_text(&result.expect_err("an unsafe binary must be refused"));
         assert!(msg.contains(path.to_str().unwrap()), "{msg}");
-        assert!(msg.contains("service install --system"), "{msg}");
+        assert!(
+            msg.contains("service install") && !msg.contains("--system"),
+            "{msg}"
+        );
         assert!(restarted.is_empty(), "{restarted:?}");
     }
 
-    /// Drive `verb` as root-run System scope through [`verb_via`] against a
+    /// Drive `verb` as a root-run system-tier caller through [`verb_via`] against a
     /// manager that reports an effective binary owned by the (non-root) test
     /// user, which `RootOnly` refuses. Returns the failure and the lines of
     /// every command issued.
@@ -807,16 +781,11 @@ mod guard_tests {
             let mut runner = |c: &mut std::process::Command, m| fake.run(c, m);
             let mut notes = |_: &ServiceNote| {};
             let mut call = super::super::native::ServiceCall::capture(&mut notes);
-            let env = Environment {
-                elevated: true,
-                can_answer: false,
-            };
             let failure = verb_via(
                 verb,
                 Role::Serve,
                 &ServiceInvocation::Combined,
-                ServiceScope::System,
-                env,
+                super::super::fixtures::ELEVATED,
                 &mut call,
                 &mut runner,
             )
@@ -847,7 +816,10 @@ mod guard_tests {
         // RootOnly refuses the first untrusted component, an ancestor of the
         // file; the refusal still names the registered binary itself.
         assert!(msg.contains(path.to_str().unwrap()), "{msg}");
-        assert!(msg.contains("service install --system"), "{msg}");
+        assert!(
+            msg.contains("service install") && !msg.contains("--system"),
+            "{msg}"
+        );
         assert!(failure.applied.is_empty(), "{:?}", failure.applied);
         assert_eq!(
             lines.len(),
@@ -947,7 +919,7 @@ mod guard_tests {
         let msg = permission_text(&result.expect_err("an unreadable definition must refuse"));
         assert!(msg.contains("the unit has two ExecStart commands"), "{msg}");
         assert!(
-            msg.contains("sudo iroh-tunnel serve service install --system"),
+            msg.contains("sudo iroh-tunnel serve service install`"),
             "{msg}"
         );
         assert!(restarted.is_empty(), "{restarted:?}");
@@ -964,7 +936,7 @@ mod guard_tests {
         for (path, mode) in [(&root, 0o755), (&dir, 0o755), (&file, 0o755)] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
         }
-        let verify = |p: &Path| verify_binary(p, TrustedOwners::RootAnd(me()));
+        let verify = |p: &Path| verify_binary(p, TrustedOwners::TestOwner(me()));
         // Accepted as installed ...
         check_effective(
             EffectiveBinary::Binary(file.clone()),
@@ -985,7 +957,10 @@ mod guard_tests {
         let msg = permission_text(&result.expect_err("a loosened directory must refuse"));
         assert!(msg.contains(dir.to_str().unwrap()), "{msg}");
         assert!(msg.contains("0775"), "{msg}");
-        assert!(msg.contains("service install --system"), "{msg}");
+        assert!(
+            msg.contains("service install") && !msg.contains("--system"),
+            "{msg}"
+        );
         assert!(restarted.is_empty(), "{restarted:?}");
     }
 
@@ -1051,7 +1026,7 @@ mod guard_tests {
                 },
                 copy: copy.clone(),
             };
-            let mine = TrustedOwners::RootAnd(me());
+            let mine = TrustedOwners::TestOwner(me());
             super::super::service_binary::materialize(&binary, mine).unwrap();
             let snapshot = |p: &Path| {
                 let meta = std::fs::symlink_metadata(p).unwrap();
@@ -1085,12 +1060,12 @@ mod guard_tests {
                     )
                 },
                 |native, notes| {
-                    Backend::select(ServiceScope::System)?.verb(
+                    Backend::select(crate::Tier::System)?.verb(
                         Verb::Restart,
                         native,
                         notes,
                         Role::Serve,
-                        ServiceScope::System,
+                        crate::Tier::System,
                     )
                 },
                 |_| panic!("restart releases nothing"),

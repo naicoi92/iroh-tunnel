@@ -506,46 +506,173 @@ async fn running_role_status_names_role_and_owner_pid() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn system_tier_lock_refuses_user_start_and_blocks_a_system_start() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    // Root ignores file modes, so the non-elevated view cannot be simulated.
-    if running_as_root() {
-        eprintln!("skipped: running as root");
-        return Ok(());
+impl World {
+    /// A command forced into the system tier: its lock lives in the machine
+    /// directory (`IROH_TUNNEL_TEST_TIER` stands in for elevation).
+    fn system_command(&self, exe: &str, prefix: Option<&str>, state: &Path) -> Command {
+        let mut command = self.command(exe, prefix, state);
+        command.env("IROH_TUNNEL_TEST_TIER", "system");
+        command
     }
+
+    fn user_command(&self, exe: &str, prefix: Option<&str>, state: &Path) -> Command {
+        let mut command = self.command(exe, prefix, state);
+        command.env("IROH_TUNNEL_TEST_TIER", "user");
+        command
+    }
+}
+
+/// Start a serve in the system tier (status file under the state override).
+fn start_system_serve(world: &World, relay: &str, key: &Path, state: &Path) -> Result<Process> {
+    let mut process = spawn(
+        world.system_command(ALL_IN_ONE, Some("serve"), state),
+        &serve_args(relay, key),
+    )?;
+    wait_running(&state.join("serve-status.json"), &mut process)?;
+    Ok(process)
+}
+
+#[tokio::test]
+async fn system_and_user_tiers_run_side_by_side() -> Result<()> {
     let (relay, _server) = relay().await?;
     let world = World::new()?;
     let (key, _) = write_key(world.root.path(), "k.key")?;
 
-    // A "system service": the test holds the machine lock exclusively on a
-    // file the user process cannot open for writing (read-only, like a
-    // root-owned file seen by a non-elevated user).
-    let machine_lock = world.machine().join("serve.lock");
-    drop(File::create(&machine_lock)?);
-    let _restore = RestoreMode(world.machine());
-    std::fs::set_permissions(&machine_lock, std::fs::Permissions::from_mode(0o444))?;
-    std::fs::set_permissions(world.machine(), std::fs::Permissions::from_mode(0o555))?;
-    let system = File::open(&machine_lock)?;
-    system.try_lock()?;
-    let refused = spawn(
-        world.command(ALL_IN_ONE, Some("serve"), &world.state("user")),
-        &serve_args(&relay, &key),
-    )?;
-    assert_refused(wait_refused(refused)?, "system service");
-    drop(system);
+    let system = start_system_serve(&world, &relay, &key, &world.state("system"))?;
+    // The system start creates the presence file, unlocked and readable.
+    assert!(world.machine().join("serve.user.lock").exists());
+    assert!(world.machine().join("serve.lock").exists());
+    assert!(world.machine().join("serve.claim.lock").exists());
 
-    // Reverse order: a running user process stops a later system start.
+    let user_state = world.state("user");
     let mut user = spawn(
-        world.command(ALL_IN_ONE, Some("serve"), &world.state("user2")),
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
         &serve_args(&relay, &key),
     )?;
-    wait_running(&world.state("user2").join("serve-status.json"), &mut user)?;
-    let later = File::open(&machine_lock)?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+    // Both hold their own lock; neither refused the other.
+    assert!(system.0.id() != user.0.id());
+    let claim_lock = File::open(world.machine().join("serve.claim.lock"))?;
     assert!(
-        matches!(later.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
-        "a running user role must hold the machine lock shared"
+        matches!(
+            claim_lock.try_lock_shared(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ),
+        "the system process holds its claim lock exclusively"
     );
+    let detection = File::open(world.machine().join("serve.lock"))?;
+    assert!(
+        matches!(detection.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "the system process holds its detection lock shared"
+    );
+    let presence = File::open(world.machine().join("serve.user.lock"))?;
+    assert!(
+        matches!(presence.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "the user process holds the presence file shared"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn second_system_instance_is_refused() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let _first = start_system_serve(&world, &relay, &key, &world.state("first"))?;
+    let second = spawn(
+        world.system_command(SERVE, None, &world.state("second")),
+        &serve_args(&relay, &key),
+    )?;
+    assert_refused(wait_refused(second)?, "already running");
+    Ok(())
+}
+
+#[tokio::test]
+async fn system_lock_ignores_state_override() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let _first = start_system_serve(&world, &relay, &key, &world.state("one"))?;
+    // A different override and a different binary still hit the same lock.
+    let second = spawn(
+        world.system_command(SERVE, None, &world.state("two")),
+        &serve_args(&relay, &key),
+    )?;
+    assert_refused(wait_refused(second)?, "already running");
+    Ok(())
+}
+
+/// Whether the system tier still sees a user instance, from outside any
+/// process: an exclusive test of the presence file.
+fn user_instance_visible(world: &World) -> Result<bool> {
+    let presence = File::open(world.machine().join("serve.user.lock"))?;
+    Ok(matches!(
+        presence.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ))
+}
+
+#[tokio::test]
+async fn several_user_holders_keep_presence_until_last_exits() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key_a, _) = write_key(world.root.path(), "a.key")?;
+    // The presence file exists once a system instance has run on this boot.
+    drop(start_system_serve(
+        &world,
+        &relay,
+        &key_a,
+        &world.state("system"),
+    )?);
+    assert!(!user_instance_visible(&world)?);
+
+    // Two "users": distinct HOME, one shared machine directory.
+    let other = World::new()?;
+    let state_a = world.state("a");
+    let mut first = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &state_a),
+        &serve_args(&relay, &key_a),
+    )?;
+    wait_running(&state_a.join("serve-status.json"), &mut first)?;
+    let state_b = other.state("b");
+    let mut second = spawn(
+        {
+            let mut command = other.user_command(ALL_IN_ONE, Some("serve"), &state_b);
+            command.env("IROH_TUNNEL_MACHINE_LOCK_DIR", world.machine());
+            command
+        },
+        &serve_args(&relay, &key_a),
+    )?;
+    wait_running(&state_b.join("serve-status.json"), &mut second)?;
+    assert!(user_instance_visible(&world)?);
+
+    drop(first);
+    assert!(user_instance_visible(&world)?, "one holder is left");
+    // kill -9: the kernel drops the shared lock.
+    second.0.kill()?;
+    second.0.wait()?;
+    assert!(!user_instance_visible(&world)?, "no holder is left");
+    Ok(())
+}
+
+#[tokio::test]
+async fn blind_spot_user_before_presence_is_not_seen() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    let user_state = world.state("user");
+    let mut user = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
+        &serve_args(&relay, &key),
+    )?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+    assert!(
+        !world.machine().join("serve.user.lock").exists(),
+        "a user start never creates the presence file"
+    );
+    // The system instance starts anyway, and the earlier user stays unseen.
+    let _system = start_system_serve(&world, &relay, &key, &world.state("system"))?;
+    assert!(!user_instance_visible(&world)?);
     Ok(())
 }
 
@@ -573,21 +700,256 @@ fn out(output: &Output) -> String {
     )
 }
 
-fn running_as_root() -> bool {
-    // `id -u` avoids an unsafe libc call in the test.
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false)
+/// The user-tier notice: the role also runs as a system service.
+const SYSTEM_NOTICE: &str = "note: serve is also running as a system service; \
+                             manage it with sudo or from an elevated terminal";
+/// The system-tier notice: the role also runs in a user session.
+const USER_NOTICE: &str = "note: serve is also running in a user session";
+
+/// Spawn with stdout and stderr interleaved in one file, so the order of the
+/// notice (stderr) and the ready or bind lines (stdout) is observable.
+fn spawn_logged(mut command: Command, args: &[String], log: &Path) -> Result<Process> {
+    let file = File::create(log)?;
+    Ok(Process(
+        command
+            .args(args)
+            .stdout(file.try_clone()?)
+            .stderr(file)
+            .spawn()?,
+    ))
 }
 
-/// Gives a directory its write bit back so the tempdir can be removed even
-/// when an assertion fails.
-struct RestoreMode(PathBuf);
-impl Drop for RestoreMode {
-    fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+/// Wait until the interleaved `log` contains `needle`; returns the log.
+fn wait_log(log: &Path, needle: &str, process: &mut Process) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if text.contains(needle) {
+            return Ok(text);
+        }
+        if let Some(exit) = process.0.try_wait()? {
+            anyhow::bail!("exited ({exit}) before {needle:?}: {text}");
+        }
+        anyhow::ensure!(Instant::now() < deadline, "no {needle:?} in: {text}");
+        std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Byte offset of `needle` in `text`, failing the test when it is missing.
+fn offset(text: &str, needle: &str) -> usize {
+    text.find(needle)
+        .unwrap_or_else(|| panic!("no {needle:?} in: {text}"))
+}
+
+/// A configured serve config with `key`'s identity and one service.
+fn write_serve_config(dir: &Path, relay: &str, key: &Path) -> Result<PathBuf> {
+    let secret = std::fs::read_to_string(key)?;
+    let path = dir.join("serve.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[node]\nsecret_key = {:?}\nrelay_urls = [{relay:?}]\n\n\
+             [[services]]\nname = \"echo\"\nprotocol = \"tcp\"\nport = 9\n",
+            secret.trim()
+        ),
+    )?;
+    Ok(path)
+}
+
+#[tokio::test]
+async fn run_prints_other_tier_notice_before_bind() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (system_key, _) = write_key(world.root.path(), "system.key")?;
+    let (user_key, _) = write_key(world.root.path(), "user.key")?;
+    let _system = start_system_serve(&world, &relay, &system_key, &world.state("system"))?;
+
+    // Quick mode: the notice precedes the ready lines and the user starts.
+    let quick_log = world.root.path().join("quick.log");
+    let mut quick = spawn_logged(
+        world.user_command(ALL_IN_ONE, Some("serve"), &world.state("quick")),
+        &serve_args(&relay, &user_key),
+        &quick_log,
+    )?;
+    let text = wait_log(&quick_log, "NodeId:", &mut quick)?;
+    assert!(
+        offset(&text, SYSTEM_NOTICE) < offset(&text, "NodeId:"),
+        "{text}"
+    );
+    assert_eq!(text.matches("note:").count(), 1, "{text}");
+    drop(quick);
+
+    // Configured mode, standalone binary.
+    let config = write_serve_config(world.root.path(), &relay, &user_key)?;
+    let configured_log = world.root.path().join("configured.log");
+    let mut configured = spawn_logged(
+        world.user_command(SERVE, None, &world.state("configured")),
+        &[
+            "run".to_owned(),
+            "--config".to_owned(),
+            config.display().to_string(),
+        ],
+        &configured_log,
+    )?;
+    let text = wait_log(&configured_log, "NodeId:", &mut configured)?;
+    assert!(
+        offset(&text, SYSTEM_NOTICE) < offset(&text, "NodeId:"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_prints_user_session_notice_in_system_tier() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    // The system tier created the presence file on an earlier start.
+    File::create(world.machine().join("serve.user.lock"))?;
+    let user_state = world.state("user");
+    let mut user = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
+        &serve_args(&relay, &key),
+    )?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+
+    let output = world
+        .system_command(ALL_IN_ONE, Some("serve"), &world.state("system"))
+        .args(["status"])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(USER_NOTICE), "{stderr}");
+    // It names no account: neither the user's home nor its owner pid.
+    assert!(
+        !stderr.contains(&world.home().display().to_string()),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&user.0.id().to_string()), "{stderr}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_reads_own_tier_snapshot_when_both_run() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (system_key, system_id) = write_key(world.root.path(), "system.key")?;
+    let (user_key, user_id) = write_key(world.root.path(), "user.key")?;
+    let system_state = world.state("system");
+    let _system = start_system_serve(&world, &relay, &system_key, &system_state)?;
+    let user_state = world.state("user");
+    let mut user = spawn(
+        world.user_command(ALL_IN_ONE, Some("serve"), &user_state),
+        &serve_args(&relay, &user_key),
+    )?;
+    wait_running(&user_state.join("serve-status.json"), &mut user)?;
+
+    for (command, own, other, notice) in [
+        (
+            world.system_command(ALL_IN_ONE, Some("serve"), &system_state),
+            &system_id,
+            &user_id,
+            USER_NOTICE,
+        ),
+        (
+            world.user_command(SERVE, None, &user_state),
+            &user_id,
+            &system_id,
+            SYSTEM_NOTICE,
+        ),
+    ] {
+        let output = { command }.args(["status", "--json"]).output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        let json: serde_json::Value = serde_json::from_str(stdout.trim())?;
+        assert_eq!(json["node_id"].as_str(), Some(own.as_str()), "{stdout}");
+        assert!(!stdout.contains(other.as_str()), "{stdout}");
+        // The notice stays on stderr: `--json` stdout is the file verbatim.
+        assert!(stderr.contains(notice), "{stderr}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_notice_when_other_tier_idle() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (key, _) = write_key(world.root.path(), "k.key")?;
+    // A system instance ran and stopped: its lock and presence files remain.
+    drop(start_system_serve(
+        &world,
+        &relay,
+        &key,
+        &world.state("old"),
+    )?);
+
+    let log = world.root.path().join("user.log");
+    let mut user = spawn_logged(
+        world.user_command(ALL_IN_ONE, Some("serve"), &world.state("user")),
+        &serve_args(&relay, &key),
+        &log,
+    )?;
+    let text = wait_log(&log, "NodeId:", &mut user)?;
+    assert!(!text.contains("note:"), "{text}");
+    drop(user);
+
+    for command in [
+        world.user_command(ALL_IN_ONE, Some("serve"), &world.state("user")),
+        world.system_command(ALL_IN_ONE, Some("serve"), &world.state("old")),
+    ] {
+        let output = { command }.args(["status"]).output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("note:"), "{stderr}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn port_clash_error_follows_notice() -> Result<()> {
+    let (relay, _server) = relay().await?;
+    let world = World::new()?;
+    let (system_key, _) = write_key(world.root.path(), "system.key")?;
+    let (user_key, _) = write_key(world.root.path(), "user.key")?;
+    let peer = iroh::SecretKey::generate().public().to_string();
+    let listen = free_loopback();
+    let args = |key: &Path| -> Vec<String> {
+        [
+            "--name",
+            "echo",
+            "--listen",
+            &listen,
+            "--node-id",
+            &peer,
+            "--relay-url",
+            &relay,
+            "--key-file",
+        ]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .chain([key.display().to_string()])
+        .collect()
+    };
+    // The system-tier access holds the address.
+    let system_log = world.root.path().join("system.log");
+    let mut system = spawn_logged(
+        world.system_command(ALL_IN_ONE, Some("access"), &world.state("system")),
+        &args(&system_key),
+        &system_log,
+    )?;
+    wait_log(&system_log, "listening for local clients", &mut system)?;
+
+    let user_log = world.root.path().join("user.log");
+    let mut user = spawn_logged(
+        world.user_command(ALL_IN_ONE, Some("access"), &world.state("user")),
+        &args(&user_key),
+        &user_log,
+    )?;
+    let bind_error = format!("failed to bind {listen}");
+    let text = wait_log(&user_log, &bind_error, &mut user)?;
+    let access_notice = SYSTEM_NOTICE.replace("serve", "access");
+    assert!(
+        offset(&text, &access_notice) < offset(&text, &bind_error),
+        "{text}"
+    );
+    Ok(())
 }

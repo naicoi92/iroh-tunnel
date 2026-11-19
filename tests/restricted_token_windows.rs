@@ -44,26 +44,27 @@ fn restricted_child_is_not_elevated() {
 }
 
 /// The product's own elevation decision (`is_elevated`) for the restricted
-/// child: a `--system` install must be refused as a permission error before
-/// anything else runs (Option A: the real CLI, no test-only probe).
+/// child: it is the user tier, so its default config path is the user's own,
+/// never `%ProgramData%` (Option A: the real CLI, no test-only probe).
 #[test]
 fn restricted_child_is_not_elevated_per_product() {
     if std::env::var_os("IROH_TUNNEL_E2E_SERVICE").is_none() {
         eprintln!("skipped: set IROH_TUNNEL_E2E_SERVICE=1 to launch restricted-token children");
         return;
     }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let config = dir.path().join("serve.toml");
-    let out = run_non_elevated(Command::new(env!("CARGO_BIN_EXE_iroh-tunnel")).args([
-        "serve",
-        "service",
-        "install",
-        "--system",
-        "--config",
-        config.to_str().unwrap(),
-    ]))
+    let out = run_non_elevated(
+        Command::new(env!("CARGO_BIN_EXE_iroh-tunnel"))
+            .args(["serve", "config", "path"])
+            .env_remove("IROH_TUNNEL_TEST_CONFIG_DIR")
+            .env_remove("IROH_TUNNEL_TEST_TIER"),
+    )
     .expect("launch iroh-tunnel under a restricted token");
+    let path = String::from_utf8_lossy(&out.stdout).to_lowercase();
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(3), "{err}");
-    assert!(err.contains("Run as administrator"), "{err}");
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let program_data = std::env::var("ProgramData")
+        .expect("ProgramData must be set on Windows")
+        .to_lowercase();
+    assert!(!path.contains(&program_data), "{path}");
+    assert!(path.contains(r"iroh-tunnel\config\serve.toml"), "{path}");
 }

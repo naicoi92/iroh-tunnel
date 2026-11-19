@@ -37,6 +37,7 @@ impl World {
             .env("HOME", self.dir("home"))
             .env("XDG_CONFIG_HOME", self.dir("home"))
             .env("IROH_TUNNEL_TEST_CONFIG_DIR", self.dir("home"))
+            .env("IROH_TUNNEL_TEST_TIER", "user")
             .env("IROH_TUNNEL_STATE_DIR", self.dir("state"))
             .env("IROH_TUNNEL_MACHINE_LOCK_DIR", self.dir("machine"))
             .env("NO_COLOR", "1");
