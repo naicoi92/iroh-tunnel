@@ -467,7 +467,6 @@ fn verify_system_state(_state: &Path, _env: EnvLookup<'_>) -> Result<()> {
     Err(CliError::Service("system services are not supported on this platform".into()).into())
 }
 
-#[cfg(windows)]
 /// Keep a `Permission` refusal from the machine-directory check as it is
 /// (its text already says nothing was changed); wrap anything else into one.
 #[cfg(windows)]

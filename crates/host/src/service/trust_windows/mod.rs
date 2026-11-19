@@ -3,7 +3,7 @@
 //! `model` is pure and compiles on every platform; `win32` is the adapter
 //! that feeds it real descriptors read from no-follow handles.
 #![cfg_attr(
-    not(windows),
+    all(not(windows), not(test)),
     expect(
         dead_code,
         reason = "the model is pure and compiled everywhere, but only Windows consumes it"
