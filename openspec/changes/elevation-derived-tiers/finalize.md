@@ -15,21 +15,21 @@
 
 - **Branch**: `spec/elevation-derived-tiers`
 - **Base branch**: `main`
-- **Final state**: `pr-updated` (feature branch fast-forwarded to `47fdeba` and pushed; no PR existed at finalize time)
-- **PR URL**: N/A (see PR comment)
+- **Final state**: `pr-updated` (feature branch fast-forwarded to `47fdeba`, pushed with the user's approval; PR opened at finalize)
+- **PR URL**: https://github.com/naicoi92/iroh-tunnel/pull/260
 
 ---
 
 ## Workspace
 
 - **Worktree**: removed (`/Users/naicoi/Projects/iroh/iroh-tunnel.elevation-derived-tiers`, removed with `wt remove` per project AGENTS.md: Worktrunk instead of `git worktree`)
-- **Cleanup**: `removed`. The local branch `elevation-derived-tiers` and the lane branches `--task-2` and `--task-3` were deleted. The remote branch `origin/elevation-derived-tiers`, pushed during apply to run the Windows e2e workflow, still exists; delete it with `git push origin --delete elevation-derived-tiers` once it is no longer needed.
+- **Cleanup**: `removed`. The local branch `elevation-derived-tiers` and the lane branches `--task-2` and `--task-3` were deleted. The remote CI branch `elevation-derived-tiers`, pushed during apply to run the Windows e2e workflow, was deleted with the user's approval.
 
 ---
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)`
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/260#issuecomment-7005321311)
 
 ---
 
@@ -55,14 +55,13 @@
 ## Deviations from the canonical flow
 
 - **Worktree operations:** project AGENTS.md requires Worktrunk, so the closeout used `wt remove`. The feature branch is checked out in its own worktree (`../iroh-tunnel.spec-elevation-derived-tiers`), so the fast-forward merge (`git merge --ff-only elevation-derived-tiers`) ran there rather than via `git checkout` in the main checkout.
-- **Push and PR:** project AGENTS.md forbids pushing, merging or opening a PR without the user's explicit approval in chat. The push of `spec/elevation-derived-tiers` and PR creation therefore wait for that approval; see Next step.
+- **Push and PR:** project AGENTS.md forbids pushing, merging or opening a PR without the user's explicit approval in chat. The user approved in chat, then the feature branch was pushed over HTTPS with the `naicoi92` gh credential (the SSH key was refused) and PR #260 was opened.
 
 ---
 
 ## Next step
 
-Push `spec/elevation-derived-tiers` and open a PR once the user approves. Wait for the PR code review (the logic pre-review already happened), then run `/opsx-archive` on this feature branch, push the archive commits to update the PR, and merge the PR with `gh pr merge --squash --delete-branch` or the GitHub UI. That single merge lands the implementation and the archive in main.
+Wait for the PR code review (the logic pre-review already happened), then run `/opsx-archive` on this feature branch, push the archive commits to update the PR, and merge the PR with `gh pr merge --squash --delete-branch` or the GitHub UI. That single merge lands the implementation and the archive in main.
 
 Follow-ups:
 - Open an issue for the occasional test flakes in untouched code: `scm_runtime::session::tests::stopped_report_always_refused_exits_with_101` and `serve::run_serve::tests::initial_status_saved_before_accept_loop`.
-- Delete the remote CI branch `elevation-derived-tiers` once it is no longer needed.
