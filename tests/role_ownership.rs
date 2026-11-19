@@ -542,6 +542,7 @@ async fn system_and_user_tiers_run_side_by_side() -> Result<()> {
     // The system start creates the presence file, unlocked and readable.
     assert!(world.machine().join("serve.user.lock").exists());
     assert!(world.machine().join("serve.lock").exists());
+    assert!(world.machine().join("serve.claim.lock").exists());
 
     let user_state = world.state("user");
     let mut user = spawn(
@@ -551,13 +552,18 @@ async fn system_and_user_tiers_run_side_by_side() -> Result<()> {
     wait_running(&user_state.join("serve-status.json"), &mut user)?;
     // Both hold their own lock; neither refused the other.
     assert!(system.0.id() != user.0.id());
-    let machine_lock = File::open(world.machine().join("serve.lock"))?;
+    let claim_lock = File::open(world.machine().join("serve.claim.lock"))?;
     assert!(
         matches!(
-            machine_lock.try_lock_shared(),
+            claim_lock.try_lock_shared(),
             Err(std::fs::TryLockError::WouldBlock)
         ),
-        "the system process holds its lock exclusively"
+        "the system process holds its claim lock exclusively"
+    );
+    let detection = File::open(world.machine().join("serve.lock"))?;
+    assert!(
+        matches!(detection.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "the system process holds its detection lock shared"
     );
     let presence = File::open(world.machine().join("serve.user.lock"))?;
     assert!(

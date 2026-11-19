@@ -54,7 +54,9 @@ pub use start::start;
 pub use status::status;
 pub use stop::stop;
 #[cfg(windows)]
-pub(crate) use trust_windows::{create_dir_with_sddl, program_data_dir, verify_machine_dir};
+pub(crate) use trust_windows::{
+    create_dir_with_sddl, create_file_with_sddl, program_data_dir, verify_machine_dir,
+};
 pub use types::{
     AppliedEffect, Environment, Fact, InstallRequest, Registration, RunningExecutable,
     ServiceFailure, ServiceInvocation, ServiceReport, ServiceStatusReport,

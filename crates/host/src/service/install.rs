@@ -1117,11 +1117,11 @@ mod unix_tests {
             std::fs::create_dir_all(&machine).unwrap();
             // SAFETY: single test thread in an isolated child process.
             unsafe { std::env::set_var("IROH_TUNNEL_MACHINE_LOCK_DIR", &machine) };
-            // A system-tier serve holds the machine lock.
+            // A system-tier serve holds its detection lock shared.
             let _system = crate::ownership::hold_for_test(
                 Role::Serve,
                 &machine,
-                crate::ownership::LockKind::Exclusive,
+                crate::ownership::LockKind::Shared,
             )
             .unwrap();
             let mut req = request();

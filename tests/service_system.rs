@@ -711,6 +711,52 @@ fn user_and_system_tiers_coexist_with_notices() {
 }
 
 #[test]
+fn non_admin_lock_holder_cannot_block_the_system_service() {
+    if !enabled() {
+        return;
+    }
+    let _sandbox = Sandbox::new();
+    let alice = Home::new("it91a", "squatter");
+    write_system_config("alpha", &fresh_key());
+    let out = install();
+    assert!(out.status.success(), "{}", err(&out));
+    wait_running();
+    stop_and_release(SYSTEM_PATH);
+    let detection = Path::new(SYSTEM_STATE).join("serve.lock");
+    let claim = Path::new(SYSTEM_STATE).join("serve.claim.lock");
+    assert_eq!(owner_and_mode(&detection), (0, 0o644));
+    assert_eq!(owner_and_mode(&claim), (0, 0o600));
+
+    // A non-admin account holds the world-readable detection lock shared.
+    let mut squatter = alice.command(
+        "flock",
+        &["--shared", detection.to_str().unwrap(), "sleep", "60"],
+    );
+    squatter.stdout(Stdio::null()).stderr(Stdio::null());
+    let _squatter = UserInstance(squatter.spawn().unwrap());
+    wait_for("the squatter to hold the detection lock", || {
+        let file = std::fs::File::open(&detection).unwrap();
+        matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    });
+    // It cannot even open the claim lock.
+    let out = alice
+        .command("cat", &[claim.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(err(&out).contains("Permission denied"), "{}", err(&out));
+
+    clear_snapshot();
+    let out = service_verb("start", SYSTEM_PATH);
+    assert!(out.status.success(), "start: {}", err(&out));
+    wait_running();
+
+    // A second system instance is refused through the claim lock.
+    let out = run(&["serve", "run"], &[]);
+    assert_eq!(out.status.code(), Some(6), "{}", err(&out));
+    assert!(err(&out).contains("already running"), "{}", err(&out));
+}
+
+#[test]
 fn busybox_non_root_mutation_refused() {
     if !enabled() {
         return;

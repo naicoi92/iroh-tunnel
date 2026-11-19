@@ -18,9 +18,14 @@
 //!   location comes from the user's home, never from `--config` or
 //!   `IROH_TUNNEL_STATE_DIR`, so foreground and user-service runs of one user
 //!   share it however they were started.
-//! - **System tier** — `<machine dir>/<role>.lock`, held exclusively: one per
-//!   machine per role. The machine dir is `/run/iroh-tunnel` (Linux),
-//!   `/var/run/iroh-tunnel` (macOS; the macOS state dir is separate, under `/Library`), `%ProgramData%\iroh-tunnel` (Windows).
+//! - **System tier** — `<machine dir>/<role>.claim.lock`, held exclusively:
+//!   one per machine per role. It is private to root (Unix `0o600`) or to
+//!   SYSTEM and Administrators (Windows), so no other account can open it
+//!   and block a system start. The system process also holds
+//!   `<machine dir>/<role>.lock` (`0o644`) *shared*, only so the user tier can
+//!   detect it. The machine dir is `/run/iroh-tunnel` (Linux),
+//!   `/var/run/iroh-tunnel` (macOS; the macOS state dir is separate, under
+//!   `/Library`), `%ProgramData%\iroh-tunnel` (Windows).
 //! - **Presence file** — `<machine dir>/<role>.user.lock`. The system tier
 //!   creates it (0644, unlocked); a user process holds it *shared* through a
 //!   read-only open while it runs and never creates anything in the machine
@@ -76,9 +81,18 @@ pub(crate) struct MachineDir {
     pub(crate) verify: bool,
 }
 
-/// Mode of the machine-dir lock and presence files: every account must be
-/// able to open them for reading.
+/// Mode of the machine-dir detection lock and presence files: every account
+/// must be able to open them for reading.
 const MACHINE_FILE_MODE: u32 = 0o644;
+
+/// Mode of the system tier's claim lock: root only, so no other account can
+/// hold it and block a system start.
+const CLAIM_FILE_MODE: u32 = 0o600;
+
+/// SDDL of the Windows claim lock: owner Administrators, protected DACL with
+/// full control for SYSTEM and Administrators only.
+#[cfg(windows)]
+const CLAIM_FILE_SDDL: &str = "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)";
 
 /// Who is recorded as running a role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +290,20 @@ impl TierDirs {
 
 fn lock_name(role: Role) -> String {
     format!("{}.lock", role.name())
+}
+
+/// The system tier's exclusive, admin-only claim lock.
+fn claim_lock_name(role: Role) -> String {
+    format!("{}.claim.lock", role.name())
+}
+
+/// The lock that says `role` runs in `tier`: the user lock, or the system
+/// tier's claim lock.
+fn own_lock_name(role: Role, tier: Tier) -> String {
+    match tier {
+        Tier::User => lock_name(role),
+        Tier::System => claim_lock_name(role),
+    }
 }
 
 /// The presence file user processes hold shared while they run.
@@ -744,16 +772,24 @@ fn hold_presence(path: &Path) -> Option<File> {
             return None;
         }
     };
-    // The system tier's probe holds the file exclusively for microseconds.
+    hold_shared(file, path)
+}
+
+/// Hold `file` (opened at `path`) shared, best effort: the other tier's probe
+/// holds it exclusively for microseconds, so a busy lock is retried briefly;
+/// a lasting holder or an error is logged and yields `None`.
+fn hold_shared(file: File, path: &Path) -> Option<File> {
     const ATTEMPTS: u32 = 4;
     const PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
     for attempt in 1..=ATTEMPTS {
         match file.try_lock_shared() {
             Ok(()) => return Some(file),
             Err(TryLockError::WouldBlock) if attempt < ATTEMPTS => std::thread::sleep(PAUSE),
-            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::WouldBlock) => {
+                tracing::debug!("{} stays locked; holding it skipped", path.display());
+            }
             Err(TryLockError::Error(e)) => {
-                tracing::debug!("cannot lock presence file {}: {e}", path.display());
+                tracing::debug!("cannot lock {}: {e}", path.display());
                 return None;
             }
         }
@@ -761,20 +797,23 @@ fn hold_presence(path: &Path) -> Option<File> {
     None
 }
 
-/// Take the system tier: the machine lock exclusively, then make sure the
-/// presence file exists.
+/// Take the system tier: the claim lock exclusively and the detection lock
+/// shared, then make sure the presence file exists.
 fn claim_system(role: Role, dirs: &TierDirs) -> Result<Vec<File>> {
     let machine = dirs
         .machine
         .as_ref()
         .context("this platform defines no machine lock directory")?;
-    let lock = claim_system_lock(role, &machine.path, machine.verify)?;
+    let locks = claim_system_lock(role, &machine.path, machine.verify)?;
     ensure_presence_in(role, &machine.path)?;
-    Ok(vec![lock])
+    Ok(locks)
 }
 
 /// Create the machine directory (verifying an existing one where `verify`),
-/// then take `<role>.lock` there exclusively.
+/// take `<role>.claim.lock` there exclusively, then hold `<role>.lock` shared
+/// for the user tier to detect. Only the claim lock can refuse: it is
+/// admin-only, while anyone may hold the world-readable detection lock, which
+/// is then skipped (at worst the user tier misses the notice).
 ///
 /// `verify` (Windows only) requires an existing directory to pass the machine
 /// trust check before anything is created in it; a refusal is a permission
@@ -782,10 +821,11 @@ fn claim_system(role: Role, dirs: &TierDirs) -> Result<Vec<File>> {
 ///
 /// # Errors
 ///
-/// [`CliError::Conflict`] when the lock is held; [`CliError::Permission`] for
-/// an untrusted directory; the create/open error with the path otherwise.
-fn claim_system_lock(role: Role, dir: &Path, verify: bool) -> Result<File> {
-    let path = dir.join(lock_name(role));
+/// [`CliError::Conflict`] when the claim lock is held;
+/// [`CliError::Permission`] for an untrusted directory; the create/open error
+/// with the path otherwise.
+fn claim_system_lock(role: Role, dir: &Path, verify: bool) -> Result<Vec<File>> {
+    let path = dir.join(claim_lock_name(role));
     #[cfg(windows)]
     let dir_exists = std::fs::symlink_metadata(dir).is_ok();
     #[cfg(windows)]
@@ -817,16 +857,42 @@ fn claim_system_lock(role: Role, dir: &Path, verify: bool) -> Result<File> {
         other => other,
     };
     let file = ensure_dir
-        .and_then(|()| create_lock_file(&path, MACHINE_FILE_MODE))
+        .and_then(|()| create_claim_file(&path, verify))
         .with_context(|| format!("cannot create machine role lock {}", path.display()))?;
-    match claim_lock(file)? {
-        Lock::Held(file) => Ok(file),
-        Lock::Busy => Err(already_running(
-            role,
-            Tier::System,
-            read_owner(dir, role).as_ref(),
-        )),
+    let claim = match claim_lock(file)? {
+        Lock::Held(file) => file,
+        Lock::Busy => {
+            return Err(already_running(
+                role,
+                Tier::System,
+                read_owner(dir, role).as_ref(),
+            ))
+        }
+    };
+    let detect_path = dir.join(lock_name(role));
+    let detect = create_lock_file(&detect_path, MACHINE_FILE_MODE)
+        .with_context(|| format!("cannot create machine role lock {}", detect_path.display()))?;
+    let mut locks = vec![claim];
+    locks.extend(hold_shared(detect, &detect_path));
+    Ok(locks)
+}
+
+/// Open the claim lock at `path`, creating it admin-only when missing: Unix
+/// `0o600`; Windows (where `verify` marks the real `%ProgramData%` location)
+/// with [`CLAIM_FILE_SDDL`]. An existing file keeps its permissions.
+fn create_claim_file(path: &Path, verify: bool) -> std::io::Result<File> {
+    #[cfg(windows)]
+    if verify {
+        return match crate::service::create_file_with_sddl(path, CLAIM_FILE_SDDL) {
+            Ok(file) => Ok(file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                base_options().read(true).write(true).open(path)
+            }
+            Err(e) => Err(e),
+        };
     }
+    let _ = verify;
+    create_lock_file(path, CLAIM_FILE_MODE)
 }
 
 /// Create `<role>.user.lock` in `dir` when missing, readable by everyone and
@@ -900,7 +966,7 @@ impl RoleClaim {
         let (dir, mode) = self.record_dir()?;
         write_owner(dir, self.role, Some(node_id), mode)?;
         let other = other_role(self.role);
-        if let Some(owner) = running_owner(dir, other)? {
+        if let Some(owner) = running_owner(dir, other, self.tier)? {
             if owner.node_id.as_deref() == Some(node_id) {
                 return Err(start_refused(format!(
                     "the {} role already runs with the same public identity ({}); \
@@ -914,8 +980,8 @@ impl RoleClaim {
     }
 }
 
-/// The owner record of `role` running in `dir`: `None` when its lock there is
-/// not held exclusively, or the holder has published no record or no
+/// The owner record of `role` running in `tier`'s `dir`: `None` when its own
+/// lock there is not held exclusively, or the holder has published no record or no
 /// identity yet.
 ///
 /// An unreadable record is retried briefly (a reader racing a Windows rename,
@@ -927,10 +993,10 @@ impl RoleClaim {
 ///
 /// [`CliError::Conflict`] when the record stays unreadable while the lock is
 /// held; lock I/O errors.
-fn running_owner(dir: &Path, role: Role) -> Result<Option<OwnerRecord>> {
+fn running_owner(dir: &Path, role: Role, tier: Tier) -> Result<Option<OwnerRecord>> {
     const ATTEMPTS: u32 = 4;
     const PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
-    let lock = dir.join(lock_name(role));
+    let lock = dir.join(own_lock_name(role, tier));
     let mut attempt = 1;
     loop {
         if !held_exclusively(&lock)? {
@@ -981,8 +1047,8 @@ pub(crate) fn probe_tier(role: Role, tier: Tier) -> Result<Liveness> {
 }
 
 /// Whether `role` also runs in the tier other than `tier`, as seen from
-/// `tier`: a user process tests the system lock, a system process tests the
-/// presence file. Only a lock is read, never an owner record. Any I/O error
+/// `tier`: a user process tests the system tier's detection lock, a system
+/// process tests the presence file, each with an exclusive try-lock. Only a lock is read, never an owner record. Any I/O error
 /// is logged at debug level and reads as "not running", so the notice can
 /// never block a start.
 #[must_use]
@@ -1005,13 +1071,9 @@ fn other_tier_running_in(role: Role, tier: Tier, machine: &Path) -> Option<Tier>
         Tier::System => (presence_name(role), Tier::User),
     };
     let path = machine.join(name);
-    // A shared test sees the system's exclusive hold; an exclusive test sees
-    // any shared presence hold.
-    let held = match tier {
-        Tier::User => held_exclusively(&path),
-        Tier::System => held_shared(&path),
-    };
-    match held {
+    // Both are held shared by the other tier, so an exclusive test sees them.
+    // A non-admin may hold the detection lock too: at worst a false notice.
+    match held_shared(&path) {
         Ok(true) => Some(other),
         Ok(false) => None,
         Err(e) => {
@@ -1021,13 +1083,15 @@ fn other_tier_running_in(role: Role, tier: Tier, machine: &Path) -> Option<Tier>
     }
 }
 
-/// Probe exactly `dir` for `role`'s own lock and report it as `tier`.
+/// Probe exactly `dir` for `role`'s own lock in `tier` (the user lock, or
+/// the system tier's claim lock, which only an elevated process can open) and
+/// report it as `tier`.
 ///
 /// # Errors
 ///
 /// I/O errors other than "no such lock" when opening or testing the lock.
 pub(crate) fn tier_liveness_in(role: Role, tier: Tier, dir: &Path) -> Result<Liveness> {
-    if held_exclusively(&dir.join(lock_name(role)))? {
+    if held_exclusively(&dir.join(own_lock_name(role, tier)))? {
         Ok(Liveness::Running {
             tier,
             owner: read_owner(dir, role),
@@ -1188,6 +1252,7 @@ mod tests {
     #[test]
     fn lock_and_owner_names_are_role_scoped() {
         assert_eq!(lock_name(Role::Serve), "serve.lock");
+        assert_eq!(claim_lock_name(Role::Access), "access.claim.lock");
         assert_eq!(owner_name(Role::Access), "access.owner.json");
     }
 
@@ -1261,17 +1326,69 @@ mod tests {
     }
 
     #[test]
-    fn system_lock_is_exclusive_and_readable_by_others() {
+    fn system_claim_lock_is_exclusive_and_detection_lock_shared() {
         let dir = tempfile::tempdir().unwrap();
         let first = claim_system_lock(Role::Serve, dir.path(), false).unwrap();
-        let path = dir.path().join(lock_name(Role::Serve));
-        let reader = base_options().read(true).open(&path).unwrap();
-        assert!(matches!(
-            try_lock(reader, LockKind::Shared).unwrap(),
-            Lock::Busy
-        ));
+        let claim = dir.path().join(claim_lock_name(Role::Serve));
+        let detect = dir.path().join(lock_name(Role::Serve));
+        assert!(
+            !lockable(&claim, LockKind::Shared),
+            "claim held exclusively"
+        );
+        assert!(lockable(&detect, LockKind::Shared), "detection held shared");
+        assert!(!lockable(&detect, LockKind::Exclusive), "detection held");
         drop(first);
-        assert!(eventually(|| lockable(&path, LockKind::Shared)));
+        assert!(eventually(|| lockable(&claim, LockKind::Exclusive)));
+        assert!(eventually(|| lockable(&detect, LockKind::Exclusive)));
+    }
+
+    #[test]
+    fn non_admin_holder_cannot_block_the_system_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = temp_dirs(&tmp);
+        let machine = machine_path(&dirs);
+        std::fs::create_dir_all(&machine).unwrap();
+        // Any account can open the world-readable detection lock and hold it.
+        let _squatter = hold_for_test(Role::Serve, &machine, LockKind::Shared).unwrap();
+        let claim = claim_in(Role::Serve, Tier::System, dirs)
+            .unwrap_or_else(|e| panic!("a shared holder must not refuse: {e:#}"));
+        assert!(matches!(
+            tier_liveness_in(Role::Serve, Tier::System, &machine).unwrap(),
+            Liveness::Running {
+                tier: Tier::System,
+                ..
+            }
+        ));
+        drop(claim);
+    }
+
+    #[test]
+    fn second_system_claim_is_refused_through_the_claim_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = machine_path(&temp_dirs(&tmp));
+        std::fs::create_dir_all(&machine).unwrap();
+        // Only the claim lock is held; the detection lock is free.
+        let claim = create_lock_file(&machine.join(claim_lock_name(Role::Serve)), 0o600).unwrap();
+        let Lock::Held(_claim) = try_lock(claim, LockKind::Exclusive).unwrap() else {
+            panic!("first holder must win");
+        };
+        let err = claim_in(Role::Serve, Tier::System, temp_dirs(&tmp)).expect_err("refused");
+        let msg = conflict_message(&err);
+        assert!(msg.contains("already running"), "{msg}");
+        assert!(msg.contains("system service"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_claim_lock_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(claim_lock_name(Role::Serve));
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        drop(claim_system_lock(Role::Serve, tmp.path(), false).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "must not be re-chmodded: {mode:o}");
     }
 
     fn running() -> Result<Liveness> {
@@ -1417,6 +1534,21 @@ mod tests {
     fn tier_liveness_in_reports_a_held_lock() {
         let dir = tempfile::tempdir().unwrap();
         let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Exclusive).unwrap();
+        let seen = tier_liveness_in(Role::Serve, Tier::User, dir.path()).unwrap();
+        assert!(
+            matches!(
+                seen,
+                Liveness::Running {
+                    tier: Tier::User,
+                    ..
+                }
+            ),
+            "{seen:?}"
+        );
+        // The system tier is judged by its claim lock only.
+        let seen = tier_liveness_in(Role::Serve, Tier::System, dir.path()).unwrap();
+        assert!(matches!(seen, Liveness::NotRunning), "{seen:?}");
+        let _system = claim_system_lock(Role::Serve, dir.path(), false);
         let seen = tier_liveness_in(Role::Serve, Tier::System, dir.path()).unwrap();
         assert!(
             matches!(
@@ -1444,7 +1576,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _hold = hold_for_test(Role::Serve, dir.path(), LockKind::Exclusive).unwrap();
         let Liveness::Running { owner, .. } =
-            tier_liveness_in(Role::Serve, Tier::System, dir.path()).unwrap()
+            tier_liveness_in(Role::Serve, Tier::User, dir.path()).unwrap()
         else {
             panic!("a held lock must read as Running")
         };
@@ -1455,6 +1587,11 @@ mod tests {
     fn tier_liveness_in_is_not_running_for_an_existing_but_unlocked_file() {
         let dir = tempfile::tempdir().unwrap();
         create_lock_file(&dir.path().join(lock_name(Role::Serve)), 0o600).unwrap();
+        create_lock_file(&dir.path().join(claim_lock_name(Role::Serve)), 0o600).unwrap();
+        for tier in [Tier::User, Tier::System] {
+            let seen = tier_liveness_in(Role::Serve, tier, dir.path()).unwrap();
+            assert!(matches!(seen, Liveness::NotRunning), "{seen:?}");
+        }
         let seen = tier_liveness_in(Role::Serve, Tier::System, dir.path()).unwrap();
         assert!(matches!(seen, Liveness::NotRunning), "{seen:?}");
     }
@@ -2048,6 +2185,7 @@ mod tests {
             let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&machine), 0o755, "machine dir");
             assert_eq!(mode(&machine.join("serve.lock")), 0o644);
+            assert_eq!(mode(&machine.join("serve.claim.lock")), 0o600, "claim lock");
             assert_eq!(mode(&machine.join("serve.user.lock")), 0o644);
             assert_eq!(mode(&machine.join("serve.owner.json")), 0o644);
             assert_eq!(mode(machine.parent().unwrap()), 0o755);

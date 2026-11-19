@@ -989,19 +989,11 @@ pub(crate) fn program_data_dir() -> Result<PathBuf> {
     result
 }
 
-/// Create the single directory `path` with the security descriptor given in
-/// SDDL form. The parent must exist; an existing directory is an error.
-///
-/// # Errors
-///
-/// The OS error from the SDDL conversion or from `CreateDirectoryW`.
-pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
+/// The self-relative security descriptor of `sddl`, freed on drop.
+fn sddl_descriptor(sddl: &str) -> io::Result<LocalBox> {
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
-    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
-
     let sddl = wide(sddl);
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and outlives the call; the out-pointer
@@ -1017,7 +1009,36 @@ pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    let descriptor = LocalBox(descriptor);
+    Ok(LocalBox(descriptor))
+}
+
+/// The last OS error of a create call, with "not elevated" codes reported as
+/// `PermissionDenied` (see [`super::map_create_error`]).
+fn create_error() -> io::Error {
+    let err = io::Error::last_os_error();
+    let code = err.raw_os_error().unwrap_or(0).cast_unsigned();
+    match super::map_create_error(code) {
+        io::ErrorKind::PermissionDenied if err.kind() != io::ErrorKind::PermissionDenied => {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{err} (os error {code})"),
+            )
+        }
+        _ => err,
+    }
+}
+
+/// Create the single directory `path` with the security descriptor given in
+/// SDDL form. The parent must exist; an existing directory is an error.
+///
+/// # Errors
+///
+/// The OS error from the SDDL conversion or from `CreateDirectoryW`.
+pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let descriptor = sddl_descriptor(sddl)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: win32_size_of::<SECURITY_ATTRIBUTES>(),
         lpSecurityDescriptor: descriptor.0,
@@ -1028,20 +1049,53 @@ pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     // that `descriptor` keeps alive until after the call.
     let created = unsafe { CreateDirectoryW(path.as_ptr(), &attributes) };
     if created == 0 {
-        let err = io::Error::last_os_error();
-        let code = err.raw_os_error().unwrap_or(0).cast_unsigned();
         // `CreateDirectoryW` is atomic: a failure leaves no directory behind.
-        return Err(match super::map_create_error(code) {
-            io::ErrorKind::PermissionDenied if err.kind() != io::ErrorKind::PermissionDenied => {
-                io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("{err} (os error {code})"),
-                )
-            }
-            _ => err,
-        });
+        return Err(create_error());
     }
     Ok(())
+}
+
+/// Create the new file `path` (read/write, never following or replacing an
+/// existing entry) with the security descriptor given in SDDL form, so it is
+/// never visible with another DACL.
+///
+/// # Errors
+///
+/// The OS error from the SDDL conversion or from `CreateFileW`;
+/// `AlreadyExists` when anything exists at `path`.
+pub(crate) fn create_file_with_sddl(path: &Path, sddl: &str) -> io::Result<std::fs::File> {
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+
+    let descriptor = sddl_descriptor(sddl)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: win32_size_of::<SECURITY_ATTRIBUTES>(),
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let path = wide(&path.to_string_lossy());
+    // SAFETY: `path` is NUL-terminated; `attributes` points at a descriptor
+    // that `descriptor` keeps alive until after the call.
+    let raw = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(create_error());
+    }
+    // SAFETY: CreateFileW succeeded, so `raw` is a valid handle owned by no
+    // one else; the File closes it on drop.
+    Ok(std::fs::File::from(unsafe {
+        OwnedHandle::from_raw_handle(raw)
+    }))
 }
 
 #[cfg(test)]
