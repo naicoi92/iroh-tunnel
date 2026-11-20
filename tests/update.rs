@@ -24,7 +24,8 @@ use anyhow::{Context, Result};
 use common::busy_exec;
 use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::{
-    update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
+    update, DowngradePolicy, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest,
+    Verification,
 };
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
@@ -112,6 +113,15 @@ fn run_update(exe: &Path, base_url: &str, args: &[&str]) -> Result<Output> {
             .env("IROH_TUNNEL_BASE_URL", base_url),
     )
     .context("cannot run update")
+}
+
+fn installed_version(exe: &Path) -> Result<String> {
+    let out = busy_exec::output(Command::new(exe).arg("--version"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.split_whitespace()
+        .last()
+        .map(str::to_owned)
+        .context("empty --version output")
 }
 
 fn run_installed(exe: &Path) -> Result<String> {
@@ -246,6 +256,118 @@ fn invalid_version_is_rejected_before_any_request() -> Result<()> {
 }
 
 #[test]
+fn force_without_to_is_a_usage_error() -> Result<()> {
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+    let out = run_update(&install.exe, "http://127.0.0.1:9", &["--force"])?;
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stderr.split("\n\n").next().unwrap_or("");
+    assert!(
+        first.contains("required arguments were not provided"),
+        "{stderr}"
+    );
+    assert!(first.contains("--to <VERSION>"), "{stderr}");
+    assert!(!first.contains("unexpected argument"), "{stderr}");
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
+fn explicit_downgrade_exits_1_and_names_force() -> Result<()> {
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+    let out = run_update(&install.exe, "http://127.0.0.1:9", &["--to", "0.0.1"])?;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("0.0.1"), "{stderr}");
+    assert!(
+        stderr.contains(&installed_version(&install.exe)?),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(stderr.contains("refusing to downgrade"), "{stderr}");
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
+fn same_version_with_force_reports_already_current() -> Result<()> {
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+    let version = installed_version(&install.exe)?;
+    let out = run_update(
+        &install.exe,
+        "http://127.0.0.1:9",
+        &["-i", "--to", &version, "--force"],
+    )?;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("is already at {version}")),
+        "{stdout}"
+    );
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
+fn forced_explicit_downgrade_installs_the_older_build() -> Result<()> {
+    let Some(target) = host_target() else {
+        return Ok(());
+    };
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "0.0.1", target, false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+    let install = install_real_binary()?;
+
+    let out = run_update(
+        &install.exe,
+        &server.url,
+        &["-i", "--to", "0.0.1", "--force"],
+    )?;
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_installed(&install.exe)?, "NEW-0.0.1");
+    Ok(())
+}
+
+#[test]
+fn newer_than_latest_hint_suggests_force() -> Result<()> {
+    let Some(target) = host_target() else {
+        return Ok(());
+    };
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "0.0.5", target, false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "0.0.5")?;
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+
+    let out = run_update(&install.exe, &server.url, &["-i"])?;
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("--to 0.0.5 --force"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
 fn update_does_not_stop_a_running_process_of_the_old_binary() -> Result<()> {
     let Some(target) = host_target() else {
         return Ok(());
@@ -308,11 +430,22 @@ fn in_process(
     install: &Path,
     args: &UpdateRequest,
 ) -> Result<()> {
+    in_process_as("0.0.1", server, verifier, install, args)
+}
+
+/// Like [`in_process`], with the running version set to `current_version`.
+fn in_process_as(
+    current_version: &str,
+    server: &ReleaseServer,
+    verifier: &dyn SignatureVerifier,
+    install: &Path,
+    args: &UpdateRequest,
+) -> Result<()> {
     let ctx = UpdateContext {
         base_url: server.url.clone(),
         exe_name: EXE,
         target: "linux-amd64",
-        current_version: "0.0.1",
+        current_version,
         install_path: install.to_owned(),
         verifier,
         owner: iroh_tunnel_host::update::Owner::Standalone,
@@ -331,6 +464,7 @@ fn args(to: Option<&str>, insecure: bool) -> UpdateRequest {
             Verification::Verified
         },
         overwrite: OverwritePolicy::RespectOwner,
+        downgrade: DowngradePolicy::Refuse,
     }
 }
 
@@ -516,5 +650,119 @@ fn bundle_from_a_foreign_signer_is_rejected_by_the_real_binary() -> Result<()> {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+fn forced(to: &str) -> UpdateRequest {
+    UpdateRequest {
+        downgrade: DowngradePolicy::Allow,
+        ..args(Some(to), true)
+    }
+}
+
+/// Serve `published` as the only (and latest) release.
+fn serve_only(published: &str) -> Result<(tempfile::TempDir, ReleaseServer)> {
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), published, "linux-amd64", false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), published)?;
+    Ok((releases, server))
+}
+
+#[test]
+fn forced_downgrade_installs_older_release() -> Result<()> {
+    let (_releases, server) = serve_only("0.6.0")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as("0.7.0", &server, &Accept, &exe, &forced("0.6.0"))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.6.0");
+    Ok(())
+}
+
+#[test]
+fn newer_release_candidate_installs_without_force() -> Result<()> {
+    let (_releases, server) = serve_only("0.8.0-rc.2")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as(
+        "0.8.0-rc.1",
+        &server,
+        &Accept,
+        &exe,
+        &args(Some("0.8.0-rc.2"), true),
+    )?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.8.0-rc.2");
+    Ok(())
+}
+
+#[test]
+fn release_candidate_can_be_pinned() -> Result<()> {
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "9.9.9-rc.1", "linux-amd64", false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process(&server, &Accept, &exe, &args(Some("9.9.9-rc.1"), true))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-9.9.9-rc.1");
+    Ok(())
+}
+
+#[test]
+fn forced_downgrade_keeps_verification() -> Result<()> {
+    let (_releases, server) = serve_only("0.6.0")?;
+    let (_dir, exe) = old_install()?;
+    let req = UpdateRequest {
+        downgrade: DowngradePolicy::Allow,
+        ..args(Some("0.6.0"), false)
+    };
+
+    let err = in_process_as("0.7.0", &server, &Reject, &exe, &req).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("signature verification failed"),
+        "{err:#}"
+    );
+    assert_eq!(std::fs::read(&exe)?, OLD_BYTES);
+    Ok(())
+}
+
+#[test]
+fn latest_upgrades_dev_build_to_its_release() -> Result<()> {
+    let (_releases, server) = serve_only("0.7.0")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as("0.7.0-dev", &server, &Accept, &exe, &args(None, false))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.7.0");
+    Ok(())
+}
+
+#[test]
+fn latest_upgrades_release_candidate_to_its_release() -> Result<()> {
+    let (_releases, server) = serve_only("0.8.0")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as("0.8.0-rc.2", &server, &Accept, &exe, &args(None, false))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.8.0");
+    Ok(())
+}
+
+#[test]
+fn unordered_running_version_installs_explicit_target() -> Result<()> {
+    let (_releases, server) = serve_only("9.9.8")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as(
+        "garbage",
+        &server,
+        &Accept,
+        &exe,
+        &args(Some("9.9.8"), true),
+    )?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-9.9.8");
     Ok(())
 }

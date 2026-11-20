@@ -17,7 +17,8 @@ mod common;
 use anyhow::Result;
 use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::{
-    update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
+    update, DowngradePolicy, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest,
+    Verification,
 };
 use std::path::Path;
 
@@ -66,6 +67,7 @@ fn run_update_for(
         to: None,
         verification: Verification::Verified,
         overwrite: OverwritePolicy::RespectOwner,
+        downgrade: DowngradePolicy::Refuse,
     };
     tokio::runtime::Runtime::new()?.block_on(update(&req, &ctx))?;
     Ok(())

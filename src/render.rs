@@ -363,7 +363,7 @@ pub(crate) fn render_update(
         }
         UpdateOutcome::NewerThanLatest { current, latest } => format!(
             "{exe_name} {current} is newer than the latest release {latest}; nothing to do \
-             (use --to {latest} to install it anyway)\n"
+             (use --to {latest} --force to install it anyway)\n"
         ),
         UpdateOutcome::Updated { path, from, to } => format!(
             "updated {} from {from} to {to}\n\
@@ -711,6 +711,18 @@ mod tests {
         assert_eq!(
             render_ready(&plain),
             "NodeId: X\nExposed: w a:1 -> peer P (tcp://a:1)\n"
+        );
+    }
+
+    #[test]
+    fn render_update_newer_than_latest_suggests_force() {
+        let outcome = iroh_tunnel_host::update::UpdateOutcome::NewerThanLatest {
+            current: "0.1.0".into(),
+            latest: "0.0.5".into(),
+        };
+        assert_eq!(
+            render_update(&outcome, "iroh-tunnel"),
+            "iroh-tunnel 0.1.0 is newer than the latest release 0.0.5; nothing to do (use --to 0.0.5 --force to install it anyway)\n"
         );
     }
 }

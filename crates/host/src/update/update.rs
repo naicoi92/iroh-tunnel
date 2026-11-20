@@ -8,7 +8,7 @@ use anyhow::{bail, Context as _};
 use sha2::{Digest as _, Sha256};
 
 use super::replace::{classify_replace_error, replace_executable};
-use super::types::{UpdateContext, UpdateOutcome, UpdateRequest, Verification};
+use super::types::{DowngradePolicy, UpdateContext, UpdateOutcome, UpdateRequest, Verification};
 #[cfg(test)]
 #[path = "../../../../tests/common/release_server.rs"]
 mod release_server;
@@ -22,6 +22,16 @@ mod release_server;
 pub async fn update(req: &UpdateRequest, ctx: &UpdateContext<'_>) -> anyhow::Result<UpdateOutcome> {
     let insecure = req.verification == Verification::Insecure;
     let requested = req.to.as_deref().map(parse_version).transpose()?;
+    if let Some(v) = &requested {
+        if req.downgrade == DowngradePolicy::Refuse && is_older(v, ctx.current_version) {
+            bail!(
+                "refusing to downgrade {} from {} to {v}; pass --force to install it anyway; \
+                 the installed executable was not changed",
+                ctx.exe_name,
+                ctx.current_version
+            );
+        }
+    }
     let client = http_client()?;
     let release_url = match &requested {
         Some(v) => format!("{}/download/v{v}", ctx.base_url.trim_end_matches('/')),
@@ -112,35 +122,26 @@ pub async fn update(req: &UpdateRequest, ctx: &UpdateContext<'_>) -> anyhow::Res
 }
 
 /// Accepts `1.2.3` or `v1.2.3` (plus pre-release/build suffix); the result is
-/// embedded in URLs and file names, so anything else is rejected.
+/// embedded in URLs and file names, so anything but valid semver is rejected.
+/// The text after the optional `v` is returned unchanged.
 fn parse_version(raw: &str) -> anyhow::Result<String> {
-    #[expect(
-        clippy::expect_used,
-        reason = "invariant: the pattern is a constant and covered by the version tests"
-    )]
-    static VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.\-]+)?$")
-            .expect("valid static regex")
-    });
     let v = raw.strip_prefix('v').unwrap_or(raw);
-    if !VERSION.is_match(v) {
+    if semver::Version::parse(v).is_err() {
         bail!("invalid version {raw:?}; expected e.g. 0.4.2");
     }
     Ok(v.to_owned())
 }
 
-/// True when `version` is strictly older than `current` (numeric core only;
-/// a `-dev` or pre-release suffix of `current` is ignored).
+/// True when both versions are semver and `version` has lower precedence than
+/// `current` (build metadata ignored).
 fn is_older(version: &str, current: &str) -> bool {
-    fn core(v: &str) -> Option<[u64; 3]> {
-        let mut parts = v.split(['-', '+']).next()?.split('.');
-        let mut out = [0; 3];
-        for slot in &mut out {
-            *slot = parts.next()?.parse().ok()?;
-        }
-        Some(out)
-    }
-    matches!((core(version), core(current)), (Some(v), Some(c)) if v < c)
+    matches!(
+        (
+            semver::Version::parse(version),
+            semver::Version::parse(current)
+        ),
+        (Ok(v), Ok(c)) if v.cmp_precedence(&c) == std::cmp::Ordering::Less
+    )
 }
 
 fn checksums_name(target: &str) -> &'static str {
@@ -330,6 +331,7 @@ mod tests {
             to: None,
             verification: Verification::Verified,
             overwrite: OverwritePolicy::RespectOwner,
+            downgrade: DowngradePolicy::Refuse,
         };
 
         let outcome = tokio::runtime::Runtime::new()
@@ -349,10 +351,96 @@ mod tests {
     }
 
     #[test]
-    fn older_detection_ignores_dev_suffix_and_handles_garbage() {
+    fn parse_version_accepts_semver_with_optional_v() {
+        assert_eq!(parse_version("v0.8.0-rc.1").unwrap(), "0.8.0-rc.1");
+        assert_eq!(parse_version("0.8.0+build.5").unwrap(), "0.8.0+build.5");
+        for bad in [
+            "../x",
+            "01.2.3",
+            "1.2.3-",
+            "1.2.3-..",
+            "1.2.3-rc..1",
+            "1.2",
+            "vv1.2.3",
+            "",
+        ] {
+            assert!(
+                parse_version(bad)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid version"),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn older_uses_semver_precedence() {
+        assert!(is_older("0.8.0-rc.1", "0.8.0"));
+        assert!(is_older("0.8.0-rc.1", "0.8.0-rc.2"));
+        assert!(!is_older("0.8.0-rc.2", "0.8.0-rc.1"));
+        assert!(!is_older("0.7.0", "0.7.0-dev"));
+        assert!(is_older("0.8.0-beta.1", "0.8.0-dev"));
+        assert!(!is_older("0.8.0-rc.1", "0.8.0-dev"));
+        assert!(!is_older("0.8.0+build.5", "0.8.0"));
         assert!(is_older("0.4.1", "0.4.2"));
-        assert!(!is_older("0.4.2", "0.4.2-dev"));
-        assert!(!is_older("0.4.3", "0.4.2"));
+        assert!(!is_older("0.0.1", "garbage"));
         assert!(!is_older("x", "0.4.2"));
+    }
+
+    fn run_with(
+        current: &str,
+        to: &str,
+        downgrade: DowngradePolicy,
+    ) -> (
+        anyhow::Result<UpdateOutcome>,
+        std::path::PathBuf,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("iroh-tunnel-serve");
+        std::fs::write(&install, b"OLD").unwrap();
+        let mut ctx = ctx_with(Owner::Standalone, install.clone(), &AcceptAll);
+        ctx.current_version = current;
+        let req = UpdateRequest {
+            to: Some(to.to_owned()),
+            verification: Verification::Insecure,
+            overwrite: OverwritePolicy::RespectOwner,
+            downgrade,
+        };
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(update(&req, &ctx));
+        (result, install, dir)
+    }
+
+    fn assert_refused(current: &str, to: &str) {
+        let (result, install, _dir) = run_with(current, to, DowngradePolicy::Refuse);
+        let msg = result.unwrap_err().to_string();
+        for part in ["refusing to downgrade", current, to, "--force"] {
+            assert!(msg.contains(part), "{part}: {msg}");
+        }
+        assert_eq!(std::fs::read(&install).unwrap(), b"OLD");
+    }
+
+    #[test]
+    fn explicit_downgrade_is_refused_before_any_request() {
+        assert_refused("0.8.0", "0.8.0-rc.1");
+    }
+
+    #[test]
+    fn older_release_candidate_is_refused() {
+        assert_refused("0.8.0-rc.2", "0.8.0-rc.1");
+    }
+
+    #[test]
+    fn same_version_with_force_is_already_current() {
+        let (result, _install, _dir) = run_with("0.0.1", "0.0.1", DowngradePolicy::Allow);
+        assert_eq!(
+            result.unwrap(),
+            UpdateOutcome::AlreadyCurrent {
+                version: "0.0.1".to_owned()
+            }
+        );
     }
 }

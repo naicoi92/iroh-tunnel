@@ -113,14 +113,15 @@ See [Running as a service](services.md).
 ## `update`
 
 ```sh
-iroh-tunnel update [--to VERSION] [-i] [-y]
+iroh-tunnel update [--to VERSION [--force]] [-i] [-y]
 its update ...
 ita update ...
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--to VERSION` | Install this release (`0.7.0` or `v0.7.0`); allows downgrades |
+| `--to VERSION` | Install this release (`0.7.0`, `v0.7.0` or a pre-release such as `0.8.0-rc.1`); refuses a release older than the running one unless `--force` is given |
+| `--force` | Allow `--to` to install a release older than the running one; requires `--to` |
 | `-i`, `--insecure` | Skip signature and checksum verification, with a warning |
 | `-y`, `--yes` | Replace a package- or Homebrew-owned executable anyway |
 

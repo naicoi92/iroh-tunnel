@@ -209,6 +209,7 @@ Each executable can replace itself with a newer release:
 ```sh
 iroh-tunnel update             # latest stable release
 iroh-tunnel update --to 0.7.0  # a chosen release
+iroh-tunnel update --to 0.8.0-rc.1  # a release candidate
 its update                     # iroh-tunnel-serve
 ita update                     # iroh-tunnel-access
 ```
@@ -222,7 +223,7 @@ ita update                     # iroh-tunnel-access
 - stages the new file beside the old one and renames it into place, so a
   failure keeps the installed executable;
 - never stops a running tunnel: restart it afterwards;
-- does not downgrade unless you pass `--to`.
+- does not downgrade unless you pass `--to VERSION --force`.
 
 Installs owned by something else are sent back to their owner: use
 `brew upgrade --cask iroh-tunnel`, `brew upgrade --cask iroh-tunnel-serve`

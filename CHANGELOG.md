@@ -9,6 +9,16 @@ Before 1.0.0, a minor release may contain breaking changes; they are marked
 
 ## [Unreleased]
 
+### Breaking
+
+- `update --to VERSION` refuses a version older than the running one; add
+  `--force` to downgrade.
+
+### Added
+
+- `update --force`; `update --to` accepts release candidates and orders
+  versions by semver precedence.
+
 ## [0.7.0] - 2026-11-20
 
 ### Breaking

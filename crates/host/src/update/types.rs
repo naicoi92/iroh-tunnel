@@ -100,6 +100,15 @@ pub enum OverwritePolicy {
     ReplacePackageOwned,
 }
 
+/// Whether an explicit older release may be installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DowngradePolicy {
+    /// An explicit `to` older than the running version fails (default).
+    Refuse,
+    /// An explicit `to` older than the running version is installed (`--force`).
+    Allow,
+}
+
 /// What the operator asked `update` to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateRequest {
@@ -109,6 +118,8 @@ pub struct UpdateRequest {
     pub verification: Verification,
     /// Ownership policy, consulted by [`super::check_owner`].
     pub overwrite: OverwritePolicy,
+    /// Whether an explicit `to` older than the running version may be installed.
+    pub downgrade: DowngradePolicy,
 }
 
 /// Whether `update` may replace the installed file.

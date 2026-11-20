@@ -18,8 +18,8 @@ use common::busy_exec;
 use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::Owner;
 use iroh_tunnel_host::update::{
-    check_owner, update, OverwritePolicy, OwnerDecision, SignatureVerifier, UpdateContext,
-    UpdateRequest, Verification,
+    check_owner, update, DowngradePolicy, OverwritePolicy, OwnerDecision, SignatureVerifier,
+    UpdateContext, UpdateRequest, Verification,
 };
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
@@ -137,6 +137,7 @@ fn run(f: &Fixture, owner: Owner, insecure: bool, yes: bool) -> Result<()> {
         } else {
             OverwritePolicy::RespectOwner
         },
+        downgrade: DowngradePolicy::Refuse,
     };
     // The updater does not check ownership; the CLI wrapper does, in this order.
     if matches!(
@@ -339,5 +340,58 @@ fn real_binary_in_a_container_prints_redeploy_guidance_and_changes_nothing() -> 
     );
     assert!(stdout.contains("redeploy"), "{stdout}");
     assert_eq!(std::fs::read(&exe)?, before);
+    Ok(())
+}
+
+/// Ownership is checked before the downgrade guard, so a container refuses with
+/// guidance (exit 0) instead of the downgrade error.
+#[test]
+fn real_binary_in_a_container_gives_redeploy_guidance_before_the_downgrade_guard() -> Result<()> {
+    let f = fixture()?;
+    let installed = f.exe.with_file_name("copy");
+    std::fs::create_dir(&installed)?;
+    let exe = installed.join(EXE);
+    std::fs::copy(SERVE, &exe)?;
+    let before = std::fs::read(&exe)?;
+
+    let out = busy_exec::output(
+        Command::new(&exe)
+            .args(["update", "--to", "0.0.1"])
+            .env("IROH_TUNNEL_BASE_URL", &f.server.url)
+            .env("IROH_TUNNEL_CONTAINER", "1"),
+    )?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("redeploy"), "{stdout}");
+    assert_eq!(std::fs::read(&exe)?, before);
+    Ok(())
+}
+
+#[test]
+fn force_does_not_override_homebrew_ownership() -> Result<()> {
+    let install = HomebrewInstall::new(SERVE, "iroh-tunnel-serve")?;
+    let before = std::fs::read(&install.exe)?;
+
+    let out = busy_exec::output(
+        install
+            .command("http://127.0.0.1:9")
+            .args(["--to", "0.0.1", "--force"]),
+    )?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("brew upgrade"), "{stdout}");
+    assert!(stdout.contains("--yes"), "{stdout}");
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    install.assert_siblings_unchanged()?;
     Ok(())
 }

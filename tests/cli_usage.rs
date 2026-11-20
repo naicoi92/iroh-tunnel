@@ -84,6 +84,19 @@ fn unknown_option_on_leaf_shows_leaf_help() {
 }
 
 #[test]
+fn all_in_one_role_update_is_refused() {
+    for role in ["serve", "access"] {
+        let o = World::new().it(&[role, "update"]);
+        o.assert_usage();
+        assert!(
+            o.stderr.contains("update acts on the invoked executable"),
+            "{}",
+            o.stderr
+        );
+    }
+}
+
+#[test]
 fn unknown_subcommand_shows_group_help() {
     let o = World::new().it(&["serve", "config", "bogus"]);
     o.assert_usage();
