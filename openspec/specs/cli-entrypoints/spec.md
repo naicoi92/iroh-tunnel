@@ -243,7 +243,7 @@ Evidence: src/app.rs:219-225, tests/role_binaries.rs:713-728
 - **THEN** exit code is 5, stderr contains "not yet supported", and the home directory is empty
 
 ### Requirement: Update acts only on the invoked executable
-The system SHALL provide `update` (options `--to VERSION`, `-i/--insecure`, `-y/--yes`) at top level of `iroh-tunnel` and as a role command of standalone binaries, replacing only the running executable, and SHALL reject `<role> update` on the all-in-one binary with a config error telling the user to run `iroh-tunnel update`.
+The system SHALL provide `update` (options `--to VERSION`, `-i/--insecure`, `-y/--yes`, `--force`) at top level of `iroh-tunnel` and as a role command of standalone binaries, replacing only the running executable, and SHALL reject `<role> update` on the all-in-one binary with a config error telling the user to run `iroh-tunnel update`. It SHALL reject `--force` without `--to` as a usage error with exit code 2.
 Evidence: src/cli.rs:56-73,213-214, src/app.rs:111-113,209-218
 Confidence: inferred
 
@@ -254,6 +254,10 @@ Confidence: inferred
 #### Scenario: Standalone update
 - **WHEN** `its update` is run
 - **THEN** the update runs for executable name `iroh-tunnel-serve`
+
+#### Scenario: Force without a version
+- **WHEN** `iroh-tunnel update --force` is run
+- **THEN** it exits 2 with a usage error naming `--to`, and nothing is downloaded or replaced
 
 ### Requirement: Logging verbosity precedence
 The system SHALL choose the log filter with `RUST_LOG` first (overrides everything), then `--quiet` (errors only), then `-v` count: none or `-v` = info, `-vv` = debug, `-vvv` or more = trace; the default is info.
