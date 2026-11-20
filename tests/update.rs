@@ -254,7 +254,12 @@ fn force_without_to_is_a_usage_error() -> Result<()> {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     let first = stderr.split("\n\n").next().unwrap_or("");
-    assert!(first.contains("--to"), "{stderr}");
+    assert!(
+        first.contains("required arguments were not provided"),
+        "{stderr}"
+    );
+    assert!(first.contains("--to <VERSION>"), "{stderr}");
+    assert!(!first.contains("unexpected argument"), "{stderr}");
     assert_eq!(std::fs::read(&install.exe)?, before);
     Ok(())
 }
