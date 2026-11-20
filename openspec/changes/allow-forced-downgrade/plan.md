@@ -171,7 +171,7 @@
 - Latest older than running → `tests/update.rs::latest_never_downgrades_a_newer_installed_version` (existing) + `tests/update.rs::newer_than_latest_hint_suggests_force` + `render.rs` hint test
 - Dev build updates to its release → `tests/update.rs::latest_upgrades_dev_build_to_its_release` + `update.rs::older_uses_semver_precedence`
 - Release candidate updates to its release → `tests/update.rs::latest_upgrades_release_candidate_to_its_release`
-- Same version with force → `update.rs::same_version_with_force_is_already_current`
+- Same version with force → `update.rs::same_version_with_force_is_already_current` + `tests/update.rs::same_version_with_force_reports_already_current`
 - Unordered running version → `tests/update.rs::unordered_running_version_installs_explicit_target` (in-process; defensive, `build.rs` always emits semver)
 - Downgrade refused → `tests/update.rs::explicit_downgrade_exits_1_and_names_force` + `update.rs::explicit_downgrade_is_refused_before_any_request`
 - Release candidate below running release refused → `update.rs::explicit_downgrade_is_refused_before_any_request`
@@ -183,6 +183,6 @@
 - Container decision precedes the guard → `tests/update_ownership.rs::real_binary_in_a_container_gives_redeploy_guidance_before_the_downgrade_guard`
 
 **cli-entrypoints**
-- All-in-one role update → existing coverage (unchanged)
+- All-in-one role update → `tests/cli_usage.rs::all_in_one_role_update_is_refused`
 - Standalone update → existing coverage (unchanged)
 - Force without a version → `tests/update.rs::force_without_to_is_a_usage_error`

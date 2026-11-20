@@ -115,6 +115,15 @@ fn run_update(exe: &Path, base_url: &str, args: &[&str]) -> Result<Output> {
     .context("cannot run update")
 }
 
+fn installed_version(exe: &Path) -> Result<String> {
+    let out = busy_exec::output(Command::new(exe).arg("--version"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.split_whitespace()
+        .last()
+        .map(str::to_owned)
+        .context("empty --version output")
+}
+
 fn run_installed(exe: &Path) -> Result<String> {
     let out = busy_exec::output(&mut Command::new(exe))?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -272,8 +281,36 @@ fn explicit_downgrade_exits_1_and_names_force() -> Result<()> {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("0.0.1"), "{stderr}");
+    assert!(
+        stderr.contains(&installed_version(&install.exe)?),
+        "{stderr}"
+    );
     assert!(stderr.contains("--force"), "{stderr}");
     assert!(stderr.contains("refusing to downgrade"), "{stderr}");
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
+fn same_version_with_force_reports_already_current() -> Result<()> {
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+    let version = installed_version(&install.exe)?;
+    let out = run_update(
+        &install.exe,
+        "http://127.0.0.1:9",
+        &["-i", "--to", &version, "--force"],
+    )?;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("is already at {version}")),
+        "{stdout}"
+    );
     assert_eq!(std::fs::read(&install.exe)?, before);
     Ok(())
 }
