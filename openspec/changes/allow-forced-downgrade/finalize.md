@@ -16,7 +16,7 @@
 - **Branch**: `spec/allow-forced-downgrade`
 - **Base branch**: `main`
 - **Final state**: `pr-updated`
-- **PR URL**: N/A (none when this receipt was written; see PR comment)
+- **PR URL**: https://github.com/naicoi92/iroh-tunnel/pull/265 (opened during finalize step 11 with user approval; title `feat(self-update): allow-forced-downgrade`)
 
 Deviations from the schema steps, required by project `AGENTS.md`:
 - Step 3: the feature branch is checked out in its own Worktrunk worktree (`~/Projects/iroh/iroh-tunnel.spec-allow-forced-downgrade`). The merge ran there, and the main checkout stays on `main`.
@@ -35,7 +35,7 @@ Deviations from the schema steps, required by project `AGENTS.md`:
 
 ## PR comment
 
-- **PR comment status**: `skipped (no PR)` (updated below if a PR is opened during this finalize)
+- **PR comment status**: `posted` (https://github.com/naicoi92/iroh-tunnel/pull/265#issuecomment-7036268473)
 
 ---
 
