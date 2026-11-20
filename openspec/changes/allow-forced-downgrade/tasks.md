@@ -4,11 +4,11 @@ Blocked by: none
 
 Files: `crates/host/Cargo.toml`, `Cargo.lock`, `crates/host/src/update/types.rs`, `crates/host/src/update/mod.rs`, `crates/host/src/update/update.rs`, `src/app.rs` (compile-only: new field set to `Refuse`), `tests/update.rs`, `tests/update_ownership.rs` (literal only), `tests/update_zip_windows.rs`. Platforms: shared code; Windows zip test only needs the new field.
 
-- [ ] 1.1 Add `semver = "1"` to `iroh-tunnel-host` dependencies (design D2)
-- [ ] 1.2 Add `DowngradePolicy { Refuse, Allow }` and `UpdateRequest::downgrade`, re-export from `update/mod.rs`; set `downgrade` in every existing `UpdateRequest` literal (`src/app.rs` → `Refuse`, tests → `Refuse`) (design D1)
-- [ ] 1.3 TDD `parse_version` on `semver::Version` (scenarios "Path traversal value", "Pre-release value accepted")
-- [ ] 1.4 TDD semver `is_older` with `cmp_precedence`, non-semver running version never older (scenarios "Dev build updates to its release", "Release candidate updates to its release", "Unordered running version"; design D4)
-- [ ] 1.5 TDD the downgrade guard before any network request, error text naming both versions and `--force` (scenarios "Release candidate below running release refused", "Older release candidate refused", "Newer release candidate installed", "Forced downgrade", "Force keeps verification", "Same version with force", "Release candidate"; design D3, D5)
+- [x] 1.1 Add `semver = "1"` to `iroh-tunnel-host` dependencies (design D2)
+- [x] 1.2 Add `DowngradePolicy { Refuse, Allow }` and `UpdateRequest::downgrade`, re-export from `update/mod.rs`; set `downgrade` in every existing `UpdateRequest` literal (`src/app.rs` → `Refuse`, tests → `Refuse`) (design D1)
+- [x] 1.3 TDD `parse_version` on `semver::Version` (scenarios "Path traversal value", "Pre-release value accepted")
+- [x] 1.4 TDD semver `is_older` with `cmp_precedence`, non-semver running version never older (scenarios "Dev build updates to its release", "Release candidate updates to its release", "Unordered running version"; design D4)
+- [x] 1.5 TDD the downgrade guard before any network request, error text naming both versions and `--force` (scenarios "Release candidate below running release refused", "Older release candidate refused", "Newer release candidate installed", "Forced downgrade", "Force keeps verification", "Same version with force", "Release candidate"; design D3, D5)
 
 ## 2. CLI: `--force` flag, mapping and hint
 
