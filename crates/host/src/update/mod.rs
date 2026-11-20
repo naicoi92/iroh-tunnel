@@ -20,8 +20,8 @@ pub use check_owner::check_owner;
 pub use current_target::current_target;
 pub use detect::detect;
 pub use types::{
-    OverwritePolicy, Owner, OwnerDecision, SignatureVerifier, UpdateContext, UpdateOutcome,
-    UpdateRequest, Verification, BASE_URL_ENV, DEFAULT_BASE_URL,
+    DowngradePolicy, OverwritePolicy, Owner, OwnerDecision, SignatureVerifier, UpdateContext,
+    UpdateOutcome, UpdateRequest, Verification, BASE_URL_ENV, DEFAULT_BASE_URL,
 };
 pub use update::update;
 pub use verify::SigstoreVerifier;

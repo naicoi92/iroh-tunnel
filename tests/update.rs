@@ -24,7 +24,8 @@ use anyhow::{Context, Result};
 use common::busy_exec;
 use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::{
-    update, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest, Verification,
+    update, DowngradePolicy, OverwritePolicy, SignatureVerifier, UpdateContext, UpdateRequest,
+    Verification,
 };
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
@@ -308,11 +309,22 @@ fn in_process(
     install: &Path,
     args: &UpdateRequest,
 ) -> Result<()> {
+    in_process_as("0.0.1", server, verifier, install, args)
+}
+
+/// Like [`in_process`], with the running version set to `current_version`.
+fn in_process_as(
+    current_version: &str,
+    server: &ReleaseServer,
+    verifier: &dyn SignatureVerifier,
+    install: &Path,
+    args: &UpdateRequest,
+) -> Result<()> {
     let ctx = UpdateContext {
         base_url: server.url.clone(),
         exe_name: EXE,
         target: "linux-amd64",
-        current_version: "0.0.1",
+        current_version,
         install_path: install.to_owned(),
         verifier,
         owner: iroh_tunnel_host::update::Owner::Standalone,
@@ -331,6 +343,7 @@ fn args(to: Option<&str>, insecure: bool) -> UpdateRequest {
             Verification::Verified
         },
         overwrite: OverwritePolicy::RespectOwner,
+        downgrade: DowngradePolicy::Refuse,
     }
 }
 
@@ -516,5 +529,119 @@ fn bundle_from_a_foreign_signer_is_rejected_by_the_real_binary() -> Result<()> {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+fn forced(to: &str) -> UpdateRequest {
+    UpdateRequest {
+        downgrade: DowngradePolicy::Allow,
+        ..args(Some(to), true)
+    }
+}
+
+/// Serve `published` as the only (and latest) release.
+fn serve_only(published: &str) -> Result<(tempfile::TempDir, ReleaseServer)> {
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), published, "linux-amd64", false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), published)?;
+    Ok((releases, server))
+}
+
+#[test]
+fn forced_downgrade_installs_older_release() -> Result<()> {
+    let (_releases, server) = serve_only("0.6.0")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as("0.7.0", &server, &Accept, &exe, &forced("0.6.0"))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.6.0");
+    Ok(())
+}
+
+#[test]
+fn newer_release_candidate_installs_without_force() -> Result<()> {
+    let (_releases, server) = serve_only("0.8.0-rc.2")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as(
+        "0.8.0-rc.1",
+        &server,
+        &Accept,
+        &exe,
+        &args(Some("0.8.0-rc.2"), true),
+    )?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.8.0-rc.2");
+    Ok(())
+}
+
+#[test]
+fn release_candidate_can_be_pinned() -> Result<()> {
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "9.9.9-rc.1", "linux-amd64", false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process(&server, &Accept, &exe, &args(Some("9.9.9-rc.1"), true))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-9.9.9-rc.1");
+    Ok(())
+}
+
+#[test]
+fn forced_downgrade_keeps_verification() -> Result<()> {
+    let (_releases, server) = serve_only("0.6.0")?;
+    let (_dir, exe) = old_install()?;
+    let req = UpdateRequest {
+        downgrade: DowngradePolicy::Allow,
+        ..args(Some("0.6.0"), false)
+    };
+
+    let err = in_process_as("0.7.0", &server, &Reject, &exe, &req).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("signature verification failed"),
+        "{err:#}"
+    );
+    assert_eq!(std::fs::read(&exe)?, OLD_BYTES);
+    Ok(())
+}
+
+#[test]
+fn latest_upgrades_dev_build_to_its_release() -> Result<()> {
+    let (_releases, server) = serve_only("0.7.0")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as("0.7.0-dev", &server, &Accept, &exe, &args(None, false))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.7.0");
+    Ok(())
+}
+
+#[test]
+fn latest_upgrades_release_candidate_to_its_release() -> Result<()> {
+    let (_releases, server) = serve_only("0.8.0")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as("0.8.0-rc.2", &server, &Accept, &exe, &args(None, false))?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-0.8.0");
+    Ok(())
+}
+
+#[test]
+fn unordered_running_version_installs_explicit_target() -> Result<()> {
+    let (_releases, server) = serve_only("9.9.8")?;
+    let (_dir, exe) = old_install()?;
+
+    in_process_as(
+        "garbage",
+        &server,
+        &Accept,
+        &exe,
+        &args(Some("9.9.8"), true),
+    )?;
+
+    assert_eq!(run_installed(&exe)?, "NEW-9.9.8");
     Ok(())
 }

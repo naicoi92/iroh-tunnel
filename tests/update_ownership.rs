@@ -18,8 +18,8 @@ use common::busy_exec;
 use common::release_server::ReleaseServer;
 use iroh_tunnel_host::update::Owner;
 use iroh_tunnel_host::update::{
-    check_owner, update, OverwritePolicy, OwnerDecision, SignatureVerifier, UpdateContext,
-    UpdateRequest, Verification,
+    check_owner, update, DowngradePolicy, OverwritePolicy, OwnerDecision, SignatureVerifier,
+    UpdateContext, UpdateRequest, Verification,
 };
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
@@ -137,6 +137,7 @@ fn run(f: &Fixture, owner: Owner, insecure: bool, yes: bool) -> Result<()> {
         } else {
             OverwritePolicy::RespectOwner
         },
+        downgrade: DowngradePolicy::Refuse,
     };
     // The updater does not check ownership; the CLI wrapper does, in this order.
     if matches!(
