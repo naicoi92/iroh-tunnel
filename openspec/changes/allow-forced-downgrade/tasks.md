@@ -28,5 +28,5 @@ Blocked by: none
 
 Files: `docs/cli.md`, `docs/install.md`, `CHANGELOG.md`.
 
-- [ ] 3.1 Document `--force` and release-candidate pinning in `docs/cli.md` (`update` synopsis/options) and `docs/install.md` (replace "does not downgrade unless you pass `--to`")
-- [ ] 3.2 Add a **Breaking** entry and an Added entry under `[Unreleased]` in `CHANGELOG.md`
+- [x] 3.1 Document `--force` and release-candidate pinning in `docs/cli.md` (`update` synopsis/options) and `docs/install.md` (replace "does not downgrade unless you pass `--to`")
+- [x] 3.2 Add a **Breaking** entry and an Added entry under `[Unreleased]` in `CHANGELOG.md`
