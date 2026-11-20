@@ -85,6 +85,9 @@ pub struct UpdateArgs {
     /// package database will no longer match the file. Never applies to containers.
     #[arg(short = 'y', long)]
     pub yes: bool,
+    /// Allow --to to install a release older than the running one.
+    #[arg(long, requires = "to")]
+    pub force: bool,
 }
 
 /// Standalone Serve binary (`iroh-tunnel-serve`, alias `its`).

@@ -313,7 +313,11 @@ async fn run_update_cli(args: &cli::UpdateArgs, exe_name: &str) -> anyhow::Resul
         } else {
             update::OverwritePolicy::RespectOwner
         },
-        downgrade: update::DowngradePolicy::Refuse,
+        downgrade: if args.force {
+            update::DowngradePolicy::Allow
+        } else {
+            update::DowngradePolicy::Refuse
+        },
     };
     let target = update::current_target()?;
     let install_path = std::env::current_exe()

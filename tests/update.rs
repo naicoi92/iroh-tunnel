@@ -247,6 +247,85 @@ fn invalid_version_is_rejected_before_any_request() -> Result<()> {
 }
 
 #[test]
+fn force_without_to_is_a_usage_error() -> Result<()> {
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+    let out = run_update(&install.exe, "http://127.0.0.1:9", &["--force"])?;
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stderr.split("\n\n").next().unwrap_or("");
+    assert!(first.contains("--to"), "{stderr}");
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
+fn explicit_downgrade_exits_1_and_names_force() -> Result<()> {
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+    let out = run_update(&install.exe, "http://127.0.0.1:9", &["--to", "0.0.1"])?;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("0.0.1"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(stderr.contains("refusing to downgrade"), "{stderr}");
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
+fn forced_explicit_downgrade_installs_the_older_build() -> Result<()> {
+    let Some(target) = host_target() else {
+        return Ok(());
+    };
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "0.0.1", target, false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "9.9.9")?;
+    let install = install_real_binary()?;
+
+    let out = run_update(
+        &install.exe,
+        &server.url,
+        &["-i", "--to", "0.0.1", "--force"],
+    )?;
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_installed(&install.exe)?, "NEW-0.0.1");
+    Ok(())
+}
+
+#[test]
+fn newer_than_latest_hint_suggests_force() -> Result<()> {
+    let Some(target) = host_target() else {
+        return Ok(());
+    };
+    let releases = tempfile::tempdir()?;
+    publish(releases.path(), "0.0.5", target, false)?;
+    let server = ReleaseServer::start(releases.path().to_owned(), "0.0.5")?;
+    let install = install_real_binary()?;
+    let before = std::fs::read(&install.exe)?;
+
+    let out = run_update(&install.exe, &server.url, &["-i"])?;
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("--to 0.0.5 --force"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(std::fs::read(&install.exe)?, before);
+    Ok(())
+}
+
+#[test]
 fn update_does_not_stop_a_running_process_of_the_old_binary() -> Result<()> {
     let Some(target) = host_target() else {
         return Ok(());
