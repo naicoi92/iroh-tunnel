@@ -1,0 +1,14 @@
+testCommand: cargo test --workspace --all-features --locked --lib --bins
+forge: github
+# pi-livespec project config. Uncomment a key to set it.
+#
+# Forge kind; detected from the origin remote when absent.
+# forge: github            # github | gitea
+# host: github.example.com
+# githubHosts: [github.example.com]
+# giteaUrl: https://gitea.example.com
+#
+# Branch that changes merge into; the origin default branch when absent.
+# integrationBranch: main
+#
+# The agent-skills channel is a user setting, read from ~/.pi/agent/livespec/config.yaml only.
