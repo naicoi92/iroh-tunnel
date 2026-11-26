@@ -22265,7 +22265,7 @@ function exitMessage(role, code, status, log, platform, secrets = []) {
     head += ` Another iroh-tunnel ${role} is already running for this runner user, possibly as a system service or another step of this job.`;
     head += ` Stop that system service or run the step as a different user.`;
     if (platform === "win32")
-      head += ` Use only one Serve and one Access step per job on Windows.`;
+      head += ` Older tunnel versions may not support isolated action ownership on Windows; upgrade the tunnel version if using an older release.`;
   }
   return withLog(head, log, secrets);
 }
@@ -22342,7 +22342,11 @@ async function run(req, deps) {
   const { exePath, version } = await deps.installer.install(req.role, req.version);
   io.info(`using iroh-tunnel-${req.role} ${version}`);
   await ws.writeConfig(renderConfig(req));
-  const env = { IROH_TUNNEL_STATE_DIR: ws.stateDir, NO_COLOR: "1" };
+  const env = {
+    IROH_TUNNEL_STATE_DIR: ws.stateDir,
+    IROH_TUNNEL_ACTION_SCOPE: ws.stateDir,
+    NO_COLOR: "1"
+  };
   if (deps.platform !== "win32")
     env.HOME = ws.homeDir;
   const child = await launcher.spawn(exePath, ["run", "-c", ws.configPath], env, ws.logPath);

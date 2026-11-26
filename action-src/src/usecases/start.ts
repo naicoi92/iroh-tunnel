@@ -57,7 +57,11 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
   io.info(`using iroh-tunnel-${req.role} ${version}`);
 
   await ws.writeConfig(renderConfig(req));
-  const env: Record<string, string> = { IROH_TUNNEL_STATE_DIR: ws.stateDir, NO_COLOR: '1' };
+  const env: Record<string, string> = {
+    IROH_TUNNEL_STATE_DIR: ws.stateDir,
+    IROH_TUNNEL_ACTION_SCOPE: ws.stateDir,
+    NO_COLOR: '1',
+  };
   if (deps.platform !== 'win32') env.HOME = ws.homeDir;
   const child = await launcher.spawn(exePath, ['run', '-c', ws.configPath], env, ws.logPath);
   io.saveState('pid', String(child.pid));

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { stop } from '../../src/usecases/stop';
-import { NODE, newWorld, stopDeps } from '../fakes';
+import { runMain } from '../../src/usecases/run-main';
+import { NODE, WS, newWorld, startDeps, stopDeps } from '../fakes';
 
 function saved() {
   const w = newWorld();
@@ -11,6 +12,35 @@ function saved() {
 }
 
 describe('stop', () => {
+  test('cleans up only the tunnel saved by that invocation', async () => {
+    const first = newWorld({ name: 'svc', target: '127.0.0.1:8080' });
+    const second = newWorld({ name: 'svc', target: '127.0.0.1:8081' });
+    first.status = { node_id: NODE, home_relay: 'https://relay.example./', services: [] };
+    const secondWorkspace = { ...WS, root: '/tmp/ws2', stateDir: '/tmp/ws2/state', homeDir: '/tmp/ws2/home', configPath: '/tmp/ws2/config.toml', logPath: '/tmp/ws2/tunnel.log' };
+    const secondStart = startDeps(second, {
+      createWorkspace: async () => secondWorkspace,
+      readStatus: async () => { throw new Error('status read failed after spawn'); },
+    });
+    const spawn = secondStart.launcher.spawn;
+    secondStart.launcher.spawn = async (...args) => ({ ...await spawn(...args), pid: 4243 });
+    await runMain('serve', startDeps(first));
+    await runMain('serve', secondStart);
+    expect(first.failed).toEqual([]);
+    expect(second.failed).toHaveLength(1);
+    expect(second.failed[0]).toContain('status read failed after spawn');
+    expect(second.exit).toBeNull();
+    expect(second.state['main-ok']).toBeUndefined();
+    second.jobFailed = true;
+    await stop(stopDeps(second));
+    expect(second.stopCalls).toEqual([[4243, 5000]]);
+    expect(second.removed).toEqual(['/tmp/ws2']);
+    expect(first.stopCalls).toEqual([]);
+    expect(first.removed).toEqual([]);
+    await stop(stopDeps(first));
+    expect(first.stopCalls).toEqual([[4242, 5000]]);
+    expect(first.removed).toEqual(['/tmp/ws']);
+  });
+
   test('no saved workspace: success, no calls', async () => {
     const w = newWorld();
     await stop(stopDeps(w));
