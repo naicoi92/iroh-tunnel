@@ -270,17 +270,12 @@ Confidence: inferred
 - **THEN** they use the executables built by the job through the CI-only `IROH_TUNNEL_ACTION_BIN_DIR` hook and download no release asset
 
 ### Requirement: End-to-end stage covers the Access alias path
-The system SHALL, in `e2e (linux)` and `e2e (macos)`, also run an Access step through the `access` path in the same job and complete a round trip through it. In `e2e (windows)` it SHALL instead check that this second Access step fails with the one-step-per-role message.
-Evidence: this change's design.md D10
-Confidence: inferred
+In `e2e (linux)`, `e2e (macos)` and `e2e (windows)`, the system SHALL run two Serve steps and two Access steps in the same job, using the root and alias paths for the two Access steps. After all four steps start, the job SHALL verify distinct NodeIds and a round trip through each Access listener to its intended target.
+Evidence: issue #268
 
-#### Scenario: Alias path on Linux and macOS
-- **WHEN** `e2e (linux)` or `e2e (macos)` runs
-- **THEN** the `access` path step succeeds and bytes sent through its listener return from the target
-
-#### Scenario: Windows limit asserted
-- **WHEN** `e2e (windows)` runs
-- **THEN** the second Access step fails with the one-step-per-role message, and the job fails if it succeeds or fails for another reason
+#### Scenario: Multiple tunnels on each runner platform
+- **WHEN** `e2e (linux)`, `e2e (macos)` or `e2e (windows)` runs
+- **THEN** the job fails if a tunnel cannot start, any NodeIds match, or either listener fails to round-trip bytes to its intended target
 
 ### Requirement: Release moves the major action tag
 The system SHALL, in the release stage and only after the GitHub release for a stable tag `vX.Y.Z` is published, move the tag `vX` to the same commit when `X.Y.Z` is the highest stable version with major `X`, so callers of every action path at `@vX` receive that release. Pre-release tags and lower versions SHALL NOT move it, and a failed move SHALL fail the release run without changing the published release.
