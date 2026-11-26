@@ -14,5 +14,7 @@ test('documents concurrent tunnels and legacy Windows pins', () => {
   expect(example).toContain('steps.redis.outputs.node-id');
   expect(example).toMatch(/each step[\s\S]*cleanup/i);
   expect(docs).toMatch(/Windows[\s\S]*0\.8\.0[\s\S]*0\.7\.0[\s\S]*one Access[\s\S]*one Serve/i);
+  expect(docs).toMatch(/each (?:step|tunnel)[\s\S]*compatible binary/i);
+  expect(docs).toMatch(/legacy[\s\S]*cleanup[\s\S]*identity/i);
   expect(docs).not.toContain('On Windows, use at most one Access step and one Serve step per job.');
 });

@@ -235,9 +235,12 @@ The minimum version is 0.6.0, the first release that ships the actions.
 
 On Windows, concurrent tunnels of the same role require a compatible tunnel
 binary with isolated action ownership (0.8.0 or later). This applies to the
-binary selected by `version:`, not just the action reference. With legacy
-binary pins 0.7.0 or earlier, use at most one Access step and one Serve step
-per job on Windows. Upgrade the binary pin for multiple steps of the same role.
+binary selected by `version:`, not just the action reference. Each step of the
+same role must use a compatible binary. With legacy binary pins 0.7.0 or
+earlier, use at most one Access step and one Serve step per job on Windows.
+Upgrade the binary pin for multiple steps of the same role. Legacy cleanup
+checks process identity before signaling and fails rather than signal when
+identity has changed or is unavailable.
 
 ## Embedded clients
 
