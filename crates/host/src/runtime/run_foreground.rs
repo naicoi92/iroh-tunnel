@@ -30,16 +30,11 @@ pub async fn run_foreground(
     on_ready: OnReady,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    run_role(
-        role,
-        config,
-        Ownership::Enforced(role),
-        ctx,
-        None,
-        on_ready,
-        shutdown,
-    )
-    .await
+    let ownership = match std::env::var_os("IROH_TUNNEL_ACTION_SCOPE") {
+        Some(scope) => Ownership::Action(role, scope.into()),
+        None => Ownership::Enforced(role),
+    };
+    run_role(role, config, ownership, ctx, None, on_ready, shutdown).await
 }
 
 #[cfg(test)]

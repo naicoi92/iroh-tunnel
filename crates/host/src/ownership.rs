@@ -712,6 +712,25 @@ pub(crate) fn claim(role: Role) -> Result<RoleClaim> {
     claim_in(role, tier, TierDirs::resolve_for(tier)?)
 }
 
+/// Claim a configured action's role in its explicit private user scope,
+/// independently of the process's elevation and machine-wide ownership.
+pub(crate) fn claim_action(role: Role, scope: PathBuf) -> Result<RoleClaim> {
+    if !scope.is_absolute() {
+        return Err(CliError::Config(
+            "IROH_TUNNEL_ACTION_SCOPE must be an absolute directory path".into(),
+        )
+        .into());
+    }
+    claim_in(
+        role,
+        Tier::User,
+        TierDirs {
+            user: Some(scope),
+            machine: None,
+        },
+    )
+}
+
 /// [`claim`] for `tier` in already resolved directories.
 ///
 /// # Errors
