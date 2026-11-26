@@ -318,13 +318,17 @@ Confidence: inferred
 - **THEN** the step fails at once naming `listen` and quoting the bind error, without waiting for the 60-second limit, and the post step stops the process
 
 ### Requirement: Job-end cleanup
-Each action's post step SHALL run whatever the job result is, stop the tunnel and fail if the tunnel process is still running afterwards, so no tunnel process started by the action outlives the job. On Unix it SHALL send a termination signal and force a kill after 5 seconds; on Windows it SHALL terminate the process.
+Each action's post step SHALL run whatever the job result is, stop the tunnel and fail if the tunnel process is still running afterwards, so no tunnel process started by the action outlives the job. For binaries that support action-scoped shutdown, the post step SHALL request shutdown through a private channel unique to the invocation, without signaling a numeric PID, and SHALL report failure if shutdown is not confirmed. Older pinned binaries SHALL remain usable with legacy cleanup: the post step checks process identity before signaling, but that check is not atomic with signaling.
 Evidence: design.md D8
 Confidence: inferred
 
 #### Scenario: Normal stop
 - **WHEN** the post step runs after a successful job
 - **THEN** the tunnel process exits and the post step succeeds
+
+#### Scenario: Shutdown is scoped to the action invocation
+- **WHEN** a post step cleans up a tunnel started with action-scoped shutdown support
+- **THEN** it requests shutdown through that invocation's private channel, does not signal a PID, and fails if shutdown cannot be confirmed
 
 #### Scenario: Main step failed before starting
 - **WHEN** the main step failed during input validation
@@ -344,7 +348,7 @@ Confidence: inferred
 - **THEN** the post step prints the status and the tunnel log
 
 ### Requirement: Per-step isolation
-Each step SHALL run its tunnel with its own runtime state and ownership scope on every supported platform. Steps of the same or different roles in one job and steps in concurrent jobs of one runner user MUST NOT overwrite one another's state. Each step SHALL publish its own `node-id`, and its post step SHALL stop only the tunnel it started. Existing single-tunnel workflows SHALL require no input or output changes.
+Each step SHALL run its tunnel with its own runtime state and ownership scope on every supported platform. Steps of the same or different roles in one job and steps in concurrent jobs of one runner user MUST NOT overwrite one another's state. Each step SHALL publish its own `node-id`, and its post step SHALL target only that invocation's tunnel, subject to the legacy cleanup limitation in Job-end cleanup. Steps MAY use the same executable, but each invocation SHALL run in a separate process. Existing single-tunnel workflows SHALL require no input or output changes.
 Evidence: design.md D5; role-ownership-shutdown spec "Ownership scope is the user's default state directory"
 Confidence: inferred
 
