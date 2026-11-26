@@ -47,7 +47,7 @@ Evidence: issue #268
 - **THEN** the second invocation is still refused with exit code 6
 
 ### Requirement: Concurrent starts admit exactly one owner
-The system SHALL admit exactly one owner when several processes of the same role start at the same time in the same tier (for the user tier, for the same user); every other contender in that tier exits with the conflict status.
+The system SHALL admit exactly one owner when several processes of the same role start at the same time in the same ownership scope: the machine scope for system-tier processes, the default user scope for ordinary user-tier processes, or a single isolated action scope. Every other contender in that scope SHALL exit with the conflict status.
 Evidence: src/ownership.rs:200-215, tests/role_ownership.rs:276-304 (concurrent_starts_admit_exactly_one_owner)
 
 #### Scenario: Four racing serve starts
