@@ -89,21 +89,35 @@ jobs:
 
 ## Two services
 
-Use one step per service; every step has its own NodeId.
+Use one step per service. Steps start sequentially, but their tunnels remain
+running concurrently for later steps. Each Access step needs a distinct local
+listener address and port. Each step has its own NodeId output and its own
+automatic post-job cleanup; cleanup stops that step's tunnel, not its siblings.
 
 ```yaml
 steps:
-  - uses: naicoi92/iroh-tunnel@v0
+  - id: postgres
+    uses: naicoi92/iroh-tunnel@v0
     with:
       name: postgres
       node-id: ${{ vars.POSTGRES_NODE_ID }}
       listen: 127.0.0.1:15432
-  - uses: naicoi92/iroh-tunnel@v0
+  - id: redis
+    uses: naicoi92/iroh-tunnel@v0
     with:
       name: redis
       node-id: ${{ vars.REDIS_NODE_ID }}
       listen: 127.0.0.1:16379
+  - run: |
+      echo "Postgres Access node: $POSTGRES_ACCESS_NODE"
+      echo "Redis Access node: $REDIS_ACCESS_NODE"
+    env:
+      POSTGRES_ACCESS_NODE: ${{ steps.postgres.outputs.node-id }}
+      REDIS_ACCESS_NODE: ${{ steps.redis.outputs.node-id }}
 ```
+
+The outputs above identify the respective Access nodes, not the remote Serve
+nodes. The same separate-step pattern works for multiple Serve tunnels.
 
 ## Own relay
 
@@ -219,7 +233,11 @@ The minimum version is 0.6.0, the first release that ships the actions.
 | Windows amd64, arm64 | Yes |
 | macOS Intel, Linux riscv64 | No |
 
-On Windows, use at most one Access step and one Serve step per job.
+On Windows, concurrent tunnels of the same role require a compatible tunnel
+binary with isolated action ownership (0.8.0 or later). This applies to the
+binary selected by `version:`, not just the action reference. With legacy
+binary pins 0.7.0 or earlier, use at most one Access step and one Serve step
+per job on Windows. Upgrade the binary pin for multiple steps of the same role.
 
 ## Embedded clients
 
