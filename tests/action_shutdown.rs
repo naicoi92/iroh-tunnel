@@ -69,11 +69,16 @@ async fn request_stops_only_its_own_process() -> Result<()> {
     wait_for(&da.join("serve-status.json"), &mut a)?;
     wait_for(&db.join("serve-status.json"), &mut b)?;
     std::fs::write(da.join("shutdown-request"), "shutdown")?;
-    wait_for(&da.join("shutdown-complete"), &mut a)?;
+    anyhow::ensure!(wait_exit(&mut a)?.success());
+    anyhow::ensure!(std::fs::read(da.join("shutdown-complete"))? == b"complete");
+    anyhow::ensure!(!da.join("serve-status.json").exists());
     anyhow::ensure!(b.0.try_wait()?.is_none(), "other invocation exited");
+    anyhow::ensure!(db.join("serve-status.json").exists());
     anyhow::ensure!(!db.join("shutdown-complete").exists());
     std::fs::write(db.join("shutdown-request"), "shutdown")?;
-    wait_for(&db.join("shutdown-complete"), &mut b)?;
+    anyhow::ensure!(wait_exit(&mut b)?.success());
+    anyhow::ensure!(std::fs::read(db.join("shutdown-complete"))? == b"complete");
+    anyhow::ensure!(!db.join("serve-status.json").exists());
     Ok(())
 }
 
@@ -92,6 +97,36 @@ async fn duplicate_channel_cannot_confirm_the_original_has_stopped() -> Result<(
     );
     std::fs::write(dir.join("shutdown-request"), "shutdown")?;
     anyhow::ensure!(wait_exit(&mut original)?.success());
+    anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_before_start_is_not_lost() -> Result<()> {
+    let (_, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let temp = tempfile::tempdir()?;
+    let dir = temp.path().join("early-stop");
+    std::fs::create_dir(&dir)?;
+    std::fs::write(dir.join("shutdown-request"), "shutdown")?;
+    let (mut child, _) = spawn(temp.path(), "early-stop", &relay.to_string())?;
+    anyhow::ensure!(wait_exit(&mut child)?.success());
+    anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
+    anyhow::ensure!(!dir.join("serve-status.json").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_request_does_not_stop_the_tunnel() -> Result<()> {
+    let (_, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let temp = tempfile::tempdir()?;
+    let (mut child, dir) = spawn(temp.path(), "invalid-request", &relay.to_string())?;
+    wait_for(&dir.join("serve-status.json"), &mut child)?;
+    std::fs::write(dir.join("shutdown-request"), "not a shutdown request")?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    anyhow::ensure!(child.0.try_wait()?.is_none());
+    anyhow::ensure!(!dir.join("shutdown-complete").exists());
+    std::fs::write(dir.join("shutdown-request"), "shutdown")?;
+    anyhow::ensure!(wait_exit(&mut child)?.success());
     anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
     Ok(())
 }
