@@ -71,9 +71,14 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     io.saveState('shutdown-mode', 'action');
   }
   if (deps.platform !== 'win32') env.HOME = ws.homeDir;
-  const child = await launcher.spawn(exePath, ['run', '-c', ws.configPath], env, ws.logPath);
-  io.saveState('pid', String(child.pid));
   io.saveState('role', req.role);
+  const child = await launcher.spawn(exePath, ['run', '-c', ws.configPath], env, ws.logPath).catch((e) => {
+    // A rejected spawn never started a child. Otherwise retain the private
+    // shutdown intent even if saving the PID or later startup work fails.
+    if (actionShutdown) io.saveState('shutdown-mode', '');
+    throw e;
+  });
+  io.saveState('pid', String(child.pid));
   const identity = actionShutdown ? undefined : await launcher.identity(child.pid);
   if (identity && child.exitCode() === null) io.saveState('process-identity', identity);
 

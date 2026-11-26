@@ -56,6 +56,44 @@ describe('stop', () => {
     expect(w.stopCalls).toEqual([]);
   });
 
+  test('cooperative cleanup does not need a PID when main fails while saving it', async () => {
+    const w = newWorld({ name: 'svc', target: '127.0.0.1:8080' });
+    const deps = startDeps(w, {
+      installer: { async install() { return { exePath: '/bin/serve', version: 'local' }; } },
+    });
+    const saveState = deps.io.saveState;
+    deps.io.saveState = (key, value) => {
+      if (key === 'pid') throw new Error('cannot save PID after spawn');
+      saveState(key, value);
+    };
+    await runMain('serve', deps);
+    expect(w.failed[0]).toContain('cannot save PID after spawn');
+    expect(w.spawned).toHaveLength(1);
+    expect(w.state.pid).toBeUndefined();
+    expect(w.state['shutdown-mode']).toBe('action');
+    await stop(stopDeps(w));
+    expect(w.calls).toContain(`launcher.stopAction:${WS.root}:5000`);
+    expect(w.stopCalls).toEqual([]);
+    expect(w.removed).toEqual([WS.root]);
+    expect(w.failed).toHaveLength(1);
+  });
+
+  test('failed cooperative spawn leaves no tunnel to confirm', async () => {
+    const w = newWorld({ name: 'svc', target: '127.0.0.1:8080' });
+    const deps = startDeps(w, {
+      installer: { async install() { return { exePath: '/bin/serve', version: 'local' }; } },
+    });
+    deps.launcher.spawn = async () => { throw new Error('failed to start: ENOENT'); };
+    await runMain('serve', deps);
+    expect(w.failed[0]).toContain('ENOENT');
+    expect(w.state['shutdown-mode']).not.toBe('action');
+    await stop(stopDeps(w));
+    expect(w.calls.some((c) => c.startsWith('launcher.stopAction:'))).toBe(false);
+    expect(w.stopCalls).toEqual([]);
+    expect(w.removed).toEqual([WS.root]);
+    expect(w.failed).toHaveLength(1);
+  });
+
   test('cooperative shutdown failure never falls back to a PID', async () => {
     const w = saved();
     w.state['shutdown-mode'] = 'action';

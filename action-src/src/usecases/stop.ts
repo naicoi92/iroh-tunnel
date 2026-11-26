@@ -26,6 +26,7 @@ export async function stop(deps: StopDeps): Promise<void> {
 
   const role = io.getState('role') as Role | '';
   const pidText = io.getState('pid');
+  const actionShutdown = io.getState('shutdown-mode') === 'action';
   const logPath = join(root, 'tunnel.log');
   const stateDir = join(root, 'state');
   const errors: string[] = [];
@@ -48,10 +49,10 @@ export async function stop(deps: StopDeps): Promise<void> {
   }
 
   const outcome: { result: StopResult } = { result: 'exited' };
-  if (pidText !== '') {
-    if (io.getState('shutdown-mode') === 'action') outcome.result = 'still-alive';
+  if (actionShutdown || pidText !== '') {
+    if (actionShutdown) outcome.result = 'still-alive';
     await attempt('stopping the tunnel failed', async () => {
-      outcome.result = io.getState('shutdown-mode') === 'action'
+      outcome.result = actionShutdown
         ? await deps.launcher.stopAction(root, GRACE_MS)
         : await deps.launcher.stop(Number(pidText), GRACE_MS, io.getState('process-identity'));
     });
@@ -72,11 +73,11 @@ export async function stop(deps: StopDeps): Promise<void> {
 
   // Keep a cooperative request in place if shutdown was not confirmed: a
   // delayed child may still observe it. Removing it could strand the tunnel.
-  if (io.getState('shutdown-mode') !== 'action' || outcome.result === 'exited') {
+  if (!actionShutdown || outcome.result === 'exited') {
     await attempt('removing the workspace failed', () => deps.removeWorkspace(root));
   }
   if (outcome.result === 'still-alive') {
-    errors.push(io.getState('shutdown-mode') === 'action'
+    errors.push(actionShutdown
       ? `iroh-tunnel-${role || 'tunnel'} did not confirm action-scoped shutdown.`
       : `iroh-tunnel-${role || 'tunnel'} (pid ${pidText}) did not exit after SIGKILL/taskkill.`);
   }
