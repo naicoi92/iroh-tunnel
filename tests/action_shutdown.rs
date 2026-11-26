@@ -26,6 +26,17 @@ fn wait_for(path: &Path, child: &mut Process) -> Result<()> {
     Ok(())
 }
 
+fn wait_exit(child: &mut Process) -> Result<std::process::ExitStatus> {
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.0.try_wait()? {
+            return Ok(status);
+        }
+        anyhow::ensure!(Instant::now() < end, "child did not exit");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn spawn(root: &Path, name: &str, relay: &str) -> Result<(Process, PathBuf)> {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir)?;
@@ -63,6 +74,25 @@ async fn request_stops_only_its_own_process() -> Result<()> {
     anyhow::ensure!(!db.join("shutdown-complete").exists());
     std::fs::write(db.join("shutdown-request"), "shutdown")?;
     wait_for(&db.join("shutdown-complete"), &mut b)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_channel_cannot_confirm_the_original_has_stopped() -> Result<()> {
+    let (_, relay, _server) = iroh::test_utils::run_relay_server().await?;
+    let temp = tempfile::tempdir()?;
+    let (mut original, dir) = spawn(temp.path(), "invocation", &relay.to_string())?;
+    wait_for(&dir.join("serve-status.json"), &mut original)?;
+    let (mut duplicate, _) = spawn(temp.path(), "invocation", &relay.to_string())?;
+    anyhow::ensure!(!wait_exit(&mut duplicate)?.success());
+    anyhow::ensure!(original.0.try_wait()?.is_none(), "original exited");
+    anyhow::ensure!(
+        !dir.join("shutdown-complete").exists(),
+        "a duplicate must not confirm shutdown of the original"
+    );
+    std::fs::write(dir.join("shutdown-request"), "shutdown")?;
+    anyhow::ensure!(wait_exit(&mut original)?.success());
+    anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
     Ok(())
 }
 
