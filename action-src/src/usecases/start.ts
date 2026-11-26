@@ -66,6 +66,8 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
   const child = await launcher.spawn(exePath, ['run', '-c', ws.configPath], env, ws.logPath);
   io.saveState('pid', String(child.pid));
   io.saveState('role', req.role);
+  const identity = await launcher.identity(child.pid);
+  if (identity && child.exitCode() === null) io.saveState('process-identity', identity);
 
   const secrets = req.relayToken === undefined ? [] : [req.relayToken];
   const deadline = deps.clock.now() + DEADLINE_MS;
@@ -86,6 +88,7 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     if ('failed' in r) throw new StartFailure(bindMessage(r.failed, lastStatus, log, secrets));
     // The output is this node's own id, which only the status file knows.
     if (r.ready && lastStatus?.node_id) {
+      if (!identity) throw new StartFailure('Could not identify the tunnel process safely; refusing to continue without safe cleanup.');
       if (req.role === 'access' && req.protocol === 'udp') {
         io.info('UDP listener is bound; peer connection not checked');
       }

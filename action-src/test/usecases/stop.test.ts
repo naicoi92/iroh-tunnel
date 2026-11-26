@@ -5,7 +5,7 @@ import { NODE, WS, newWorld, startDeps, stopDeps } from '../fakes';
 
 function saved() {
   const w = newWorld();
-  w.state = { workspace: '/tmp/ws', pid: '4242', role: 'serve', 'main-ok': '1' };
+  w.state = { workspace: '/tmp/ws', pid: '4242', role: 'serve', 'main-ok': '1', 'process-identity': 'fake-identity' };
   w.status = { node_id: NODE, services: [] };
   w.files.set('/tmp/ws/tunnel.log', 'log line A\nlog line B\n');
   return w;
@@ -32,12 +32,12 @@ describe('stop', () => {
     expect(second.state['main-ok']).toBeUndefined();
     second.jobFailed = true;
     await stop(stopDeps(second));
-    expect(second.stopCalls).toEqual([[4243, 5000]]);
+    expect(second.stopCalls).toEqual([[4243, 5000, 'fake-identity']]);
     expect(second.removed).toEqual(['/tmp/ws2']);
     expect(first.stopCalls).toEqual([]);
     expect(first.removed).toEqual([]);
     await stop(stopDeps(first));
-    expect(first.stopCalls).toEqual([[4242, 5000]]);
+    expect(first.stopCalls).toEqual([[4242, 5000, 'fake-identity']]);
     expect(first.removed).toEqual(['/tmp/ws']);
   });
 
@@ -53,7 +53,7 @@ describe('stop', () => {
     expect(w.calls.filter((c) => c.startsWith('group:'))).toEqual(['group:iroh-tunnel final status']);
     expect(w.out.join('\n')).toContain(NODE);
     expect(w.out.join('\n')).not.toContain('log line A');
-    expect(w.stopCalls).toEqual([[4242, 5000]]);
+    expect(w.stopCalls).toEqual([[4242, 5000, 'fake-identity']]);
     expect(w.removed).toEqual(['/tmp/ws']);
     expect(w.failed).toEqual([]);
   });
@@ -73,6 +73,15 @@ describe('stop', () => {
     await stop(stopDeps(w));
     expect(w.failed).toHaveLength(1);
     expect(w.failed[0]).toContain('4242');
+    expect(w.removed).toEqual(['/tmp/ws']);
+  });
+
+  test.each(['identity-mismatch', 'identity-unavailable'] as const)('%s fails cleanup without hiding the unsafe process', async (result) => {
+    const w = saved();
+    const deps = stopDeps(w);
+    deps.launcher.stop = async () => result;
+    await stop(deps);
+    expect(w.failed[0]).toContain('Cannot safely stop');
     expect(w.removed).toEqual(['/tmp/ws']);
   });
 
@@ -103,7 +112,7 @@ describe('stop', () => {
         expect(w.removed).toEqual(['/tmp/ws']);
         expect(w.failed).toHaveLength(1);
         expect(w.failed[0]).toContain(`${name === 'launcher.stop' ? 'stop' : name === 'readStatus' ? 'status' : 'log'} boom`);
-        if (name !== 'launcher.stop') expect(w.stopCalls).toEqual([[4242, 5000]]);
+        if (name !== 'launcher.stop') expect(w.stopCalls).toEqual([[4242, 5000, 'fake-identity']]);
       });
     }
 

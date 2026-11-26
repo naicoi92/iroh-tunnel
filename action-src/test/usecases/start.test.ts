@@ -21,6 +21,7 @@ describe('happy paths', () => {
     expect(w.state['workspace']).toBe(WS.root);
     expect(w.state['pid']).toBe('4242');
     expect(w.state['role']).toBe('serve');
+    expect(w.state['process-identity']).toBe('fake-identity');
     const c = w.calls;
     expect(c.indexOf('setSecret')).toBeLessThan(c.indexOf('createWorkspace'));
     expect(c.indexOf('save:workspace')).toBeLessThan(c.indexOf('install'));
@@ -117,6 +118,18 @@ describe('happy paths', () => {
 });
 
 describe('failures', () => {
+  test('does not publish readiness when process identity is unavailable', async () => {
+    const w = newWorld(serveIn);
+    serveReady(w);
+    const deps = startDeps(w);
+    deps.launcher.identity = async () => undefined;
+    await runMain('serve', deps);
+    expect(w.failed[0]).toContain('Could not identify');
+    expect(w.state.pid).toBe('4242');
+    expect(w.state['process-identity']).toBeUndefined();
+    expect(w.outputs['node-id']).toBeUndefined();
+  });
+
   test('invalid input: names the input, nothing else used', async () => {
     const w = newWorld({ ...serveIn, name: 'Bad Name' });
     await runMain('serve', startDeps(w));

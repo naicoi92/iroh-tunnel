@@ -34,6 +34,56 @@ test('writes stdout+stderr to the log and sets the child env', async () => {
   await until(() => h.exitCode() === 0);
 });
 
+test.skipIf(process.platform === 'win32')('refuses to signal when identity is unavailable', async () => {
+  const s = await script('unavailable.js', `console.log('up'); setInterval(() => {}, 1000);`);
+  const log = join(dir, 'unavailable.log');
+  const l = createLauncher();
+  const h = await l.spawn(exe, [s], {}, log);
+  try {
+    await until(async () => (await readFile(log, 'utf8').catch(() => '')).includes('up'));
+    expect(await l.stop(h.pid, 100, '')).toBe('identity-unavailable');
+    expect(l.isAlive(h.pid)).toBe(true);
+  } finally {
+    try { process.kill(h.pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+});
+
+test.skipIf(process.platform === 'win32')('does not escalate if the process identity changes after SIGTERM', async () => {
+  const s = await script('changed.js', `process.on('SIGTERM', () => {}); console.log('up'); setInterval(() => {}, 1000);`);
+  const log = join(dir, 'changed.log');
+  let checks = 0;
+  const l = createLauncher(process.platform, undefined, async () => ++checks === 1 ? 'original' : 'replacement');
+  const h = await l.spawn(exe, [s], {}, log);
+  try {
+    await until(async () => (await readFile(log, 'utf8').catch(() => '')).includes('up'));
+    expect(await l.stop(h.pid, 100, 'original')).toBe('identity-mismatch');
+    expect(l.isAlive(h.pid)).toBe(true);
+  } finally {
+    try { process.kill(h.pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+});
+
+test('Windows escalation checks identity before taskkill', async () => {
+  let checks = 0;
+  const signals: string[] = [];
+  let forced = false;
+  const l = createLauncher('win32', undefined, async () => ++checks === 1 ? 'original' : 'replacement',
+    (_pid, sig) => { signals.push(sig); }, async () => { forced = true; });
+  expect(await l.stop(process.pid, 0, 'original')).toBe('identity-mismatch');
+  expect(signals).toEqual(['SIGTERM']);
+  expect(forced).toBe(false);
+});
+
+test('Windows escalation invokes taskkill only with a matching identity', async () => {
+  const signals: string[] = [];
+  let forced = false;
+  const l = createLauncher('win32', undefined, async () => 'original',
+    (_pid, sig) => { signals.push(sig); }, async () => { forced = true; });
+  expect(await l.stop(process.pid, 0, 'original')).toBe('still-alive');
+  expect(signals).toEqual(['SIGTERM']);
+  expect(forced).toBe(true);
+});
+
 test.skipIf(process.platform === 'win32')('stop returns exited for a child that handles SIGTERM, and isAlive is false', async () => {
   const s = await script('term.js', `process.on('SIGTERM', () => process.exit(0)); console.log('up'); setInterval(() => {}, 1000);`);
   const log = join(dir, 'term.log');
@@ -41,8 +91,22 @@ test.skipIf(process.platform === 'win32')('stop returns exited for a child that 
   const h = await l.spawn(exe, [s], {}, log);
   await until(async () => (await readFile(log, 'utf8').catch(() => '')).includes('up'));
   expect(l.isAlive(h.pid)).toBe(true);
-  expect(await l.stop(h.pid, 200)).toBe('exited');
+  expect(await l.stop(h.pid, 200, (await l.identity(h.pid)) ?? '')).toBe('exited');
   expect(l.isAlive(h.pid)).toBe(false);
+});
+
+test.skipIf(process.platform !== 'linux')('refuses to signal a reused pid with a different process identity', async () => {
+  const s = await script('reused.js', `process.on('SIGTERM', () => {}); console.log('up'); setInterval(() => {}, 1000);`);
+  const log = join(dir, 'reused.log');
+  const l = createLauncher();
+  const h = await l.spawn(exe, [s], {}, log);
+  try {
+    await until(async () => (await readFile(log, 'utf8').catch(() => '')).includes('up'));
+    expect(await l.stop(h.pid, 100, 'linux:old-process')).toBe('identity-mismatch');
+    expect(l.isAlive(h.pid)).toBe(true);
+  } finally {
+    try { process.kill(h.pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
 });
 
 test.skipIf(process.platform === 'win32')('stop returns killed for a child ignoring SIGTERM', async () => {
@@ -51,7 +115,7 @@ test.skipIf(process.platform === 'win32')('stop returns killed for a child ignor
   const l = createLauncher();
   const h = await l.spawn(exe, [s], {}, log);
   await until(async () => (await readFile(log, 'utf8').catch(() => '')).includes('up'));
-  expect(await l.stop(h.pid, 200)).toBe('killed');
+  expect(await l.stop(h.pid, 200, (await l.identity(h.pid)) ?? '')).toBe('killed');
   expect(l.isAlive(h.pid)).toBe(false);
 });
 
@@ -61,7 +125,7 @@ test('a zombie pid counts as dead on linux', async () => {
   const zombieStat = (pid: number) => `${pid} (iroh-tunnel-acc) Z 1 1 1 0 -1`;
   const l = createLauncher('linux', zombieStat);
   expect(l.isAlive(process.pid)).toBe(false);
-  expect(await l.stop(process.pid, 200)).toBe('exited');
+  expect(await l.stop(process.pid, 200, '')).toBe('exited');
 });
 
 test('a running pid with a non-zombie state is alive on linux', () => {
@@ -80,7 +144,7 @@ test('stop on an already-dead pid is exited', async () => {
   const l = createLauncher();
   const h = await l.spawn(exe, [s], {}, join(dir, 'q.log'));
   await until(() => h.exitCode() === 0);
-  expect(await l.stop(h.pid, 100)).toBe('exited');
+  expect(await l.stop(h.pid, 100, '')).toBe('exited');
 });
 
 test('spawning a nonexistent executable rejects with the cause and emits no unhandled error', async () => {

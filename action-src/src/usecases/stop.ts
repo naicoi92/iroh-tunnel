@@ -1,5 +1,5 @@
 import type { ActionsIO } from '../adapters/io';
-import type { Launcher } from '../adapters/launcher';
+import type { Launcher, StopResult } from '../adapters/launcher';
 import type { readStatus } from '../adapters/status';
 import { join } from 'node:path';
 import type { Role } from '../domain/inputs';
@@ -47,10 +47,10 @@ export async function stop(deps: StopDeps): Promise<void> {
     );
   }
 
-  const outcome: { result: 'exited' | 'killed' | 'still-alive' } = { result: 'exited' };
+  const outcome: { result: StopResult } = { result: 'exited' };
   if (pidText !== '') {
     await attempt('stopping the tunnel failed', async () => {
-      outcome.result = await deps.launcher.stop(Number(pidText), GRACE_MS);
+      outcome.result = await deps.launcher.stop(Number(pidText), GRACE_MS, io.getState('process-identity'));
     });
   }
 
@@ -70,6 +70,9 @@ export async function stop(deps: StopDeps): Promise<void> {
   await attempt('removing the workspace failed', () => deps.removeWorkspace(root));
   if (outcome.result === 'still-alive') {
     errors.push(`iroh-tunnel-${role || 'tunnel'} (pid ${pidText}) did not exit after SIGKILL/taskkill.`);
+  }
+  if (outcome.result === 'identity-mismatch' || outcome.result === 'identity-unavailable') {
+    errors.push(`Cannot safely stop iroh-tunnel-${role || 'tunnel'} (pid ${pidText}): process identity ${outcome.result === 'identity-mismatch' ? 'changed' : 'is unavailable'}. No signal was sent without matching identity.`);
   }
   if (errors.length > 0) io.setFailed(errors.join('\n'));
 }
