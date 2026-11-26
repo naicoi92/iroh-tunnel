@@ -1,6 +1,8 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { closeSync, openSync, readFileSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { exec } from '@actions/exec';
 
 export type StopResult = 'exited' | 'killed' | 'still-alive' | 'identity-mismatch' | 'identity-unavailable';
@@ -15,6 +17,7 @@ export interface Launcher {
   isAlive(pid: number): boolean;
   identity(pid: number): Promise<string | undefined>;
   stop(pid: number, graceMs: number, identity: string): Promise<StopResult>;
+  stopAction(root: string, graceMs: number): Promise<StopResult>;
 }
 
 // The runner exposes every action input (INPUT_*) and saved state (STATE_*) in
@@ -147,6 +150,18 @@ export function createLauncher(
 
     isAlive: alive,
     identity: readIdentity,
+
+    async stopAction(root, graceMs) {
+      const complete = async () => (await readFile(join(root, 'shutdown-complete'), 'utf8').catch(() => '')) === 'complete';
+      if (await complete()) return 'exited';
+      await writeFile(join(root, 'shutdown-request'), 'shutdown', { mode: 0o600 });
+      const end = Date.now() + graceMs;
+      while (Date.now() < end) {
+        if (await complete()) return 'exited';
+        await sleep(POLL_MS);
+      }
+      return (await complete()) ? 'exited' : 'still-alive';
+    },
 
     async stop(pid, graceMs, identity) {
       if (!Number.isSafeInteger(pid) || pid <= 0) return 'identity-unavailable';

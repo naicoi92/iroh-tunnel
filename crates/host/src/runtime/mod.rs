@@ -6,6 +6,7 @@
 //! everything file- and OS-bound around them. Terminal and signal concerns
 //! are the caller's: it supplies the readiness hook and the shutdown future.
 
+mod action_shutdown;
 mod policy;
 mod remove_own_status_file_for_exit;
 mod run_foreground;

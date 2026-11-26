@@ -41,6 +41,31 @@ describe('stop', () => {
     expect(first.removed).toEqual(['/tmp/ws']);
   });
 
+  test('cooperative cleanup after startup failure never uses PID fallback', async () => {
+    const w = newWorld({ name: 'svc', target: '127.0.0.1:8080' });
+    const deps = startDeps(w, {
+      installer: { async install() { return { exePath: '/bin/serve', version: 'local' }; } },
+      readStatus: async () => { throw new Error('startup failed'); },
+    });
+    await runMain('serve', deps);
+    expect(w.failed[0]).toContain('startup failed');
+    expect(w.spawned[0]!.env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR).toBe(WS.root);
+    expect(w.state['shutdown-mode']).toBe('action');
+    await stop(stopDeps(w));
+    expect(w.calls).toContain('launcher.stopAction:/tmp/ws:5000');
+    expect(w.stopCalls).toEqual([]);
+  });
+
+  test('cooperative shutdown failure never falls back to a PID', async () => {
+    const w = saved();
+    w.state['shutdown-mode'] = 'action';
+    w.stopResult = 'still-alive';
+    await stop(stopDeps(w));
+    expect(w.failed[0]).toContain('did not confirm action-scoped shutdown');
+    expect(w.stopCalls).toEqual([]);
+    expect(w.removed).toEqual([]);
+  });
+
   test('no saved workspace: success, no calls', async () => {
     const w = newWorld();
     await stop(stopDeps(w));

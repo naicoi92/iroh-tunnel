@@ -67,6 +67,23 @@ describe('happy paths', () => {
     expect(w.failed).toEqual([]);
   });
 
+  test('new protocol versions use cooperative shutdown while legacy pins retain PID cleanup', async () => {
+    for (const [version, action] of [['0.7.0', false], ['0.8.0', true], ['local', true]] as const) {
+      const w = newWorld(serveIn);
+      serveReady(w);
+      await runMain('serve', startDeps(w, { installer: { async install() { return { exePath: '/bin/serve', version }; } } }));
+      expect(w.failed).toEqual([]);
+      expect(w.state['shutdown-mode'] === 'action').toBe(action);
+      if (action) {
+        expect(w.spawned[0]!.env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR).toBe(WS.root);
+        expect(w.state['process-identity']).toBeUndefined();
+      } else {
+        expect(w.spawned[0]!.env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR).toBeUndefined();
+        expect(w.state['process-identity']).toBe('fake-identity');
+      }
+    }
+  });
+
   test('serve waits for the home relay before completing', async () => {
     const w = newWorld(serveIn);
     w.status = { node_id: NODE, home_relay: null, services: [] };

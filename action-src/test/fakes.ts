@@ -115,6 +115,10 @@ export function fakeLauncher(w: World): Launcher {
     },
     isAlive: () => true,
     identity: async () => 'fake-identity',
+    async stopAction(root, grace) {
+      w.calls.push(`launcher.stopAction:${root}:${grace}`);
+      return w.stopResult;
+    },
     async stop(pid, grace, identity) {
       w.calls.push('launcher.stop');
       w.stopCalls.push([pid, grace, identity]);
