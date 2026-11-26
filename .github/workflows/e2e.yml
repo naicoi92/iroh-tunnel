@@ -139,79 +139,56 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
-      - name: Start echo server
+      - id: echo_servers
+        name: Start echo servers
         shell: bash
         run: |
-          nohup bun action-src/scripts/echo-server.ts 18080 > "$RUNNER_TEMP/echo1.log" 2>&1 &
+          nohup bun action-src/scripts/echo-server.ts 18080 target-one > "$RUNNER_TEMP/echo1.log" 2>&1 &
+          nohup bun action-src/scripts/echo-server.ts 18081 target-two > "$RUNNER_TEMP/echo2.log" 2>&1 &
           bun action-src/scripts/wait-port.ts 127.0.0.1:18080
+          bun action-src/scripts/wait-port.ts 127.0.0.1:18081
       - id: serve1
         uses: ./serve
         with:
-          name: echo
+          name: echo1
           target: 127.0.0.1:18080
-      - uses: ./
-        with:
-          name: echo
-          node-id: ${{ steps.serve1.outputs.node-id }}
-          listen: 127.0.0.1:19080
-      - name: Round trip (root path)
-        shell: bash
-        run: bun action-src/scripts/roundtrip.ts 127.0.0.1:19080 "hello-$RUNNER_OS"
-      # Linux and macOS: a second Serve/Access pair, the `access` alias path.
-      - name: Start second echo server
-        if: matrix.name != 'windows'
-        shell: bash
-        run: |
-          nohup bun action-src/scripts/echo-server.ts 18081 > "$RUNNER_TEMP/echo2.log" 2>&1 &
-          bun action-src/scripts/wait-port.ts 127.0.0.1:18081
       - id: serve2
-        if: matrix.name != 'windows'
         uses: ./serve
         with:
           name: echo2
           target: 127.0.0.1:18081
-      - name: Access (alias path)
-        if: matrix.name != 'windows'
+      - id: access1
+        uses: ./
+        with:
+          name: echo1
+          node-id: ${{ steps.serve1.outputs.node-id }}
+          listen: 127.0.0.1:19080
+      - id: access2
+        name: Access (alias path)
         uses: ./access
         with:
           name: echo2
           node-id: ${{ steps.serve2.outputs.node-id }}
           listen: 127.0.0.1:19081
-      - name: Round trip (alias path and root path)
-        if: matrix.name != 'windows'
+      - id: verify_tunnels
+        name: Verify distinct NodeIds and both routes
         shell: bash
+        env:
+          SERVE1: ${{ steps.serve1.outputs.node-id }}
+          SERVE2: ${{ steps.serve2.outputs.node-id }}
+          ACCESS1: ${{ steps.access1.outputs.node-id }}
+          ACCESS2: ${{ steps.access2.outputs.node-id }}
         run: |
-          bun action-src/scripts/roundtrip.ts 127.0.0.1:19081 "alias-$RUNNER_OS"
-          bun action-src/scripts/roundtrip.ts 127.0.0.1:19080 "root-$RUNNER_OS"
-      - name: Node ids differ
-        if: matrix.name != 'windows'
-        shell: bash
-        env:
-          A: ${{ steps.serve1.outputs.node-id }}
-          B: ${{ steps.serve2.outputs.node-id }}
-        run: '[ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ]'
-      # Windows: only one Serve and one Access step per job; the second fails.
-      - id: second
-        name: Second Access step (expected to fail)
-        if: matrix.name == 'windows'
-        continue-on-error: true
-        uses: ./access
-        env:
-          IROH_TUNNEL_ACTION_ERROR_FILE: ${{ runner.temp }}/second-error.txt
-        with:
-          name: echo
-          node-id: ${{ steps.serve1.outputs.node-id }}
-          listen: 127.0.0.1:19082
-      - name: Assert second Access step failed for the right reason
-        if: matrix.name == 'windows'
-        shell: bash
-        env:
-          OUTCOME: ${{ steps.second.outcome }}
-          ERROR_FILE: ${{ runner.temp }}/second-error.txt
-        run: |
-          [ "$OUTCOME" = failure ] || { echo "second step outcome: $OUTCOME"; exit 1; }
-          cat "$ERROR_FILE"
-          grep -q 'one Serve and one Access step per job on Windows' "$ERROR_FILE"
+          set -euo pipefail
+          node_ids=("$SERVE1" "$SERVE2" "$ACCESS1" "$ACCESS2")
+          for ((i=0; i<4; i++)); do
+            [ -n "${node_ids[$i]}" ] || { echo "NodeId $i is empty"; exit 1; }
+            for ((j=i+1; j<4; j++)); do
+              [ "${node_ids[$i]}" != "${node_ids[$j]}" ] || { echo "NodeIds $i and $j match"; exit 1; }
+            done
+          done
+          bun action-src/scripts/roundtrip.ts 127.0.0.1:19080 "root-$RUNNER_OS" target-one
+          bun action-src/scripts/roundtrip.ts 127.0.0.1:19081 "alias-$RUNNER_OS" target-two
       - name: Echo server logs
         if: failure()
         shell: bash
