@@ -1,12 +1,12 @@
-// Round trip through a TCP tunnel: `bun roundtrip.ts <host:port> <payload>`.
-// Connects, writes the payload, half-closes, reads to EOF; exits 0 iff the
-// bytes read equal the payload.
+// Round trip: `bun roundtrip.ts <host:port> <payload> <expected-target>`.
+// Connects, writes the payload, half-closes, reads to EOF; checks the
+// target-specific prefix and echoed bytes.
 import net from 'node:net';
 
-const [addr, payload] = process.argv.slice(2);
+const [addr, payload, target] = process.argv.slice(2);
 const idx = addr?.lastIndexOf(':') ?? -1;
-if (!addr || payload === undefined || idx < 1) {
-  console.error('usage: bun roundtrip.ts <host:port> <payload>');
+if (!addr || payload === undefined || !target || idx < 1) {
+  console.error('usage: bun roundtrip.ts <host:port> <payload> <expected-target>');
   process.exit(2);
 }
 const host = addr.slice(0, idx);
@@ -26,10 +26,11 @@ sock.on('error', (e) => {
 sock.on('close', () => {
   clearTimeout(timer);
   const got = Buffer.concat(chunks).toString();
-  if (got === payload) {
+  const expected = `${target}:${payload}`;
+  if (got === expected) {
     console.log(`roundtrip ${addr}: ok (${got.length} bytes)`);
     process.exit(0);
   }
-  console.error(`roundtrip ${addr}: expected ${JSON.stringify(payload)}, got ${JSON.stringify(got)}`);
+  console.error(`roundtrip ${addr}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(got)}`);
   process.exit(1);
 });
