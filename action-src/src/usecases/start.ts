@@ -1,6 +1,5 @@
 import { InputError } from '../domain/errors';
 import { renderConfig } from '../domain/config';
-import { compareVersions } from '../domain/version';
 import { parseAccess, parseServe } from '../domain/inputs';
 import { bindMessage, exitMessage, NO_HOME_RELAY, timeoutMessage } from './failure';
 import { isReady, type Readiness } from './readiness';
@@ -63,18 +62,11 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     IROH_TUNNEL_ACTION_SCOPE: ws.stateDir,
     NO_COLOR: '1',
   };
-  // v0.7.0 and earlier are already released without this protocol. The
-  // local-binary CI override always tests the current source tree.
-  const actionShutdown = version === 'local' || compareVersions(version, '0.8.0') >= 0;
-  if (actionShutdown) {
-    env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR = ws.root;
-    io.saveState('shutdown-mode', 'action');
-  }
   if (deps.platform !== 'win32') env.HOME = ws.homeDir;
   const child = await launcher.spawn(exePath, ['run', '-c', ws.configPath], env, ws.logPath);
   io.saveState('pid', String(child.pid));
   io.saveState('role', req.role);
-  const identity = actionShutdown ? undefined : await launcher.identity(child.pid);
+  const identity = await launcher.identity(child.pid);
   if (identity && child.exitCode() === null) io.saveState('process-identity', identity);
 
   const secrets = req.relayToken === undefined ? [] : [req.relayToken];
@@ -96,7 +88,7 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     if ('failed' in r) throw new StartFailure(bindMessage(r.failed, lastStatus, log, secrets));
     // The output is this node's own id, which only the status file knows.
     if (r.ready && lastStatus?.node_id) {
-      if (!actionShutdown && !identity) throw new StartFailure('Could not identify the tunnel process safely; refusing to continue without safe cleanup.');
+      if (!identity) throw new StartFailure('Could not identify the tunnel process safely; refusing to continue without safe cleanup.');
       if (req.role === 'access' && req.protocol === 'udp') {
         io.info('UDP listener is bound; peer connection not checked');
       }

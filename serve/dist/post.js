@@ -21931,10 +21931,8 @@ async function stop(deps) {
   }
   const outcome = { result: "exited" };
   if (pidText !== "") {
-    if (io.getState("shutdown-mode") === "action")
-      outcome.result = "still-alive";
     await attempt("stopping the tunnel failed", async () => {
-      outcome.result = io.getState("shutdown-mode") === "action" ? await deps.launcher.stopAction(root, GRACE_MS) : await deps.launcher.stop(Number(pidText), GRACE_MS, io.getState("process-identity"));
+      outcome.result = await deps.launcher.stop(Number(pidText), GRACE_MS, io.getState("process-identity"));
     });
   }
   if (io.jobFailed()) {
@@ -21947,11 +21945,9 @@ async function stop(deps) {
       io.info(tail === "" ? "Tunnel log is empty." : tail);
     }));
   }
-  if (io.getState("shutdown-mode") !== "action" || outcome.result === "exited") {
-    await attempt("removing the workspace failed", () => deps.removeWorkspace(root));
-  }
+  await attempt("removing the workspace failed", () => deps.removeWorkspace(root));
   if (outcome.result === "still-alive") {
-    errors.push(io.getState("shutdown-mode") === "action" ? `iroh-tunnel-${role || "tunnel"} did not confirm action-scoped shutdown.` : `iroh-tunnel-${role || "tunnel"} (pid ${pidText}) did not exit after SIGKILL/taskkill.`);
+    errors.push(`iroh-tunnel-${role || "tunnel"} (pid ${pidText}) did not exit after SIGKILL/taskkill.`);
   }
   if (outcome.result === "identity-mismatch" || outcome.result === "identity-unavailable") {
     errors.push(`Cannot safely stop iroh-tunnel-${role || "tunnel"} (pid ${pidText}): process identity ${outcome.result === "identity-mismatch" ? "changed" : "is unavailable"}. No signal was sent without matching identity.`);
@@ -21971,7 +21967,7 @@ var IS_WINDOWS3 = process.platform === "win32";
 var IS_MAC = process.platform === "darwin";
 
 // src/entry/deps.ts
-import { readFile as readFile3, writeFile as writeFile4 } from "node:fs/promises";
+import { readFile as readFile2, writeFile as writeFile3 } from "node:fs/promises";
 
 // src/adapters/io.ts
 function createIO(core = exports_core) {
@@ -22004,8 +22000,6 @@ function createIO(core = exports_core) {
 import { execFile, spawn as nodeSpawn } from "node:child_process";
 import { promisify } from "node:util";
 import { closeSync, openSync, readFileSync } from "node:fs";
-import { readFile, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join4 } from "node:path";
 function inheritedEnv() {
   const out = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -22115,19 +22109,6 @@ function createLauncher(platform = process.platform, readStat = readProcStat, re
     },
     isAlive: alive,
     identity: readIdentity,
-    async stopAction(root, graceMs) {
-      const complete = async () => await readFile(join4(root, "shutdown-complete"), "utf8").catch(() => "") === "complete";
-      if (await complete())
-        return "exited";
-      await writeFile2(join4(root, "shutdown-request"), "shutdown", { mode: 384 });
-      const end = Date.now() + graceMs;
-      while (Date.now() < end) {
-        if (await complete())
-          return "exited";
-        await sleep(POLL_MS);
-      }
-      return await complete() ? "exited" : "still-alive";
-    },
     async stop(pid, graceMs, identity) {
       if (!Number.isSafeInteger(pid) || pid <= 0)
         return "identity-unavailable";
@@ -22163,12 +22144,12 @@ function createLauncher(platform = process.platform, readStat = readProcStat, re
 }
 
 // src/adapters/status.ts
-import { readFile as readFile2 } from "node:fs/promises";
-import { join as join5 } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join as join4 } from "node:path";
 async function readStatus(stateDir, role) {
   let text;
   try {
-    text = await readFile2(join5(stateDir, `${role}-status.json`), "utf8");
+    text = await readFile(join4(stateDir, `${role}-status.json`), "utf8");
   } catch {
     return;
   }
@@ -22189,7 +22170,7 @@ async function readStatus(stateDir, role) {
 }
 
 // src/adapters/workspace.ts
-import { chmod as chmod2, mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { chmod as chmod2, mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 async function removeWorkspace(root) {
   await rm2(root, { recursive: true, force: true });
 }
@@ -22200,7 +22181,7 @@ function realStopDeps() {
     io: createIO(),
     launcher: createLauncher(),
     readStatus,
-    readLog: (path) => readFile3(path, "utf8").catch(() => ""),
+    readLog: (path) => readFile2(path, "utf8").catch(() => ""),
     removeWorkspace,
     platform: process.platform
   };

@@ -34,23 +34,7 @@ pub async fn run_foreground(
         Some(scope) => Ownership::Action(role, scope.into()),
         None => Ownership::Enforced(role),
     };
-    let Some(dir) = super::action_shutdown::workspace() else {
-        return run_role(role, config, ownership, ctx, None, on_ready, shutdown).await;
-    };
-    anyhow::ensure!(
-        dir.is_absolute(),
-        "action shutdown workspace must be absolute"
-    );
-    // Publish support before entering the runtime. If startup fails later, the
-    // completion marker still confirms that all owned resources were dropped.
-    tokio::fs::write(dir.join("shutdown-ready"), b"ready").await?;
-    let channel = super::action_shutdown::wait(dir.clone());
-    let result = run_role(role, config, ownership, ctx, None, on_ready, async {
-        tokio::select! { () = shutdown => (), () = channel => () }
-    })
-    .await;
-    tokio::fs::write(dir.join("shutdown-complete"), b"complete").await?;
-    result
+    run_role(role, config, ownership, ctx, None, on_ready, shutdown).await
 }
 
 #[cfg(test)]
