@@ -27,7 +27,7 @@ const cooperativeChild = `
     try { request = fs.readFileSync(path.join(root, 'shutdown-request'), 'utf8'); } catch {}
     if (request !== 'shutdown') return;
     clearInterval(timer);
-    fs.writeFileSync(path.join(root, 'shutdown-complete'), 'complete');
+    fs.writeFileSync(path.join(root, 'shutdown-complete'), JSON.stringify({ version: 1, pid: process.pid }));
   }, 10);
   console.log('ready');
 `;
@@ -113,12 +113,56 @@ test('unconfirmed shutdown is bounded and never signals an unresponsive child', 
   }
 });
 
-test('an already completed invocation needs no new request or live PID', async () => {
+test('completion published by a still-running invocation is not exit confirmation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'action-shutdown-'));
+  const launcher = createLauncher();
+  let pid: number | undefined;
+  try {
+    const child = await launcher.spawn(process.execPath, ['-e', `
+      require('node:fs').writeFileSync(process.env.COMPLETION, JSON.stringify({ version: 1, pid: process.pid }));
+      console.log('ready');
+      setInterval(() => {}, 1000);
+    `], { COMPLETION: join(root, 'shutdown-complete') }, join(root, 'log'));
+    pid = child.pid;
+    await until(async () => (await readFile(join(root, 'log'), 'utf8')).includes('ready'));
+    expect(await launcher.stopAction(root, 100)).toBe('still-alive');
+    expect(child.exitCode()).toBeNull();
+    expect(launcher.isAlive(child.pid)).toBe(true);
+    // A protocol acknowledgement by itself is insufficient. The same record
+    // becomes usable only after its publisher actually exits.
+    process.kill(child.pid, 'SIGKILL'); // test teardown, not action cleanup
+    await until(() => child.exitCode() !== null);
+    expect(await launcher.stopAction(root, 5000)).toBe('exited');
+  } finally {
+    if (pid !== undefined) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* test teardown only */ }
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an already completed and exited invocation needs no new request or saved PID', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'action-shutdown-'));
+  const launcher = createLauncher();
+  try {
+    const child = await launcher.spawn(process.execPath, ['-e', `
+      require('node:fs').writeFileSync(process.env.COMPLETION, JSON.stringify({ version: 1, pid: process.pid }));
+    `], { COMPLETION: join(root, 'shutdown-complete') }, join(root, 'log'));
+    await until(() => child.exitCode() !== null);
+    expect(await launcher.stopAction(root, 5000)).toBe('exited');
+    expect(await readFile(join(root, 'shutdown-request'), 'utf8').catch(() => '')).toBe('');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('malformed completion never confirms shutdown', async () => {
   const root = await mkdtemp(join(tmpdir(), 'action-shutdown-'));
   try {
-    await writeFile(join(root, 'shutdown-complete'), 'complete');
-    expect(await createLauncher().stopAction(root, 0)).toBe('exited');
-    expect(await readFile(join(root, 'shutdown-request'), 'utf8').catch(() => '')).toBe('');
+    for (const record of ['complete', '{', '{}', '{"version":1,"pid":0}', '{"version":1,"pid":-1}', '{"version":2,"pid":123}', '{"version":1,"pid":"123"}']) {
+      await writeFile(join(root, 'shutdown-complete'), record);
+      expect(await createLauncher().stopAction(root, 0)).toBe('still-alive');
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

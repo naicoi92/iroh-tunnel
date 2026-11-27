@@ -22057,6 +22057,34 @@ async function processIdentity(platform, pid) {
   } catch {}
   return;
 }
+async function actionProcessExited(platform, pid, timeout) {
+  if (platform === "linux") {
+    try {
+      return procState(await readFile(`/proc/${pid}/stat`, "utf8")) === "Z";
+    } catch (e) {
+      return ["ENOENT", "ESRCH"].includes(e.code ?? "");
+    }
+  }
+  try {
+    if (platform === "darwin") {
+      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "stat="], { timeout });
+      return stdout.trim().startsWith("Z");
+    }
+    if (platform === "win32") {
+      const { stdout } = await execFileAsync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `try { $p = [System.Diagnostics.Process]::GetProcessById(${pid}); if ($p.HasExited) { 'exited' } else { 'alive' } } catch { if ($_.Exception -is [System.ArgumentException] -or $_.Exception.InnerException -is [System.ArgumentException]) { 'exited' } else { 'unknown' } }`
+      ], { timeout, windowsHide: true });
+      return stdout.trim() === "exited";
+    }
+  } catch (e) {
+    const error = e;
+    return platform === "darwin" && error.code === 1 && error.stdout === "" && error.stderr === "";
+  }
+  return false;
+}
 function signalable(pid) {
   try {
     process.kill(pid, 0);
@@ -22117,17 +22145,26 @@ function createLauncher(platform = process.platform, readStat = readProcStat, re
     isAlive: alive,
     identity: readIdentity,
     async stopAction(root, graceMs) {
-      const complete = async () => await readFile(join4(root, "shutdown-complete"), "utf8").catch(() => "") === "complete";
+      const end = Date.now() + graceMs;
+      const complete = async () => {
+        try {
+          const record = JSON.parse(await readFile(join4(root, "shutdown-complete"), "utf8"));
+          if (record.version !== 1 || !Number.isSafeInteger(record.pid) || record.pid <= 0)
+            return false;
+          return await actionProcessExited(platform, record.pid, Math.max(1, end - Date.now()));
+        } catch {
+          return false;
+        }
+      };
       if (await complete())
         return "exited";
       await writeFile2(join4(root, "shutdown-request"), "shutdown", { mode: 384 });
-      const end = Date.now() + graceMs;
       while (Date.now() < end) {
         if (await complete())
           return "exited";
-        await sleep(POLL_MS);
+        await sleep(Math.min(POLL_MS, Math.max(0, end - Date.now())));
       }
-      return await complete() ? "exited" : "still-alive";
+      return "still-alive";
     },
     async stop(pid, graceMs, identity) {
       if (!Number.isSafeInteger(pid) || pid <= 0)

@@ -37,6 +37,20 @@ fn wait_exit(child: &mut Process) -> Result<std::process::ExitStatus> {
     }
 }
 
+fn assert_completion(dir: &Path, pid: u32) -> Result<()> {
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("shutdown-complete"))?)?;
+    anyhow::ensure!(
+        record.get("version").and_then(serde_json::Value::as_u64) == Some(1),
+        "unknown completion protocol"
+    );
+    anyhow::ensure!(
+        record.get("pid").and_then(serde_json::Value::as_u64) == Some(u64::from(pid)),
+        "completion must identify its publisher"
+    );
+    Ok(())
+}
+
 fn spawn(root: &Path, name: &str, relay: &str) -> Result<(Process, PathBuf)> {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir)?;
@@ -70,14 +84,14 @@ async fn request_stops_only_its_own_process() -> Result<()> {
     wait_for(&db.join("serve-status.json"), &mut b)?;
     std::fs::write(da.join("shutdown-request"), "shutdown")?;
     anyhow::ensure!(wait_exit(&mut a)?.success());
-    anyhow::ensure!(std::fs::read(da.join("shutdown-complete"))? == b"complete");
+    assert_completion(&da, a.0.id())?;
     anyhow::ensure!(!da.join("serve-status.json").exists());
     anyhow::ensure!(b.0.try_wait()?.is_none(), "other invocation exited");
     anyhow::ensure!(db.join("serve-status.json").exists());
     anyhow::ensure!(!db.join("shutdown-complete").exists());
     std::fs::write(db.join("shutdown-request"), "shutdown")?;
     anyhow::ensure!(wait_exit(&mut b)?.success());
-    anyhow::ensure!(std::fs::read(db.join("shutdown-complete"))? == b"complete");
+    assert_completion(&db, b.0.id())?;
     anyhow::ensure!(!db.join("serve-status.json").exists());
     Ok(())
 }
@@ -97,7 +111,7 @@ async fn duplicate_channel_cannot_confirm_the_original_has_stopped() -> Result<(
     );
     std::fs::write(dir.join("shutdown-request"), "shutdown")?;
     anyhow::ensure!(wait_exit(&mut original)?.success());
-    anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
+    assert_completion(&dir, original.0.id())?;
     Ok(())
 }
 
@@ -110,7 +124,7 @@ async fn request_before_start_is_not_lost() -> Result<()> {
     std::fs::write(dir.join("shutdown-request"), "shutdown")?;
     let (mut child, _) = spawn(temp.path(), "early-stop", &relay.to_string())?;
     anyhow::ensure!(wait_exit(&mut child)?.success());
-    anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
+    assert_completion(&dir, child.0.id())?;
     anyhow::ensure!(!dir.join("serve-status.json").exists());
     Ok(())
 }
@@ -127,7 +141,7 @@ async fn invalid_request_does_not_stop_the_tunnel() -> Result<()> {
     anyhow::ensure!(!dir.join("shutdown-complete").exists());
     std::fs::write(dir.join("shutdown-request"), "shutdown")?;
     anyhow::ensure!(wait_exit(&mut child)?.success());
-    anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
+    assert_completion(&dir, child.0.id())?;
     Ok(())
 }
 
@@ -137,7 +151,7 @@ fn failed_start_still_confirms_shutdown() -> Result<()> {
     let dir = temp.path();
     let config = dir.join("invalid.toml");
     std::fs::write(&config, "invalid TOML [")?;
-    let status = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel-serve"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iroh-tunnel-serve"))
         .args(["run", "--config"])
         .arg(config)
         .env("IROH_TUNNEL_MACHINE_LOCK_DIR", dir.join("machine"))
@@ -146,8 +160,9 @@ fn failed_start_still_confirms_shutdown() -> Result<()> {
         .env("IROH_TUNNEL_ACTION_SHUTDOWN_DIR", dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
-    anyhow::ensure!(!status.success());
-    anyhow::ensure!(std::fs::read(dir.join("shutdown-complete"))? == b"complete");
+        .spawn()?;
+    let pid = child.id();
+    anyhow::ensure!(!child.wait()?.success());
+    assert_completion(dir, pid)?;
     Ok(())
 }

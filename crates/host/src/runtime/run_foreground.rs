@@ -42,15 +42,15 @@ pub async fn run_foreground(
         "action shutdown workspace must be absolute"
     );
     // Claim the single-use channel before entering the runtime. If startup
-    // fails later, completion still confirms all this invocation's resources
-    // were dropped; a duplicate channel can never publish that confirmation.
+    // fails later, completion still identifies this invocation's process for
+    // read-only exit confirmation; a duplicate cannot publish that record.
     super::action_shutdown::claim(&dir).await?;
     let channel = super::action_shutdown::wait(dir.clone());
     let result = run_role(role, config, ownership, ctx, None, on_ready, async {
         tokio::select! { () = shutdown => (), () = channel => () }
     })
     .await;
-    tokio::fs::write(dir.join("shutdown-complete"), b"complete").await?;
+    super::action_shutdown::complete(&dir).await?;
     result
 }
 

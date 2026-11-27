@@ -21,6 +21,14 @@ pub(super) async fn claim(dir: &Path) -> std::io::Result<()> {
     ready.write_all(b"ready").await
 }
 
+/// Publish runtime completion with the publisher's PID. The action must still
+/// observe OS process exit before accepting this as shutdown confirmation:
+/// returning from the runtime is not the same as exiting the process.
+pub(super) async fn complete(dir: &Path) -> std::io::Result<()> {
+    let record = format!(r#"{{"version":1,"pid":{}}}"#, std::process::id());
+    tokio::fs::write(dir.join("shutdown-complete"), record).await
+}
+
 pub(super) async fn wait(dir: PathBuf) {
     loop {
         if tokio::fs::read(dir.join("shutdown-request"))
