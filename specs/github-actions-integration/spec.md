@@ -318,13 +318,17 @@ Confidence: inferred
 - **THEN** the step fails at once naming `listen` and quoting the bind error, without waiting for the 60-second limit, and the post step stops the process
 
 ### Requirement: Job-end cleanup
-Each action's post step SHALL run whatever the job result is, stop the tunnel and fail if the tunnel process is still running afterwards, so no tunnel process started by the action outlives the job. On Unix it SHALL send a termination signal and force a kill after 5 seconds; on Windows it SHALL terminate the process.
+Each action's post step SHALL run whatever the job result is, stop the tunnel and fail if the tunnel process is still running afterwards, so no tunnel process started by the action outlives the job. For binaries that support action-scoped shutdown, the post step SHALL request shutdown through a private channel unique to the invocation, without signaling a numeric PID, and SHALL report failure if shutdown is not confirmed. Older pinned binaries SHALL remain usable with legacy cleanup: the post step checks process identity before signaling, but that check is not atomic with signaling.
 Evidence: design.md D8
 Confidence: inferred
 
 #### Scenario: Normal stop
 - **WHEN** the post step runs after a successful job
 - **THEN** the tunnel process exits and the post step succeeds
+
+#### Scenario: Shutdown is scoped to the action invocation
+- **WHEN** a post step cleans up a tunnel started with action-scoped shutdown support
+- **THEN** it requests shutdown through that invocation's private channel, does not signal a PID, and fails if shutdown cannot be confirmed
 
 #### Scenario: Main step failed before starting
 - **WHEN** the main step failed during input validation
@@ -344,7 +348,7 @@ Confidence: inferred
 - **THEN** the post step prints the status and the tunnel log
 
 ### Requirement: Per-step isolation
-Each step SHALL run its tunnel with its own state directory inside the step's temporary directory, and on Linux and macOS its own home directory, so steps of the same role in one job and concurrent jobs of one runner user do not refuse each other.
+Each step SHALL run its tunnel with its own runtime state and ownership scope on every supported platform. Steps of the same or different roles in one job and steps in concurrent jobs of one runner user MUST NOT overwrite one another's state. Each step SHALL publish its own `node-id`, and its post step SHALL target only that invocation's tunnel, subject to the legacy cleanup limitation in Job-end cleanup. Steps MAY use the same executable, but each invocation SHALL run in a separate process. Existing single-tunnel workflows SHALL require no input or output changes.
 Evidence: design.md D5; role-ownership-shutdown spec "Ownership scope is the user's default state directory"
 Confidence: inferred
 
@@ -356,30 +360,25 @@ Confidence: inferred
 - **WHEN** two macOS jobs run Access steps at the same time as the same user
 - **THEN** both start
 
-### Requirement: Windows limit of one step per role
-On Windows, where the role lock cannot be moved, a job SHALL support at most one Access step and one Serve step; a further step of the same role in the same job SHALL fail with a message that names this limit.
-Evidence: design.md D5; crates/host/src/paths/default_state_dir.rs:19-20; crates/host/src/ownership.rs:106-109
-Confidence: inferred
+#### Scenario: Multiple tunnels together on Windows
+- **WHEN** a Windows job starts two Serve steps and two Access steps with distinct local listeners, each Access step dialing its matching Serve step
+- **THEN** each invocation reports a distinct NodeId and both listeners forward traffic to their respective targets after all four steps complete
 
-#### Scenario: Second Serve step on Windows
-- **WHEN** a Windows job runs a second Serve step while the first is running
-- **THEN** the second step fails with a message stating one Serve and one Access step per job on Windows
-
-#### Scenario: Access and Serve together on Windows
-- **WHEN** a Windows job has one Serve step and one Access step
-- **THEN** both start
+#### Scenario: Cleanup belongs to each step
+- **WHEN** the post steps run after a job with several tunnels, including a tunnel whose main step failed after startup
+- **THEN** each post step stops only its own tunnel, and none of those processes remain after cleanup
 
 ### Requirement: Role already running is explained
-When the tunnel exits with the conflict status (exit code 6) during start, the step SHALL fail with a message saying the role is already running for this runner user, naming a running system service or another step as possible causes, and on Windows the one-step-per-role limit.
+When the tunnel exits with the conflict status (exit code 6) during start, the step SHALL fail with a message saying the role is already running for this runner user, without reporting a platform-specific limit on the number of action steps.
 Evidence: design.md D5, D7; docs/monitoring.md (exit codes); role-ownership-shutdown spec "Machine-tier lock between system service and user processes"
 Confidence: inferred
 
-#### Scenario: System service on a self-hosted Linux runner
-- **WHEN** a Serve step runs on a self-hosted Linux runner where an iroh-tunnel Serve system service is running
-- **THEN** the step fails with the already-running message instead of only the exit code
+#### Scenario: Ownership conflict during action startup
+- **WHEN** the tunnel exits with code 6 during startup
+- **THEN** the action explains that ownership is already held instead of reporting only the exit code
 
 ### Requirement: Consumer documentation
-The system SHALL document the actions for other projects: a README section with one copy-paste example per role, and a docs page with examples, the input and output tables, the fixed behaviour (including the one connection Access readiness opens and closes to the remote service), version pinning, the supported platforms and the Windows limit.
+The system SHALL document the actions for other projects: a README section with one copy-paste example per role, and a docs page with examples, the input and output tables, the fixed behaviour (including the one connection Access readiness opens and closes to the remote service), version pinning, supported platforms, and how to start multiple tunnels with separate steps.
 Evidence: design.md D11
 Confidence: inferred
 

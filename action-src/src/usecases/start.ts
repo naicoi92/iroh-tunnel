@@ -1,5 +1,6 @@
 import { InputError } from '../domain/errors';
 import { renderConfig } from '../domain/config';
+import { compareVersions } from '../domain/version';
 import { parseAccess, parseServe } from '../domain/inputs';
 import { bindMessage, exitMessage, NO_HOME_RELAY, timeoutMessage } from './failure';
 import { isReady, type Readiness } from './readiness';
@@ -57,11 +58,30 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
   io.info(`using iroh-tunnel-${req.role} ${version}`);
 
   await ws.writeConfig(renderConfig(req));
-  const env: Record<string, string> = { IROH_TUNNEL_STATE_DIR: ws.stateDir, NO_COLOR: '1' };
+  const env: Record<string, string> = {
+    IROH_TUNNEL_STATE_DIR: ws.stateDir,
+    IROH_TUNNEL_ACTION_SCOPE: ws.stateDir,
+    NO_COLOR: '1',
+  };
+  // v0.7.x is the legacy line. The protocol starts with the first possible
+  // v0.8.0 prerelease (SemVer -0), not just the final v0.8.0 release. The
+  // local-binary CI override always tests the current source tree.
+  const actionShutdown = version === 'local' || compareVersions(version, '0.8.0-0') >= 0;
+  if (actionShutdown) {
+    env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR = ws.root;
+    io.saveState('shutdown-mode', 'action');
+  }
   if (deps.platform !== 'win32') env.HOME = ws.homeDir;
-  const child = await launcher.spawn(exePath, ['run', '-c', ws.configPath], env, ws.logPath);
-  io.saveState('pid', String(child.pid));
   io.saveState('role', req.role);
+  const child = await launcher.spawn(exePath, ['run', '-c', ws.configPath], env, ws.logPath).catch((e) => {
+    // A rejected spawn never started a child. Otherwise retain the private
+    // shutdown intent even if saving the PID or later startup work fails.
+    if (actionShutdown) io.saveState('shutdown-mode', '');
+    throw e;
+  });
+  io.saveState('pid', String(child.pid));
+  const identity = actionShutdown ? undefined : await launcher.identity(child.pid);
+  if (identity && child.exitCode() === null) io.saveState('process-identity', identity);
 
   const secrets = req.relayToken === undefined ? [] : [req.relayToken];
   const deadline = deps.clock.now() + DEADLINE_MS;
@@ -82,6 +102,7 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     if ('failed' in r) throw new StartFailure(bindMessage(r.failed, lastStatus, log, secrets));
     // The output is this node's own id, which only the status file knows.
     if (r.ready && lastStatus?.node_id) {
+      if (!actionShutdown && !identity) throw new StartFailure('Could not identify the tunnel process safely; refusing to continue without safe cleanup.');
       if (req.role === 'access' && req.protocol === 'udp') {
         io.info('UDP listener is bound; peer connection not checked');
       }

@@ -21913,6 +21913,7 @@ async function stop(deps) {
     return;
   const role = io.getState("role");
   const pidText = io.getState("pid");
+  const actionShutdown = io.getState("shutdown-mode") === "action";
   const logPath = join3(root, "tunnel.log");
   const stateDir = join3(root, "state");
   const errors = [];
@@ -21930,9 +21931,11 @@ async function stop(deps) {
     }));
   }
   const outcome = { result: "exited" };
-  if (pidText !== "") {
+  if (actionShutdown || pidText !== "") {
+    if (actionShutdown)
+      outcome.result = "still-alive";
     await attempt("stopping the tunnel failed", async () => {
-      outcome.result = await deps.launcher.stop(Number(pidText), GRACE_MS);
+      outcome.result = actionShutdown ? await deps.launcher.stopAction(root, GRACE_MS) : await deps.launcher.stop(Number(pidText), GRACE_MS, io.getState("process-identity"));
     });
   }
   if (io.jobFailed()) {
@@ -21945,9 +21948,14 @@ async function stop(deps) {
       io.info(tail === "" ? "Tunnel log is empty." : tail);
     }));
   }
-  await attempt("removing the workspace failed", () => deps.removeWorkspace(root));
+  if (!actionShutdown || outcome.result === "exited") {
+    await attempt("removing the workspace failed", () => deps.removeWorkspace(root));
+  }
   if (outcome.result === "still-alive") {
-    errors.push(`iroh-tunnel-${role || "tunnel"} (pid ${pidText}) did not exit after SIGKILL/taskkill.`);
+    errors.push(actionShutdown ? `iroh-tunnel-${role || "tunnel"} did not confirm action-scoped shutdown.` : `iroh-tunnel-${role || "tunnel"} (pid ${pidText}) did not exit after SIGKILL/taskkill.`);
+  }
+  if (outcome.result === "identity-mismatch" || outcome.result === "identity-unavailable") {
+    errors.push(`Cannot safely stop iroh-tunnel-${role || "tunnel"} (pid ${pidText}): process identity ${outcome.result === "identity-mismatch" ? "changed" : "is unavailable"}. No signal was sent without matching identity.`);
   }
   if (errors.length > 0)
     io.setFailed(errors.join(`
@@ -21964,7 +21972,7 @@ var IS_WINDOWS3 = process.platform === "win32";
 var IS_MAC = process.platform === "darwin";
 
 // src/entry/deps.ts
-import { readFile as readFile2, writeFile as writeFile3 } from "node:fs/promises";
+import { readFile as readFile3, writeFile as writeFile4 } from "node:fs/promises";
 
 // src/adapters/io.ts
 function createIO(core = exports_core) {
@@ -21994,8 +22002,11 @@ function createIO(core = exports_core) {
 }
 
 // src/adapters/launcher.ts
-import { spawn as nodeSpawn } from "node:child_process";
+import { execFile, spawn as nodeSpawn } from "node:child_process";
+import { promisify } from "node:util";
 import { closeSync, openSync, readFileSync } from "node:fs";
+import { readFile, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join4 } from "node:path";
 function inheritedEnv() {
   const out = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -22019,6 +22030,61 @@ function readProcStat(pid) {
     return;
   }
 }
+var execFileAsync = promisify(execFile);
+async function processIdentity(platform, pid) {
+  try {
+    if (platform === "linux") {
+      const stat = readProcStat(pid);
+      const end = stat?.lastIndexOf(")") ?? -1;
+      const start = end < 0 ? undefined : stat?.slice(end + 1).trim().split(/\s+/)[19];
+      return start && /^\d+$/.test(start) ? `linux:${start}` : undefined;
+    }
+    if (platform === "darwin") {
+      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="], { timeout: 5000 });
+      const start = stdout.trim();
+      return start ? `darwin:${start}` : undefined;
+    }
+    if (platform === "win32") {
+      const { stdout } = await execFileAsync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`
+      ], { timeout: 5000, windowsHide: true });
+      const start = stdout.trim();
+      return /^\d+$/.test(start) ? `win32:${start}` : undefined;
+    }
+  } catch {}
+  return;
+}
+async function actionProcessExited(platform, pid, timeout) {
+  if (platform === "linux") {
+    try {
+      return procState(await readFile(`/proc/${pid}/stat`, "utf8")) === "Z";
+    } catch (e) {
+      return ["ENOENT", "ESRCH"].includes(e.code ?? "");
+    }
+  }
+  try {
+    if (platform === "darwin") {
+      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "stat="], { timeout });
+      return stdout.trim().startsWith("Z");
+    }
+    if (platform === "win32") {
+      const { stdout } = await execFileAsync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `try { $p = [System.Diagnostics.Process]::GetProcessById(${pid}); if ($p.HasExited) { 'exited' } else { 'alive' } } catch { if ($_.Exception -is [System.ArgumentException] -or $_.Exception.InnerException -is [System.ArgumentException]) { 'exited' } else { 'unknown' } }`
+      ], { timeout, windowsHide: true });
+      return stdout.trim() === "exited";
+    }
+  } catch (e) {
+    const error = e;
+    return platform === "darwin" && error.code === 1 && error.stdout === "" && error.stderr === "";
+  }
+  return false;
+}
 function signalable(pid) {
   try {
     process.kill(pid, 0);
@@ -22027,7 +22093,9 @@ function signalable(pid) {
   }
   return true;
 }
-function createLauncher(platform = process.platform, readStat = readProcStat) {
+function createLauncher(platform = process.platform, readStat = readProcStat, readIdentity = (pid) => processIdentity(platform, pid), sendSignal = (pid, sig) => {
+  process.kill(pid, sig);
+}, forceWindows = (pid) => exec("taskkill", ["/PID", String(pid), "/F"], { ignoreReturnCode: true })) {
   function alive(pid) {
     if (!signalable(pid))
       return false;
@@ -22047,7 +22115,7 @@ function createLauncher(platform = process.platform, readStat = readProcStat) {
   }
   function signal(pid, sig) {
     try {
-      process.kill(pid, sig);
+      sendSignal(pid, sig);
     } catch {}
   }
   return {
@@ -22075,32 +22143,70 @@ function createLauncher(platform = process.platform, readStat = readProcStat) {
       }
     },
     isAlive: alive,
-    async stop(pid, graceMs) {
-      if (!alive(pid))
+    identity: readIdentity,
+    async stopAction(root, graceMs) {
+      const end = Date.now() + graceMs;
+      const complete = async () => {
+        try {
+          const record = JSON.parse(await readFile(join4(root, "shutdown-complete"), "utf8"));
+          if (record.version !== 1 || !Number.isSafeInteger(record.pid) || record.pid <= 0)
+            return false;
+          return await actionProcessExited(platform, record.pid, Math.max(1, end - Date.now()));
+        } catch {
+          return false;
+        }
+      };
+      if (await complete())
         return "exited";
-      if (platform === "win32") {
-        signal(pid, "SIGTERM");
-        if (await waitDead(pid, graceMs))
+      await writeFile2(join4(root, "shutdown-request"), "shutdown", { mode: 384 });
+      while (Date.now() < end) {
+        if (await complete())
           return "exited";
-        await exec("taskkill", ["/PID", String(pid), "/T", "/F"], { ignoreReturnCode: true });
-        return await waitDead(pid, graceMs) ? "killed" : "still-alive";
+        await sleep(Math.min(POLL_MS, Math.max(0, end - Date.now())));
       }
+      return "still-alive";
+    },
+    async stop(pid, graceMs, identity) {
+      if (!Number.isSafeInteger(pid) || pid <= 0)
+        return "identity-unavailable";
+      const check = async () => {
+        if (!alive(pid))
+          return "exited";
+        if (!identity)
+          return "identity-unavailable";
+        const current = await readIdentity(pid);
+        if (!current)
+          return alive(pid) ? "identity-unavailable" : "exited";
+        if (current !== identity)
+          return "identity-mismatch";
+        return;
+      };
+      const first = await check();
+      if (first)
+        return first;
       signal(pid, "SIGTERM");
       if (await waitDead(pid, graceMs))
         return "exited";
-      signal(pid, "SIGKILL");
+      const second = await check();
+      if (second)
+        return second;
+      if (platform === "win32") {
+        await forceWindows(pid);
+      } else {
+        signal(pid, "SIGKILL");
+      }
       return await waitDead(pid, graceMs) ? "killed" : "still-alive";
     }
   };
 }
 
 // src/adapters/status.ts
-import { readFile } from "node:fs/promises";
-import { join as join4 } from "node:path";
+import { readFile as readFile2 } from "node:fs/promises";
+import { join as join5 } from "node:path";
 async function readStatus(stateDir, role) {
   let text;
   try {
-    text = await readFile(join4(stateDir, `${role}-status.json`), "utf8");
+    text = await readFile2(join5(stateDir, `${role}-status.json`), "utf8");
   } catch {
     return;
   }
@@ -22121,7 +22227,7 @@ async function readStatus(stateDir, role) {
 }
 
 // src/adapters/workspace.ts
-import { chmod as chmod2, mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { chmod as chmod2, mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
 async function removeWorkspace(root) {
   await rm2(root, { recursive: true, force: true });
 }
@@ -22132,7 +22238,7 @@ function realStopDeps() {
     io: createIO(),
     launcher: createLauncher(),
     readStatus,
-    readLog: (path) => readFile2(path, "utf8").catch(() => ""),
+    readLog: (path) => readFile3(path, "utf8").catch(() => ""),
     removeWorkspace,
     platform: process.platform
   };

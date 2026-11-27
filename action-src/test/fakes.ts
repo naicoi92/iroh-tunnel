@@ -25,7 +25,7 @@ export type World = {
   polls: number;
   jobFailed: boolean;
   stopResult: 'exited' | 'killed' | 'still-alive';
-  stopCalls: [number, number][];
+  stopCalls: [number, number, string][];
   removed: string[];
   /** hook run on each clock.sleep (simulates the world changing) */
   onSleep: (w: World, n: number) => void;
@@ -114,9 +114,14 @@ export function fakeLauncher(w: World): Launcher {
       return { pid: 4242, exitCode: () => w.exit };
     },
     isAlive: () => true,
-    async stop(pid, grace) {
+    identity: async () => 'fake-identity',
+    async stopAction(root, grace) {
+      w.calls.push(`launcher.stopAction:${root}:${grace}`);
+      return w.stopResult;
+    },
+    async stop(pid, grace, identity) {
       w.calls.push('launcher.stop');
-      w.stopCalls.push([pid, grace]);
+      w.stopCalls.push([pid, grace, identity]);
       return w.stopResult;
     },
   };

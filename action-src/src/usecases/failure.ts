@@ -38,7 +38,7 @@ export function exitMessage(
   if (code === 6) {
     head += ` Another iroh-tunnel ${role} is already running for this runner user, possibly as a system service or another step of this job.`;
     head += ` Stop that system service or run the step as a different user.`;
-    if (platform === 'win32') head += ` Use only one Serve and one Access step per job on Windows.`;
+    if (platform === 'win32') head += ` Older tunnel versions may not support isolated action ownership on Windows; upgrade the tunnel version if using an older release.`;
   }
   return withLog(head, log, secrets);
 }

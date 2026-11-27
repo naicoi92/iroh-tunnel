@@ -7,7 +7,7 @@ Define how a single running process owns each role (Serve or Access) through loc
 ## Requirements
 
 ### Requirement: Single running process per role
-The system SHALL refuse to start a `serve` or `access` role while another process of the same role is running in the same tier (for the user tier, for the same user), regardless of executable name, `--config` path or state directory override, and in either start order, exiting with the conflict status (exit code 6) and an "already running" message.
+Except for explicitly isolated GitHub Actions invocations, the system SHALL refuse to start a `serve` or `access` role while another process of the same role is running in the same tier (for the user tier, for the same user), regardless of executable name, `--config` path or state directory override, and in either start order, exiting with the conflict status (exit code 6) and an "already running" message.
 Evidence: src/ownership.rs:320-345, tests/role_ownership.rs:206-238 (second_serve_is_refused_across_binaries_overrides_and_start_order)
 
 #### Scenario: All-in-one first, standalone second
@@ -23,7 +23,7 @@ Evidence: src/ownership.rs:320-345, tests/role_ownership.rs:206-238 (second_serv
 - **THEN** the second process exits with code 6 and stderr contains "already running"
 
 ### Requirement: Ownership scope is the user's default state directory
-The system SHALL scope the user-tier role lock to the user's default state directory (`<default state dir>/<role>.lock`) and the system-tier ownership lock to the machine lock directory (`<machine dir>/<role>.claim.lock`, with the detection lock `<machine dir>/<role>.lock` beside it), both independent of `--config` and `IROH_TUNNEL_STATE_DIR`.
+Outside explicitly isolated GitHub Actions invocations, the system SHALL scope the user-tier role lock to the user's default state directory (`<default state dir>/<role>.lock`) and the system-tier ownership lock to the machine lock directory (`<machine dir>/<role>.claim.lock`, with the detection lock `<machine dir>/<role>.lock` beside it), both independent of `--config` and `IROH_TUNNEL_STATE_DIR`.
 Evidence: src/ownership.rs:1-30, src/ownership.rs:88-100, tests/role_ownership.rs:206-238
 
 #### Scenario: Different state overrides share one lock
@@ -34,8 +34,20 @@ Evidence: src/ownership.rs:1-30, src/ownership.rs:88-100, tests/role_ownership.r
 - **WHEN** two system-tier serve processes are started with different `IROH_TUNNEL_STATE_DIR` values
 - **THEN** only the first runs and the second is refused as already running
 
+### Requirement: GitHub Actions ownership scope
+An explicitly isolated GitHub Actions invocation SHALL claim its user-tier role within its own ownership scope on every supported runner platform. This SHALL NOT change ordinary CLI ownership, system-tier ownership, or the default behavior of `IROH_TUNNEL_STATE_DIR`.
+Evidence: issue #268
+
+#### Scenario: Separate action scopes coexist
+- **WHEN** two action invocations of the same role start with distinct action scopes and otherwise valid configurations
+- **THEN** neither invocation is refused because the other holds ownership
+
+#### Scenario: Ordinary ownership is unchanged
+- **WHEN** two ordinary CLI invocations of the same role start as the same user with different `IROH_TUNNEL_STATE_DIR` values
+- **THEN** the second invocation is still refused with exit code 6
+
 ### Requirement: Concurrent starts admit exactly one owner
-The system SHALL admit exactly one owner when several processes of the same role start at the same time in the same tier (for the user tier, for the same user); every other contender in that tier exits with the conflict status.
+The system SHALL admit exactly one owner when several processes of the same role start at the same time in the same ownership scope: the machine scope for system-tier processes, the default user scope for ordinary user-tier processes, or a single isolated action scope. Every other contender in that scope SHALL exit with the conflict status.
 Evidence: src/ownership.rs:200-215, tests/role_ownership.rs:276-304 (concurrent_starts_admit_exactly_one_owner)
 
 #### Scenario: Four racing serve starts

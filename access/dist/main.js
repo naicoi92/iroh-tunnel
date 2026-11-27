@@ -22064,46 +22064,6 @@ port = ${hp.port}
   return out;
 }
 
-// src/domain/hostport.ts
-var IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-var IPV6 = /^[0-9a-fA-F:.]+$/;
-var NAME = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
-function parsePort(p) {
-  if (!/^\d{1,5}$/.test(p))
-    throw new Error(`invalid port "${p}"; expected 1-65535`);
-  const n = Number(p);
-  if (n < 1 || n > 65535)
-    throw new Error(`invalid port "${p}"; expected 1-65535`);
-  return n;
-}
-function parseHostPort(s, opts) {
-  const fmt = opts.allowName ? "HOST:PORT or [IPV6]:PORT" : "IPV4:PORT or [IPV6]:PORT";
-  if (s.startsWith("[")) {
-    const m = /^\[([^\]]*)\]:(.*)$/.exec(s);
-    if (!m || !m[1] || !IPV6.test(m[1]) || !m[1].includes(":"))
-      throw new Error(`invalid address; expected ${fmt}`);
-    return { host: m[1], port: parsePort(m[2]), family: "ipv6" };
-  }
-  const idx = s.lastIndexOf(":");
-  if (idx <= 0)
-    throw new Error(`invalid address; expected ${fmt}`);
-  const host = s.slice(0, idx);
-  if (host.includes(":"))
-    throw new Error("IPv6 addresses must be bracketed, e.g. [::1]:5432");
-  const port = parsePort(s.slice(idx + 1));
-  const v4 = IPV4.exec(host);
-  if (v4) {
-    if (v4.slice(1).some((o) => Number(o) > 255))
-      throw new Error("invalid IPv4 address");
-    return { host, port, family: "ipv4" };
-  }
-  if (!opts.allowName)
-    throw new Error(`host names are not allowed; expected ${fmt}`);
-  if (!NAME.test(host))
-    throw new Error("invalid host name");
-  return { host, port, family: "name" };
-}
-
 // src/domain/version.ts
 var SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
 function parseVersion(s) {
@@ -22158,6 +22118,46 @@ function compareVersions(a, b) {
   if (rb === undefined)
     return -1;
   return cmpPre(ra, rb);
+}
+
+// src/domain/hostport.ts
+var IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+var IPV6 = /^[0-9a-fA-F:.]+$/;
+var NAME = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+function parsePort(p) {
+  if (!/^\d{1,5}$/.test(p))
+    throw new Error(`invalid port "${p}"; expected 1-65535`);
+  const n = Number(p);
+  if (n < 1 || n > 65535)
+    throw new Error(`invalid port "${p}"; expected 1-65535`);
+  return n;
+}
+function parseHostPort(s, opts) {
+  const fmt = opts.allowName ? "HOST:PORT or [IPV6]:PORT" : "IPV4:PORT or [IPV6]:PORT";
+  if (s.startsWith("[")) {
+    const m = /^\[([^\]]*)\]:(.*)$/.exec(s);
+    if (!m || !m[1] || !IPV6.test(m[1]) || !m[1].includes(":"))
+      throw new Error(`invalid address; expected ${fmt}`);
+    return { host: m[1], port: parsePort(m[2]), family: "ipv6" };
+  }
+  const idx = s.lastIndexOf(":");
+  if (idx <= 0)
+    throw new Error(`invalid address; expected ${fmt}`);
+  const host = s.slice(0, idx);
+  if (host.includes(":"))
+    throw new Error("IPv6 addresses must be bracketed, e.g. [::1]:5432");
+  const port = parsePort(s.slice(idx + 1));
+  const v4 = IPV4.exec(host);
+  if (v4) {
+    if (v4.slice(1).some((o) => Number(o) > 255))
+      throw new Error("invalid IPv4 address");
+    return { host, port, family: "ipv4" };
+  }
+  if (!opts.allowName)
+    throw new Error(`host names are not allowed; expected ${fmt}`);
+  if (!NAME.test(host))
+    throw new Error("invalid host name");
+  return { host, port, family: "name" };
 }
 
 // src/domain/inputs.ts
@@ -22265,7 +22265,7 @@ function exitMessage(role, code, status, log, platform, secrets = []) {
     head += ` Another iroh-tunnel ${role} is already running for this runner user, possibly as a system service or another step of this job.`;
     head += ` Stop that system service or run the step as a different user.`;
     if (platform === "win32")
-      head += ` Use only one Serve and one Access step per job on Windows.`;
+      head += ` Older tunnel versions may not support isolated action ownership on Windows; upgrade the tunnel version if using an older release.`;
   }
   return withLog(head, log, secrets);
 }
@@ -22342,12 +22342,28 @@ async function run(req, deps) {
   const { exePath, version } = await deps.installer.install(req.role, req.version);
   io.info(`using iroh-tunnel-${req.role} ${version}`);
   await ws.writeConfig(renderConfig(req));
-  const env = { IROH_TUNNEL_STATE_DIR: ws.stateDir, NO_COLOR: "1" };
+  const env = {
+    IROH_TUNNEL_STATE_DIR: ws.stateDir,
+    IROH_TUNNEL_ACTION_SCOPE: ws.stateDir,
+    NO_COLOR: "1"
+  };
+  const actionShutdown = version === "local" || compareVersions(version, "0.8.0-0") >= 0;
+  if (actionShutdown) {
+    env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR = ws.root;
+    io.saveState("shutdown-mode", "action");
+  }
   if (deps.platform !== "win32")
     env.HOME = ws.homeDir;
-  const child = await launcher.spawn(exePath, ["run", "-c", ws.configPath], env, ws.logPath);
-  io.saveState("pid", String(child.pid));
   io.saveState("role", req.role);
+  const child = await launcher.spawn(exePath, ["run", "-c", ws.configPath], env, ws.logPath).catch((e) => {
+    if (actionShutdown)
+      io.saveState("shutdown-mode", "");
+    throw e;
+  });
+  io.saveState("pid", String(child.pid));
+  const identity = actionShutdown ? undefined : await launcher.identity(child.pid);
+  if (identity && child.exitCode() === null)
+    io.saveState("process-identity", identity);
   const secrets = req.relayToken === undefined ? [] : [req.relayToken];
   const deadline = deps.clock.now() + DEADLINE_MS;
   let probed = false;
@@ -22368,6 +22384,8 @@ async function run(req, deps) {
     if ("failed" in r)
       throw new StartFailure(bindMessage(r.failed, lastStatus, log, secrets));
     if (r.ready && lastStatus?.node_id) {
+      if (!actionShutdown && !identity)
+        throw new StartFailure("Could not identify the tunnel process safely; refusing to continue without safe cleanup.");
       if (req.role === "access" && req.protocol === "udp") {
         io.info("UDP listener is bound; peer connection not checked");
       }
@@ -23087,7 +23105,7 @@ function _unique(values) {
 }
 
 // src/entry/deps.ts
-import { readFile as readFile3, writeFile as writeFile3 } from "node:fs/promises";
+import { readFile as readFile4, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 // src/adapters/io.ts
@@ -23118,8 +23136,11 @@ function createIO(core = exports_core) {
 }
 
 // src/adapters/launcher.ts
-import { spawn as nodeSpawn } from "node:child_process";
+import { execFile, spawn as nodeSpawn } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
 import { closeSync, openSync, readFileSync as readFileSync2 } from "node:fs";
+import { readFile, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join4 } from "node:path";
 function inheritedEnv() {
   const out = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -23143,6 +23164,61 @@ function readProcStat(pid) {
     return;
   }
 }
+var execFileAsync = promisify2(execFile);
+async function processIdentity(platform, pid) {
+  try {
+    if (platform === "linux") {
+      const stat = readProcStat(pid);
+      const end = stat?.lastIndexOf(")") ?? -1;
+      const start = end < 0 ? undefined : stat?.slice(end + 1).trim().split(/\s+/)[19];
+      return start && /^\d+$/.test(start) ? `linux:${start}` : undefined;
+    }
+    if (platform === "darwin") {
+      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="], { timeout: 5000 });
+      const start = stdout.trim();
+      return start ? `darwin:${start}` : undefined;
+    }
+    if (platform === "win32") {
+      const { stdout } = await execFileAsync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`
+      ], { timeout: 5000, windowsHide: true });
+      const start = stdout.trim();
+      return /^\d+$/.test(start) ? `win32:${start}` : undefined;
+    }
+  } catch {}
+  return;
+}
+async function actionProcessExited(platform, pid, timeout) {
+  if (platform === "linux") {
+    try {
+      return procState(await readFile(`/proc/${pid}/stat`, "utf8")) === "Z";
+    } catch (e) {
+      return ["ENOENT", "ESRCH"].includes(e.code ?? "");
+    }
+  }
+  try {
+    if (platform === "darwin") {
+      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "stat="], { timeout });
+      return stdout.trim().startsWith("Z");
+    }
+    if (platform === "win32") {
+      const { stdout } = await execFileAsync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `try { $p = [System.Diagnostics.Process]::GetProcessById(${pid}); if ($p.HasExited) { 'exited' } else { 'alive' } } catch { if ($_.Exception -is [System.ArgumentException] -or $_.Exception.InnerException -is [System.ArgumentException]) { 'exited' } else { 'unknown' } }`
+      ], { timeout, windowsHide: true });
+      return stdout.trim() === "exited";
+    }
+  } catch (e) {
+    const error = e;
+    return platform === "darwin" && error.code === 1 && error.stdout === "" && error.stderr === "";
+  }
+  return false;
+}
 function signalable(pid) {
   try {
     process.kill(pid, 0);
@@ -23151,7 +23227,9 @@ function signalable(pid) {
   }
   return true;
 }
-function createLauncher(platform = process.platform, readStat = readProcStat) {
+function createLauncher(platform = process.platform, readStat = readProcStat, readIdentity = (pid) => processIdentity(platform, pid), sendSignal = (pid, sig) => {
+  process.kill(pid, sig);
+}, forceWindows = (pid) => exec("taskkill", ["/PID", String(pid), "/F"], { ignoreReturnCode: true })) {
   function alive(pid) {
     if (!signalable(pid))
       return false;
@@ -23171,7 +23249,7 @@ function createLauncher(platform = process.platform, readStat = readProcStat) {
   }
   function signal(pid, sig) {
     try {
-      process.kill(pid, sig);
+      sendSignal(pid, sig);
     } catch {}
   }
   return {
@@ -23199,20 +23277,58 @@ function createLauncher(platform = process.platform, readStat = readProcStat) {
       }
     },
     isAlive: alive,
-    async stop(pid, graceMs) {
-      if (!alive(pid))
+    identity: readIdentity,
+    async stopAction(root, graceMs) {
+      const end = Date.now() + graceMs;
+      const complete = async () => {
+        try {
+          const record = JSON.parse(await readFile(join4(root, "shutdown-complete"), "utf8"));
+          if (record.version !== 1 || !Number.isSafeInteger(record.pid) || record.pid <= 0)
+            return false;
+          return await actionProcessExited(platform, record.pid, Math.max(1, end - Date.now()));
+        } catch {
+          return false;
+        }
+      };
+      if (await complete())
         return "exited";
-      if (platform === "win32") {
-        signal(pid, "SIGTERM");
-        if (await waitDead(pid, graceMs))
+      await writeFile2(join4(root, "shutdown-request"), "shutdown", { mode: 384 });
+      while (Date.now() < end) {
+        if (await complete())
           return "exited";
-        await exec("taskkill", ["/PID", String(pid), "/T", "/F"], { ignoreReturnCode: true });
-        return await waitDead(pid, graceMs) ? "killed" : "still-alive";
+        await sleep(Math.min(POLL_MS2, Math.max(0, end - Date.now())));
       }
+      return "still-alive";
+    },
+    async stop(pid, graceMs, identity) {
+      if (!Number.isSafeInteger(pid) || pid <= 0)
+        return "identity-unavailable";
+      const check = async () => {
+        if (!alive(pid))
+          return "exited";
+        if (!identity)
+          return "identity-unavailable";
+        const current = await readIdentity(pid);
+        if (!current)
+          return alive(pid) ? "identity-unavailable" : "exited";
+        if (current !== identity)
+          return "identity-mismatch";
+        return;
+      };
+      const first = await check();
+      if (first)
+        return first;
       signal(pid, "SIGTERM");
       if (await waitDead(pid, graceMs))
         return "exited";
-      signal(pid, "SIGKILL");
+      const second = await check();
+      if (second)
+        return second;
+      if (platform === "win32") {
+        await forceWindows(pid);
+      } else {
+        signal(pid, "SIGKILL");
+      }
       return await waitDead(pid, graceMs) ? "killed" : "still-alive";
     }
   };
@@ -23244,8 +23360,8 @@ function probe(addr, timeoutMs) {
 
 // src/adapters/release.ts
 import { createHash } from "node:crypto";
-import { access as access2, readFile } from "node:fs/promises";
-import { join as join4 } from "node:path";
+import { access as access2, readFile as readFile2 } from "node:fs/promises";
+import { join as join5 } from "node:path";
 
 // src/version.ts
 var BUILD_VERSION = "0.7.0";
@@ -23324,7 +23440,7 @@ function createInstaller(o) {
       const name = `iroh-tunnel-${role}`;
       const exe = exeName(role, o.target);
       if (o.binDir) {
-        const p = join4(o.binDir, exe);
+        const p = join5(o.binDir, exe);
         try {
           await access2(p);
         } catch {
@@ -23342,7 +23458,7 @@ function createInstaller(o) {
       const cacheArch = `${o.target.os}-${o.target.arch}${o.target.musl ? "-musl" : ""}`;
       const cached = o.cache.find(name, version, cacheArch);
       if (cached)
-        return { exePath: join4(cached, exe), version };
+        return { exePath: join5(cached, exe), version };
       const base = `${root}/download/v${version}`;
       const archive = archiveName(name, version, o.target);
       const sums = await fetchText(`${base}/${o.target.checksumFile}`, o.target.checksumFile, version);
@@ -23357,24 +23473,24 @@ function createInstaller(o) {
       } catch (e) {
         throw new Error(`failed to download ${archive} for iroh-tunnel ${version} from ${archiveUrl}: ${e.message}`);
       }
-      const actual = createHash("sha256").update(await readFile(file)).digest("hex");
+      const actual = createHash("sha256").update(await readFile2(file)).digest("hex");
       if (actual !== expected) {
         throw new Error(`SHA-256 mismatch for ${archive}: expected ${expected}, got ${actual}`);
       }
       const dir = o.target.archiveExt === ".zip" ? await o.cache.extractZip(file) : await o.cache.extractTar(file);
       const cachedDir = await o.cache.cacheDir(dir, name, version, cacheArch);
-      return { exePath: join4(cachedDir, exe), version };
+      return { exePath: join5(cachedDir, exe), version };
     }
   };
 }
 
 // src/adapters/status.ts
-import { readFile as readFile2 } from "node:fs/promises";
-import { join as join5 } from "node:path";
+import { readFile as readFile3 } from "node:fs/promises";
+import { join as join6 } from "node:path";
 async function readStatus(stateDir, role) {
   let text;
   try {
-    text = await readFile2(join5(stateDir, `${role}-status.json`), "utf8");
+    text = await readFile3(join6(stateDir, `${role}-status.json`), "utf8");
   } catch {
     return;
   }
@@ -23395,24 +23511,24 @@ async function readStatus(stateDir, role) {
 }
 
 // src/adapters/workspace.ts
-import { chmod as chmod2, mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join6 } from "node:path";
+import { chmod as chmod2, mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join7 } from "node:path";
 async function createWorkspace(runnerTemp) {
   await mkdir2(runnerTemp, { recursive: true });
-  const root = await mkdtemp(join6(runnerTemp, "iroh-tunnel-"));
-  const stateDir = join6(root, "state");
-  const homeDir = join6(root, "home");
+  const root = await mkdtemp(join7(runnerTemp, "iroh-tunnel-"));
+  const stateDir = join7(root, "state");
+  const homeDir = join7(root, "home");
   await mkdir2(stateDir);
   await mkdir2(homeDir);
-  const configPath = join6(root, "config.toml");
+  const configPath = join7(root, "config.toml");
   return {
     root,
     stateDir,
     homeDir,
     configPath,
-    logPath: join6(root, "tunnel.log"),
+    logPath: join7(root, "tunnel.log"),
     async writeConfig(toml) {
-      await writeFile2(configPath, toml, { mode: 384 });
+      await writeFile3(configPath, toml, { mode: 384 });
       if (process.platform !== "win32")
         await chmod2(configPath, 384);
     }
@@ -23435,13 +23551,13 @@ function realStartDeps() {
     createWorkspace,
     launcher: createLauncher(),
     readStatus,
-    readLog: (path) => readFile3(path, "utf8").catch(() => ""),
+    readLog: (path) => readFile4(path, "utf8").catch(() => ""),
     probe,
     clock: { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) },
     platform: process.platform,
     runnerTemp: process.env.RUNNER_TEMP || tmpdir(),
     env: process.env,
-    writeFile: (path, text) => writeFile3(path, text)
+    writeFile: (path, text) => writeFile4(path, text)
   };
 }
 

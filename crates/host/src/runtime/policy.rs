@@ -10,9 +10,10 @@ use crate::role::Role;
 /// Production entry points enforce it; `testing::run_unowned` (test-utils)
 /// does not, so several in-process roles of one kind can share a test
 /// binary. Real-process tests cover enforcement.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum Ownership {
     Enforced(Role),
+    Action(Role, std::path::PathBuf),
     #[cfg(feature = "test-utils")]
     Unenforced,
 }
@@ -22,6 +23,7 @@ impl Ownership {
     pub(crate) fn claim(self) -> Result<Option<RoleClaim>> {
         match self {
             Self::Enforced(role) => crate::ownership::claim(role).map(Some),
+            Self::Action(role, scope) => crate::ownership::claim_action(role, scope).map(Some),
             #[cfg(feature = "test-utils")]
             Self::Unenforced => Ok(None),
         }

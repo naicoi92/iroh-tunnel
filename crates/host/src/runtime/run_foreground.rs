@@ -30,16 +30,28 @@ pub async fn run_foreground(
     on_ready: OnReady,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    run_role(
-        role,
-        config,
-        Ownership::Enforced(role),
-        ctx,
-        None,
-        on_ready,
-        shutdown,
-    )
-    .await
+    let ownership = match std::env::var_os("IROH_TUNNEL_ACTION_SCOPE") {
+        Some(scope) => Ownership::Action(role, scope.into()),
+        None => Ownership::Enforced(role),
+    };
+    let Some(dir) = super::action_shutdown::workspace() else {
+        return run_role(role, config, ownership, ctx, None, on_ready, shutdown).await;
+    };
+    anyhow::ensure!(
+        dir.is_absolute(),
+        "action shutdown workspace must be absolute"
+    );
+    // Claim the single-use channel before entering the runtime. If startup
+    // fails later, completion still identifies this invocation's process for
+    // read-only exit confirmation; a duplicate cannot publish that record.
+    super::action_shutdown::claim(&dir).await?;
+    let channel = super::action_shutdown::wait(dir.clone());
+    let result = run_role(role, config, ownership, ctx, None, on_ready, async {
+        tokio::select! { () = shutdown => (), () = channel => () }
+    })
+    .await;
+    super::action_shutdown::complete(&dir).await?;
+    result
 }
 
 #[cfg(test)]

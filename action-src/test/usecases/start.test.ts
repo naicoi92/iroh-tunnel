@@ -21,6 +21,7 @@ describe('happy paths', () => {
     expect(w.state['workspace']).toBe(WS.root);
     expect(w.state['pid']).toBe('4242');
     expect(w.state['role']).toBe('serve');
+    expect(w.state['process-identity']).toBe('fake-identity');
     const c = w.calls;
     expect(c.indexOf('setSecret')).toBeLessThan(c.indexOf('createWorkspace'));
     expect(c.indexOf('save:workspace')).toBeLessThan(c.indexOf('install'));
@@ -30,8 +31,57 @@ describe('happy paths', () => {
     const s = w.spawned[0]!;
     expect(s.exe).toBe('/bin/iroh-tunnel-serve');
     expect(s.args).toEqual(['run', '-c', WS.configPath]);
-    expect(s.env).toEqual({ IROH_TUNNEL_STATE_DIR: WS.stateDir, NO_COLOR: '1', HOME: WS.homeDir });
+    expect(s.env).toEqual({ IROH_TUNNEL_STATE_DIR: WS.stateDir, IROH_TUNNEL_ACTION_SCOPE: WS.stateDir, NO_COLOR: '1', HOME: WS.homeDir });
     expect(w.secrets).toEqual([]);
+  });
+
+  test('starts each tunnel in its own action ownership scope', async () => {
+    for (const platform of ['linux', 'darwin', 'win32'] as const) {
+      const first = newWorld(serveIn);
+      const second = newWorld(serveIn);
+      serveReady(first);
+      second.status = { node_id: 'b'.repeat(64), home_relay: 'https://relay.example./', services: [] };
+      const secondWorkspace = { ...WS, root: '/tmp/ws2', stateDir: '/tmp/ws2/state', homeDir: '/tmp/ws2/home', configPath: '/tmp/ws2/config.toml', logPath: '/tmp/ws2/tunnel.log' };
+      await runMain('serve', startDeps(first, { platform }));
+      await runMain('serve', startDeps(second, { platform, createWorkspace: async () => secondWorkspace }));
+      expect(first.failed).toEqual([]);
+      expect(second.failed).toEqual([]);
+      expect(first.spawned[0]!.env.IROH_TUNNEL_ACTION_SCOPE).toBe(WS.stateDir);
+      expect(second.spawned[0]!.env.IROH_TUNNEL_ACTION_SCOPE).toBe(secondWorkspace.stateDir);
+      expect(first.outputs['node-id']).toBe(NODE);
+      expect(second.outputs['node-id']).toBe('b'.repeat(64));
+    }
+  });
+
+  test('access retains the requested version and uses its own scope', async () => {
+    const w = newWorld({ ...accessIn, version: 'v0.6.0', protocol: 'udp' });
+    w.status = { node_id: NODE, services: [] };
+    w.onSpawn = (x) => x.files.set(WS.logPath, 'listening for local udp clients listen_addr=127.0.0.1:15000\n');
+    let installed: unknown;
+    await runMain('access', startDeps(w, {
+      installer: { async install(role, version) { installed = { role, version }; return { exePath: '/bin/access', version: '0.6.0' }; } },
+    }));
+    expect(installed).toEqual({ role: 'access', version: { kind: 'exact', version: '0.6.0' } });
+    expect(w.spawned[0]!.env.IROH_TUNNEL_ACTION_SCOPE).toBe(WS.stateDir);
+    expect(w.outputs['node-id']).toBe(NODE);
+    expect(w.failed).toEqual([]);
+  });
+
+  test('new protocol versions use cooperative shutdown while legacy pins retain PID cleanup', async () => {
+    for (const [version, action] of [['0.7.0', false], ['0.7.1-rc.1', false], ['0.8.0-alpha.1', true], ['0.8.0-rc.1', true], ['0.8.0', true], ['local', true]] as const) {
+      const w = newWorld(serveIn);
+      serveReady(w);
+      await runMain('serve', startDeps(w, { installer: { async install() { return { exePath: '/bin/serve', version }; } } }));
+      expect(w.failed).toEqual([]);
+      expect(w.state['shutdown-mode'] === 'action').toBe(action);
+      if (action) {
+        expect(w.spawned[0]!.env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR).toBe(WS.root);
+        expect(w.state['process-identity']).toBeUndefined();
+      } else {
+        expect(w.spawned[0]!.env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR).toBeUndefined();
+        expect(w.state['process-identity']).toBe('fake-identity');
+      }
+    }
   });
 
   test('serve waits for the home relay before completing', async () => {
@@ -48,7 +98,7 @@ describe('happy paths', () => {
     const w = newWorld(serveIn);
     serveReady(w);
     await runMain('serve', startDeps(w, { platform: 'win32' }));
-    expect(w.spawned[0]!.env).toEqual({ IROH_TUNNEL_STATE_DIR: WS.stateDir, NO_COLOR: '1' });
+    expect(w.spawned[0]!.env).toEqual({ IROH_TUNNEL_STATE_DIR: WS.stateDir, IROH_TUNNEL_ACTION_SCOPE: WS.stateDir, NO_COLOR: '1' });
   });
 
   test('relay-token is masked first', async () => {
@@ -85,6 +135,18 @@ describe('happy paths', () => {
 });
 
 describe('failures', () => {
+  test('does not publish readiness when process identity is unavailable', async () => {
+    const w = newWorld(serveIn);
+    serveReady(w);
+    const deps = startDeps(w);
+    deps.launcher.identity = async () => undefined;
+    await runMain('serve', deps);
+    expect(w.failed[0]).toContain('Could not identify');
+    expect(w.state.pid).toBe('4242');
+    expect(w.state['process-identity']).toBeUndefined();
+    expect(w.outputs['node-id']).toBeUndefined();
+  });
+
   test('invalid input: names the input, nothing else used', async () => {
     const w = newWorld({ ...serveIn, name: 'Bad Name' });
     await runMain('serve', startDeps(w));
@@ -136,11 +198,12 @@ describe('failures', () => {
     expect(w2.failed[0]).toContain('no status file yet');
   });
 
-  test('exit code 6 on windows adds the limit', async () => {
+  test('exit code 6 on windows suggests upgrading older tunnel binaries, not an action step limit', async () => {
     const w = newWorld(serveIn);
     w.onSpawn = (x) => (x.exit = 6);
     await runMain('serve', startDeps(w, { platform: 'win32' }));
-    expect(w.failed[0]).toContain('one Serve and one Access step per job on Windows');
+    expect(w.failed[0]).toContain('upgrade');
+    expect(w.failed[0]).not.toContain('one Serve and one Access step per job on Windows');
   });
 
   test('start fails fast on bind error', async () => {
@@ -255,7 +318,7 @@ describe('failures', () => {
     w.onSpawn = (x) => (x.exit = 6);
     await runMain('serve', startDeps(w, { env: { IROH_TUNNEL_ACTION_ERROR_FILE: '/tmp/err.txt' }, platform: 'win32' }));
     expect(w.files.get('/tmp/err.txt')).toBe(w.failed[0]!);
-    expect(w.files.get('/tmp/err.txt')).toContain('one Serve and one Access step per job on Windows');
+    expect(w.files.get('/tmp/err.txt')).toContain('upgrade');
   });
 
   test('error file also written for input errors; absent when env unset', async () => {
