@@ -63,9 +63,10 @@ async function run(req: TunnelRequest, deps: StartDeps): Promise<void> {
     IROH_TUNNEL_ACTION_SCOPE: ws.stateDir,
     NO_COLOR: '1',
   };
-  // v0.7.0 and earlier are already released without this protocol. The
+  // v0.7.x is the legacy line. The protocol starts with the first possible
+  // v0.8.0 prerelease (SemVer -0), not just the final v0.8.0 release. The
   // local-binary CI override always tests the current source tree.
-  const actionShutdown = version === 'local' || compareVersions(version, '0.8.0') >= 0;
+  const actionShutdown = version === 'local' || compareVersions(version, '0.8.0-0') >= 0;
   if (actionShutdown) {
     env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR = ws.root;
     io.saveState('shutdown-mode', 'action');

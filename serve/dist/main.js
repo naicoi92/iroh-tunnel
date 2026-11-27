@@ -22347,7 +22347,7 @@ async function run(req, deps) {
     IROH_TUNNEL_ACTION_SCOPE: ws.stateDir,
     NO_COLOR: "1"
   };
-  const actionShutdown = version === "local" || compareVersions(version, "0.8.0") >= 0;
+  const actionShutdown = version === "local" || compareVersions(version, "0.8.0-0") >= 0;
   if (actionShutdown) {
     env.IROH_TUNNEL_ACTION_SHUTDOWN_DIR = ws.root;
     io.saveState("shutdown-mode", "action");

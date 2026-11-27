@@ -68,7 +68,7 @@ describe('happy paths', () => {
   });
 
   test('new protocol versions use cooperative shutdown while legacy pins retain PID cleanup', async () => {
-    for (const [version, action] of [['0.7.0', false], ['0.8.0', true], ['local', true]] as const) {
+    for (const [version, action] of [['0.7.0', false], ['0.7.1-rc.1', false], ['0.8.0-alpha.1', true], ['0.8.0-rc.1', true], ['0.8.0', true], ['local', true]] as const) {
       const w = newWorld(serveIn);
       serveReady(w);
       await runMain('serve', startDeps(w, { installer: { async install() { return { exePath: '/bin/serve', version }; } } }));
